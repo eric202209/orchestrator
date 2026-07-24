@@ -1097,7 +1097,26 @@ class ExecutionTaskRuntimeExecutionService:
         )
         if outcome.outcome_status not in RUNTIME_OUTCOME_STATUSES:
             issues.append("runtime_outcome_status_invalid")
-        if task is not None and task.status != expected_state:
+        expected_states = {expected_state}
+        if expected_state == "awaiting_validation":
+            # Phase 29D-4: an accepted candidate legitimately leaves
+            # `awaiting_validation` for `succeeded` or `awaiting_apply` (and,
+            # from there, Controlled Apply legitimately reaches `succeeded`).
+            # This only widens the accepted-state set when the immutable
+            # acceptance authority for this exact outcome says so; it never
+            # trusts `task.status` alone, so a task in any other state (e.g.
+            # incorrectly forced or corrupted) still fails closed.
+            accepted_decision = (
+                self.db.query(ExecutionTaskAcceptanceDecision)
+                .filter(
+                    ExecutionTaskAcceptanceDecision.candidate_outcome_id == outcome.id,
+                    ExecutionTaskAcceptanceDecision.decision_status == "accepted",
+                )
+                .one_or_none()
+            )
+            if accepted_decision is not None:
+                expected_states |= {"awaiting_apply", "succeeded"}
+        if task is not None and task.status not in expected_states:
             issues.append("outcome_lifecycle_mismatch")
         if event is not None and (
             event.to_state != runtime_event_state

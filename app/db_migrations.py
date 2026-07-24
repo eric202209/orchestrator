@@ -4476,6 +4476,154 @@ def _migration_022_knowledge_sync_state(engine: Engine) -> None:
                 connection.execute(text(statement))
 
 
+def _migration_050_post_apply_validation_recovery_lifecycle(engine: Engine) -> None:
+    """Add immutable Phase 29D-4 post-apply validation and recovery authorities."""
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_post_apply_validations (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    apply_result_id INTEGER NOT NULL,
+                    apply_result_hash VARCHAR(64) NOT NULL,
+                    apply_attempt_id INTEGER NOT NULL,
+                    apply_attempt_hash VARCHAR(64) NOT NULL,
+                    change_set_id INTEGER NOT NULL,
+                    change_set_hash VARCHAR(64) NOT NULL,
+                    pre_apply_snapshot_id INTEGER,
+                    pre_apply_snapshot_hash VARCHAR(64),
+                    workspace_target_id INTEGER NOT NULL,
+                    workspace_target_hash VARCHAR(64) NOT NULL,
+                    base_state_id INTEGER NOT NULL,
+                    base_state_hash VARCHAR(64) NOT NULL,
+                    validation_policy_id VARCHAR(64) NOT NULL,
+                    validation_policy_version INTEGER NOT NULL,
+                    status VARCHAR(16) NOT NULL,
+                    failure_reason VARCHAR(64),
+                    failure_detail VARCHAR(1024),
+                    checked_operation_count INTEGER NOT NULL,
+                    canonical_payload JSON NOT NULL,
+                    canonical_sha256 VARCHAR(64) NOT NULL,
+                    validation_idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT uq_execution_task_post_apply_validation_result_policy
+                        UNIQUE (apply_result_id, validation_policy_version),
+                    CONSTRAINT ck_execution_task_post_apply_validation_bounds
+                        CHECK (attempt_generation > 0 AND validation_policy_version > 0
+                            AND checked_operation_count >= 0),
+                    CONSTRAINT ck_execution_task_post_apply_validation_status
+                        CHECK (status IN ('passed', 'failed', 'blocked', 'validation_error')),
+                    CONSTRAINT ck_execution_task_post_apply_validation_failure_shape
+                        CHECK ((status = 'passed' AND failure_reason IS NULL) OR
+                            (status != 'passed' AND failure_reason IS NOT NULL)),
+                    FOREIGN KEY(execution_plan_id) REFERENCES execution_plans (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_id) REFERENCES execution_tasks (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_attempt_id) REFERENCES execution_task_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(apply_result_id) REFERENCES execution_task_apply_results (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(apply_attempt_id) REFERENCES execution_task_apply_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(change_set_id) REFERENCES execution_task_change_sets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(pre_apply_snapshot_id) REFERENCES execution_task_pre_apply_snapshots (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(workspace_target_id) REFERENCES execution_workspace_targets (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(base_state_id) REFERENCES execution_workspace_base_states (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_recovery_decisions (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    apply_result_id INTEGER NOT NULL UNIQUE,
+                    apply_result_hash VARCHAR(64) NOT NULL,
+                    post_apply_validation_id INTEGER UNIQUE,
+                    post_apply_validation_hash VARCHAR(64),
+                    decision VARCHAR(32) NOT NULL,
+                    decision_reason VARCHAR(64) NOT NULL,
+                    decision_detail VARCHAR(1024),
+                    canonical_payload JSON NOT NULL,
+                    canonical_sha256 VARCHAR(64) NOT NULL,
+                    decision_idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT ck_execution_task_recovery_decision_generation_positive
+                        CHECK (attempt_generation > 0),
+                    CONSTRAINT ck_execution_task_recovery_decision_outcome
+                        CHECK (decision IN ('rollback_required', 'no_recovery_required',
+                            'recovery_blocked', 'manual_intervention_required')),
+                    FOREIGN KEY(execution_plan_id) REFERENCES execution_plans (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_id) REFERENCES execution_tasks (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_attempt_id) REFERENCES execution_task_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(apply_result_id) REFERENCES execution_task_apply_results (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(post_apply_validation_id) REFERENCES execution_task_post_apply_validations (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS execution_task_recovery_results (
+                    id INTEGER PRIMARY KEY,
+                    execution_plan_id INTEGER NOT NULL,
+                    execution_task_id INTEGER NOT NULL,
+                    execution_task_attempt_id INTEGER NOT NULL,
+                    attempt_generation INTEGER NOT NULL,
+                    recovery_decision_id INTEGER NOT NULL UNIQUE,
+                    recovery_decision_hash VARCHAR(64) NOT NULL,
+                    apply_result_id INTEGER NOT NULL,
+                    apply_result_hash VARCHAR(64) NOT NULL,
+                    pre_apply_snapshot_id INTEGER,
+                    pre_apply_snapshot_hash VARCHAR(64),
+                    status VARCHAR(32) NOT NULL,
+                    failure_reason VARCHAR(64),
+                    failure_detail VARCHAR(1024),
+                    rolled_back_operations JSON NOT NULL,
+                    canonical_payload JSON NOT NULL,
+                    canonical_sha256 VARCHAR(64) NOT NULL,
+                    result_idempotency_key VARCHAR(160) NOT NULL UNIQUE,
+                    started_at DATETIME NOT NULL,
+                    ended_at DATETIME NOT NULL,
+                    created_at DATETIME NOT NULL,
+                    CONSTRAINT ck_execution_task_recovery_result_generation_positive
+                        CHECK (attempt_generation > 0),
+                    CONSTRAINT ck_execution_task_recovery_result_status
+                        CHECK (status IN ('recovered', 'blocked', 'failed',
+                            'manual_intervention_required')),
+                    CONSTRAINT ck_execution_task_recovery_result_failure_shape
+                        CHECK ((status = 'recovered' AND failure_reason IS NULL) OR
+                            (status != 'recovered' AND failure_reason IS NOT NULL)),
+                    FOREIGN KEY(execution_plan_id) REFERENCES execution_plans (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_id) REFERENCES execution_tasks (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(execution_task_attempt_id) REFERENCES execution_task_attempts (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(recovery_decision_id) REFERENCES execution_task_recovery_decisions (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(apply_result_id) REFERENCES execution_task_apply_results (id) ON DELETE RESTRICT,
+                    FOREIGN KEY(pre_apply_snapshot_id) REFERENCES execution_task_pre_apply_snapshots (id) ON DELETE RESTRICT
+                )
+                """
+            )
+        )
+        for statement in (
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_post_apply_validations_task_status "
+            "ON execution_task_post_apply_validations (execution_task_id, status)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_post_apply_validations_apply_result "
+            "ON execution_task_post_apply_validations (apply_result_id)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_recovery_decisions_task_decision "
+            "ON execution_task_recovery_decisions (execution_task_id, decision)",
+            "CREATE INDEX IF NOT EXISTS ix_execution_task_recovery_results_task_status "
+            "ON execution_task_recovery_results (execution_task_id, status)",
+        ):
+            connection.execute(text(statement))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -4727,6 +4875,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="049_pre_apply_snapshot_authority",
         description="Add immutable Phase 29D-3A pre-apply snapshot authority",
         upgrade=_migration_049_pre_apply_snapshot_authority,
+    ),
+    Migration(
+        version="050_post_apply_validation_recovery_lifecycle",
+        description=(
+            "Add Phase 29D-4 immutable post-apply validation, recovery "
+            "decision, and recovery result authorities"
+        ),
+        upgrade=_migration_050_post_apply_validation_recovery_lifecycle,
     ),
 )
 

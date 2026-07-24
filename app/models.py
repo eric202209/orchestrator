@@ -3716,6 +3716,306 @@ def _reject_apply_result_delete(mapper, connection, target):
     raise RuntimeError("ExecutionTaskApplyResult is immutable")
 
 
+class ExecutionTaskPostApplyValidation(Base):
+    """Immutable Phase 29D-4 post-apply file-state verification outcome."""
+
+    __tablename__ = "execution_task_post_apply_validations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    apply_result_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_results.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    apply_result_hash = Column(String(64), nullable=False)
+    apply_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    apply_attempt_hash = Column(String(64), nullable=False)
+    change_set_id = Column(
+        Integer,
+        ForeignKey("execution_task_change_sets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    change_set_hash = Column(String(64), nullable=False)
+    pre_apply_snapshot_id = Column(
+        Integer,
+        ForeignKey("execution_task_pre_apply_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    pre_apply_snapshot_hash = Column(String(64), nullable=True)
+    workspace_target_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_targets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    workspace_target_hash = Column(String(64), nullable=False)
+    base_state_id = Column(
+        Integer,
+        ForeignKey("execution_workspace_base_states.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    base_state_hash = Column(String(64), nullable=False)
+    validation_policy_id = Column(String(64), nullable=False)
+    validation_policy_version = Column(Integer, nullable=False)
+    status = Column(String(16), nullable=False, index=True)
+    failure_reason = Column(String(64), nullable=True)
+    failure_detail = Column(String(1024), nullable=True)
+    checked_operation_count = Column(Integer, nullable=False)
+    canonical_payload = Column(JSON, nullable=False)
+    canonical_sha256 = Column(String(64), nullable=False, index=True)
+    validation_idempotency_key = Column(String(160), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "apply_result_id",
+            "validation_policy_version",
+            name="uq_execution_task_post_apply_validation_result_policy",
+        ),
+        CheckConstraint(
+            "attempt_generation > 0 AND validation_policy_version > 0 "
+            "AND checked_operation_count >= 0",
+            name="ck_execution_task_post_apply_validation_bounds",
+        ),
+        CheckConstraint(
+            "status IN ('passed', 'failed', 'blocked', 'validation_error')",
+            name="ck_execution_task_post_apply_validation_status",
+        ),
+        CheckConstraint(
+            "(status = 'passed' AND failure_reason IS NULL) OR "
+            "(status != 'passed' AND failure_reason IS NOT NULL)",
+            name="ck_execution_task_post_apply_validation_failure_shape",
+        ),
+        Index(
+            "ix_execution_task_post_apply_validations_task_status",
+            "execution_task_id",
+            "status",
+        ),
+    )
+
+    apply_result = relationship("ExecutionTaskApplyResult")
+    apply_attempt = relationship("ExecutionTaskApplyAttempt")
+    change_set = relationship("ExecutionTaskChangeSet")
+    pre_apply_snapshot = relationship("ExecutionTaskPreApplySnapshot")
+    workspace_target = relationship("ExecutionWorkspaceTarget")
+    base_state = relationship("ExecutionWorkspaceBaseState")
+
+
+class ExecutionTaskRecoveryDecision(Base):
+    """Immutable Phase 29D-4 recovery-routing decision for one Apply Result."""
+
+    __tablename__ = "execution_task_recovery_decisions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    apply_result_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_results.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    apply_result_hash = Column(String(64), nullable=False)
+    post_apply_validation_id = Column(
+        Integer,
+        ForeignKey("execution_task_post_apply_validations.id", ondelete="RESTRICT"),
+        nullable=True,
+        unique=True,
+        index=True,
+    )
+    post_apply_validation_hash = Column(String(64), nullable=True)
+    decision = Column(String(32), nullable=False, index=True)
+    decision_reason = Column(String(64), nullable=False)
+    decision_detail = Column(String(1024), nullable=True)
+    canonical_payload = Column(JSON, nullable=False)
+    canonical_sha256 = Column(String(64), nullable=False, index=True)
+    decision_idempotency_key = Column(String(160), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_generation > 0",
+            name="ck_execution_task_recovery_decision_generation_positive",
+        ),
+        CheckConstraint(
+            "decision IN ('rollback_required', 'no_recovery_required', "
+            "'recovery_blocked', 'manual_intervention_required')",
+            name="ck_execution_task_recovery_decision_outcome",
+        ),
+        Index(
+            "ix_execution_task_recovery_decisions_task_decision",
+            "execution_task_id",
+            "decision",
+        ),
+    )
+
+    apply_result = relationship("ExecutionTaskApplyResult")
+    post_apply_validation = relationship("ExecutionTaskPostApplyValidation")
+
+
+class ExecutionTaskRecoveryResult(Base):
+    """Immutable Phase 29D-4 outcome of one attempted recovery action."""
+
+    __tablename__ = "execution_task_recovery_results"
+
+    id = Column(Integer, primary_key=True, index=True)
+    execution_plan_id = Column(
+        Integer,
+        ForeignKey("execution_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_id = Column(
+        Integer,
+        ForeignKey("execution_tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    execution_task_attempt_id = Column(
+        Integer,
+        ForeignKey("execution_task_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_generation = Column(Integer, nullable=False)
+    recovery_decision_id = Column(
+        Integer,
+        ForeignKey("execution_task_recovery_decisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    recovery_decision_hash = Column(String(64), nullable=False)
+    apply_result_id = Column(
+        Integer,
+        ForeignKey("execution_task_apply_results.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    apply_result_hash = Column(String(64), nullable=False)
+    pre_apply_snapshot_id = Column(
+        Integer,
+        ForeignKey("execution_task_pre_apply_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    pre_apply_snapshot_hash = Column(String(64), nullable=True)
+    status = Column(String(32), nullable=False, index=True)
+    failure_reason = Column(String(64), nullable=True)
+    failure_detail = Column(String(1024), nullable=True)
+    rolled_back_operations = Column(JSON, nullable=False)
+    canonical_payload = Column(JSON, nullable=False)
+    canonical_sha256 = Column(String(64), nullable=False, index=True)
+    result_idempotency_key = Column(String(160), nullable=False, unique=True)
+    started_at = Column(DateTime(timezone=True), nullable=False)
+    ended_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "attempt_generation > 0",
+            name="ck_execution_task_recovery_result_generation_positive",
+        ),
+        CheckConstraint(
+            "status IN ('recovered', 'blocked', 'failed', "
+            "'manual_intervention_required')",
+            name="ck_execution_task_recovery_result_status",
+        ),
+        CheckConstraint(
+            "(status = 'recovered' AND failure_reason IS NULL) OR "
+            "(status != 'recovered' AND failure_reason IS NOT NULL)",
+            name="ck_execution_task_recovery_result_failure_shape",
+        ),
+        Index(
+            "ix_execution_task_recovery_results_task_status",
+            "execution_task_id",
+            "status",
+        ),
+    )
+
+    recovery_decision = relationship("ExecutionTaskRecoveryDecision")
+    apply_result = relationship("ExecutionTaskApplyResult")
+    pre_apply_snapshot = relationship("ExecutionTaskPreApplySnapshot")
+
+
+@event.listens_for(ExecutionTaskPostApplyValidation, "before_update")
+def _reject_post_apply_validation_update(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskPostApplyValidation is immutable")
+
+
+@event.listens_for(ExecutionTaskPostApplyValidation, "before_delete")
+def _reject_post_apply_validation_delete(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskPostApplyValidation is immutable")
+
+
+@event.listens_for(ExecutionTaskRecoveryDecision, "before_update")
+def _reject_recovery_decision_update(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskRecoveryDecision is immutable")
+
+
+@event.listens_for(ExecutionTaskRecoveryDecision, "before_delete")
+def _reject_recovery_decision_delete(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskRecoveryDecision is immutable")
+
+
+@event.listens_for(ExecutionTaskRecoveryResult, "before_update")
+def _reject_recovery_result_update(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskRecoveryResult is immutable")
+
+
+@event.listens_for(ExecutionTaskRecoveryResult, "before_delete")
+def _reject_recovery_result_delete(mapper, connection, target):
+    raise RuntimeError("ExecutionTaskRecoveryResult is immutable")
+
+
 class ExecutionTaskTransition(Base):
     """Immutable lifecycle transition event for one Execution Task."""
 
