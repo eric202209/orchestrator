@@ -20,6 +20,10 @@ from app.services.orchestration.planning.planner import (
 from app.services.orchestration.planning.source_materialization import (
     plan_has_concrete_source_materialization,
 )
+from app.services.orchestration.planning.workspace_identity import (
+    PlannerWorkspaceIdentity,
+    planner_workspace_identity_for_context,
+)
 from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.state.session_state import mark_session_paused
@@ -55,6 +59,37 @@ def _planning_validation_profile(ctx: OrchestrationRunContext) -> str:
         )
     except Exception:
         return ""
+
+
+def _planner_workspace_identity(
+    ctx: OrchestrationRunContext,
+) -> PlannerWorkspaceIdentity:
+    return planner_workspace_identity_for_context(ctx)
+
+
+def _validate_planning_plan(
+    ctx: OrchestrationRunContext,
+    plan: list[dict[str, Any]],
+    output_text: str,
+):
+    from app.services.orchestration.phases.planning_task1_bootstrap import (
+        is_first_ordered_task as _is_first_ordered_task,
+    )
+
+    return ValidatorService.validate_plan(
+        plan,
+        output_text=output_text,
+        task_prompt=ctx.prompt,
+        execution_profile=ctx.execution_profile,
+        project_dir=ctx.orchestration_state.project_dir,
+        title=ctx.task.title if ctx.task else None,
+        description=ctx.task.description if ctx.task else None,
+        validation_severity=ctx.validation_severity,
+        workflow_profile=ctx.workflow_profile,
+        workflow_stage=ctx.workflow_stage,
+        is_first_ordered_task=_is_first_ordered_task(ctx.task),
+        workspace_identity=_planner_workspace_identity(ctx),
+    )
 
 
 def _truncated_multistep_collapse_diagnostics(
@@ -475,16 +510,45 @@ def _build_repair_rejection_reasons(
             if fragment_clauses
             else f"steps {nested_workspace_steps}"
         )
-        targeted_reasons.append(
-            "nested_workspace_violation: "
-            f'You are already inside workspace "{workspace_name}"; do not '
-            f"recreate or enter it. Offending text: {fragments_clause}. "
-            f"Remove any `mkdir {workspace_name}` / `cd {workspace_name}` step "
-            f"and strip the `{workspace_prefix}` prefix from paths and commands "
-            "so they are relative to the workspace root "
-            f'(e.g. "{workspace_prefix}app.py" becomes "app.py"). '
-            "Preserve all other valid steps unchanged."
-        )
+        offending_alias = str(details.get("offending_root_alias") or "").strip()
+        logical_name = str(details.get("logical_project_name") or "").strip()
+        physical_basename = str(details.get("physical_runtime_basename") or "").strip()
+        corrected_fragments = details.get("corrected_fragments") or {}
+        corrected_clause = ""
+        if corrected_fragments:
+            corrected_values = corrected_fragments.get(
+                nested_workspace_steps[0]
+            ) or corrected_fragments.get(str(nested_workspace_steps[0]))
+            if corrected_values:
+                corrected_clause = (
+                    " Corrected forms: "
+                    + "; ".join(str(value) for value in corrected_values[:4])
+                    + "."
+                )
+        if offending_alias and logical_name and physical_basename:
+            targeted_reasons.append(
+                "nested_workspace_violation: "
+                f'offending alias "{offending_alias}" duplicates the logical '
+                f'project root "{logical_name}" or physical runtime root; '
+                f'physical runtime directory "{physical_basename}" is not a '
+                "semantic project name. "
+                f"Offending text: {fragments_clause}. "
+                f"Remove any `mkdir {offending_alias}` / `cd {offending_alias}` "
+                f"step and strip the `{offending_alias}/` prefix from paths and "
+                f"commands so they are relative to the current root.{corrected_clause} "
+                "Preserve all other valid steps unchanged."
+            )
+        else:
+            targeted_reasons.append(
+                "nested_workspace_violation: "
+                f'You are already inside workspace "{workspace_name}"; do not '
+                f"recreate or enter it. Offending text: {fragments_clause}. "
+                f"Remove any `mkdir {workspace_name}` / `cd {workspace_name}` step "
+                f"and strip the `{workspace_prefix}` prefix from paths and commands "
+                "so they are relative to the workspace root "
+                f'(e.g. "{workspace_prefix}app.py" becomes "app.py"). '
+                "Preserve all other valid steps unchanged."
+            )
 
     nested_project_root_steps = _normalized_step_numbers(
         details.get("nested_project_root_steps") or []
@@ -1259,6 +1323,7 @@ def _record_pending_repair_outcome(
     attempt_number: int,
     original_violation_codes: list[str],
     targeted_violation_code: str | None,
+    validator_details: dict[str, Any] | None = None,
 ) -> None:
     """Remember what a just-fired repair attempt targeted.
 
@@ -1273,6 +1338,20 @@ def _record_pending_repair_outcome(
     retry_state.pending_repair_outcome_original_violation_codes = list(
         original_violation_codes or []
     )[:8]
+    details = validator_details or {}
+    retry_state.pending_repair_outcome_identity = {
+        key: details.get(key)
+        for key in (
+            "physical_runtime_basename",
+            "logical_project_name",
+            "display_project_path",
+            "offending_root_alias",
+            "offending_fragments",
+            "corrected_fragments",
+            "violation_kind",
+        )
+        if details.get(key) is not None
+    }
 
 
 def _emit_repair_outcome_if_pending(
@@ -1305,6 +1384,10 @@ def _emit_repair_outcome_if_pending(
     same_violation_repeated = (
         targeted_code is not None and targeted_code in post_repair_codes
     )
+    identity_metadata = dict(
+        getattr(retry_state, "pending_repair_outcome_identity", {}) or {}
+    )
+    retry_state.pending_repair_outcome_identity = {}
     ctx.emit_live(
         "WARN" if same_violation_repeated else "INFO",
         "[OPENCLAW][PLANNING_REPAIR_OUTCOME] repair effectiveness",
@@ -1318,6 +1401,8 @@ def _emit_repair_outcome_if_pending(
             "post_repair_violation_codes": post_repair_codes[:8],
             "target_violation_resolved": target_violation_resolved,
             "same_violation_repeated": same_violation_repeated,
+            **identity_metadata,
+            "repair_guidance_identity": identity_metadata,
         },
     )
 
@@ -1327,6 +1412,7 @@ def _record_repair_target(
     *,
     codes: list[str] | None = None,
     reason: "_SecondRepairReason | None" = None,
+    details: dict[str, Any] | None = None,
 ) -> None:
     """Record pending repair-outcome tracking for a first or second repair.
 
@@ -1341,6 +1427,7 @@ def _record_repair_target(
             attempt_number=retry_state.consecutive_failures + 1,
             original_violation_codes=[reason.semantic_violation_code],
             targeted_violation_code=reason.semantic_violation_code,
+            validator_details=details,
         )
         return
     codes = codes or []
@@ -1353,6 +1440,7 @@ def _record_repair_target(
             if "nested_project_folder_command" in codes
             else None
         ),
+        validator_details=details,
     )
 
 
@@ -1490,6 +1578,7 @@ class _PlanningRetryState:
         self.pending_repair_outcome_attempt_number = 0
         self.pending_repair_outcome_targeted_violation_code: str | None = None
         self.pending_repair_outcome_original_violation_codes: list[str] = []
+        self.pending_repair_outcome_identity: dict[str, Any] = {}
         self.task1_bootstrap_rejection_contract: dict[str, Any] | None = None
         self.source_materialization_required_after_repair = False
         self.vma_repair_triggered = False
@@ -1946,6 +2035,26 @@ def _post_repair_nested_workspace_reason(
     step_numbers = sorted(set(nested_workspace_steps + nested_project_root_steps))
     workspace_name = str(details.get("nested_workspace_name") or "").strip()
     workspace_prefix = str(details.get("nested_workspace_prefix") or "").strip()
+    offending_fragments = details.get("nested_workspace_offending_fragments") or {}
+    fragment_clauses = []
+    for step_number in nested_workspace_steps:
+        values = offending_fragments.get(step_number) or offending_fragments.get(
+            str(step_number)
+        )
+        if values:
+            fragment_clauses.append(
+                f"step {step_number}: {', '.join(str(value) for value in values[:4])}"
+            )
+    repeated_fragments = (
+        "; ".join(fragment_clauses) if fragment_clauses else "the quoted root alias"
+    )
+    identity_clause = ""
+    if details.get("logical_project_name") and details.get("physical_runtime_basename"):
+        identity_clause = (
+            f' The logical project is "{details["logical_project_name"]}"; '
+            f'physical runtime directory "{details["physical_runtime_basename"]}" '
+            "is not a semantic project name."
+        )
 
     if nested_workspace_steps and workspace_name:
         rejection_text = (
@@ -1954,7 +2063,7 @@ def _post_repair_nested_workspace_reason(
             f'"{workspace_name}" after repair. Remove any `mkdir {workspace_name}` '
             f"/ `cd {workspace_name}` step and strip the `{workspace_prefix}` "
             "prefix from every path and command so they are relative to the "
-            "workspace root."
+            f"workspace root. Offending text: {repeated_fragments}.{identity_clause}"
         )
     else:
         rejection_text = (

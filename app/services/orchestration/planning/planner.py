@@ -53,6 +53,9 @@ from app.services.orchestration.planning.repair_prompts import (
 from app.services.orchestration.planning.repair_evidence import (
     record_pending_planning_repair_triplet,
 )
+from app.services.orchestration.planning.workspace_identity import (
+    PlannerWorkspaceIdentity,
+)
 from app.services.project.index_service import (
     build_project_index,
     render_project_structure_capsule,
@@ -1154,6 +1157,7 @@ class PlannerService:
         project_structure_capsule: Optional[str] = None,
         validation_profile: Optional[str] = None,
         project_context: Optional[str] = None,
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ) -> str:
         return _build_minimal_planning_prompt(
             task_description,
@@ -1166,6 +1170,7 @@ class PlannerService:
             project_structure_capsule=project_structure_capsule,
             validation_profile=validation_profile,
             project_context=project_context,
+            workspace_identity=workspace_identity,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
 
@@ -1179,6 +1184,7 @@ class PlannerService:
         workspace_has_existing_files: bool = False,
         validation_profile: Optional[str] = None,
         project_context: Optional[str] = None,
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ) -> str:
         return _build_ultra_minimal_planning_prompt(
             task_description,
@@ -1189,6 +1195,7 @@ class PlannerService:
             workspace_has_existing_files=workspace_has_existing_files,
             validation_profile=validation_profile,
             project_context=project_context,
+            workspace_identity=workspace_identity,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
 
@@ -1689,6 +1696,7 @@ class PlannerService:
         workflow_phases: Optional[List[str]] = None,
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ) -> str:
         del workflow_profile, workflow_phases, workspace_has_existing_files
         return _build_planning_repair_prompt(
@@ -1699,6 +1707,7 @@ class PlannerService:
             prompt_profile=prompt_profile,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
             knowledge_context=knowledge_context,
+            workspace_identity=workspace_identity,
             project_structure_capsule=cls._build_project_structure_capsule(project_dir),
         )
 
@@ -1715,6 +1724,7 @@ class PlannerService:
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
         guidance_block: str = "",
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ):
         del workflow_profile, workflow_phases, workspace_has_existing_files
         return _build_planning_repair_prompt_with_metadata(
@@ -1725,6 +1735,7 @@ class PlannerService:
             prompt_profile=prompt_profile,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
             knowledge_context=knowledge_context,
+            workspace_identity=workspace_identity,
             project_structure_capsule=cls._build_project_structure_capsule(project_dir),
             guidance_block=guidance_block,
         )
@@ -1735,6 +1746,7 @@ class PlannerService:
         rejection_reasons: Optional[List[str]] = None,
         prompt_profile: str = "default",
         guidance_block: str = "",
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ) -> str:
         return _build_compact_planning_repair_prompt(
             malformed_output=malformed_output,
@@ -1742,6 +1754,7 @@ class PlannerService:
             prompt_profile=prompt_profile,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
             guidance_block=guidance_block,
+            workspace_identity=workspace_identity,
         )
 
     @staticmethod
@@ -1769,6 +1782,7 @@ class PlannerService:
         knowledge_context: Any = None,
         validation_profile: Optional[str] = None,
         project_context: Optional[str] = None,
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ) -> Dict[str, Any]:
         can_store_retry_guard = hasattr(runtime_service, "__dict__")
         if can_store_retry_guard:
@@ -1811,6 +1825,7 @@ class PlannerService:
             ),
             validation_profile=validation_profile,
             project_context=project_context,
+            workspace_identity=workspace_identity,
         )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)
@@ -1954,6 +1969,7 @@ class PlannerService:
                         workspace_has_existing_files=workspace_has_existing_files,
                         validation_profile=validation_profile,
                         project_context=project_context,
+                        workspace_identity=workspace_identity,
                     ),
                     timeout_seconds=ultra_minimal_timeout,
                     reuse_task_session=False,
@@ -1990,6 +2006,7 @@ class PlannerService:
         _repair_attempt_number: int = 1,
         _compact_no_output_retry: bool = False,
         guidance_block: str = "",
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ) -> Dict[str, Any]:
         repair_build_started_at = time.monotonic()
         logger.warning(
@@ -2006,6 +2023,7 @@ class PlannerService:
                 rejection_reasons=rejection_reasons,
                 prompt_profile=prompt_profile,
                 guidance_block=guidance_block,
+                workspace_identity=workspace_identity,
             )
             repair_prompt_metadata: Dict[str, Any] = {
                 "source_api_contract_available": False,
@@ -2025,6 +2043,7 @@ class PlannerService:
                 workflow_phases=workflow_phases,
                 workspace_has_existing_files=workspace_has_existing_files,
                 knowledge_context=knowledge_context,
+                workspace_identity=workspace_identity,
                 guidance_block=guidance_block,
             )
             repair_prompt = repair_prompt_result.prompt
@@ -2418,6 +2437,7 @@ class PlannerService:
                         _repair_attempt_number=_repair_attempt_number + 1,
                         _compact_no_output_retry=True,
                         guidance_block=guidance_block,
+                        workspace_identity=workspace_identity,
                     )
                 timeout_exc = PlanningRepairNoOutputTimeout(
                     (

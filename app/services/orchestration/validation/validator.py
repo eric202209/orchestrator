@@ -53,6 +53,9 @@ from app.services.orchestration.planning.task_bootstrap_contract import (
     build_task1_bootstrap_contract,
     validate_task1_bootstrap_contract,
 )
+from app.services.orchestration.planning.workspace_identity import (
+    PlannerWorkspaceIdentity,
+)
 from .rules.contract_placeholders import (
     _plan_contains_placeholder_intent,
     _plan_fake_verification_artifact_steps,
@@ -124,6 +127,8 @@ from .rules.core_paths import (
     _plan_creates_nested_project_root,
     _plan_negative_existing_file_checks,
     _plan_nested_project_root_names,
+    _plan_nested_workspace_aliases,
+    _plan_nested_workspace_corrected_fragments,
     _plan_nested_workspace_offending_fragments,
     _plan_nests_task_workspace,
     _resolve_existing_static_site_mentions,
@@ -192,6 +197,10 @@ class ValidatorService:
     _plan_nests_task_workspace = staticmethod(_plan_nests_task_workspace)
     _plan_nested_workspace_offending_fragments = staticmethod(
         _plan_nested_workspace_offending_fragments
+    )
+    _plan_nested_workspace_aliases = staticmethod(_plan_nested_workspace_aliases)
+    _plan_nested_workspace_corrected_fragments = staticmethod(
+        _plan_nested_workspace_corrected_fragments
     )
     _plan_creates_nested_project_root = staticmethod(_plan_creates_nested_project_root)
     _plan_nested_project_root_names = staticmethod(_plan_nested_project_root_names)
@@ -848,6 +857,7 @@ class ValidatorService:
         workflow_profile: Optional[str] = None,
         workflow_stage: Optional[str] = None,
         is_first_ordered_task: bool = False,
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ) -> PlanOutcome:
         plan = copy.deepcopy(plan)
         profile = cls.infer_validation_profile(
@@ -1120,7 +1130,9 @@ class ValidatorService:
             )
             details["background_process_steps"] = background_process_steps
 
-        nested_workspace_steps = cls._plan_nests_task_workspace(plan, project_dir)
+        nested_workspace_steps = cls._plan_nests_task_workspace(
+            plan, project_dir, workspace_identity
+        )
         if nested_workspace_steps:
             repairable.append(
                 "Plan incorrectly recreates the current task workspace as a nested folder "
@@ -1128,11 +1140,39 @@ class ValidatorService:
             )
             details["nested_workspace_steps"] = nested_workspace_steps
             if project_dir is not None:
-                details["nested_workspace_name"] = Path(project_dir).name
-                details["nested_workspace_prefix"] = f"{Path(project_dir).name}/"
-                details["nested_workspace_offending_fragments"] = (
-                    cls._plan_nested_workspace_offending_fragments(plan, project_dir)
+                offending_fragments = cls._plan_nested_workspace_offending_fragments(
+                    plan, project_dir, workspace_identity
                 )
+                offending_aliases = cls._plan_nested_workspace_aliases(
+                    plan, project_dir, workspace_identity
+                )
+                details["nested_workspace_name"] = next(
+                    iter(offending_aliases.values()), Path(project_dir).name
+                )
+                details["nested_workspace_prefix"] = (
+                    f'{details["nested_workspace_name"]}/'
+                )
+                details["nested_workspace_offending_fragments"] = offending_fragments
+                if workspace_identity is not None:
+                    corrected_fragments = (
+                        cls._plan_nested_workspace_corrected_fragments(
+                            offending_fragments, offending_aliases
+                        )
+                    )
+                    details.update(
+                        {
+                            "physical_runtime_basename": workspace_identity.physical_runtime_basename,
+                            "logical_project_name": workspace_identity.logical_project_name,
+                            "display_project_path": workspace_identity.display_project_path,
+                            "offending_root_alias": next(
+                                iter(offending_aliases.values()),
+                                workspace_identity.physical_runtime_basename,
+                            ),
+                            "offending_fragments": offending_fragments,
+                            "corrected_fragments": corrected_fragments,
+                            "violation_kind": "duplicate_root_alias",
+                        }
+                    )
 
         nested_project_root_steps = cls._plan_creates_nested_project_root(
             plan, project_dir

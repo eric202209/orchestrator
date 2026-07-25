@@ -13,6 +13,10 @@ import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.services.orchestration.planning.workspace_identity import (
+    PlannerWorkspaceIdentity,
+)
+
 from app.services.orchestration.operations.file_ops_contract import (
     normalize_file_op_shape,
 )
@@ -128,11 +132,14 @@ def _strip_heredoc_bodies_for_command_scanning(command: str) -> str:
 
 
 def _plan_nests_task_workspace(
-    plan: List[Dict[str, Any]], project_dir: Optional[Path]
+    plan: List[Dict[str, Any]],
+    project_dir: Optional[Path],
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> List[int]:
     if not project_dir:
         return []
-    nested_prefix = f"{project_dir.name}/"
+    root = Path(project_dir)
+    aliases = _workspace_root_aliases(root, workspace_identity)
     bad_steps: List[int] = []
     for step in plan:
         step_text_parts = [
@@ -146,13 +153,103 @@ def _plan_nests_task_workspace(
             str(path or "") for path in step.get("expected_files", []) or []
         )
         combined = "\n".join(step_text_parts)
-        if nested_prefix in combined:
-            bad_steps.append(step.get("step_number"))
+        for alias in aliases:
+            if (root / alias).is_dir():
+                continue
+            if _alias_has_nested_intent(
+                step, alias, combined, workspace_identity=workspace_identity
+            ):
+                bad_steps.append(step.get("step_number"))
+                break
     return [step for step in bad_steps if step is not None]
 
 
+def _workspace_root_aliases(
+    project_dir: Path,
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
+) -> tuple[str, ...]:
+    if workspace_identity is not None:
+        return workspace_identity.forbidden_root_aliases
+    return (Path(project_dir).name,)
+
+
+def _alias_has_nested_intent(
+    step: Dict[str, Any],
+    alias: str,
+    combined: str,
+    *,
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
+) -> bool:
+    nested_prefix = f"{alias}/"
+    command_pattern = re.compile(
+        rf"\b(?:mkdir(?:\s+-p)?|cd)\s+{re.escape(alias)}(?:\s|$|[;&|])"
+    )
+    if command_pattern.search(combined):
+        return True
+    if nested_prefix not in combined:
+        return False
+    if (
+        workspace_identity is None
+        or alias != workspace_identity.physical_runtime_basename
+    ):
+        return True
+    prefixed_targets = [
+        str(path or "")
+        for path in step.get("expected_files", []) or []
+        if str(path or "").startswith(nested_prefix)
+    ]
+    prefixed_targets.extend(
+        str(operation.get("path") or "")
+        for operation in step.get("ops", []) or []
+        if isinstance(operation, dict)
+        and str(operation.get("path") or "").startswith(nested_prefix)
+    )
+    # A bare numeric child path may be a legitimate fixture/package target.
+    # Multiple materialized targets are deterministic evidence of a duplicated
+    # project root; a root mkdir/cd above is stronger evidence and was handled.
+    return len(set(prefixed_targets)) >= 2
+
+
+def _plan_nested_workspace_aliases(
+    plan: List[Dict[str, Any]],
+    project_dir: Optional[Path],
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
+) -> Dict[int, str]:
+    if not project_dir:
+        return {}
+    root = Path(project_dir)
+    aliases = _workspace_root_aliases(root, workspace_identity)
+    findings: Dict[int, str] = {}
+    for step in plan:
+        step_number = step.get("step_number")
+        if step_number is None:
+            continue
+        step_text = "\n".join(
+            [
+                str(step.get("verification") or ""),
+                str(step.get("rollback") or ""),
+                *(str(command or "") for command in step.get("commands", []) or []),
+                *(str(path or "") for path in step.get("expected_files", []) or []),
+            ]
+        )
+        for alias in aliases:
+            if (root / alias).is_dir():
+                continue
+            if _alias_has_nested_intent(
+                step,
+                alias,
+                step_text,
+                workspace_identity=workspace_identity,
+            ):
+                findings[int(step_number)] = alias
+                break
+    return findings
+
+
 def _plan_nested_workspace_offending_fragments(
-    plan: List[Dict[str, Any]], project_dir: Optional[Path]
+    plan: List[Dict[str, Any]],
+    project_dir: Optional[Path],
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> Dict[int, List[str]]:
     """Quote the exact command/path fragments that triggered nested-workspace detection.
 
@@ -163,11 +260,9 @@ def _plan_nested_workspace_offending_fragments(
 
     if not project_dir:
         return {}
-    nested_prefix = f"{project_dir.name}/"
+    root = Path(project_dir)
+    aliases = _workspace_root_aliases(root, workspace_identity)
     findings: Dict[int, List[str]] = {}
-    mkdir_cd_pattern = re.compile(
-        rf"\b(mkdir(?:\s+-p)?|cd)\s+{re.escape(project_dir.name)}\b"
-    )
     for step in plan:
         step_number = step.get("step_number")
         if step_number is None:
@@ -181,20 +276,66 @@ def _plan_nested_workspace_offending_fragments(
             str(command or "") for command in step.get("commands", []) or []
         )
         path_parts = [str(path or "") for path in step.get("expected_files", []) or []]
-        for text in step_text_parts:
-            for match in mkdir_cd_pattern.finditer(text):
-                fragment = match.group(0)
-                if fragment not in fragments:
-                    fragments.append(fragment)
-            for token in re.findall(r"\S*" + re.escape(nested_prefix) + r"\S*", text):
-                if token not in fragments:
-                    fragments.append(token)
-        for path_text in path_parts:
-            if path_text.startswith(nested_prefix) and path_text not in fragments:
-                fragments.append(path_text)
+        for alias in aliases:
+            if (root / alias).is_dir():
+                continue
+            nested_prefix = f"{alias}/"
+            if not _alias_has_nested_intent(
+                step,
+                alias,
+                "\n".join(step_text_parts),
+                workspace_identity=workspace_identity,
+            ):
+                continue
+            alias_mkdir_cd_pattern = re.compile(
+                rf"\b(mkdir(?:\s+-p)?|cd)\s+{re.escape(alias)}\b"
+            )
+            for text in step_text_parts:
+                for match in alias_mkdir_cd_pattern.finditer(text):
+                    fragment = match.group(0)
+                    if fragment not in fragments:
+                        fragments.append(fragment)
+                for token in re.findall(
+                    r"\S*" + re.escape(nested_prefix) + r"\S*", text
+                ):
+                    if token not in fragments:
+                        fragments.append(token)
+            for path_text in path_parts:
+                if path_text.startswith(nested_prefix) and path_text not in fragments:
+                    fragments.append(path_text)
         if fragments:
             findings[int(step_number)] = fragments[:6]
     return findings
+
+
+def _plan_nested_workspace_corrected_fragments(
+    fragments: Dict[int, List[str]],
+    aliases: Dict[int, str],
+) -> Dict[int, List[str]]:
+    """Return deterministic relative replacements for quoted fragments."""
+
+    corrected: Dict[int, List[str]] = {}
+    for step_number, values in fragments.items():
+        alias = aliases.get(step_number, "")
+        replacements: List[str] = []
+        for fragment in values:
+            text = str(fragment or "")
+            command_match = re.match(
+                rf"\b(?:mkdir(?:\s+-p)?|cd)\s+{re.escape(alias)}\b",
+                text,
+            )
+            if command_match:
+                replacement = f"remove `{text}`"
+            else:
+                prefix = f"{alias}/"
+                replacement = (
+                    text.replace(prefix, "", 1) if prefix and prefix in text else text
+                )
+            if replacement not in replacements:
+                replacements.append(replacement)
+        if replacements:
+            corrected[step_number] = replacements[:6]
+    return corrected
 
 
 def _plan_creates_nested_project_root(

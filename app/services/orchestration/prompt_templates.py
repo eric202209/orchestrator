@@ -29,6 +29,10 @@ from app.services.orchestration.planning.prompt_contracts import (
     render_operation_choice_contract,
 )
 from app.services.workspace.system_settings import get_effective_workspace_root
+from app.services.orchestration.planning.workspace_identity import (
+    PlannerWorkspaceIdentity,
+    render_planner_workspace_identity,
+)
 
 # ---------------------------------------------------------------------------
 # Workspace constants
@@ -296,7 +300,10 @@ Do not implement anything.
 
 **Workspace:**
 - Root: {workspace_root}
-- Project: {project_dir}
+- Project Workspace (baseline authority): {project_workspace}
+- Runtime Workspace (physical execution root): {project_dir}
+
+{workspace_identity_guidance}
 
 **Execution Boundary:**
 1. Working directory is already `{project_dir}`; every command runs there.
@@ -399,7 +406,10 @@ Do not implement anything.
 
 **Workspace:**
 - Root: {workspace_root}
-- Project: {project_dir}
+- Project Workspace (baseline authority): {project_workspace}
+- Runtime Workspace (physical execution root): {project_dir}
+
+{workspace_identity_guidance}
 
 **Execution Boundary:**
 1. Working directory is already `{project_dir}`; every command runs there.
@@ -935,6 +945,7 @@ Examples:
         workflow_profile: str = "default",
         workflow_phases: Optional[List[str]] = None,
         project_structure_capsule: Optional[str] = None,
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ) -> str:
         """Build a reduced planning prompt for the Arm B experiment (Priority 8).
 
@@ -993,6 +1004,14 @@ Examples:
             "project_structure_capsule": compact_project_structure_capsule,
             "workspace_root": ws_root,
             "project_dir": proj_dir,
+            "project_workspace": (
+                workspace_identity.display_project_workspace_path
+                if workspace_identity is not None
+                else proj_dir
+            ),
+            "workspace_identity_guidance": render_planner_workspace_identity(
+                workspace_identity
+            ),
             "workflow_guidance": workflow_guidance,
             "supported_file_ops": render_supported_file_ops(),
             "arm_b_operation_contract": cls._arm_b_operation_contract(
@@ -1057,6 +1076,7 @@ Examples:
         workflow_profile: str = "default",
         workflow_phases: Optional[List[str]] = None,
         project_structure_capsule: Optional[str] = None,
+        workspace_identity: PlannerWorkspaceIdentity | None = None,
     ) -> str:
         """
         Build a prompt for task planning phase.
@@ -1082,6 +1102,7 @@ Examples:
                 workflow_profile=workflow_profile,
                 workflow_phases=workflow_phases,
                 project_structure_capsule=project_structure_capsule,
+                workspace_identity=workspace_identity,
             )
 
         ws_root = workspace_root or str(get_effective_workspace_root())
@@ -1138,6 +1159,14 @@ Examples:
             "project_structure_capsule": compact_project_structure_capsule,
             "workspace_root": ws_root,
             "project_dir": proj_dir,
+            "project_workspace": (
+                workspace_identity.display_project_workspace_path
+                if workspace_identity is not None
+                else proj_dir
+            ),
+            "workspace_identity_guidance": render_planner_workspace_identity(
+                workspace_identity
+            ),
             "workflow_guidance": workflow_guidance,
             "supported_file_ops": render_supported_file_ops(),
             "operation_choice_contract": render_operation_choice_contract(),

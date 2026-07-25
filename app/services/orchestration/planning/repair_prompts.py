@@ -36,6 +36,10 @@ from app.services.project.index_service import (
     build_project_index,
     render_project_structure_capsule,
 )
+from app.services.orchestration.planning.workspace_identity import (
+    PlannerWorkspaceIdentity,
+    render_planner_workspace_identity,
+)
 
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEMS = 1
 PLANNING_REPAIR_MAX_KNOWLEDGE_ITEM_CHARS = 500
@@ -183,6 +187,7 @@ def build_planning_repair_prompt(
     knowledge_context: Any = None,
     project_structure_capsule: str | None = None,
     guidance_block: str = "",
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> str:
     return build_planning_repair_prompt_with_metadata(
         task_description=task_description,
@@ -194,6 +199,7 @@ def build_planning_repair_prompt(
         knowledge_context=knowledge_context,
         project_structure_capsule=project_structure_capsule,
         guidance_block=guidance_block,
+        workspace_identity=workspace_identity,
     ).prompt
 
 
@@ -207,6 +213,7 @@ def build_planning_repair_prompt_with_metadata(
     knowledge_context: Any = None,
     project_structure_capsule: str | None = None,
     guidance_block: str = "",
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> PlanningRepairPromptBuildResult:
     broken_output = compact_invalid_output_excerpt(malformed_output)
     knowledge_block = render_repair_knowledge_block(knowledge_context)
@@ -251,6 +258,7 @@ def build_planning_repair_prompt_with_metadata(
         source_api_contract_block=source_api_contract_block,
         source_api_contract_compact_block=source_api_contract_compact_block,
         structure_capsule=structure_capsule,
+        workspace_identity=workspace_identity,
     )
     if specialized_prompt is not None:
         if len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
@@ -287,6 +295,7 @@ def build_planning_repair_prompt_with_metadata(
                     source_api_contract_block=candidate_block,
                     knowledge_block=knowledge_block,
                     guidance_block=guidance_block,
+                    workspace_identity=workspace_identity,
                 )
                 if len(candidate_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS and (
                     not candidate_block or candidate_block in candidate_prompt
@@ -340,6 +349,7 @@ def build_planning_repair_prompt_with_metadata(
             ),
             knowledge_block=knowledge_block,
             guidance_block=guidance_block,
+            workspace_identity=workspace_identity,
         )
         return PlanningRepairPromptBuildResult(
             prompt=prompt,
@@ -415,6 +425,7 @@ def build_planning_repair_prompt_with_metadata(
         rejection_reasons
     )
     validation_guidance_block = _join_optional_blocks(
+        render_planner_workspace_identity(workspace_identity),
         verification_source_mutation_guidance,
         materialization_preservation_guidance,
         grounded_source_edit_guidance,
@@ -620,6 +631,7 @@ Rules:
                 source_api_contract_block=candidate_block,
                 knowledge_block=knowledge_block,
                 guidance_block=guidance_block,
+                workspace_identity=workspace_identity,
             )
             if len(candidate_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS and (
                 not candidate_block or candidate_block in candidate_prompt
@@ -678,6 +690,7 @@ Rules:
         ),
         knowledge_block=knowledge_block,
         guidance_block=guidance_block,
+        workspace_identity=workspace_identity,
     )
     prompt_metadata.update(final_metadata)
     return PlanningRepairPromptBuildResult(prompt=prompt, metadata=prompt_metadata)
@@ -944,6 +957,7 @@ def _build_specialized_prompt_protected(
     source_api_contract_block: str,
     source_api_contract_compact_block: str,
     structure_capsule: str,
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> tuple[str | None, dict[str, Any]]:
     metadata = _source_api_contract_metadata(
         full_block=source_api_contract_block,
@@ -1063,6 +1077,7 @@ def _build_specialized_prompt_protected(
             project_dir=project_dir,
             rejection_reasons=rejection_reasons,
             knowledge_block=_join_optional_blocks(
+                render_planner_workspace_identity(workspace_identity),
                 verification_source_mutation_guidance,
                 attempt["knowledge"],
                 attempt["source_api"],
@@ -1460,11 +1475,20 @@ def _build_nested_workspace_repair_guidance(
         workspace_match = re.search(
             r'nested_workspace_violation:.*?workspace "([^"]*)"', text
         )
+        alias_match = re.search(
+            r'nested_workspace_violation:.*?offending alias "([^"]*)"', text
+        )
+        logical_match = re.search(r'logical project root "([^"]*)"', text)
+        runtime_match = re.search(r'physical runtime directory "([^"]*)"', text)
         prefix_match = re.search(r"strip the `([^`]*)` prefix", text)
         offending_match = re.search(
             r"nested_workspace_violation:.*?Offending text: (.*?)\. Remove", text
         )
-        workspace_name = workspace_match.group(1) if workspace_match else ""
+        workspace_name = (
+            workspace_match.group(1)
+            if workspace_match
+            else (alias_match.group(1) if alias_match else "")
+        )
         prefix = (
             prefix_match.group(1)
             if prefix_match
@@ -1479,6 +1503,16 @@ def _build_nested_workspace_repair_guidance(
                 "relative to the workspace root, not prefixed with it.",
             ]
         )
+        if logical_match:
+            lines.append(
+                f'- Logical project name: "{logical_match.group(1)}"; this is '
+                "metadata, not a path prefix."
+            )
+        if runtime_match:
+            lines.append(
+                f'- The physical runtime directory "{runtime_match.group(1)}" '
+                "is not a semantic project name and must not be used to duplicate the root."
+            )
         if offending_text:
             lines.append(f"- Offending text from the rejected plan: {offending_text}")
         if prefix:
@@ -1488,8 +1522,11 @@ def _build_nested_workspace_repair_guidance(
             )
             lines.append(
                 f'- Correct the form: "{example}" -> "{corrected}"; '
-                f'remove "mkdir {workspace_name}" and "cd {workspace_name}" steps entirely.'
+                f"remove `mkdir {workspace_name}` and `cd {workspace_name}` steps entirely."
             )
+        corrected_match = re.search(r"Corrected forms: (.*?)(?:\. Preserve|\.?$)", text)
+        if corrected_match:
+            lines.append(f"- Deterministic corrections: {corrected_match.group(1)}.")
 
     if has_nested_project_root:
         lines.extend(
@@ -1694,6 +1731,7 @@ def build_compact_planning_repair_prompt(
     apply_prompt_profile: Any = None,
     source_api_contract_block: str = "",
     guidance_block: str = "",
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> str:
     ops_contract = render_ops_first_contract()
     operation_choice_contract = render_operation_choice_contract()
@@ -1740,6 +1778,7 @@ def build_compact_planning_repair_prompt(
         rejection_reasons
     )
     validation_guidance_block = _join_optional_blocks(
+        render_planner_workspace_identity(workspace_identity),
         verification_source_mutation_guidance,
         materialization_preservation_guidance,
         grounded_source_edit_guidance,
@@ -2094,6 +2133,7 @@ def _apply_profile_or_compact_fallback_with_metadata(
     guidance_block: str = "",
     compacted: bool = False,
     included_reason: str = "repair_context",
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> tuple[str, dict[str, Any]]:
     profiled_prompt = _apply_profile(
         prompt.rstrip(), prompt_profile, apply_prompt_profile
@@ -2117,6 +2157,7 @@ def _apply_profile_or_compact_fallback_with_metadata(
             source_api_contract_block=candidate_block,
             knowledge_block=knowledge_block,
             guidance_block=guidance_block,
+            workspace_identity=workspace_identity,
         )
         if len(candidate_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS and (
             not candidate_block or candidate_block in candidate_prompt
@@ -2140,6 +2181,7 @@ def _apply_profile_or_compact_fallback_with_metadata(
             source_api_contract_block="",
             knowledge_block=knowledge_block,
             guidance_block=guidance_block,
+            workspace_identity=workspace_identity,
         )
     return fallback_prompt, _metadata_for_final_source_api_block(
         source_api_metadata=source_api_metadata,
@@ -2173,6 +2215,7 @@ def _build_over_budget_compact_repair_prompt(
     source_api_contract_block: str = "",
     knowledge_block: str = "",
     guidance_block: str = "",
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> str:
     if _is_stale_replace_repair(malformed_output, rejection_reasons):
         return build_compact_stale_replace_repair_prompt(
@@ -2193,6 +2236,7 @@ def _build_over_budget_compact_repair_prompt(
         apply_prompt_profile=apply_prompt_profile,
         source_api_contract_block=source_api_contract_block,
         guidance_block=guidance_block,
+        workspace_identity=workspace_identity,
     )
 
 

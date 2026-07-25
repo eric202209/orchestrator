@@ -28,6 +28,10 @@ from app.services.project.index_service import (
     render_project_structure_capsule,
 )
 from app.services.project.source_imports import python_test_source_context_from_tests
+from app.services.orchestration.planning.workspace_identity import (
+    PlannerWorkspaceIdentity,
+    render_planner_workspace_identity,
+)
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
@@ -117,8 +121,12 @@ def _render_workflow_guidance(
 
 
 def _render_workspace_prefix_prohibition(
-    project_dir: Path, display_project_dir: str
+    project_dir: Path,
+    display_project_dir: str,
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> str:
+    if workspace_identity is not None:
+        return render_planner_workspace_identity(workspace_identity)
     workspace_name = Path(project_dir).name
     return (
         f'You are already inside workspace "{workspace_name}" ({display_project_dir}). '
@@ -153,6 +161,7 @@ def build_minimal_planning_prompt(
     project_structure_capsule: Optional[str] = None,
     validation_profile: Optional[str] = None,
     project_context: Optional[str] = None,
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
     apply_prompt_profile: Any = None,
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:1200]
@@ -178,7 +187,7 @@ def build_minimal_planning_prompt(
     python_source_context = python_test_source_context_from_tests(project_dir)
     operator_guidance_block = _render_operator_guidance_prompt_block(project_context)
     workspace_prefix_prohibition = _render_workspace_prefix_prohibition(
-        project_dir, display_project_dir
+        project_dir, display_project_dir, workspace_identity
     )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
@@ -253,6 +262,7 @@ def build_ultra_minimal_planning_prompt(
     workspace_has_existing_files: bool = False,
     validation_profile: Optional[str] = None,
     project_context: Optional[str] = None,
+    workspace_identity: PlannerWorkspaceIdentity | None = None,
     apply_prompt_profile: Any = None,
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:700]
@@ -271,7 +281,7 @@ def build_ultra_minimal_planning_prompt(
     test_scaffold_contract = _render_test_scaffold_contract()
     operator_guidance_block = _render_operator_guidance_prompt_block(project_context)
     workspace_prefix_prohibition = _render_workspace_prefix_prohibition(
-        project_dir, display_project_dir
+        project_dir, display_project_dir, workspace_identity
     )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.

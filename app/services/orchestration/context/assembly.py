@@ -29,6 +29,9 @@ from app.services.orchestration.context.hitl_sentinel import (
 from app.services.orchestration.workflow_profiles import get_workflow_phases
 from app.services.orchestration.prompt_templates import PromptTemplates, StepResult
 from app.services.workspace.path_display import render_workspace_path_for_prompt
+from app.services.orchestration.planning.workspace_identity import (
+    planner_workspace_identity_for_context,
+)
 from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 logger = logging.getLogger(__name__)
@@ -831,6 +834,7 @@ def assemble_planning_prompt(
     prompt_project_dir = render_workspace_path_for_prompt(
         ctx.orchestration_state.project_dir, db=ctx.db
     )
+    planner_workspace_identity = planner_workspace_identity_for_context(ctx)
     workspace_summary = build_workspace_inventory_summary(
         Path(ctx.orchestration_state.project_dir),
         workspace_review=workspace_review,
@@ -864,6 +868,7 @@ def assemble_planning_prompt(
         project_structure_capsule=_build_project_structure_capsule(
             Path(ctx.orchestration_state.project_dir)
         ),
+        workspace_identity=planner_workspace_identity,
     )
     artifact_supplement = getattr(ctx.orchestration_state, "artifact_supplement", None)
     if artifact_supplement:

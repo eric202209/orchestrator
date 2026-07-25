@@ -131,6 +131,7 @@ from app.services.orchestration.phases.planning_support import (
     _record_repair_target,
     _record_repair_root_cause,
     _repair_root_cause_from_plan_verdict,
+    _planner_workspace_identity,
     _semantic_codes_for_immediate_repair_issues,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
@@ -138,6 +139,7 @@ from app.services.orchestration.phases.planning_support import (
     _task1_bootstrap_second_repair_rejection_reasons,
     _truncated_multistep_collapse_diagnostics,
     _usable_knowledge_context,
+    _validate_planning_plan,
 )
 
 
@@ -1433,18 +1435,8 @@ def execute_planning_phase(
                 retry_state.consecutive_failures += 1
                 continue
             if blocking_repair_issues:
-                blocking_plan_verdict = ValidatorService.validate_plan(
-                    ctx.orchestration_state.plan,
-                    output_text=output_text,
-                    task_prompt=ctx.prompt,
-                    execution_profile=ctx.execution_profile,
-                    project_dir=ctx.orchestration_state.project_dir,
-                    title=ctx.task.title if ctx.task else None,
-                    description=ctx.task.description if ctx.task else None,
-                    validation_severity=ctx.validation_severity,
-                    workflow_profile=ctx.workflow_profile,
-                    workflow_stage=ctx.workflow_stage,
-                    is_first_ordered_task=_is_first_ordered_task(ctx.task),
+                blocking_plan_verdict = _validate_planning_plan(
+                    ctx, ctx.orchestration_state.plan, output_text
                 )
                 second_repair_reason = _get_targeted_second_repair_reason(
                     retry_state=retry_state,
@@ -1536,7 +1528,11 @@ def execute_planning_phase(
                         log_knowledge_usage=_log_knowledge_usage,
                     )
                     retry_state.last_repair_reason = second_repair_reason.event_reason
-                    _record_repair_target(retry_state, reason=second_repair_reason)
+                    _record_repair_target(
+                        retry_state,
+                        reason=second_repair_reason,
+                        details=blocking_plan_verdict.details,
+                    )
                     planning_result = __repair_planning_output(
                         ctx=ctx,
                         retry_state=retry_state,
@@ -1632,18 +1628,8 @@ def execute_planning_phase(
                 planning_result = _p2b
                 continue
 
-            plan_verdict = ValidatorService.validate_plan(
-                ctx.orchestration_state.plan,
-                output_text=output_text,
-                task_prompt=ctx.prompt,
-                execution_profile=ctx.execution_profile,
-                project_dir=ctx.orchestration_state.project_dir,
-                title=ctx.task.title if ctx.task else None,
-                description=ctx.task.description if ctx.task else None,
-                validation_severity=ctx.validation_severity,
-                workflow_profile=ctx.workflow_profile,
-                workflow_stage=ctx.workflow_stage,
-                is_first_ordered_task=_is_first_ordered_task(ctx.task),
+            plan_verdict = _validate_planning_plan(
+                ctx, ctx.orchestration_state.plan, output_text
             )
             if not plan_verdict.accepted and (plan_verdict.details or {}).get(
                 "unmaterialized_expected_files"
@@ -1668,18 +1654,8 @@ def execute_planning_phase(
                         message="[ORCHESTRATION] Pruned unmaterialized expected_files from plan",
                         details=prune_details,
                     )
-                    plan_verdict = ValidatorService.validate_plan(
-                        ctx.orchestration_state.plan,
-                        output_text=output_text,
-                        task_prompt=ctx.prompt,
-                        execution_profile=ctx.execution_profile,
-                        project_dir=ctx.orchestration_state.project_dir,
-                        title=ctx.task.title if ctx.task else None,
-                        description=ctx.task.description if ctx.task else None,
-                        validation_severity=ctx.validation_severity,
-                        workflow_profile=ctx.workflow_profile,
-                        workflow_stage=ctx.workflow_stage,
-                        is_first_ordered_task=_is_first_ordered_task(ctx.task),
+                    plan_verdict = _validate_planning_plan(
+                        ctx, ctx.orchestration_state.plan, output_text
                     )
             if not plan_verdict.accepted and (
                 (plan_verdict.details or {}).get("read_only_stage_mutation_steps")
@@ -1724,18 +1700,8 @@ def execute_planning_phase(
                     )
                     ctx.orchestration_state.plan = fallback_plan
                     output_text = json.dumps(fallback_plan)
-                    plan_verdict = ValidatorService.validate_plan(
-                        ctx.orchestration_state.plan,
-                        output_text=output_text,
-                        task_prompt=ctx.prompt,
-                        execution_profile=ctx.execution_profile,
-                        project_dir=ctx.orchestration_state.project_dir,
-                        title=ctx.task.title if ctx.task else None,
-                        description=ctx.task.description if ctx.task else None,
-                        validation_severity=ctx.validation_severity,
-                        workflow_profile=ctx.workflow_profile,
-                        workflow_stage=ctx.workflow_stage,
-                        is_first_ordered_task=_is_first_ordered_task(ctx.task),
+                    plan_verdict = _validate_planning_plan(
+                        ctx, ctx.orchestration_state.plan, output_text
                     )
             if (
                 _is_first_ordered_task(ctx.task)
@@ -1881,7 +1847,11 @@ def execute_planning_phase(
                     plan_verdict.reasons,
                     plan_verdict.details,
                 )
-                _record_repair_target(retry_state, codes=semantic_violation_codes)
+                _record_repair_target(
+                    retry_state,
+                    codes=semantic_violation_codes,
+                    details=plan_verdict.details,
+                )
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     retry_state=retry_state,
@@ -2015,7 +1985,11 @@ def execute_planning_phase(
                             ctx, validation_knowledge_ctx, used_in_prompt=True
                         )
                     retry_state.last_repair_reason = second_repair_reason.event_reason
-                    _record_repair_target(retry_state, reason=second_repair_reason)
+                    _record_repair_target(
+                        retry_state,
+                        reason=second_repair_reason,
+                        details=plan_verdict.details,
+                    )
                     planning_result = __repair_planning_output(
                         ctx=ctx,
                         retry_state=retry_state,
@@ -2511,6 +2485,7 @@ def __retry_with_minimal_prompt(
         knowledge_context=_usable_knowledge_context(knowledge_context),
         validation_profile=_planning_validation_profile(ctx),
         project_context=ctx.orchestration_state.project_context,
+        workspace_identity=_planner_workspace_identity(ctx),
     )
 
 
@@ -2551,6 +2526,7 @@ def __repair_planning_output(
         session_id=ctx.session_id,
         task_id=ctx.task_id,
         guidance_block=_collect_repair_guidance(ctx),
+        workspace_identity=_planner_workspace_identity(ctx),
     )
 
 

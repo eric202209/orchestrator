@@ -11,8 +11,6 @@ Focused tests for:
 
 from pathlib import Path
 
-import pytest
-
 from app.services.orchestration.phases.planning_flow import (
     _PlanningRetryState,
     _build_repair_rejection_reasons,
@@ -397,19 +395,15 @@ def _plan_step(**kwargs):
 def test_nested_workspace_bare_mkdir_without_slash_not_matched_by_substring_rule(
     tmp_path,
 ):
-    # Characterization: _plan_nests_task_workspace matches the literal
-    # substring "<workspace-name>/" (with trailing slash); a bare
-    # `mkdir todo` with no following path segment is not itself flagged by
-    # this rule (though it is quoted by the offending-fragments helper used
-    # for repair guidance, and a step that both mkdirs and materializes
-    # under "todo/..." is still flagged via the expected_files/path check).
+    # Phase 30H: root recreation commands are rejected even without a
+    # following path segment.
     project_dir = tmp_path / "todo"
     project_dir.mkdir()
     plan = _plan_step(commands=["mkdir todo"])
 
     steps = ValidatorService._plan_nests_task_workspace(plan, project_dir)
 
-    assert steps == []
+    assert steps == [1]
 
 
 def test_nested_workspace_bare_cd_without_slash_not_matched_by_substring_rule(
@@ -421,7 +415,7 @@ def test_nested_workspace_bare_cd_without_slash_not_matched_by_substring_rule(
 
     steps = ValidatorService._plan_nests_task_workspace(plan, project_dir)
 
-    assert steps == []
+    assert steps == [1]
 
 
 def test_nested_workspace_detects_prefixed_expected_file(tmp_path):
@@ -483,21 +477,7 @@ def test_nested_workspace_traversal_variant_also_matches_substring_rule(tmp_path
     assert steps == [1]
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Phase 30G item E: known false-positive class deferred without "
-        "characterization evidence of real-world occurrence beyond the "
-        "Phase 30F risk note. _plan_nests_task_workspace does not exempt "
-        "an existing in-place directory whose name matches the workspace, "
-        "unlike its sibling _plan_creates_nested_project_root. Left "
-        "unchanged per the requirement to only adjust the detector when "
-        "tests demonstrate a real false-positive class without weakening "
-        "genuine-nesting detection; this phase does not have real-provider "
-        "evidence of this specific collision occurring."
-    ),
-    strict=True,
-)
-def test_nested_workspace_existing_in_place_directory_is_currently_flagged(tmp_path):
+def test_nested_workspace_existing_in_place_directory_is_allowed(tmp_path):
     project_dir = tmp_path / "app"
     project_dir.mkdir()
     (project_dir / "app").mkdir()  # existing in-place directory named "app"
