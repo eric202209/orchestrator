@@ -317,6 +317,7 @@ def test_phase12m_scorer_has_artifact_expectations_beyond_surface_verifier(tmp_p
             "timeout_seconds": 10,
         },
         "required_files": ["deliverable.md"],
+        "required_events": [],
     }
 
     score_report = scorer._score_case(
