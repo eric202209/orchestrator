@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import UTC, datetime
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,23 @@ import shlex
 import subprocess
 import sys
 from typing import Any
+
+
+def _load_scenario_contract():
+    """Load scripts/evals/scenario_contract.py without a package import.
+
+    Matches the existing importlib module-loading convention already used by
+    app/tests/test_eval_harness_hardening.py for these sibling scripts.
+    """
+    path = Path(__file__).resolve().parent.parent / "evals" / "scenario_contract.py"
+    spec = importlib.util.spec_from_file_location("scenario_contract", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+scenario_contract = _load_scenario_contract()
 
 
 EVENT_DIR = ".agent/events"
@@ -865,7 +883,7 @@ def _derive_clean_success(
     return not blockers, blockers
 
 
-def _score_case(
+def _score_case_from_evidence(
     *,
     manifest_path: Path,
     manifest: dict[str, Any],
@@ -873,24 +891,34 @@ def _score_case(
     project_dir: Path,
     session_id: int,
     task_id: int,
-    python_executable: str | None = None,
+    events_path: Path,
+    snapshots_path: Path,
+    events: list[dict[str, Any]],
+    malformed_events: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    malformed_snapshots: list[dict[str, Any]],
+    verifier: dict[str, Any],
     session_status: str | None = None,
     failure_category: str | None = None,
 ) -> dict[str, Any]:
-    events_path = _event_path(project_dir, session_id, task_id)
-    snapshots_path = _state_snapshot_path(project_dir, session_id, task_id)
-    events, malformed_events = _read_jsonl(events_path)
-    snapshots, malformed_snapshots = _read_jsonl(snapshots_path)
+    """Pure evidence-to-report computation: no file I/O, no subprocess.
+
+    Given identical ``events``/``snapshots``/``verifier``/``case`` inputs,
+    every key except ``generated_at`` and ``env_summary`` is deterministic —
+    this is the function deterministic replay (Phase 30C, Program 4) calls
+    directly, bypassing live file reads and verifier execution.
+    """
+    scenario_contract.enforce_case_contract(case)
+    contract = {
+        "case": scenario_contract.validate_case_contract(case),
+        "events": scenario_contract.validate_event_records(events),
+    }
+    contract["valid"] = contract["case"]["valid"] and contract["events"]["valid"]
     event_summary = _event_summary(events)
     snapshot_summary = _snapshot_summary(snapshots)
     touched_files = _collect_touched_files(events, snapshots)
     scope = _touch_scope(touched_files, case)
     files = _file_checks(project_dir, case)
-    verifier = _run_verifier(
-        project_dir,
-        case,
-        python_executable=python_executable,
-    )
     required_events = _required_event_results(case, event_summary["event_type_counts"])
     session_aborted = _is_session_aborted(session_status, failure_category)
     clean_success, blockers = _derive_clean_success(
@@ -950,6 +978,7 @@ def _score_case(
             "state_snapshot_path": str(snapshots_path),
         },
         "env_summary": _scorer_env_summary(project_dir),
+        "contract": contract,
         "result": {
             "clean_success": clean_success,
             "blockers": blockers,
@@ -1010,6 +1039,90 @@ def _score_case(
     }
 
 
+def _score_case(
+    *,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    case: dict[str, Any],
+    project_dir: Path,
+    session_id: int,
+    task_id: int,
+    python_executable: str | None = None,
+    session_status: str | None = None,
+    failure_category: str | None = None,
+) -> dict[str, Any]:
+    """Score a live case: reads evidence files, runs the verifier, scores."""
+    events_path = _event_path(project_dir, session_id, task_id)
+    snapshots_path = _state_snapshot_path(project_dir, session_id, task_id)
+    events, malformed_events = _read_jsonl(events_path)
+    snapshots, malformed_snapshots = _read_jsonl(snapshots_path)
+    verifier = _run_verifier(
+        project_dir,
+        case,
+        python_executable=python_executable,
+    )
+    return _score_case_from_evidence(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        case=case,
+        project_dir=project_dir,
+        session_id=session_id,
+        task_id=task_id,
+        events_path=events_path,
+        snapshots_path=snapshots_path,
+        events=events,
+        malformed_events=malformed_events,
+        snapshots=snapshots,
+        malformed_snapshots=malformed_snapshots,
+        verifier=verifier,
+        session_status=session_status,
+        failure_category=failure_category,
+    )
+
+
+def replay_case(
+    *,
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    case: dict[str, Any],
+    project_dir: Path,
+    session_id: int,
+    task_id: int,
+    events: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+    verifier: dict[str, Any],
+    session_status: str | None = None,
+    failure_category: str | None = None,
+) -> dict[str, Any]:
+    """Deterministic replay entrypoint (Phase 30C, Program 4).
+
+    Re-scores already-captured evidence (event/snapshot records and a
+    previously-captured verifier result) with zero file I/O and zero
+    subprocess execution. Calling this twice with identical arguments must
+    produce identical output outside of ``generated_at``/``env_summary`` —
+    see ``scenario_contract.deterministic_slice``.
+    """
+    events_path = _event_path(project_dir, session_id, task_id)
+    snapshots_path = _state_snapshot_path(project_dir, session_id, task_id)
+    return _score_case_from_evidence(
+        manifest_path=manifest_path,
+        manifest=manifest,
+        case=case,
+        project_dir=project_dir,
+        session_id=session_id,
+        task_id=task_id,
+        events_path=events_path,
+        snapshots_path=snapshots_path,
+        events=events,
+        malformed_events=[],
+        snapshots=snapshots,
+        malformed_snapshots=[],
+        verifier=verifier,
+        session_status=session_status,
+        failure_category=failure_category,
+    )
+
+
 def _write_report(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n",
@@ -1059,17 +1172,20 @@ def main() -> int:
         raise SystemExit(f"Project directory not found: {project_dir}")
     manifest = _load_json(manifest_path)
     case = _select_case(manifest, args.case_id)
-    report = _score_case(
-        manifest_path=manifest_path,
-        manifest=manifest,
-        case=case,
-        project_dir=project_dir,
-        session_id=args.session_id,
-        task_id=args.task_id,
-        python_executable=args.python_executable,
-        session_status=args.session_status,
-        failure_category=args.failure_category,
-    )
+    try:
+        report = _score_case(
+            manifest_path=manifest_path,
+            manifest=manifest,
+            case=case,
+            project_dir=project_dir,
+            session_id=args.session_id,
+            task_id=args.task_id,
+            python_executable=args.python_executable,
+            session_status=args.session_status,
+            failure_category=args.failure_category,
+        )
+    except scenario_contract.ScenarioContractError as exc:
+        raise SystemExit(str(exc)) from None
     if args.output:
         output_path = Path(args.output)
         _write_report(output_path, report)

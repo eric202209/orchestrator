@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from datetime import UTC, datetime
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,25 @@ import sys
 import time
 from typing import Any
 from urllib import error, request
+
+
+def _load_project_type_authority():
+    """Load app/services/project/project_type_authority.py by path.
+
+    Avoids importing the ``app`` package (and its DB/Celery setup) into this
+    standalone, urllib-only eval runner; the authority module has no
+    dependencies beyond the standard library.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    path = repo_root / "app" / "services" / "project" / "project_type_authority.py"
+    spec = importlib.util.spec_from_file_location("project_type_authority", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+project_type_authority = _load_project_type_authority()
 
 
 SUPPORTED_CASES = frozenset(
@@ -1155,6 +1175,7 @@ def _run_case(
         "session_id": session_id,
         "task_id": task_id,
         "session_status": final_session.get("status"),
+        "project_type": project_type_authority.resolve_project_type(workspace),
         "report": str(report),
         "scorer_exit_code": scorer_exit_code,
         "prompt_source": prompt_source,

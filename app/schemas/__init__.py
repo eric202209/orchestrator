@@ -29,6 +29,7 @@ class ProjectBase(BaseModel):
     github_url: Optional[str] = None
     branch: Optional[str] = "main"
     workspace_path: Optional[str] = None
+    project_type_override: Optional[str] = None
 
 
 class ProjectCreate(ProjectBase):
@@ -42,6 +43,7 @@ class ProjectUpdate(BaseModel):
     github_url: Optional[str] = None
     branch: Optional[str] = None
     workspace_path: Optional[str] = None
+    project_type_override: Optional[str] = None
 
 
 class ProjectResponse(ProjectBase):
@@ -61,6 +63,28 @@ class ProjectResponse(ProjectBase):
         )
 
         return str(resolve_project_workspace_path(self.workspace_path, self.name))
+
+    @computed_field
+    @property
+    def project_type(self) -> str:
+        """Authoritative project type (Phase 30C metadata authority).
+
+        Metadata only — never used to gate execution, planning,
+        orchestration, or provider selection.
+        """
+
+        from pathlib import Path
+
+        from app.services.project.project_type_authority import resolve_project_type
+        from app.services.workspace.project_isolation_service import (
+            resolve_project_workspace_path,
+        )
+
+        workspace_path = resolve_project_workspace_path(self.workspace_path, self.name)
+        return resolve_project_type(
+            Path(workspace_path) if workspace_path else None,
+            self.project_type_override,
+        )
 
 
 # Task Schemas

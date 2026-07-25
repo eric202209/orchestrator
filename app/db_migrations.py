@@ -4669,6 +4669,18 @@ def _migration_050_post_apply_validation_recovery_lifecycle(engine: Engine) -> N
             connection.execute(text(statement))
 
 
+def _migration_051_project_type_override(engine: Engine) -> None:
+    if "projects" not in _table_names(engine):
+        return
+    if not _has_column(engine, "projects", "project_type_override"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE projects ADD COLUMN project_type_override VARCHAR(16)"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -4928,6 +4940,11 @@ MIGRATIONS: tuple[Migration, ...] = (
             "decision, and recovery result authorities"
         ),
         upgrade=_migration_050_post_apply_validation_recovery_lifecycle,
+    ),
+    Migration(
+        version="051_project_type_override",
+        description="Add Phase 30C manual project-type override column to projects",
+        upgrade=_migration_051_project_type_override,
     ),
 )
 

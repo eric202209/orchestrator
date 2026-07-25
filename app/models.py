@@ -45,6 +45,9 @@ class Project(Base):
     github_url = Column(String(512), nullable=True)
     branch = Column(String(255), default="main")
     workspace_path = Column(String(512), nullable=True)  # Project isolation workspace
+    project_type_override = Column(
+        String(16), nullable=True
+    )  # Manual project-type override (Phase 30C authority); metadata only
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     deleted_at = Column(DateTime(timezone=True), nullable=True)  # Soft delete tracking
