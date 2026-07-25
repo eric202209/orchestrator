@@ -13,7 +13,8 @@ import pytest
 
 from app.config import settings
 from app.models import LogEntry, Task, TaskExecution
-from app.tests.test_phase30e_provider_certification import real_pipeline
+
+pytest_plugins = ("app.tests.test_phase30e_provider_certification",)
 
 pytestmark = pytest.mark.live
 
