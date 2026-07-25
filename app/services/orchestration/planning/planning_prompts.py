@@ -116,6 +116,19 @@ def _render_workflow_guidance(
     return "\n".join(lines)
 
 
+def _render_workspace_prefix_prohibition(
+    project_dir: Path, display_project_dir: str
+) -> str:
+    workspace_name = Path(project_dir).name
+    return (
+        f'You are already inside workspace "{workspace_name}" ({display_project_dir}). '
+        f'Never prefix paths or commands with "{workspace_name}/", and never '
+        f"`mkdir {workspace_name}` or `cd {workspace_name}`. "
+        f'Wrong: "{workspace_name}/app.py", "mkdir {workspace_name}", "cd {workspace_name}". '
+        f'Correct: "app.py", "mkdir src", "cd src".'
+    )
+
+
 def _build_project_structure_capsule(project_dir: Path) -> str:
     try:
         return render_project_structure_capsule(build_project_index(project_dir))
@@ -164,6 +177,9 @@ def build_minimal_planning_prompt(
     )
     python_source_context = python_test_source_context_from_tests(project_dir)
     operator_guidance_block = _render_operator_guidance_prompt_block(project_context)
+    workspace_prefix_prohibition = _render_workspace_prefix_prohibition(
+        project_dir, display_project_dir
+    )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 Do not implement anything.
@@ -202,7 +218,7 @@ Rules:
 16. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. {verification_contract}
 18. {test_scaffold_contract}
-19. Do not create or cd into a nested project folder; run directly from {display_project_dir}
+19. Do not create or cd into a nested project folder; run directly from {display_project_dir}. {workspace_prefix_prohibition}
 20. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`
 21. Prefer package-manager/editor-friendly commands and one-file-at-a-time edits
 22. Preserve the JSON-only output mode from the first instruction.
@@ -254,6 +270,9 @@ def build_ultra_minimal_planning_prompt(
     verification_contract = _render_verification_contract()
     test_scaffold_contract = _render_test_scaffold_contract()
     operator_guidance_block = _render_operator_guidance_prompt_block(project_context)
+    workspace_prefix_prohibition = _render_workspace_prefix_prohibition(
+        project_dir, display_project_dir
+    )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
 
@@ -285,7 +304,7 @@ Requirements:
 14. For implementation steps with expected_files, include at least one command or file-mutating `ops` entry that writes real file content, not just mkdir/touch
 15. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command, and must prove behavior or content using current workspace evidence.
 16. Commands must be runnable shell, not pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
-17. Do not create or cd into a nested project folder; run directly from {display_project_dir}
+17. Do not create or cd into a nested project folder; run directly from {display_project_dir}. {workspace_prefix_prohibition}
 18. Include exactly one final meaningful verification/build step
 19. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 

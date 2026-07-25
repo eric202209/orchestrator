@@ -123,6 +123,8 @@ from .rules.core_paths import (
     _plan_contains_unsafe_paths,
     _plan_creates_nested_project_root,
     _plan_negative_existing_file_checks,
+    _plan_nested_project_root_names,
+    _plan_nested_workspace_offending_fragments,
     _plan_nests_task_workspace,
     _resolve_existing_static_site_mentions,
     _source_path_mentions,
@@ -188,7 +190,11 @@ class ValidatorService:
         _strip_heredoc_bodies_for_command_scanning
     )
     _plan_nests_task_workspace = staticmethod(_plan_nests_task_workspace)
+    _plan_nested_workspace_offending_fragments = staticmethod(
+        _plan_nested_workspace_offending_fragments
+    )
     _plan_creates_nested_project_root = staticmethod(_plan_creates_nested_project_root)
+    _plan_nested_project_root_names = staticmethod(_plan_nested_project_root_names)
     _source_path_mentions = staticmethod(_source_path_mentions)
     _resolve_existing_static_site_mentions = staticmethod(
         _resolve_existing_static_site_mentions
@@ -1121,6 +1127,12 @@ class ValidatorService:
                 f"(steps: {nested_workspace_steps[:5]})"
             )
             details["nested_workspace_steps"] = nested_workspace_steps
+            if project_dir is not None:
+                details["nested_workspace_name"] = Path(project_dir).name
+                details["nested_workspace_prefix"] = f"{Path(project_dir).name}/"
+                details["nested_workspace_offending_fragments"] = (
+                    cls._plan_nested_workspace_offending_fragments(plan, project_dir)
+                )
 
         nested_project_root_steps = cls._plan_creates_nested_project_root(
             plan, project_dir
@@ -1131,6 +1143,9 @@ class ValidatorService:
                 f"instead of the task workspace root (steps: {nested_project_root_steps[:5]})"
             )
             details["nested_project_root_steps"] = nested_project_root_steps
+            details["nested_project_root_names"] = cls._plan_nested_project_root_names(
+                plan, nested_project_root_steps
+            )
 
         duplicated_root_paths = cls._plan_contains_duplicated_path_roots(plan)
         if duplicated_root_paths:

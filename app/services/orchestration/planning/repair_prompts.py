@@ -411,6 +411,9 @@ def build_planning_repair_prompt_with_metadata(
         malformed_output=malformed_output,
         rejection_reasons=rejection_reasons,
     )
+    nested_workspace_guidance = _build_nested_workspace_repair_guidance(
+        rejection_reasons
+    )
     validation_guidance_block = _join_optional_blocks(
         verification_source_mutation_guidance,
         materialization_preservation_guidance,
@@ -421,6 +424,7 @@ def build_planning_repair_prompt_with_metadata(
         python_source_syntax_guidance,
         python_framework_guidance,
         stale_replace_target_guidance,
+        nested_workspace_guidance,
     )
 
     def _compose_prompt(
@@ -1432,6 +1436,77 @@ def _build_python_framework_repair_guidance(
     )
 
 
+def _build_nested_workspace_repair_guidance(
+    rejection_reasons: Optional[list[str]],
+) -> str:
+    """Category-specific repair guidance for ``nested_project_folder_command``.
+
+    Unlike the generic rejection-reason line, this names the exact forbidden
+    workspace prefix and quotes the offending command/path text (sourced from
+    the validator's structured ``nested_workspace_*`` / ``nested_project_root_*``
+    details via ``_build_repair_rejection_reasons``) so the model has an
+    actionable delta instead of the rejected plan as its only template.
+    """
+
+    text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    has_nested_workspace = "nested_workspace_violation:" in text
+    has_nested_project_root = "nested_project_root_violation:" in text
+    if not (has_nested_workspace or has_nested_project_root):
+        return ""
+
+    lines = ["Nested-workspace repair required:"]
+
+    if has_nested_workspace:
+        workspace_match = re.search(
+            r'nested_workspace_violation:.*?workspace "([^"]*)"', text
+        )
+        prefix_match = re.search(r"strip the `([^`]*)` prefix", text)
+        offending_match = re.search(
+            r"nested_workspace_violation:.*?Offending text: (.*?)\. Remove", text
+        )
+        workspace_name = workspace_match.group(1) if workspace_match else ""
+        prefix = (
+            prefix_match.group(1)
+            if prefix_match
+            else (f"{workspace_name}/" if workspace_name else "")
+        )
+        offending_text = offending_match.group(1) if offending_match else ""
+        lines.extend(
+            [
+                f'- You are already inside workspace "{workspace_name}"; never '
+                f'recreate, mkdir, or cd into "{workspace_name}".',
+                f'- Forbidden prefix: "{prefix}" — every path/command must be '
+                "relative to the workspace root, not prefixed with it.",
+            ]
+        )
+        if offending_text:
+            lines.append(f"- Offending text from the rejected plan: {offending_text}")
+        if prefix:
+            example = f"{prefix}app.py"
+            corrected = (
+                example[len(prefix) :] if example.startswith(prefix) else example
+            )
+            lines.append(
+                f'- Correct the form: "{example}" -> "{corrected}"; '
+                f'remove "mkdir {workspace_name}" and "cd {workspace_name}" steps entirely.'
+            )
+
+    if has_nested_project_root:
+        lines.extend(
+            [
+                "- Do not materialize the deliverable under a brand-new "
+                "top-level scaffold folder; write files directly at the "
+                "workspace root or under an existing in-place directory.",
+            ]
+        )
+
+    lines.append(
+        "- Preserve every other valid step and operation unchanged; only "
+        "correct the offending paths/commands identified above."
+    )
+    return "\n".join(lines)
+
+
 def _build_stale_replace_target_preservation_guidance(
     *,
     project_dir: Path,
@@ -1661,6 +1736,9 @@ def build_compact_planning_repair_prompt(
     python_framework_guidance = _build_python_framework_repair_guidance(
         rejection_reasons
     )
+    nested_workspace_guidance = _build_nested_workspace_repair_guidance(
+        rejection_reasons
+    )
     validation_guidance_block = _join_optional_blocks(
         verification_source_mutation_guidance,
         materialization_preservation_guidance,
@@ -1670,6 +1748,7 @@ def build_compact_planning_repair_prompt(
         unsafe_python_append_guidance,
         python_source_syntax_guidance,
         python_framework_guidance,
+        nested_workspace_guidance,
     )
 
     def _compose(

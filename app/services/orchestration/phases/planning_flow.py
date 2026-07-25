@@ -114,6 +114,7 @@ from app.services.orchestration.phases.planning_support import (
     _compress_project_context_for_planning,
     _count_prior_failed_planning_executions,
     _emit_planning_diagnostics_contract_violation,
+    _emit_repair_outcome_if_pending,
     _finalize_planning_terminal_failure,
     _finalize_planning_timeout_failure,
     _get_targeted_second_repair_reason,
@@ -127,6 +128,7 @@ from app.services.orchestration.phases.planning_support import (
     _planning_root_cause_from_issue_key,
     _planning_root_cause_from_plan_verdict,
     _record_planning_root_cause,
+    _record_repair_target,
     _record_repair_root_cause,
     _repair_root_cause_from_plan_verdict,
     _semantic_codes_for_immediate_repair_issues,
@@ -1534,6 +1536,7 @@ def execute_planning_phase(
                         log_knowledge_usage=_log_knowledge_usage,
                     )
                     retry_state.last_repair_reason = second_repair_reason.event_reason
+                    _record_repair_target(retry_state, reason=second_repair_reason)
                     planning_result = __repair_planning_output(
                         ctx=ctx,
                         retry_state=retry_state,
@@ -1824,6 +1827,7 @@ def execute_planning_phase(
                     return candidate_recovery["return_result"]
                 output_text = candidate_recovery["output_text"]
                 plan_verdict = candidate_recovery["plan_verdict"]
+            _emit_repair_outcome_if_pending(ctx, retry_state, plan_verdict)
             _emit_planning_phase_finished(
                 ctx,
                 plan_verdict=plan_verdict,
@@ -1877,6 +1881,7 @@ def execute_planning_phase(
                     plan_verdict.reasons,
                     plan_verdict.details,
                 )
+                _record_repair_target(retry_state, codes=semantic_violation_codes)
                 planning_result = __repair_planning_output(
                     ctx=ctx,
                     retry_state=retry_state,
@@ -2010,6 +2015,7 @@ def execute_planning_phase(
                             ctx, validation_knowledge_ctx, used_in_prompt=True
                         )
                     retry_state.last_repair_reason = second_repair_reason.event_reason
+                    _record_repair_target(retry_state, reason=second_repair_reason)
                     planning_result = __repair_planning_output(
                         ctx=ctx,
                         retry_state=retry_state,

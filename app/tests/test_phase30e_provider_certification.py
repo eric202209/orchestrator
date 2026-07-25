@@ -80,6 +80,11 @@ EVIDENCE_ROOT = (
 
 REAL_OPENCLAW_CONFIG_PATH = Path("/root/.openclaw/openclaw.json")
 
+# These scenarios call the real OpenClaw/provider stack and require the
+# operator's private runtime configuration. Keep them out of ordinary CI;
+# live certification jobs can select them explicitly with ``-m live``.
+pytestmark = pytest.mark.live
+
 
 def _write_evidence(name: str, record: dict[str, Any]) -> None:
     EVIDENCE_ROOT.mkdir(parents=True, exist_ok=True)

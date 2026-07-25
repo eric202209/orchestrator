@@ -454,6 +454,62 @@ def _build_repair_rejection_reasons(
             f"{undefined_python_decorator_files[:5]}"
         )
 
+    nested_workspace_steps = _normalized_step_numbers(
+        details.get("nested_workspace_steps") or []
+    )
+    if nested_workspace_steps:
+        workspace_name = str(details.get("nested_workspace_name") or "").strip()
+        workspace_prefix = str(details.get("nested_workspace_prefix") or "").strip()
+        offending_fragments = details.get("nested_workspace_offending_fragments") or {}
+        fragment_clauses: list[str] = []
+        for step_number in nested_workspace_steps:
+            fragments = offending_fragments.get(step_number) or offending_fragments.get(
+                str(step_number)
+            )
+            if fragments:
+                fragment_clauses.append(
+                    f"step {step_number}: {', '.join(str(f) for f in fragments[:4])}"
+                )
+        fragments_clause = (
+            "; ".join(fragment_clauses)
+            if fragment_clauses
+            else f"steps {nested_workspace_steps}"
+        )
+        targeted_reasons.append(
+            "nested_workspace_violation: "
+            f'You are already inside workspace "{workspace_name}"; do not '
+            f"recreate or enter it. Offending text: {fragments_clause}. "
+            f"Remove any `mkdir {workspace_name}` / `cd {workspace_name}` step "
+            f"and strip the `{workspace_prefix}` prefix from paths and commands "
+            "so they are relative to the workspace root "
+            f'(e.g. "{workspace_prefix}app.py" becomes "app.py"). '
+            "Preserve all other valid steps unchanged."
+        )
+
+    nested_project_root_steps = _normalized_step_numbers(
+        details.get("nested_project_root_steps") or []
+    )
+    if nested_project_root_steps:
+        root_names = details.get("nested_project_root_names") or {}
+        name_clauses: list[str] = []
+        for step_number in nested_project_root_steps:
+            root_name = root_names.get(step_number) or root_names.get(str(step_number))
+            if root_name:
+                name_clauses.append(f'step {step_number}: "{root_name}"')
+        names_clause = (
+            "; ".join(name_clauses)
+            if name_clauses
+            else f"steps {nested_project_root_steps}"
+        )
+        targeted_reasons.append(
+            "nested_project_root_violation: Plan materializes the deliverable "
+            f"under a new top-level folder instead of the task workspace root "
+            f"({names_clause}). Write files directly at the workspace root "
+            "(or under an existing in-place directory) instead of scaffolding "
+            "a new nested project folder. Preserve all other valid steps "
+            "unchanged."
+        )
+
     truncated_subcodes = details.get("truncated_multistep_subcodes") or []
     if truncated_subcodes:
         original_step_count = details.get("truncated_multistep_original_step_count")
@@ -1197,6 +1253,109 @@ def _normalize_contract_violation_type(
     return normalized[:80] or default
 
 
+def _record_pending_repair_outcome(
+    retry_state: _PlanningRetryState,
+    *,
+    attempt_number: int,
+    original_violation_codes: list[str],
+    targeted_violation_code: str | None,
+) -> None:
+    """Remember what a just-fired repair attempt targeted.
+
+    Consumed by ``_emit_repair_outcome_if_pending`` on the next validation
+    pass so repair effectiveness is queryable per category without a
+    parallel metrics subsystem (reuses the existing ``emit_live`` event
+    journal).
+    """
+
+    retry_state.pending_repair_outcome_attempt_number = attempt_number
+    retry_state.pending_repair_outcome_targeted_violation_code = targeted_violation_code
+    retry_state.pending_repair_outcome_original_violation_codes = list(
+        original_violation_codes or []
+    )[:8]
+
+
+def _emit_repair_outcome_if_pending(
+    ctx: OrchestrationRunContext,
+    retry_state: _PlanningRetryState,
+    plan_verdict: Any,
+) -> None:
+    """Emit a structured repair-outcome event for the most recent repair attempt.
+
+    No-op when no repair is pending. Always clears the pending marker so a
+    single validation pass cannot double-report.
+    """
+
+    if not retry_state.pending_repair_outcome_attempt_number:
+        return
+    attempt_number = retry_state.pending_repair_outcome_attempt_number
+    original_codes = retry_state.pending_repair_outcome_original_violation_codes
+    targeted_code = retry_state.pending_repair_outcome_targeted_violation_code
+    retry_state.pending_repair_outcome_attempt_number = 0
+    retry_state.pending_repair_outcome_targeted_violation_code = None
+    retry_state.pending_repair_outcome_original_violation_codes = []
+
+    post_repair_codes = list(
+        (getattr(plan_verdict, "details", None) or {}).get("semantic_violation_codes")
+        or []
+    )
+    target_violation_resolved = (
+        targeted_code is not None and targeted_code not in post_repair_codes
+    )
+    same_violation_repeated = (
+        targeted_code is not None and targeted_code in post_repair_codes
+    )
+    ctx.emit_live(
+        "WARN" if same_violation_repeated else "INFO",
+        "[OPENCLAW][PLANNING_REPAIR_OUTCOME] repair effectiveness",
+        metadata={
+            "session_id": ctx.session_id,
+            "task_id": ctx.task_id,
+            "repair_attempt_number": attempt_number,
+            "original_violation_codes": original_codes[:8],
+            "targeted_violation_code": targeted_code,
+            "repair_completed": True,
+            "post_repair_violation_codes": post_repair_codes[:8],
+            "target_violation_resolved": target_violation_resolved,
+            "same_violation_repeated": same_violation_repeated,
+        },
+    )
+
+
+def _record_repair_target(
+    retry_state: _PlanningRetryState,
+    *,
+    codes: list[str] | None = None,
+    reason: "_SecondRepairReason | None" = None,
+) -> None:
+    """Record pending repair-outcome tracking for a first or second repair.
+
+    Pass ``codes`` (the full semantic_violation_codes list) for a first,
+    non-targeted repair, or ``reason`` (a resolved ``_SecondRepairReason``)
+    for a targeted second repair.
+    """
+
+    if reason is not None:
+        _record_pending_repair_outcome(
+            retry_state,
+            attempt_number=retry_state.consecutive_failures + 1,
+            original_violation_codes=[reason.semantic_violation_code],
+            targeted_violation_code=reason.semantic_violation_code,
+        )
+        return
+    codes = codes or []
+    _record_pending_repair_outcome(
+        retry_state,
+        attempt_number=retry_state.consecutive_failures + 1,
+        original_violation_codes=codes,
+        targeted_violation_code=(
+            "nested_project_folder_command"
+            if "nested_project_folder_command" in codes
+            else None
+        ),
+    )
+
+
 def _emit_planning_diagnostics_contract_violation(
     ctx: OrchestrationRunContext,
     *,
@@ -1327,6 +1486,10 @@ class _PlanningRetryState:
         self.post_repair_python_source_syntax_second_repair_used = False
         self.post_repair_framework_second_repair_used = False
         self.post_repair_task1_bootstrap_second_repair_used = False
+        self.post_repair_nested_workspace_second_repair_used = False
+        self.pending_repair_outcome_attempt_number = 0
+        self.pending_repair_outcome_targeted_violation_code: str | None = None
+        self.pending_repair_outcome_original_violation_codes: list[str] = []
         self.task1_bootstrap_rejection_contract: dict[str, Any] | None = None
         self.source_materialization_required_after_repair = False
         self.vma_repair_triggered = False
@@ -1519,6 +1682,21 @@ _SECOND_REPAIR_VALIDATOR_POLICIES: dict[str, _SecondRepairPolicy] = {
             "src-layout tests must import the package namespace, not `src.*`"
         ),
     ),
+    "nested_workspace_violation": _SecondRepairPolicy(
+        issue_key="nested_workspace_violation",
+        issue_label="nested workspace recreation",
+        retry_reason="post_repair_nested_workspace_violation",
+        event_reason="post_repair_nested_workspace_second_pass",
+        semantic_violation_code="nested_project_folder_command",
+        cap_attribute="post_repair_nested_workspace_second_repair_used",
+        rejection_template=(
+            "nested_workspace_violation: steps {steps} still recreate or enter "
+            "the current task workspace after repair. Remove any `mkdir "
+            "<workspace-name>` / `cd <workspace-name>` step and strip the "
+            "`<workspace-name>/` prefix from every path and command so they "
+            "are relative to the workspace root"
+        ),
+    ),
 }
 
 _SECOND_REPAIR_WORKSPACE_POLICIES: dict[str, _SecondRepairPolicy] = {
@@ -1684,6 +1862,13 @@ def _get_targeted_second_repair_reason(
     if task1_bootstrap_reason:
         return task1_bootstrap_reason
 
+    nested_workspace_reason = _post_repair_nested_workspace_reason(
+        retry_state,
+        plan_verdict,
+    )
+    if nested_workspace_reason:
+        return nested_workspace_reason
+
     return None
 
 
@@ -1716,6 +1901,81 @@ def _task1_bootstrap_second_repair_rejection_reasons(
     return _build_repair_rejection_reasons(
         [rejection_text, *list(getattr(plan_verdict, "reasons", []) or [])],
         details,
+    )
+
+
+def _post_repair_nested_workspace_reason(
+    retry_state: _PlanningRetryState,
+    plan_verdict: Any | None,
+) -> _SecondRepairReason | None:
+    """Targeted second repair for a nested-workspace violation that survives repair.
+
+    Fires only when the nested-workspace category is the sole remaining
+    blocker (Task-1 bootstrap already covers nested-workspace path drift for
+    the first ordered task through its own contract) and only once per plan.
+    """
+
+    if not plan_verdict:
+        return None
+    details = getattr(plan_verdict, "details", None) or {}
+    nested_workspace_steps = _normalized_step_numbers(
+        details.get("nested_workspace_steps") or []
+    )
+    nested_project_root_steps = _normalized_step_numbers(
+        details.get("nested_project_root_steps") or []
+    )
+    if not (nested_workspace_steps or nested_project_root_steps):
+        return None
+    if isinstance(details.get("task1_bootstrap_contract"), dict):
+        return None
+
+    blocking_detail_keys = (
+        "non_runnable_steps",
+        "background_process_steps",
+        "placeholder_only_implementation",
+        "test_assertion_loss_ops_steps",
+        "test_deletion_ops_steps",
+        "stale_replace_ops_steps",
+        "empty_replace_old_text_steps",
+        "brittle_command_subcodes",
+        "malformed_shell_quoting_steps",
+    )
+    if any(details.get(key) for key in blocking_detail_keys):
+        return None
+
+    step_numbers = sorted(set(nested_workspace_steps + nested_project_root_steps))
+    workspace_name = str(details.get("nested_workspace_name") or "").strip()
+    workspace_prefix = str(details.get("nested_workspace_prefix") or "").strip()
+
+    if nested_workspace_steps and workspace_name:
+        rejection_text = (
+            "nested_workspace_violation: steps "
+            f"{nested_workspace_steps} still recreate or enter workspace "
+            f'"{workspace_name}" after repair. Remove any `mkdir {workspace_name}` '
+            f"/ `cd {workspace_name}` step and strip the `{workspace_prefix}` "
+            "prefix from every path and command so they are relative to the "
+            "workspace root."
+        )
+    else:
+        rejection_text = (
+            "nested_project_root_violation: steps "
+            f"{nested_project_root_steps} still materialize the deliverable "
+            "under a new top-level scaffold folder after repair. Write files "
+            "directly at the workspace root or under an existing in-place "
+            "directory instead."
+        )
+
+    policy = _SECOND_REPAIR_VALIDATOR_POLICIES["nested_workspace_violation"]
+    return _SecondRepairReason(
+        issue_key=policy.issue_key,
+        issue_label=policy.issue_label,
+        retry_reason=policy.retry_reason,
+        event_reason=policy.event_reason,
+        semantic_violation_code=policy.semantic_violation_code,
+        step_numbers=step_numbers[:5],
+        rejection_text=rejection_text,
+        cap_used=retry_state.post_repair_nested_workspace_second_repair_used,
+        cap_attribute=policy.cap_attribute,
     )
 
 

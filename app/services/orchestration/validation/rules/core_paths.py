@@ -151,6 +151,52 @@ def _plan_nests_task_workspace(
     return [step for step in bad_steps if step is not None]
 
 
+def _plan_nested_workspace_offending_fragments(
+    plan: List[Dict[str, Any]], project_dir: Optional[Path]
+) -> Dict[int, List[str]]:
+    """Quote the exact command/path fragments that triggered nested-workspace detection.
+
+    Mirrors ``_plan_nests_task_workspace``'s scan but returns the offending
+    substrings per step (instead of only the step numbers) so repair guidance
+    can name the exact forbidden text rather than replaying the whole plan.
+    """
+
+    if not project_dir:
+        return {}
+    nested_prefix = f"{project_dir.name}/"
+    findings: Dict[int, List[str]] = {}
+    mkdir_cd_pattern = re.compile(
+        rf"\b(mkdir(?:\s+-p)?|cd)\s+{re.escape(project_dir.name)}\b"
+    )
+    for step in plan:
+        step_number = step.get("step_number")
+        if step_number is None:
+            continue
+        fragments: List[str] = []
+        step_text_parts = [
+            str(step.get("verification") or ""),
+            str(step.get("rollback") or ""),
+        ]
+        step_text_parts.extend(
+            str(command or "") for command in step.get("commands", []) or []
+        )
+        path_parts = [str(path or "") for path in step.get("expected_files", []) or []]
+        for text in step_text_parts:
+            for match in mkdir_cd_pattern.finditer(text):
+                fragment = match.group(0)
+                if fragment not in fragments:
+                    fragments.append(fragment)
+            for token in re.findall(r"\S*" + re.escape(nested_prefix) + r"\S*", text):
+                if token not in fragments:
+                    fragments.append(token)
+        for path_text in path_parts:
+            if path_text.startswith(nested_prefix) and path_text not in fragments:
+                fragments.append(path_text)
+        if fragments:
+            findings[int(step_number)] = fragments[:6]
+    return findings
+
+
 def _plan_creates_nested_project_root(
     plan: List[Dict[str, Any]], project_dir: Optional[Path] = None
 ) -> List[int]:
@@ -298,6 +344,38 @@ def _plan_creates_nested_project_root(
                 continue
             bad_steps.append(step.get("step_number"))
     return [step for step in bad_steps if step is not None]
+
+
+def _plan_nested_project_root_names(
+    plan: List[Dict[str, Any]], nested_project_root_steps: List[int]
+) -> Dict[int, str]:
+    """Recover the offending nested-root folder name for each flagged step.
+
+    Lightweight companion to ``_plan_creates_nested_project_root`` used only
+    to name the forbidden folder in repair guidance; it does not re-run the
+    scaffold/materialization heuristics, it just reports the single
+    non-allowed top-level path segment for an already-flagged step.
+    """
+
+    flagged = set(nested_project_root_steps)
+    names: Dict[int, str] = {}
+    for step in plan:
+        step_number = step.get("step_number")
+        if step_number is None or int(step_number) not in flagged:
+            continue
+        expected_files = [
+            str(path or "").strip()
+            for path in (step.get("expected_files", []) or [])
+            if str(path or "").strip()
+        ]
+        top_levels = [
+            Path(path_text).parts[0]
+            for path_text in expected_files
+            if len(Path(path_text).parts) > 1
+        ]
+        if top_levels:
+            names[int(step_number)] = sorted(set(top_levels), key=top_levels.index)[0]
+    return names
 
 
 def _source_path_mentions(*values: Any) -> List[str]:
