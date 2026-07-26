@@ -15,9 +15,20 @@ _RETRY_EXEMPT_CATEGORIES = {
 _MAX_RETRIES = 2
 
 
+def is_retry_exempt_category(failure_category: str) -> bool:
+    """True when persisted policy forbids creating a new attempt for this category."""
+
+    return failure_category in _RETRY_EXEMPT_CATEGORIES
+
+
 def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
     """Map backend/provider outcome strings to a stable failure_category value."""
     reason = (exit_reason or "").lower()
+    if any(k in reason for k in ("context window too small", "blocked model")):
+        # Deterministic backend capability rejection: the same request fails
+        # identically until the deployment configuration changes, so a new
+        # attempt is never warranted (backend_transport_error is retry-exempt).
+        return "backend_transport_error"
     if any(k in reason for k in ("capacity", "lock", "slot", "busy")):
         return "backend_capacity_limit"
     if any(k in reason for k in ("time limit", "timeout", "timed out")):

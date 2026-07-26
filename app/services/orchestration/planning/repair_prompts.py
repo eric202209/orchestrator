@@ -47,6 +47,14 @@ PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS = 800
 PLANNING_REPAIR_COMPACT_STALE_OUTPUT_CHARS = 500
 PLANNING_REPAIR_COMPACT_STALE_EXCERPT_CHARS = 900
 PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS = 700
+# A structurally intact rejected plan (valid JSON array) is passed to the
+# repair model whole up to this budget instead of being head/tail-mangled to
+# PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS. Repairing from a truncated plan
+# forces full regeneration, which drops materialization obligations and
+# reintroduces violations (Phase 31C-V2 S1-2/S1-4/S1-5 evidence). ~2600 chars
+# is ~650 tokens, far below the frozen 16000-token repair-context minimum on
+# every deployment profile.
+PLANNING_REPAIR_INTACT_PLAN_MAX_CHARS = 2600
 PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS = 450
 PLANNING_REPAIR_MAX_STALE_FALLBACK_VALIDATION_ERROR_CHARS = 1600
 PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS = 1400
@@ -56,7 +64,11 @@ PLANNING_REPAIR_MINIMAL_SOURCE_API_CONTRACT_CHARS = 760
 PLANNING_REPAIR_STRUCTURE_TRUNCATION_MARKER = (
     "\n- ... project structure capsule truncated to fit repair prompt budget"
 )
-REPAIR_PROMPT_MAX_CHARS = 6000
+# 8000 chars is ~2000 tokens — comfortably below the frozen provider-neutral
+# 16000-token repair-context minimum enforced since Phase 31C-R2 on every
+# deployment profile. The previous 6000-char cap forced intact rejected plans
+# out of the prompt and defeated single-pass repair convergence.
+REPAIR_PROMPT_MAX_CHARS = 8000
 PLANNING_REPAIR_PROMPT_MAX_CHARS = REPAIR_PROMPT_MAX_CHARS
 PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {
     "failure_memory",
@@ -131,6 +143,17 @@ def compact_invalid_output_excerpt(malformed_output: str) -> str:
     sanitized = sanitize_malformed_repair_output(malformed_output)
     if len(sanitized) <= PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS:
         return sanitized
+
+    if len(sanitized) <= PLANNING_REPAIR_INTACT_PLAN_MAX_CHARS:
+        try:
+            parsed = json.loads(sanitized)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, list):
+            # Keep semantically rejected but structurally intact plans whole
+            # so the repair pass can patch the flagged issue instead of
+            # regenerating the plan from a mangled head/tail excerpt.
+            return sanitized
 
     head_chars = PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS // 2
     tail_chars = PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS - head_chars - 80

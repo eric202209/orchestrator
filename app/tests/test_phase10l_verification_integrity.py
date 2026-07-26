@@ -589,9 +589,16 @@ def test_wm_parser_t1_bootstrap_accepts_generated_contract_tests(tmp_path: Path)
 
 
 def test_fresh_repair_task_still_requires_independent_evidence(tmp_path: Path):
+    # Phase 31C-R3: the strict explicit-repair-intent rule keys off whether any
+    # pre-existing source exists to protect. Here `util.py` pre-existed (not in
+    # added_files), so a "fix the regression" task validated only by its own
+    # newly generated tests must still be rejected.
     project_dir = tmp_path / "project"
     test_file = project_dir / "tests" / "test_app.py"
     test_file.parent.mkdir(parents=True)
+    (project_dir / "util.py").write_text(
+        "def helper():\n    return 1\n", encoding="utf-8"
+    )
     app_file = project_dir / "app.py"
     app_file.write_text("def status():\n    return 'ready'\n", encoding="utf-8")
     test_file.write_text(
@@ -644,6 +651,72 @@ def test_fresh_repair_task_still_requires_independent_evidence(tmp_path: Path):
     assert evidence["fresh_bootstrap_generated_test_evidence"] is False
     assert evidence["requires_independent_evidence"] is True
     assert evidence["verification_insufficient"] is True
+    assert evidence["pre_existing_source_files"] == ["util.py"]
+
+
+def test_explicit_repair_intent_in_empty_workspace_accepts_bootstrap_evidence(
+    tmp_path: Path,
+):
+    """Phase 31C-R3 (S1-3): explicit repair phrasing over a workspace with no
+    pre-existing source cannot demand pre-existing test coverage — the task
+    materialized the implementation and its tests from scratch, and that
+    freshly generated evidence is the only evidence that can exist."""
+
+    project_dir = tmp_path / "project"
+    test_file = project_dir / "tests" / "test_app.py"
+    test_file.parent.mkdir(parents=True)
+    app_file = project_dir / "app.py"
+    app_file.write_text("def status():\n    return 'ready'\n", encoding="utf-8")
+    test_file.write_text(
+        "from app import status\n\n"
+        "def test_status():\n"
+        "    assert status() == 'ready'\n",
+        encoding="utf-8",
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=[
+            {
+                "step_number": 1,
+                "description": "Fix broken status behavior",
+                "verification": "python3 -m pytest tests/test_app.py -q",
+                "expected_files": ["app.py", "tests/test_app.py"],
+                "ops": [
+                    {
+                        "op": "write_file",
+                        "path": "app.py",
+                        "content": app_file.read_text(encoding="utf-8"),
+                    },
+                    {
+                        "op": "write_file",
+                        "path": "tests/test_app.py",
+                        "content": test_file.read_text(encoding="utf-8"),
+                    },
+                ],
+            }
+        ],
+        task_prompt="Fix the broken status regression.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        title="Fix status regression",
+        is_first_ordered_task=True,
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["app.py", "tests/test_app.py"],
+            "completion_verification_command": "python3 -m pytest tests/test_app.py -q",
+            "change_set": {
+                "added_files": ["app.py", "tests/test_app.py"],
+            },
+        },
+    )
+
+    evidence = verdict.details["validation_evidence"]
+    assert evidence["pre_existing_source_files"] == []
+    assert evidence["fresh_bootstrap_generated_test_evidence"] is True
+    assert evidence["requires_independent_evidence"] is False
+    assert evidence["verification_insufficient"] is False
 
 
 def test_mature_project_test_rewrite_remains_rejected(tmp_path: Path):
@@ -856,10 +929,16 @@ def test_recovery_rerun_fresh_bootstrap_passes_end_to_end(tmp_path: Path):
 def test_genuine_repair_task_still_requires_independent_evidence(tmp_path: Path):
     """When the original task title/description explicitly say 'fix failing tests',
     requires_independent_evidence must remain True even without recovery boilerplate.
-    The fix must preserve repair protection for genuine repair tasks."""
+    The fix must preserve repair protection for genuine repair tasks.
+
+    Phase 31C-R3: genuine repair means pre-existing source exists to protect,
+    so this workspace carries a pre-existing helper outside the change set."""
     project_dir = tmp_path / "project"
     test_file = project_dir / "tests" / "test_core.py"
     test_file.parent.mkdir(parents=True)
+    (project_dir / "legacy_util.py").write_text(
+        "def legacy():\n    return 0\n", encoding="utf-8"
+    )
     app_file = project_dir / "core.py"
     app_file.write_text("def normalize(s):\n    return s.strip()\n", encoding="utf-8")
     test_file.write_text(

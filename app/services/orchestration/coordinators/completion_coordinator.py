@@ -1120,7 +1120,10 @@ class CompletionCoordinator:
                 if publish_captured_change_set:
                     baseline_publish_result = (
                         task_service.promote_change_set_into_baseline(
-                            project, task, task_change_set
+                            project,
+                            task,
+                            task_change_set,
+                            lock_already_held=runs_in_canonical_baseline,
                         )
                     )
                     baseline_publish_result["materialization_mode"] = (

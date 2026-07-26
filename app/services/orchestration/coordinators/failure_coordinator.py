@@ -207,12 +207,27 @@ class FailureCoordinator:
             and not is_bounded_debug_repair_timeout
         )
 
+        # Retry ownership is a single authority: the automatic-recovery rerun
+        # obeys the same exclusions as the Celery retry path. A canonical-root
+        # mutation-lock conflict must never queue a new attempt (the rerun
+        # races the still-held lock of the failing dispatch), and categories
+        # the persisted execution policy marks retry-exempt (deterministic
+        # backend capability rejections, planning failures, governance holds)
+        # must not be re-executed either.
+        from app.services.session.execution_policy import (
+            classify_failure as _classify_failure_category,
+            is_retry_exempt_category as _is_retry_exempt_category,
+        )
+
+        failure_category_for_retry = _classify_failure_category(str(exc), "", {})
         auto_recovery_eligible = bool(
             session
             and task
             and session.execution_mode == "automatic"
             and getattr(task, "plan_position", None) is not None
             and not is_timeout
+            and not is_project_mutation_lock_conflict
+            and not _is_retry_exempt_category(failure_category_for_retry)
             and getattr(task, "workspace_status", None) != "changes_requested"
         )
 

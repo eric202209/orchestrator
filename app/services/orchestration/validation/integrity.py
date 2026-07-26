@@ -189,6 +189,57 @@ def pre_existing_python_test_files(
     return [path for path in python_test_files(project_dir) if path not in added]
 
 
+_PRE_EXISTING_SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx"}
+
+
+def pre_existing_source_files(
+    project_dir: str | Path,
+    change_set: Optional[dict[str, Any]],
+) -> list[str]:
+    """Non-test source files that already existed before this change set.
+
+    Mirrors ``pre_existing_python_test_files``: everything in the workspace
+    with a source suffix that this change set did not add. An empty result
+    means the task materialized all source from scratch — there was no
+    pre-existing implementation whose behavior independent evidence could
+    protect.
+    """
+
+    root = Path(project_dir)
+    if not root.exists():
+        return []
+    added = {
+        str(path).replace("\\", "/").lstrip("./")
+        for path in ((change_set or {}).get("added_files") or [])
+    }
+    ignored_parts = {
+        ".git",
+        ".venv",
+        "venv",
+        "node_modules",
+        "__pycache__",
+        ".agent",
+    }
+    results: list[str] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.suffix.lower() not in _PRE_EXISTING_SOURCE_SUFFIXES:
+            continue
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            continue
+        if set(rel.parts) & ignored_parts:
+            continue
+        rel_text = str(rel).replace("\\", "/")
+        if is_python_test_path(rel_text):
+            continue
+        if rel_text not in added:
+            results.append(rel_text)
+    return sorted(results)
+
+
 def classify_verification_command(command: Optional[str]) -> CommandQuality:
     text = str(command or "").strip().lower()
     if not text:

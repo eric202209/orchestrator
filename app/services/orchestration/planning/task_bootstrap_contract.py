@@ -205,18 +205,20 @@ def _classify_bootstrap_task_type(
     test_paths = sorted(path for path in all_paths if _is_test_path(path))
     artifact_paths = sorted(path for path in all_paths if _is_artifact_path(path))
 
-    source_terms = {
+    source_noun_terms = {
         "cli",
         "code",
         "function",
-        "feature",
-        "implement",
-        "implementation",
         "module",
         "package",
         "script",
         "source",
         "tests",
+    }
+    source_action_terms = {
+        "feature",
+        "implement",
+        "implementation",
     }
     artifact_terms = {
         "checklist",
@@ -236,7 +238,8 @@ def _classify_bootstrap_task_type(
             for term in terms
         )
 
-    has_source_intent = has_term(source_terms)
+    has_source_noun_intent = has_term(source_noun_terms)
+    has_source_intent = has_source_noun_intent or has_term(source_action_terms)
     has_artifact_intent = any(
         re.search(rf"\b{re.escape(term)}\b", prompt_lower) for term in artifact_terms
     )
@@ -245,7 +248,14 @@ def _classify_bootstrap_task_type(
 
     if has_source_surface and has_artifact_surface:
         task_type = BootstrapTaskType.MIXED
-    elif has_artifact_surface and has_source_intent:
+    elif has_artifact_surface and has_source_noun_intent:
+        # An artifact-only plan surface is promoted to MIXED only when the
+        # prompt names a concrete source deliverable (code, module, tests, ...).
+        # Bare action verbs such as "implement the requested change" also
+        # describe pure documentation work and must not force a source-file
+        # obligation onto an artifact task. Prompts with real source intent
+        # and no artifact vocabulary still fall through to UNKNOWN, which
+        # keeps source materialization required.
         task_type = BootstrapTaskType.MIXED
     elif has_source_surface:
         task_type = BootstrapTaskType.SOURCE_CODE
@@ -259,6 +269,7 @@ def _classify_bootstrap_task_type(
         "test_paths": test_paths[:20],
         "artifact_paths": artifact_paths[:20],
         "has_source_intent": has_source_intent,
+        "has_source_noun_intent": has_source_noun_intent,
         "has_artifact_intent": has_artifact_intent,
         "negated_source_intent_removed": positive_source_intent_text != prompt_lower,
     }

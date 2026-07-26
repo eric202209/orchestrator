@@ -46,6 +46,7 @@ from .integrity import (
     check_test_preservation,
     classify_verification_command,
     pre_existing_python_test_files,
+    pre_existing_source_files,
     scan_test_file_changes,
 )
 from app.services.orchestration.planning.task_bootstrap_contract import (
@@ -1868,6 +1869,7 @@ class ValidatorService:
         else:
             change_set = None
         pre_existing_tests = pre_existing_python_test_files(project_dir, change_set)
+        pre_existing_sources = pre_existing_source_files(project_dir, change_set)
         behavior_baseline = completion_evidence.get("behavior_baseline")
         behavior_baseline_passed = bool(
             isinstance(behavior_baseline, dict) and behavior_baseline.get("passed")
@@ -1884,7 +1886,13 @@ class ValidatorService:
         )
         fresh_bootstrap_generated_test_evidence = bool(
             repair_keyword_match
-            and not explicit_repair_intent
+            # Explicit repair intent normally demands independent pre-existing
+            # evidence — unless the workspace contained no source at all, in
+            # which case the demanded evidence cannot exist: the first-task
+            # bootstrap materialized both the implementation and its tests
+            # from scratch, and those are the only obtainable evidence. Any
+            # pre-existing source file keeps the strict requirement.
+            and (not explicit_repair_intent or not pre_existing_sources)
             and is_first_ordered_task
             and bootstrap_task_type
             in {BootstrapTaskType.SOURCE_CODE, BootstrapTaskType.MIXED}
@@ -1930,6 +1938,7 @@ class ValidatorService:
             ),
             "requires_independent_evidence": requires_independent_evidence,
             "pre_existing_test_files": pre_existing_tests[:20],
+            "pre_existing_source_files": pre_existing_sources[:20],
             "has_independent_regression_test": has_independent_regression_test,
             "behavior_baseline": behavior_baseline,
             "behavior_baseline_passed": behavior_baseline_passed,

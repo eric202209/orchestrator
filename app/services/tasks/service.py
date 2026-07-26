@@ -1106,10 +1106,15 @@ class TaskService:
         return self.baselines.promote_task_into_baseline(project, task)
 
     def promote_change_set_into_baseline(
-        self, project: Project, task: Task, change_set: dict
+        self,
+        project: Project,
+        task: Task,
+        change_set: dict,
+        *,
+        lock_already_held: bool = False,
     ) -> dict:
         return self.baselines.promote_change_set_into_baseline(
-            project, task, change_set
+            project, task, change_set, lock_already_held=lock_already_held
         )
 
     def auto_publish_task_into_baseline(self, project: Project, task: Task) -> dict:

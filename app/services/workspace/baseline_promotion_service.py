@@ -225,18 +225,30 @@ class BaselinePromotionService:
         project: Project,
         task: Task,
         change_set: dict[str, Any],
+        *,
+        lock_already_held: bool = False,
     ) -> dict[str, Any]:
         project_root = self.get_project_root(project)
         task_execution_id = int(change_set["task_execution_id"])
-        result = self.canonical_mutations.run_locked(
-            project,
-            project_root=project_root,
-            operation="promote_change_set",
-            owner=f"task:{task.id}:execution:{task_execution_id}",
-            fn=lambda: self.promote_change_set_into_baseline_unlocked(
+        if lock_already_held:
+            # The calling dispatch already owns the canonical-root mutation
+            # lock for this project (worker canonical-baseline execution,
+            # operation=execute_canonical_root_task). The lock is not
+            # reentrant, so re-acquiring here would self-conflict and fail
+            # the promotion.
+            result = self.promote_change_set_into_baseline_unlocked(
                 project, task, change_set
-            ),
-        )
+            )
+        else:
+            result = self.canonical_mutations.run_locked(
+                project,
+                project_root=project_root,
+                operation="promote_change_set",
+                owner=f"task:{task.id}:execution:{task_execution_id}",
+                fn=lambda: self.promote_change_set_into_baseline_unlocked(
+                    project, task, change_set
+                ),
+            )
         self._trigger_engineering_context_generation(project)
         return result
 
