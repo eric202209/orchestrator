@@ -50,7 +50,7 @@ harness layout remains stable.
   in a recent git-log lookback window and reports working-tree
   cleanliness; detection only, cannot disable the daemon (out of this
   repo's inspectable scope). See
-  `docs/roadmap/workflow/phase31-launch-preconditions.md`.
+  `docs/roadmap/workflow/phase31/phase31-launch-preconditions.md`.
 
 2026-07: removed 45 one-off T1/WorkingMemory confirmation and pilot runners
 (`t1_*_runner.py`, `t1_*_driver*.py`, `wm_*_runner.py`, `wm_*_pilot*.py`,
