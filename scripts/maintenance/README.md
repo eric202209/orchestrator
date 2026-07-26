@@ -51,6 +51,20 @@ harness layout remains stable.
   cleanliness; detection only, cannot disable the daemon (out of this
   repo's inspectable scope). See
   `docs/roadmap/workflow/phase31/phase31-launch-preconditions.md`.
+- `phase31_launch_precondition_f12_workspace_registration.py` - Phase 31
+  launch check (Phase 31BR): verifies every declared target project's
+  resolved workspace has a matching `openclaw.json` agent entry before
+  dispatch; detection only, never registers an agent (Phase 22C-0
+  fail-closed posture preserved). See
+  `docs/roadmap/workflow/phase31/phase31-launch-preconditions.md`.
+- `phase31_certification_scenarios.py`, `phase31_certification_facts.py`,
+  `phase31_certification_evidence.py`, `phase31_certification_validation.py`,
+  `phase31_certification_runner.py` - Phase 31B Certification Execution
+  Platform: scenario-contract registry, live-run acceptance-evidence fact
+  assembly, evidence pipeline, validation pipeline, and the canonical
+  Certification Runner (F10/F11/F12 preamble, live dispatch, replay). See
+  `docs/roadmap/done/phase31/phase31b-certification-execution-platform.md`
+  and `docs/roadmap/done/phase31/phase31br-launch-readiness-resolution.md`.
 
 2026-07: removed 45 one-off T1/WorkingMemory confirmation and pilot runners
 (`t1_*_runner.py`, `t1_*_driver*.py`, `wm_*_runner.py`, `wm_*_pilot*.py`,

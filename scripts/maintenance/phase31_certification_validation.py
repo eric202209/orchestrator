@@ -46,6 +46,7 @@ def validate_session_evidence(
     if launch_preconditions_required:
         f10 = preamble.get("f10_result") if preamble else None
         f11 = preamble.get("f11_result") if preamble else None
+        f12 = preamble.get("f12_result") if preamble else None
         if f10 is None:
             failures.append("preamble record missing f10_result")
         elif not f10.get("passed"):
@@ -54,6 +55,10 @@ def validate_session_evidence(
             failures.append("preamble record missing f11_result")
         elif not f11.get("passed"):
             failures.append("F11 launch precondition did not pass at session start")
+        if f12 is None:
+            failures.append("preamble record missing f12_result")
+        elif not f12.get("passed"):
+            failures.append("F12 launch precondition did not pass at session start")
     checked["launch_preconditions_checked"] = launch_preconditions_required
 
     closing_path = evidence_dir / f"session-{session_number}-closing.json"

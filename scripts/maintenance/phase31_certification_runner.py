@@ -81,6 +81,9 @@ from scripts.maintenance.phase31_launch_precondition_f10_workspace_uniqueness im
 from scripts.maintenance.phase31_launch_precondition_f11_autocommit_daemon import (  # noqa: E402
     check_daemon,
 )
+from scripts.maintenance.phase31_launch_precondition_f12_workspace_registration import (  # noqa: E402
+    check_workspace_registrations,
+)
 
 BASE_URL = os.environ.get("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:8080")
 OPERATOR_EMAIL = os.environ.get("ORCHESTRATOR_USER_EMAIL", "eval@local.dev")
@@ -150,10 +153,11 @@ def _environment_baseline() -> dict[str, Any]:
 
 def run_launch_preamble(
     evidence: CertificationEvidenceSession, *, target_project_ids: list[int]
-) -> tuple[dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     f10_result = check_targets(target_project_ids)
     f11_result = check_daemon(lookback_minutes=60)
-    return f10_result, f11_result
+    f12_result = check_workspace_registrations(target_project_ids)
+    return f10_result, f11_result, f12_result
 
 
 def dispatch_scenario(
@@ -297,24 +301,39 @@ def main() -> int:
     project_id = int(project["id"])
     print(f"[project] id={project_id} slug={project_slug}")
 
-    f10_result, f11_result = run_launch_preamble(
+    f10_result, f11_result, f12_result = run_launch_preamble(
         evidence, target_project_ids=[project_id]
     )
     evidence.write_preamble(
         f10_result=f10_result,
         f11_result=f11_result,
+        f12_result=f12_result,
         environment_baseline=baseline,
         operator_identity=OPERATOR_EMAIL,
         declared_scenario_set=args.scenario_ids,
         dispatch_budget=len(args.scenario_ids),
     )
     print(
-        f"[preamble] F10 passed={f10_result['passed']} F11 passed={f11_result['passed']}"
+        f"[preamble] F10 passed={f10_result['passed']} "
+        f"F11 passed={f11_result['passed']} F12 passed={f12_result['passed']}"
     )
 
     if not f10_result["passed"]:
         print("[abort] F10 failed; no scenario dispatched.")
         evidence.note("ABORT: F10 failed before any scenario dispatch.")
+        return 1
+    if not f12_result["passed"]:
+        print(
+            "[abort] F12 failed; target workspace has no matching openclaw.json "
+            "agent entry, dispatch would fail closed identically -- no scenario "
+            "dispatched. Remediation: register the target workspace as an "
+            "openclaw.json agent (operator procedure, see "
+            "phase31-launch-preconditions.md F12)."
+        )
+        evidence.note(
+            "ABORT: F12 failed before any scenario dispatch: "
+            + json.dumps(f12_result, default=str)
+        )
         return 1
     if not f11_result["passed"]:
         print(

@@ -88,6 +88,7 @@ class CertificationEvidenceSession:
         *,
         f10_result: dict[str, Any],
         f11_result: dict[str, Any],
+        f12_result: dict[str, Any],
         environment_baseline: dict[str, Any],
         operator_identity: str,
         declared_scenario_set: list[str],
@@ -101,11 +102,13 @@ class CertificationEvidenceSession:
             "dispatch_budget": dispatch_budget,
             "f10_result": f10_result,
             "f11_result": f11_result,
+            "f12_result": f12_result,
             "environment_baseline": environment_baseline,
         }
         self.note(
             f"session start: scenarios={declared_scenario_set} "
-            f"f10_passed={f10_result.get('passed')} f11_passed={f11_result.get('passed')}"
+            f"f10_passed={f10_result.get('passed')} f11_passed={f11_result.get('passed')} "
+            f"f12_passed={f12_result.get('passed')}"
         )
         return self._write_json(f"session-{self.session_number}-preamble.json", payload)
 
