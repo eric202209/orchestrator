@@ -497,7 +497,10 @@ _BACKEND_REGISTRY: Dict[str, _BackendRegistration] = {
             capabilities=BackendCapabilities(
                 supports_planning=True,
                 supports_step_execution=False,
-                supports_debug_repair=False,
+                # The adapter is already used for planning repair and debug
+                # repair; this declaration must describe the deployed role
+                # path so capability validation does not reject it.
+                supports_debug_repair=True,
                 supports_streaming=False,
                 supports_checkpoint_resume=False,
                 supports_tool_execution=False,

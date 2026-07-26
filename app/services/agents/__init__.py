@@ -12,9 +12,11 @@ from .agent_backends import (
     require_backend_descriptor,
 )
 from .agent_runtime import (
+    RuntimeCapabilityError,
     create_agent_runtime,
     invoke_runtime_prompt,
     runtime_reports_context_overflow,
+    validate_runtime_capabilities,
 )
 from .interfaces import (
     AgentRuntime,
@@ -40,4 +42,6 @@ __all__ = [
     "create_agent_runtime",
     "invoke_runtime_prompt",
     "runtime_reports_context_overflow",
+    "RuntimeCapabilityError",
+    "validate_runtime_capabilities",
 ]

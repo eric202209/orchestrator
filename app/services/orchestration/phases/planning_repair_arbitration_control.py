@@ -51,6 +51,7 @@ from app.services.orchestration.planning.source_api_contract import (
 )
 from app.services.orchestration.planning.source_materialization import (
     is_concrete_source_materialization_path,
+    plan_source_materialization_paths,
 )
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.types import OrchestrationRunContext
@@ -150,6 +151,53 @@ def arbitrate_planning_repair_candidate(
         arbitration,
         ctx.orchestration_state.project_dir,
     )
+    if (
+        materialization_regression_paths
+        and _is_first_ordered_task(ctx.task)
+        and not retry_state.vma_repair_triggered
+    ):
+        preserved_materialization_plan = (
+            _preserve_bootstrap_source_materialization_plan(
+                previous_plan,
+                ctx.orchestration_state.plan,
+            )
+        )
+        if preserved_materialization_plan is not None:
+            try:
+                bootstrap_verdict = ValidatorService.validate_plan(
+                    preserved_materialization_plan,
+                    output_text=output_text,
+                    task_prompt=ctx.prompt,
+                    execution_profile=ctx.execution_profile,
+                    project_dir=ctx.orchestration_state.project_dir,
+                    title=ctx.task.title if ctx.task else None,
+                    task_type=getattr(ctx.task, "task_type", None),
+                )
+            except Exception as exc:
+                ctx.logger.debug(
+                    "[ORCHESTRATION] Bootstrap source-materialization preservation "
+                    "could not be validated: %s",
+                    exc,
+                )
+            else:
+                if bootstrap_verdict.passed:
+                    ctx.orchestration_state.plan = preserved_materialization_plan
+                    arbitration["reason"] = "bootstrap_source_materialization_preserved"
+                    arbitration["arbitration_action"] = (
+                        "preserve_bootstrap_source_materialization"
+                    )
+                    arbitration["materialization_regression_paths"] = (
+                        materialization_regression_paths[:20]
+                    )
+                    _emit_planning_repair_arbitration(
+                        ctx,
+                        arbitration=arbitration,
+                        planning_phase_event=planning_phase_event,
+                    )
+                    return {
+                        "action": "replace",
+                        "plan": preserved_materialization_plan,
+                    }
     # C-1: VMA repairs are expected to remove source-write ops — the repair prompt
     # explicitly instructs the model to do exactly that.  Triggering the terminal
     # abort here would punish a correct repair.  Skip for VMA-triggered repairs;
@@ -439,20 +487,38 @@ def _preserve_regressed_weak_verification_plan(
     non_bootstrap_placeholder_regression = not _is_first_ordered_task(
         ctx.task
     ) and bool(placeholder_steps)
-    if not bootstrap_regression and not non_bootstrap_placeholder_regression:
-        return None
-
     original_issues = PlannerService.find_immediate_repair_step_issues(
         previous_plan,
         project_dir=ctx.orchestration_state.project_dir,
     )
+    immediate_issues = arbitration.get("immediate_repair_issues") or {}
+    stale_replace_regression = bool(
+        immediate_issues.get("stale_replace_ops_steps")
+        or immediate_issues.get("empty_replace_old_text_steps")
+        or original_issues.get("stale_replace_ops_steps")
+        or original_issues.get("empty_replace_old_text_steps")
+    )
+    if (
+        not bootstrap_regression
+        and not non_bootstrap_placeholder_regression
+        and not stale_replace_regression
+    ):
+        return None
+
     blocking_original_issues = {
         key: value
         for key, value in original_issues.items()
         if key in BLOCKING_IMMEDIATE_REPAIR_ISSUE_KEYS and value
     }
     weak_steps = list(blocking_original_issues.get("weak_verification_steps") or [])
-    if not weak_steps or set(blocking_original_issues) != {"weak_verification_steps"}:
+    if not weak_steps and stale_replace_regression:
+        weak_steps = list(immediate_issues.get("weak_verification_steps") or [])
+    allowed_coissues = {
+        "weak_verification_steps",
+        "stale_replace_ops_steps",
+        "empty_replace_old_text_steps",
+    }
+    if not weak_steps or not set(blocking_original_issues).issubset(allowed_coissues):
         return None
 
     candidate_plan = ctx.orchestration_state.plan
@@ -472,10 +538,20 @@ def _preserve_regressed_weak_verification_plan(
     candidate_verifications = [
         str(step.get("verification") or "").strip() for step in candidate_steps
     ]
+    if stale_replace_regression and not candidate_verifications:
+        candidate_verifications = [
+            str(step.get("verification") or "").strip()
+            for step in previous_plan
+            if isinstance(step, dict)
+            and str(step.get("verification") or "").strip()
+            and (step.get("expected_files") or step.get("ops"))
+        ]
     if not candidate_verifications:
         return None
 
-    preserved_plan = copy.deepcopy(previous_plan)
+    preserved_plan = copy.deepcopy(
+        candidate_plan if stale_replace_regression else previous_plan
+    )
     for weak_step_number in weak_steps:
         original_step = next(
             (
@@ -543,6 +619,75 @@ def _preserve_regressed_weak_verification_plan(
                 break
         if not replacement_found:
             return None
+    return preserved_plan
+
+
+def _preserve_bootstrap_source_materialization_plan(
+    previous_plan: Any,
+    candidate_plan: Any,
+) -> list[dict[str, Any]] | None:
+    """Restore only source-write obligations lost by a first-task repair."""
+
+    if not isinstance(previous_plan, list) or not isinstance(candidate_plan, list):
+        return None
+    previous_paths = plan_source_materialization_paths(previous_plan)
+    candidate_paths = plan_source_materialization_paths(candidate_plan)
+    missing_paths = previous_paths - candidate_paths
+    if not missing_paths:
+        return None
+
+    preserved_plan = copy.deepcopy(candidate_plan)
+    for previous_step in previous_plan:
+        if not isinstance(previous_step, dict):
+            continue
+        missing_operations = [
+            copy.deepcopy(operation)
+            for operation in previous_step.get("ops") or []
+            if isinstance(operation, dict)
+            and str(operation.get("op") or "")
+            in {"write_file", "append_file", "replace_in_file"}
+            and str(operation.get("path") or "").strip().rstrip("/").lstrip("./")
+            in missing_paths
+        ]
+        if not missing_operations:
+            continue
+        target_step = next(
+            (
+                step
+                for step in preserved_plan
+                if isinstance(step, dict)
+                and step.get("step_number") == previous_step.get("step_number")
+            ),
+            None,
+        )
+        if target_step is None and preserved_plan:
+            target_step = preserved_plan[0]
+        if target_step is None:
+            return None
+        existing_ops = list(target_step.get("ops") or [])
+        existing_paths = {
+            str(operation.get("path") or "").strip().rstrip("/").lstrip("./")
+            for operation in existing_ops
+            if isinstance(operation, dict)
+        }
+        target_step["ops"] = existing_ops + [
+            operation
+            for operation in missing_operations
+            if str(operation.get("path") or "").strip().rstrip("/").lstrip("./")
+            not in existing_paths
+        ]
+        expected_files = list(target_step.get("expected_files") or [])
+        expected_paths = {
+            str(path).strip().rstrip("/").lstrip("./")
+            for path in expected_files
+            if str(path).strip()
+        }
+        for path in previous_step.get("expected_files") or []:
+            normalized = str(path).strip().rstrip("/").lstrip("./")
+            if normalized and normalized not in expected_paths:
+                expected_files.append(path)
+                expected_paths.add(normalized)
+        target_step["expected_files"] = expected_files
     return preserved_plan
 
 

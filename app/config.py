@@ -193,6 +193,10 @@ class Settings(BaseSettings):
     CANDIDATE_SLOT_MERGE_ENABLED: bool = False
     PLANNING_REPAIR_BASE_URL: str = "http://ai-gateway:8000/v1"
     PLANNING_REPAIR_MODEL: str = "qwen-local"
+    # Effective context declared by the selected repair deployment.  This is
+    # provider-neutral because OpenAI-compatible and native providers may
+    # expose different native limits for the same model.
+    PLANNING_REPAIR_CONTEXT_TOKENS: Optional[int] = None
     COMPLETION_REPAIR_MODEL: str = ""
     COMPLETION_REPAIR_ADAPTATION_PROFILE: Optional[str] = None
     PLANNING_REPAIR_API_KEY: str = ""
@@ -200,6 +204,7 @@ class Settings(BaseSettings):
     DEBUG_REPAIR_DIRECT_ENABLED: bool = True
     DEBUG_REPAIR_BASE_URL: str = ""
     DEBUG_REPAIR_MODEL: str = ""
+    DEBUG_REPAIR_CONTEXT_TOKENS: Optional[int] = None
     DEBUG_REPAIR_API_KEY: str = ""
     DEBUG_REPAIR_DISABLE_THINKING: bool = True
 

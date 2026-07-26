@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.services.agents.agent_backends import (
+    BackendDescriptor,
     UnsupportedAgentBackendError,
     require_backend_descriptor,
 )
@@ -48,6 +49,138 @@ _PROFILE_OVERRIDE_UNSET = object()
 
 class UnsupportedRuntimeProfileError(ValueError):
     """Raised when an explicit role profile is not supported by its backend."""
+
+
+MIN_REPAIR_CONTEXT_TOKENS = 16_000
+
+
+class RuntimeCapabilityError(ValueError):
+    """Raised when a role cannot satisfy its dispatch-time requirements."""
+
+
+def _configured_context_tokens(role: BackendRole) -> Optional[int]:
+    if role is BackendRole.DEBUG_REPAIR:
+        value = getattr(settings, "DEBUG_REPAIR_CONTEXT_TOKENS", None)
+        if value is None:
+            value = getattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", None)
+    elif role in {BackendRole.REPAIR, BackendRole.COMPLETION_REPAIR}:
+        value = getattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", None)
+    else:
+        value = None
+    if value is None or not str(value).strip():
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeCapabilityError(
+            f"Runtime role '{role.value}' has an invalid effective context value: {value!r}."
+        ) from exc
+
+
+def _role_provider_configuration_errors(role: BackendRole) -> list[str]:
+    if role not in {
+        BackendRole.REPAIR,
+        BackendRole.DEBUG_REPAIR,
+        BackendRole.COMPLETION_REPAIR,
+    }:
+        return []
+    base_url = getattr(settings, "PLANNING_REPAIR_BASE_URL", "")
+    model = getattr(settings, "PLANNING_REPAIR_MODEL", "")
+    if role is BackendRole.DEBUG_REPAIR:
+        base_url = getattr(settings, "DEBUG_REPAIR_BASE_URL", "") or base_url
+        model = getattr(settings, "DEBUG_REPAIR_MODEL", "") or model
+    if role is BackendRole.COMPLETION_REPAIR:
+        model = getattr(settings, "COMPLETION_REPAIR_MODEL", "") or model
+    errors: list[str] = []
+    if not str(base_url or "").strip():
+        errors.append("repair endpoint is not configured")
+    if not str(model or "").strip():
+        errors.append("repair model is not configured")
+    return errors
+
+
+def validate_runtime_capabilities(
+    descriptor: BackendDescriptor,
+    role: BackendRole | str,
+    *,
+    effective_context_tokens: Optional[int] = None,
+    required_context_tokens: int = MIN_REPAIR_CONTEXT_TOKENS,
+    dispatch: bool = True,
+) -> dict[str, Any]:
+    """Validate provider-neutral capabilities before explicit-role dispatch.
+
+    Repair context is intentionally an explicit deployment fact.  A provider
+    that does not report a limit cannot be assumed to satisfy the planning
+    contract, even when its native model metadata is larger.
+    """
+
+    role = _coerce_backend_role(role)
+    if not descriptor.implemented:
+        raise RuntimeCapabilityError(
+            f"Runtime backend '{descriptor.name}' is not implemented."
+        )
+    if not descriptor.health.available or not descriptor.health.ready:
+        errors = "; ".join(descriptor.health.errors) or descriptor.health.status
+        raise RuntimeCapabilityError(
+            f"Runtime backend '{descriptor.name}' is not ready for {role.value}: {errors}."
+        )
+    provider_errors = _role_provider_configuration_errors(role)
+    if provider_errors:
+        raise RuntimeCapabilityError(
+            f"Runtime role '{role.value}' is not provider-ready: "
+            + "; ".join(provider_errors)
+            + "."
+        )
+
+    role_supported = {
+        BackendRole.PLANNING: descriptor.capabilities.supports_planning,
+        BackendRole.EXECUTION: descriptor.capabilities.supports_step_execution,
+        BackendRole.REPAIR: descriptor.capabilities.supports_planning,
+        BackendRole.DEBUG_REPAIR: descriptor.capabilities.supports_debug_repair,
+        BackendRole.COMPLETION_REPAIR: descriptor.capabilities.supports_planning,
+    }[role]
+    if dispatch and not role_supported:
+        raise RuntimeCapabilityError(
+            f"Runtime backend '{descriptor.name}' does not support the {role.value} role."
+        )
+
+    resolved_context = effective_context_tokens
+    if resolved_context is None:
+        resolved_context = _configured_context_tokens(role)
+    if resolved_context is None:
+        resolved_context = descriptor.capabilities.max_context_tokens
+    if role in {
+        BackendRole.REPAIR,
+        BackendRole.DEBUG_REPAIR,
+        BackendRole.COMPLETION_REPAIR,
+    }:
+        if resolved_context is None:
+            raise RuntimeCapabilityError(
+                f"Runtime role '{role.value}' has no verified effective context capacity; "
+                f"at least {required_context_tokens} tokens are required."
+            )
+        if resolved_context < required_context_tokens:
+            raise RuntimeCapabilityError(
+                f"Runtime role '{role.value}' effective context {resolved_context} is below "
+                f"the required {required_context_tokens} tokens."
+            )
+
+    return {
+        "backend": descriptor.name,
+        "role": role.value,
+        "provider_ready": True,
+        "effective_context_tokens": resolved_context,
+        "required_context_tokens": (
+            required_context_tokens
+            if role
+            in {
+                BackendRole.REPAIR,
+                BackendRole.DEBUG_REPAIR,
+                BackendRole.COMPLETION_REPAIR,
+            }
+            else None
+        ),
+    }
 
 
 def _test_runtime_backends_enabled() -> bool:
@@ -355,6 +488,13 @@ def create_agent_runtime(
             runtime_configuration=runtime_configuration,
         )
     descriptor = require_backend_descriptor(backend_name)
+    if runtime_configuration is not None:
+        validate_runtime_capabilities(
+            descriptor,
+            role,
+            effective_context_tokens=_configured_context_tokens(role),
+            dispatch=False,
+        )
     runtime_factory = get_runtime_factory(descriptor.name)
     if runtime_factory is not None:
         runtime_kwargs: dict[str, Any] = {"use_demo_mode": use_demo_mode}
@@ -416,6 +556,17 @@ def invoke_runtime_prompt(
         )
         setattr(exc, "runtime_diagnostics", diagnostics)
         raise
+
+    if role is not None:
+        descriptor = getattr(runtime, "backend_descriptor", None)
+        if descriptor is not None:
+            validate_runtime_capabilities(
+                descriptor,
+                role,
+                effective_context_tokens=_configured_context_tokens(
+                    _coerce_backend_role(role)
+                ),
+            )
 
     if project_id is not None and hasattr(runtime, "project_id"):
         runtime.project_id = project_id
