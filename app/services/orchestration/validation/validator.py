@@ -126,6 +126,7 @@ from .rules.core_paths import (
     _plan_contains_unsafe_paths,
     _plan_creates_nested_project_root,
     _plan_negative_existing_file_checks,
+    _plan_nested_project_root_evidence,
     _plan_nested_project_root_names,
     _plan_nested_workspace_aliases,
     _plan_nested_workspace_corrected_fragments,
@@ -1183,8 +1184,14 @@ class ValidatorService:
                 f"instead of the task workspace root (steps: {nested_project_root_steps[:5]})"
             )
             details["nested_project_root_steps"] = nested_project_root_steps
-            details["nested_project_root_names"] = cls._plan_nested_project_root_names(
+            root_names = cls._plan_nested_project_root_names(
                 plan, nested_project_root_steps
+            )
+            details["nested_project_root_names"] = root_names
+            details["violation_kind"] = "duplicate_project_root_scaffold"
+            details["offending_root_alias"] = next(iter(root_names.values()), None)
+            details["root_intent_evidence"] = _plan_nested_project_root_evidence(
+                plan, nested_project_root_steps, root_names
             )
 
         duplicated_root_paths = cls._plan_contains_duplicated_path_roots(plan)

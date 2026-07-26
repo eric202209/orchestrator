@@ -1388,6 +1388,21 @@ def _emit_repair_outcome_if_pending(
         getattr(retry_state, "pending_repair_outcome_identity", {}) or {}
     )
     retry_state.pending_repair_outcome_identity = {}
+    # Authoritative per-attempt record. Appended (never overwritten) so a
+    # later attempt targeting a different violation cannot erase this
+    # attempt's evidence; `compute_final_repair_outcome` reconciles all
+    # attempts against the final authoritative violation codes at planning
+    # exit instead of trusting any single attempt's resolved/repeated flags.
+    retry_state.repair_attempt_outcomes.append(
+        {
+            "repair_attempt_number": attempt_number,
+            "targeted_violation_code": targeted_code,
+            "pre_repair_violation_codes": list(original_codes[:8]),
+            "post_repair_violation_codes": list(post_repair_codes[:8]),
+            "target_violation_resolved": target_violation_resolved,
+            "same_violation_repeated": same_violation_repeated,
+        }
+    )
     ctx.emit_live(
         "WARN" if same_violation_repeated else "INFO",
         "[OPENCLAW][PLANNING_REPAIR_OUTCOME] repair effectiveness",
@@ -1403,6 +1418,97 @@ def _emit_repair_outcome_if_pending(
             "same_violation_repeated": same_violation_repeated,
             **identity_metadata,
             "repair_guidance_identity": identity_metadata,
+        },
+    )
+
+
+def compute_final_repair_outcome(
+    attempt_records: list[dict[str, Any]],
+    final_violation_codes: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Reconcile every recorded repair attempt against the final verdict.
+
+    This is the single authoritative source for repair-outcome status: no
+    attempt's own ``target_violation_resolved``/``same_violation_repeated``
+    flags (recorded at attempt time, against that attempt's own post-repair
+    codes) are trusted for the final claim. Instead, each targeted violation
+    code is checked against ``final_violation_codes`` — the codes from the
+    final authoritative planning verdict (acceptance or terminal abort) — so
+    a violation that looked resolved after one attempt but was reintroduced
+    by a later, differently-targeted attempt is never reported as resolved.
+
+    Returns one entry per distinct ``targeted_violation_code`` seen across
+    ``attempt_records``, keyed by that code.
+    """
+
+    final_codes = set(final_violation_codes or [])
+    by_code: dict[str, list[dict[str, Any]]] = {}
+    for record in attempt_records or []:
+        code = record.get("targeted_violation_code")
+        if not code:
+            continue
+        by_code.setdefault(code, []).append(record)
+
+    summary: dict[str, dict[str, Any]] = {}
+    for code, records in by_code.items():
+        attempts = len(records)
+        recoveries = sum(
+            1 for record in records if record.get("target_violation_resolved")
+        )
+        present_in_final = code in final_codes
+        last_record = records[-1]
+        if not present_in_final:
+            status = "RESOLVED"
+        elif last_record.get("same_violation_repeated"):
+            status = "REPEATED_AND_EXHAUSTED"
+        elif last_record.get("target_violation_resolved"):
+            # Resolved at attempt time, but the code is present again in the
+            # final authoritative verdict: a later attempt (targeting a
+            # different violation) reintroduced it. Never claim success here.
+            status = "OUTCOME_INCONSISTENT"
+        else:
+            status = "REPEATED_AND_EXHAUSTED"
+        summary[code] = {
+            "target_repair_attempts": attempts,
+            "target_repair_recoveries": recoveries,
+            "target_present_in_final_verdict": present_in_final,
+            "target_final_status": status,
+            "repair_outcome_consistent": status != "OUTCOME_INCONSISTENT",
+        }
+    return summary
+
+
+def emit_final_repair_outcome_summary(
+    ctx: OrchestrationRunContext,
+    retry_state: _PlanningRetryState,
+    plan_verdict: Any,
+) -> None:
+    """Emit the authoritative per-task repair-outcome aggregate, if any repair ran.
+
+    Must be called at a terminal planning exit (acceptance or abort) so the
+    final codes are authoritative. No-op if no repair attempt was recorded.
+    """
+
+    attempt_records = list(getattr(retry_state, "repair_attempt_outcomes", []) or [])
+    if not attempt_records:
+        return
+    final_codes = list(
+        (getattr(plan_verdict, "details", None) or {}).get("semantic_violation_codes")
+        or []
+    )
+    summary = compute_final_repair_outcome(attempt_records, final_codes)
+    any_unresolved = any(
+        entry["target_final_status"] != "RESOLVED" for entry in summary.values()
+    )
+    ctx.emit_live(
+        "WARN" if any_unresolved else "INFO",
+        "[OPENCLAW][PLANNING_REPAIR_OUTCOME_FINAL] repair outcome summary",
+        metadata={
+            "session_id": ctx.session_id,
+            "task_id": ctx.task_id,
+            "repair_attempt_count": len(attempt_records),
+            "final_violation_codes": final_codes[:8],
+            "target_outcomes": summary,
         },
     )
 
@@ -1579,6 +1685,7 @@ class _PlanningRetryState:
         self.pending_repair_outcome_targeted_violation_code: str | None = None
         self.pending_repair_outcome_original_violation_codes: list[str] = []
         self.pending_repair_outcome_identity: dict[str, Any] = {}
+        self.repair_attempt_outcomes: list[dict[str, Any]] = []
         self.task1_bootstrap_rejection_contract: dict[str, Any] | None = None
         self.source_materialization_required_after_repair = False
         self.vma_repair_triggered = False

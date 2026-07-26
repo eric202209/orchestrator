@@ -23,6 +23,25 @@ from app.services.orchestration.operations.file_ops_contract import (
 
 from ..workspace_checks import NESTED_PROJECT_STRUCTURAL_DIRS, SOURCE_EXTENSIONS
 
+# Repository-root marker filenames. A file with one of these names appearing
+# directly under an alias (e.g. ``inventory_api/pyproject.toml``) is
+# deterministic evidence that the alias is being materialized as an
+# independent project root rather than an ordinary package/module directory
+# of the current project. Plain module files (``__init__.py``, ``routes.py``,
+# ...) under an alias are not evidence of a duplicate root by themselves.
+REPO_ROOT_MARKER_NAMES = {
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "package.json",
+    "tsconfig.json",
+    "cargo.toml",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    ".git",
+}
+
 
 def _plan_contains_unsafe_paths(plan: List[Dict[str, Any]]) -> List[str]:
     invalid_paths: List[str] = []
@@ -173,6 +192,52 @@ def _workspace_root_aliases(
     return (Path(project_dir).name,)
 
 
+def _alias_materialized_targets(step: Dict[str, Any], nested_prefix: str) -> List[str]:
+    targets = [
+        str(path or "")
+        for path in step.get("expected_files", []) or []
+        if str(path or "").startswith(nested_prefix)
+    ]
+    targets.extend(
+        str(operation.get("path") or "")
+        for operation in step.get("ops", []) or []
+        if isinstance(operation, dict)
+        and str(operation.get("path") or "").startswith(nested_prefix)
+    )
+    return sorted(set(targets))
+
+
+def _alias_scaffold_evidence(step: Dict[str, Any], alias: str) -> List[str]:
+    """Return deterministic duplicate-root-scaffold evidence for ``alias``.
+
+    A same-name package (``alias/__init__.py``, ``alias/routes.py``, ...) is
+    not scaffold evidence: those are ordinary module files. A repository-root
+    marker (``alias/pyproject.toml``, ``alias/package.json``, ...) or two or
+    more nested structural directories (``alias/src/...`` and
+    ``alias/tests/...``) materialized under the alias are deterministic
+    evidence that the alias is being built as an independent project root.
+    """
+
+    nested_prefix = f"{alias}/"
+    targets = _alias_materialized_targets(step, nested_prefix)
+    evidence: List[str] = [
+        target
+        for target in targets
+        if len(Path(target).parts) >= 2
+        and Path(target).parts[1].lower() in REPO_ROOT_MARKER_NAMES
+    ]
+    structural_dirs = {
+        Path(target).parts[1] for target in targets if len(Path(target).parts) > 2
+    } & NESTED_PROJECT_STRUCTURAL_DIRS
+    if len(structural_dirs) >= 2:
+        evidence.extend(
+            target
+            for target in targets
+            if len(Path(target).parts) > 2 and Path(target).parts[1] in structural_dirs
+        )
+    return sorted(set(evidence))
+
+
 def _alias_has_nested_intent(
     step: Dict[str, Any],
     alias: str,
@@ -188,26 +253,13 @@ def _alias_has_nested_intent(
         return True
     if nested_prefix not in combined:
         return False
-    if (
-        workspace_identity is None
-        or alias != workspace_identity.physical_runtime_basename
-    ):
-        return True
-    prefixed_targets = [
-        str(path or "")
-        for path in step.get("expected_files", []) or []
-        if str(path or "").startswith(nested_prefix)
-    ]
-    prefixed_targets.extend(
-        str(operation.get("path") or "")
-        for operation in step.get("ops", []) or []
-        if isinstance(operation, dict)
-        and str(operation.get("path") or "").startswith(nested_prefix)
-    )
-    # A bare numeric child path may be a legitimate fixture/package target.
-    # Multiple materialized targets are deterministic evidence of a duplicated
-    # project root; a root mkdir/cd above is stronger evidence and was handled.
-    return len(set(prefixed_targets)) >= 2
+    # A same-name package/directory (new or existing) is legitimate unless the
+    # materialized targets under it carry deterministic duplicate-root-scaffold
+    # evidence (a repository marker or a multi-directory project layout). A
+    # bare list of module files under the alias is not evidence of a
+    # duplicated project root; a root mkdir/cd above is stronger evidence and
+    # was already handled.
+    return bool(_alias_scaffold_evidence(step, alias))
 
 
 def _plan_nested_workspace_aliases(
@@ -358,17 +410,25 @@ def _plan_creates_nested_project_root(
             pass
 
     def looks_like_nested_project_scaffold(root_name: str, paths: List[str]) -> bool:
-        root_level_files = [
-            path_text for path_text in paths if len(Path(path_text).parts) == 2
+        # A repository-root marker (pyproject.toml, package.json, ...)
+        # materialized directly under the alias is deterministic evidence of
+        # an independent project root. An ordinary module file directly under
+        # the alias (e.g. ``inventory_api/__init__.py``) is a legitimate
+        # same-name package and is not evidence by itself.
+        marker_hits = [
+            path_text
+            for path_text in paths
+            if len(Path(path_text).parts) == 2
+            and Path(path_text).parts[1].lower() in REPO_ROOT_MARKER_NAMES
         ]
+        if marker_hits:
+            return True
+
         second_level_dirs = {
             Path(path_text).parts[1]
             for path_text in paths
             if len(Path(path_text).parts) > 2
         }
-
-        if root_level_files:
-            return True
 
         structural_dirs = second_level_dirs.intersection(NESTED_PROJECT_STRUCTURAL_DIRS)
         if len(structural_dirs) >= 2:
@@ -517,6 +577,48 @@ def _plan_nested_project_root_names(
         if top_levels:
             names[int(step_number)] = sorted(set(top_levels), key=top_levels.index)[0]
     return names
+
+
+def _plan_nested_project_root_evidence(
+    plan: List[Dict[str, Any]],
+    nested_project_root_steps: List[int],
+    root_names: Dict[int, str],
+) -> List[str]:
+    """Quote the exact mkdir/cd commands and marker paths behind a rejection.
+
+    Companion to ``_plan_nested_project_root_names``: names the concrete
+    evidence (``mkdir <root>``, ``cd <root>``, ``<root>/pyproject.toml``, ...)
+    so repair guidance and structured details can state why a step was
+    flagged instead of only which step.
+    """
+
+    flagged = set(nested_project_root_steps)
+    evidence: List[str] = []
+    for step in plan:
+        step_number = step.get("step_number")
+        if step_number is None or int(step_number) not in flagged:
+            continue
+        root_name = root_names.get(int(step_number))
+        if not root_name:
+            continue
+        command_pattern = re.compile(
+            rf"\b(mkdir(?:\s+-p)?|cd)\s+{re.escape(root_name)}\b"
+        )
+        for command in step.get("commands", []) or []:
+            for match in command_pattern.finditer(str(command or "")):
+                fragment = match.group(0)
+                if fragment not in evidence:
+                    evidence.append(fragment)
+        nested_prefix = f"{root_name}/"
+        for path_text in step.get("expected_files", []) or []:
+            text = str(path_text or "")
+            if not text.startswith(nested_prefix):
+                continue
+            parts = Path(text).parts
+            if len(parts) == 2 and parts[1].lower() in REPO_ROOT_MARKER_NAMES:
+                if text not in evidence:
+                    evidence.append(text)
+    return evidence[:8]
 
 
 def _source_path_mentions(*values: Any) -> List[str]:

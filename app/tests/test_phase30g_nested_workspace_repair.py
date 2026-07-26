@@ -418,14 +418,19 @@ def test_nested_workspace_bare_cd_without_slash_not_matched_by_substring_rule(
     assert steps == [1]
 
 
-def test_nested_workspace_detects_prefixed_expected_file(tmp_path):
+def test_nested_workspace_single_prefixed_expected_file_is_legitimate_package(
+    tmp_path,
+):
+    # Phase 30J: a single same-name module file under the alias (no root
+    # mkdir/cd, no repository marker) is a legitimate package/module target,
+    # not duplicate-root scaffold evidence.
     project_dir = tmp_path / "todo"
     project_dir.mkdir()
     plan = _plan_step(expected_files=["todo/app.py"])
 
     steps = ValidatorService._plan_nests_task_workspace(plan, project_dir)
 
-    assert steps == [1]
+    assert steps == []
 
 
 def test_nested_workspace_scaffold_creation_detected(tmp_path):
@@ -463,18 +468,18 @@ def test_nested_workspace_absolute_path_variant_not_double_counted(tmp_path):
     assert steps == []
 
 
-def test_nested_workspace_traversal_variant_also_matches_substring_rule(tmp_path):
+def test_nested_workspace_traversal_variant_not_flagged_by_this_rule(tmp_path):
     project_dir = tmp_path / "todo"
     project_dir.mkdir()
     plan = _plan_step(commands=["cat ../todo/secret"])
 
-    # The substring rule matches "todo/" wherever it appears, including
-    # inside a traversal path; the traversal itself is separately caught by
-    # _plan_contains_unsafe_command_paths (unsafe ../ segments), so this
-    # command is rejected by two independent rules.
+    # Phase 30J: a read-only command referencing "todo/" with nothing
+    # materialized under it carries no duplicate-root-scaffold evidence, so
+    # this rule no longer fires here. The traversal itself is still rejected
+    # separately by _plan_contains_unsafe_command_paths (unsafe ../ segments).
     steps = ValidatorService._plan_nests_task_workspace(plan, project_dir)
 
-    assert steps == [1]
+    assert steps == []
 
 
 def test_nested_workspace_existing_in_place_directory_is_allowed(tmp_path):

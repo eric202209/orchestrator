@@ -115,6 +115,7 @@ from app.services.orchestration.phases.planning_support import (
     _count_prior_failed_planning_executions,
     _emit_planning_diagnostics_contract_violation,
     _emit_repair_outcome_if_pending,
+    emit_final_repair_outcome_summary,
     _finalize_planning_terminal_failure,
     _finalize_planning_timeout_failure,
     _get_targeted_second_repair_reason,
@@ -1794,6 +1795,8 @@ def execute_planning_phase(
                 output_text = candidate_recovery["output_text"]
                 plan_verdict = candidate_recovery["plan_verdict"]
             _emit_repair_outcome_if_pending(ctx, retry_state, plan_verdict)
+            if plan_verdict.accepted:
+                emit_final_repair_outcome_summary(ctx, retry_state, plan_verdict)
             _emit_planning_phase_finished(
                 ctx,
                 plan_verdict=plan_verdict,
@@ -2014,6 +2017,7 @@ def execute_planning_phase(
                 # Repair already attempted and validation still fails — abort
                 # instead of looping through more repair calls (prevents the
                 # plan→error→repair→retry chain from burning minutes of budget).
+                emit_final_repair_outcome_summary(ctx, retry_state, plan_verdict)
                 ctx.orchestration_state.status = OrchestrationStatus.ABORTED
                 ctx.orchestration_state.abort_reason = (
                     "Planning validation failed after repair: "
