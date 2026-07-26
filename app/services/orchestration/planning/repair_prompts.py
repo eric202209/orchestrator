@@ -1620,6 +1620,7 @@ def _build_stale_replace_target_preservation_guidance(
             f"- Existing source targets from the current plan: {_format_paths(existing_source_paths)}.",
             f"- Required source targets from test/source contract: {_format_paths(required_source_paths)}.",
             "- Do not invent unseen test files or add expected_files entries for files not present in workspace evidence.",
+            '- REQUIRED: the final step MUST include a non-empty "verification" field containing a real project test command.',
             "- Keep simple scalar verification on final pytest/test steps, for example `python3 -m pytest -q`.",
         ]
     )
@@ -2087,6 +2088,7 @@ Repair stale replace_in_file output. Target: {target_line}.
 Use write_file for the target with full corrected file content. Do not use replace_in_file.
 Preserve current imports and public functions. Use JSON string content with escaped newlines.
 Return inspect, write_file implementation, and verification steps only.
+- REQUIRED: the final step MUST include a non-empty "verification" field containing a real project test command.
 """
     return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
 

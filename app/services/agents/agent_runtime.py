@@ -119,13 +119,13 @@ def validate_runtime_capabilities(
         raise RuntimeCapabilityError(
             f"Runtime backend '{descriptor.name}' is not implemented."
         )
-    if not descriptor.health.available or not descriptor.health.ready:
+    if dispatch and (not descriptor.health.available or not descriptor.health.ready):
         errors = "; ".join(descriptor.health.errors) or descriptor.health.status
         raise RuntimeCapabilityError(
             f"Runtime backend '{descriptor.name}' is not ready for {role.value}: {errors}."
         )
     provider_errors = _role_provider_configuration_errors(role)
-    if provider_errors:
+    if dispatch and provider_errors:
         raise RuntimeCapabilityError(
             f"Runtime role '{role.value}' is not provider-ready: "
             + "; ".join(provider_errors)
@@ -147,19 +147,19 @@ def validate_runtime_capabilities(
     resolved_context = effective_context_tokens
     if resolved_context is None:
         resolved_context = _configured_context_tokens(role)
-    if resolved_context is None:
+    if resolved_context is None and dispatch:
         resolved_context = descriptor.capabilities.max_context_tokens
     if role in {
         BackendRole.REPAIR,
         BackendRole.DEBUG_REPAIR,
         BackendRole.COMPLETION_REPAIR,
     }:
-        if resolved_context is None:
+        if resolved_context is None and dispatch:
             raise RuntimeCapabilityError(
                 f"Runtime role '{role.value}' has no verified effective context capacity; "
                 f"at least {required_context_tokens} tokens are required."
             )
-        if resolved_context < required_context_tokens:
+        if resolved_context is not None and resolved_context < required_context_tokens:
             raise RuntimeCapabilityError(
                 f"Runtime role '{role.value}' effective context {resolved_context} is below "
                 f"the required {required_context_tokens} tokens."
@@ -559,7 +559,7 @@ def invoke_runtime_prompt(
 
     if role is not None:
         descriptor = getattr(runtime, "backend_descriptor", None)
-        if descriptor is not None:
+        if isinstance(descriptor, BackendDescriptor):
             validate_runtime_capabilities(
                 descriptor,
                 role,
