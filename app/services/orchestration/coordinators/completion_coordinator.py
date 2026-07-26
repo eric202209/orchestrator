@@ -25,6 +25,10 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     build_debug_feedback_envelope,
     persist_debug_feedback_envelope,
 )
+from app.services.orchestration.diagnostics.outcome_observability import (
+    bounded_exception_message,
+    record_outcome_checkpoint,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.execution.runtime import (
@@ -153,6 +157,39 @@ class CompletionCoordinator:
         orchestration_state = ctx.orchestration_state
         emit_live = ctx.emit_live
         logger = ctx.logger
+
+        def _checkpoint(
+            operation: str,
+            status: str,
+            details: Optional[dict[str, Any]] = None,
+        ) -> None:
+            record_outcome_checkpoint(
+                ctx=ctx,
+                operation=operation,
+                status=status,
+                append_orchestration_event_fn=append_orchestration_event,
+                logger=logger,
+                details=details,
+            )
+
+        def _checkpointed(operation: str, fn: Callable[[], Any]) -> Any:
+            _checkpoint(operation, "entry")
+            try:
+                result = fn()
+            except Exception as checkpointed_error:
+                _checkpoint(
+                    operation,
+                    "failure",
+                    {
+                        "exception_type": type(checkpointed_error).__name__,
+                        "exception_message": bounded_exception_message(
+                            checkpointed_error
+                        ),
+                    },
+                )
+                raise
+            _checkpoint(operation, "success")
+            return result
 
         logger.info("[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion")
         emit_phase_event(
@@ -913,44 +950,50 @@ class CompletionCoordinator:
             and ctx.task_execution_id
             and hasattr(task_service, "persist_task_execution_change_set")
         ):
-            task_change_set = task_service.persist_task_execution_change_set(
-                project,
-                task,
-                session_id=session_id,
-                task_execution_id=ctx.task_execution_id,
-                snapshot_key=workspace_snapshot_key(task_id, ctx.task_execution_id),
-                target_dir=Path(orchestration_state.project_dir),
-                preserve_project_root_rules=runs_in_canonical_baseline,
-                status=TaskStatus.DONE.value,
-                workspace_review_policy=workspace_review_policy,
-                workflow_profile=getattr(ctx, "workflow_profile", None),
-                commit=False,
+            task_change_set = _checkpointed(
+                "change_set_persisted",
+                lambda: task_service.persist_task_execution_change_set(
+                    project,
+                    task,
+                    session_id=session_id,
+                    task_execution_id=ctx.task_execution_id,
+                    snapshot_key=workspace_snapshot_key(task_id, ctx.task_execution_id),
+                    target_dir=Path(orchestration_state.project_dir),
+                    preserve_project_root_rules=runs_in_canonical_baseline,
+                    status=TaskStatus.DONE.value,
+                    workspace_review_policy=workspace_review_policy,
+                    workflow_profile=getattr(ctx, "workflow_profile", None),
+                    commit=False,
+                ),
             )
 
         if task_change_set:
-            completion_validation = ValidatorService.validate_task_completion(
-                project_dir=orchestration_state.project_dir,
-                plan=orchestration_state.plan,
-                task_prompt=prompt,
-                execution_profile=execution_profile,
-                workspace_consistency=workspace_consistency,
-                title=task.title if task else None,
-                description=task.description if task else None,
-                relaxed_mode=orchestration_state.relaxed_mode,
-                completion_evidence={
-                    "summary_generated": bool(summary_result),
-                    "execution_results_count": len(
-                        orchestration_state.execution_results
-                    ),
-                    "reported_changed_files": reported_changed_files,
-                    "change_set": task_change_set,
-                    "completion_verification_command": completion_verification_command,
-                    "completion_verification_source": completion_verification_source,
-                    "behavior_baseline": behavior_baseline_result,
-                },
-                validation_severity=ctx.validation_severity,
-                workflow_stage=ctx.workflow_stage,
-                is_first_ordered_task=bool(task and task.plan_position == 1),
+            completion_validation = _checkpointed(
+                "post_change_set_completion_validation",
+                lambda: ValidatorService.validate_task_completion(
+                    project_dir=orchestration_state.project_dir,
+                    plan=orchestration_state.plan,
+                    task_prompt=prompt,
+                    execution_profile=execution_profile,
+                    workspace_consistency=workspace_consistency,
+                    title=task.title if task else None,
+                    description=task.description if task else None,
+                    relaxed_mode=orchestration_state.relaxed_mode,
+                    completion_evidence={
+                        "summary_generated": bool(summary_result),
+                        "execution_results_count": len(
+                            orchestration_state.execution_results
+                        ),
+                        "reported_changed_files": reported_changed_files,
+                        "change_set": task_change_set,
+                        "completion_verification_command": completion_verification_command,
+                        "completion_verification_source": completion_verification_source,
+                        "behavior_baseline": behavior_baseline_result,
+                    },
+                    validation_severity=ctx.validation_severity,
+                    workflow_stage=ctx.workflow_stage,
+                    is_first_ordered_task=bool(task and task.plan_position == 1),
+                ),
             )
             record_validation_verdict(
                 db,
@@ -1026,18 +1069,24 @@ class CompletionCoordinator:
         )
         _tmpl_review_policy = _resolve_template_review_policy(task)
         if hasattr(task_service, "change_set_review_decision"):
-            review_decision = task_service.change_set_review_decision(
-                task_change_set,
-                workspace_review_policy=workspace_review_policy,
-                workflow_profile=getattr(ctx, "workflow_profile", None),
-                template_review_policy=_tmpl_review_policy,
+            review_decision = _checkpointed(
+                "review_decision",
+                lambda: task_service.change_set_review_decision(
+                    task_change_set,
+                    workspace_review_policy=workspace_review_policy,
+                    workflow_profile=getattr(ctx, "workflow_profile", None),
+                    template_review_policy=_tmpl_review_policy,
+                ),
             )
         else:
-            review_decision = decide_change_set_review(
-                task_change_set,
-                workspace_review_policy=workspace_review_policy,
-                workflow_profile=getattr(ctx, "workflow_profile", None),
-                template_review_policy=_tmpl_review_policy,
+            review_decision = _checkpointed(
+                "review_decision",
+                lambda: decide_change_set_review(
+                    task_change_set,
+                    workspace_review_policy=workspace_review_policy,
+                    workflow_profile=getattr(ctx, "workflow_profile", None),
+                    template_review_policy=_tmpl_review_policy,
+                ),
             )
         should_hold_for_review = bool(review_decision["held_for_review"])
         evaluator_result = None
@@ -1047,13 +1096,16 @@ class CompletionCoordinator:
             and not should_hold_for_review
             and review_decision.get("outcome") == "auto_promote"
         ):
-            evaluator_result = _run_evaluator(
-                runtime_service=runtime_service,
-                orchestration_state=orchestration_state,
-                prompt=prompt,
-                summary=wm_summary,
-                emit_live=emit_live,
-                logger=logger,
+            evaluator_result = _checkpointed(
+                "evaluator_completed",
+                lambda: _run_evaluator(
+                    runtime_service=runtime_service,
+                    orchestration_state=orchestration_state,
+                    prompt=prompt,
+                    summary=wm_summary,
+                    emit_live=emit_live,
+                    logger=logger,
+                ),
             )
             if (evaluator_result or {}).get("verdict") == "NEEDS_REVIEW":
                 should_hold_for_review = True
@@ -1118,20 +1170,24 @@ class CompletionCoordinator:
                 )
             else:
                 if publish_captured_change_set:
-                    baseline_publish_result = (
-                        task_service.promote_change_set_into_baseline(
+                    baseline_publish_result = _checkpointed(
+                        "baseline_promotion",
+                        lambda: task_service.promote_change_set_into_baseline(
                             project,
                             task,
                             task_change_set,
                             lock_already_held=runs_in_canonical_baseline,
-                        )
+                        ),
                     )
                     baseline_publish_result["materialization_mode"] = (
                         "captured_change_set"
                     )
                 else:
-                    baseline_publish_result = (
-                        task_service.auto_publish_task_into_baseline(project, task)
+                    baseline_publish_result = _checkpointed(
+                        "baseline_promotion",
+                        lambda: task_service.auto_publish_task_into_baseline(
+                            project, task
+                        ),
                     )
                 baseline_publish_result["workspace_review_policy"] = (
                     workspace_review_policy
@@ -1149,8 +1205,9 @@ class CompletionCoordinator:
                 baseline_overview = task_service.validate_project_baseline(
                     project, current_task=task
                 )
-                baseline_publish_validation = (
-                    ValidatorService.validate_baseline_publish(
+                baseline_publish_validation = _checkpointed(
+                    "baseline_publish_validation",
+                    lambda: ValidatorService.validate_baseline_publish(
                         validation_profile=validation_profile,
                         baseline_path=baseline_materialization.get("baseline_path")
                         or "",
@@ -1169,7 +1226,7 @@ class CompletionCoordinator:
                         consistency_details=baseline_materialization.get("consistency"),
                         relaxed_mode=orchestration_state.relaxed_mode,
                         validation_severity=ctx.validation_severity,
-                    )
+                    ),
                 )
                 record_validation_verdict(
                     db,
@@ -1252,8 +1309,9 @@ class CompletionCoordinator:
             )
             and hasattr(task_service, "mark_task_execution_change_set_disposition")
         ):
-            disposition_record = (
-                task_service.mark_task_execution_change_set_disposition(
+            disposition_record = _checkpointed(
+                "change_set_disposition",
+                lambda: task_service.mark_task_execution_change_set_disposition(
                     task_execution_id=ctx.task_execution_id,
                     disposition="promoted",
                     reason=review_decision.get("reason") or "auto_promote",
@@ -1264,7 +1322,7 @@ class CompletionCoordinator:
                         "review_decision": review_decision,
                     },
                     commit=False,
-                )
+                ),
             )
             if disposition_record and baseline_publish_result:
                 baseline_publish_result["accepted_change_set_disposition"] = (
@@ -1284,38 +1342,47 @@ class CompletionCoordinator:
                 logger=logger,
             )
 
-        finalization = TaskCompletionFinalizer(
-            db=db,
-            task_service=task_service,
-        ).finalize_success(
-            ctx=ctx,
-            summary=wm_summary,
-            baseline_publish_result=baseline_publish_result,
-            completion_validation=completion_validation,
-            write_project_state_snapshot_fn=write_project_state_snapshot_fn,
-            write_progress_notes_fn=_pn_write_fn,
-            get_next_pending_project_task_fn=get_next_pending_project_task_fn,
-            get_latest_session_task_link_fn=get_latest_session_task_link_fn,
-            execute_orchestration_task_delay_fn=execute_orchestration_task_delay_fn,
+        finalization = _checkpointed(
+            "task_finalization",
+            lambda: TaskCompletionFinalizer(
+                db=db,
+                task_service=task_service,
+            ).finalize_success(
+                ctx=ctx,
+                summary=wm_summary,
+                baseline_publish_result=baseline_publish_result,
+                completion_validation=completion_validation,
+                write_project_state_snapshot_fn=write_project_state_snapshot_fn,
+                write_progress_notes_fn=_pn_write_fn,
+                get_next_pending_project_task_fn=get_next_pending_project_task_fn,
+                get_latest_session_task_link_fn=get_latest_session_task_link_fn,
+                execute_orchestration_task_delay_fn=execute_orchestration_task_delay_fn,
+            ),
         )
         from app.services.orchestration.working_memory import write_working_memory
 
-        write_working_memory(
-            orchestration_state=orchestration_state,
-            task=task,
-            summary=wm_summary,
-            logger=logger,
-            db=db,
-            guidance_backend=ctx.guidance_backend,
-            guidance_model_family=ctx.guidance_model_family,
+        _checkpointed(
+            "working_memory_write",
+            lambda: write_working_memory(
+                orchestration_state=orchestration_state,
+                task=task,
+                summary=wm_summary,
+                logger=logger,
+                db=db,
+                guidance_backend=ctx.guidance_backend,
+                guidance_model_family=ctx.guidance_model_family,
+            ),
         )
 
         from app.services.human_guidance.post_write_checker import (
             run_post_write_check_if_enabled,
         )
 
-        run_post_write_check_if_enabled(
-            ctx, reported_changed_files=reported_changed_files
+        _checkpointed(
+            "post_write_checker",
+            lambda: run_post_write_check_if_enabled(
+                ctx, reported_changed_files=reported_changed_files
+            ),
         )
 
         promoted_workspace_archive_result = finalization.get(
@@ -1339,6 +1406,8 @@ class CompletionCoordinator:
         )
 
         if build_task_report_payload_fn and render_task_report_fn:
+            _checkpoint("task_report_generation", "entry")
+            _report_completed = False
             try:
                 report_payload = build_task_report_payload_fn(db, task_id)
                 report_result = render_task_report_fn(
@@ -1368,10 +1437,21 @@ class CompletionCoordinator:
                         handle.write(report_content)
                     report_path.chmod(0o666)
                     logger.info("[REPORT] Task report saved to: %s", report_path)
+                _report_completed = True
             except Exception as report_error:
+                _checkpoint(
+                    "task_report_generation",
+                    "failure",
+                    {
+                        "exception_type": type(report_error).__name__,
+                        "exception_message": bounded_exception_message(report_error),
+                    },
+                )
                 logger.error(
                     "[REPORT] Failed to generate task report: %s", str(report_error)
                 )
+            if _report_completed:
+                _checkpoint("task_report_generation", "success")
 
         return {
             "status": "completed",

@@ -99,6 +99,8 @@ class EventType:
 
     # ── Diagnostics ──────────────────────────────────────────────────────────
     PLANNING_CONTEXT_PROVENANCE = "planning_context_provenance"
+    FAILURE_EVIDENCE_CAPTURED = "failure_evidence_captured"
+    OUTCOME_CHECKPOINT = "outcome_checkpoint"
 
     # ── Incremental execution (Slice J) ───────────────────────────────────────
     INCREMENTAL_ATTEMPTED = "incremental_attempted"

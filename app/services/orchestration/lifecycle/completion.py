@@ -8,6 +8,10 @@ from typing import Any, Callable, Dict, Optional
 
 from app.models import LogEntry, SessionTask, Task, TaskExecution, TaskStatus
 from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.diagnostics.outcome_observability import (
+    bounded_exception_message,
+    record_outcome_checkpoint,
+)
 from app.services.orchestration.run_state import (
     finalize_attempt_successful_completion,
     mark_task_attempt_pending,
@@ -50,6 +54,22 @@ class TaskCompletionFinalizer:
         session_id = ctx.session_id
         task_id = ctx.task_id
         orchestration_state = ctx.orchestration_state
+
+        def _checkpoint(
+            operation: str,
+            status: str,
+            details: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            record_outcome_checkpoint(
+                ctx=ctx,
+                operation=operation,
+                status=status,
+                append_orchestration_event_fn=append_orchestration_event,
+                logger=ctx.logger,
+                details=details,
+            )
+
+        _checkpoint("task_finalization_started", "entry")
 
         task_execution = (
             db.query(TaskExecution)
@@ -130,18 +150,32 @@ class TaskCompletionFinalizer:
         else:
             task.workspace_status = "ready" if task.task_subfolder else "not_created"
         task.completed_at = completed_at
-        append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
-            session_id=session_id,
-            task_id=task_id,
-            event_type=EventType.TASK_COMPLETED,
-            details={
-                "steps_completed": len(orchestration_state.plan),
-                "execution_profile": ctx.execution_profile,
-            },
-            phase="task_summary",
-            coordinator="CompletionCoordinator",
-        )
+        try:
+            append_orchestration_event(
+                project_dir=orchestration_state.project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                event_type=EventType.TASK_COMPLETED,
+                details={
+                    "steps_completed": len(orchestration_state.plan),
+                    "execution_profile": ctx.execution_profile,
+                },
+                phase="task_summary",
+                coordinator="CompletionCoordinator",
+            )
+        except Exception as completion_event_error:
+            _checkpoint(
+                "completion_event_persisted",
+                "failure",
+                {
+                    "exception_type": type(completion_event_error).__name__,
+                    "exception_message": bounded_exception_message(
+                        completion_event_error
+                    ),
+                },
+            )
+            raise
+        _checkpoint("completion_event_persisted", "success")
 
         write_progress_notes_fn(
             orchestration_state=orchestration_state,
@@ -224,29 +258,74 @@ class TaskCompletionFinalizer:
             else:
                 mark_session_completed(session, completed_at=datetime.now(UTC))
 
-        db.commit()
-        write_project_state_snapshot_fn(db, project, task, session_id)
+        try:
+            db.commit()
+        except Exception as authoritative_commit_error:
+            _checkpoint(
+                "authoritative_success_committed",
+                "failure",
+                {
+                    "exception_type": type(authoritative_commit_error).__name__,
+                    "exception_message": bounded_exception_message(
+                        authoritative_commit_error
+                    ),
+                },
+            )
+            raise
+        _checkpoint(
+            "authoritative_success_committed",
+            "success",
+            {"authoritative_success_recorded": True},
+        )
+        try:
+            write_project_state_snapshot_fn(db, project, task, session_id)
+        except Exception as snapshot_error:
+            _checkpoint(
+                "project_state_snapshot",
+                "failure",
+                {
+                    "exception_type": type(snapshot_error).__name__,
+                    "exception_message": bounded_exception_message(snapshot_error),
+                },
+            )
+            raise
+        _checkpoint("project_state_snapshot", "success")
 
         if baseline_publish_result:
+            _checkpoint("publication_log_persisted", "entry")
             publish_skipped = bool(baseline_publish_result.get("auto_publish_skipped"))
-            db.add(
-                LogEntry(
-                    session_id=session_id,
-                    session_instance_id=session.instance_id,
-                    task_id=task_id,
-                    level="INFO",
-                    message=(
-                        "[ORCHESTRATION] Held task workspace for manual review"
-                        if publish_skipped
-                        else (
-                            "[ORCHESTRATION] Published task workspace into canonical project baseline "
-                            f"({baseline_publish_result.get('files_copied', 0)} files)"
-                        )
-                    ),
-                    log_metadata=json.dumps(baseline_publish_result),
+            try:
+                db.add(
+                    LogEntry(
+                        session_id=session_id,
+                        session_instance_id=session.instance_id,
+                        task_id=task_id,
+                        level="INFO",
+                        message=(
+                            "[ORCHESTRATION] Held task workspace for manual review"
+                            if publish_skipped
+                            else (
+                                "[ORCHESTRATION] Published task workspace into canonical project baseline "
+                                f"({baseline_publish_result.get('files_copied', 0)} files)"
+                            )
+                        ),
+                        log_metadata=json.dumps(baseline_publish_result),
+                    )
                 )
-            )
-            db.commit()
+                db.commit()
+            except Exception as publication_log_error:
+                _checkpoint(
+                    "publication_log_persisted",
+                    "failure",
+                    {
+                        "exception_type": type(publication_log_error).__name__,
+                        "exception_message": bounded_exception_message(
+                            publication_log_error
+                        ),
+                    },
+                )
+                raise
+            _checkpoint("publication_log_persisted", "success")
 
         if (
             session

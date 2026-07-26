@@ -21,6 +21,11 @@ from app.runtime_naming import (
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import record_phase_event
+from app.services.orchestration.diagnostics.outcome_observability import (
+    build_failure_evidence,
+    persist_failure_evidence,
+    status_value,
+)
 from app.services.orchestration.execution.runtime import write_project_state_snapshot
 from app.services.orchestration.run_state import (
     mark_task_attempt_failed,
@@ -92,6 +97,8 @@ class FailureCoordinator:
         error_handler = ctx.error_handler if ctx else None
 
         # ── Phase 17A/17B: classify failure + route through recovery registry ───
+        _failure_event = None
+        _recovery_decision = None
         try:
             import asyncio
             import concurrent.futures
@@ -142,14 +149,6 @@ class FailureCoordinator:
             # 17A-6: wrapper_timeout_noise → annotate_and_continue
             # Timeout fired after the task already reached terminal state (DONE).
             # Treat as watchdog noise — do not mark task failed, do not re-raise.
-            if _recovery_decision.strategy == "annotate_and_continue":
-                logger.info(
-                    "[17A] wrapper_timeout_noise annotated; not propagating as task "
-                    "failure (session_id=%s task_id=%s)",
-                    session_id,
-                    task_id,
-                )
-                return
         except Exception as _17a_exc:
             logger.debug("[17A/17B] classifier/registry raised: %s", _17a_exc)
 
@@ -231,6 +230,65 @@ class FailureCoordinator:
             and getattr(task, "workspace_status", None) != "changes_requested"
         )
 
+        # Capture the current attempt before any failure transition or early
+        # recovery/annotation return can mutate durable state.
+        task_execution = _task_execution_for_context(db, ctx)
+        task_execution_id = task_execution.id if task_execution else None
+        task_status_before_failure = getattr(task, "status", None)
+        session_task_status_before_failure = getattr(session_task_link, "status", None)
+        task_execution_status_before_failure = getattr(task_execution, "status", None)
+        orchestration_status_before_failure = getattr(
+            orchestration_state, "status", None
+        )
+        authoritative_success_recorded = any(
+            status_value(status) in {TaskStatus.DONE.value, "done", "completed"}
+            for status in (
+                task_status_before_failure,
+                session_task_status_before_failure,
+                task_execution_status_before_failure,
+                orchestration_status_before_failure,
+            )
+        )
+        persist_failure_evidence(
+            evidence=build_failure_evidence(
+                exc=exc,
+                session_id=session_id,
+                task_id=task_id,
+                task_execution_id=task_execution_id,
+                orchestration_phase=getattr(orchestration_state, "current_phase", None),
+                task_status_before_failure=task_status_before_failure,
+                session_task_status_before_failure=session_task_status_before_failure,
+                task_execution_status_before_failure=task_execution_status_before_failure,
+                orchestration_status_before_failure=orchestration_status_before_failure,
+                failure_category=failure_category_for_retry,
+                failure_class=getattr(_failure_event, "failure_class", None),
+                retry_capacity=has_retry_capacity,
+                automatic_recovery_eligible=auto_recovery_eligible,
+                project_mutation_lock_classification=is_project_mutation_lock_conflict,
+                planning_lock_classification=is_planning_lock_wait_timeout,
+                timeout_classification=is_timeout,
+                authoritative_success_recorded=authoritative_success_recorded,
+            ),
+            project_dir=getattr(orchestration_state, "project_dir", None),
+            session_id=session_id,
+            task_id=task_id,
+            task_execution_id=task_execution_id,
+            session_instance_id=getattr(session, "instance_id", None),
+            append_orchestration_event_fn=append_orchestration_event,
+            record_live_log_fn=record_live_log_fn,
+            db=db,
+            logger=logger,
+        )
+
+        if getattr(_recovery_decision, "strategy", None) == "annotate_and_continue":
+            logger.info(
+                "[17A] wrapper_timeout_noise annotated; not propagating as task "
+                "failure (session_id=%s task_id=%s)",
+                session_id,
+                task_id,
+            )
+            return
+
         if orchestration_state and session_id and task_id:
             try:
                 append_orchestration_event(
@@ -246,8 +304,6 @@ class FailureCoordinator:
         if not session_task_link:
             session_task_link = get_latest_session_task_link_fn(db, session_id, task_id)
         completed_at = datetime.now(UTC)
-        task_execution = _task_execution_for_context(db, ctx)
-        task_execution_id = task_execution.id if task_execution else None
         mark_task_attempt_failed(
             task=task,
             session_task_link=session_task_link,
