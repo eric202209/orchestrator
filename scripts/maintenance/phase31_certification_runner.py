@@ -68,6 +68,8 @@ from scripts.maintenance.phase31_certification_evidence import (  # noqa: E402
 )
 from scripts.maintenance.phase31_certification_facts import (  # noqa: E402
     assemble_facts_from_live_run,
+    assemble_repair_telemetry_from_live_run,
+    assemble_timing_facts_from_live_run,
 )
 from scripts.maintenance.phase31_certification_scenarios import (  # noqa: E402
     scenario_contract,
@@ -223,6 +225,12 @@ def run_scenario(
 
     with SessionLocal() as db:
         facts = assemble_facts_from_live_run(db, session_id=session_id, task_id=task_id)
+        timing_facts = assemble_timing_facts_from_live_run(
+            db, session_id=session_id, task_id=task_id
+        )
+        repair_telemetry = assemble_repair_telemetry_from_live_run(
+            db, session_id=session_id, task_id=task_id
+        )
 
     result = classify_acceptance(contract, facts)
 
@@ -235,8 +243,12 @@ def run_scenario(
         provider_identity=facts.provider_identity,
         pre_hash=pre_hash,
         post_hash=post_hash,
-        timings={"total_seconds": total_seconds, "final_task_status": final_status},
-        repair_telemetry=[],
+        timings={
+            "total_seconds": total_seconds,
+            "final_task_status": final_status,
+            **timing_facts,
+        },
+        repair_telemetry=repair_telemetry,
         event_journal_pointer=f"session_id={session_id} task_id={task_id}",
     )
 

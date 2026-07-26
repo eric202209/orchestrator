@@ -1834,12 +1834,12 @@ def test_runtime_sandboxed_completion_leaves_workspace_ready_not_promoted(
     assert ctx.task.id in needs_review_ids
 
 
-def test_runtime_sandboxed_auto_promote_recommendation_keeps_change_set_captured(
+def test_runtime_sandboxed_auto_promote_materializes_change_set(
     db_session, tmp_path, monkeypatch
 ):
-    """A recommendation never records promotion without a real apply."""
+    """An auto-promote decision applies the captured change set before DONE."""
 
-    ctx, execution, _project_root, workspace_dir = _seed_legacy_finalize_ctx(
+    ctx, execution, project_root, workspace_dir = _seed_legacy_finalize_ctx(
         db_session, tmp_path
     )
     ctx.runs_in_canonical_baseline = True
@@ -1885,18 +1885,11 @@ def test_runtime_sandboxed_auto_promote_recommendation_keeps_change_set_captured
         .filter(TaskExecutionChangeSet.task_execution_id == execution.id)
         .one()
     )
-    assert ctx.task.workspace_status == "ready"
-    assert ctx.task.promoted_at is None
-    assert change_set.disposition == "captured"
+    assert ctx.task.workspace_status == "promoted"
+    assert ctx.task.promoted_at is not None
+    assert change_set.disposition == "promoted"
     assert change_set.review_decision["outcome"] == "auto_promote"
-
-    needs_review_ids = [
-        task_id
-        for (task_id,) in db_session.query(Task.id).filter(
-            Task.workspace_status == "ready"
-        )
-    ]
-    assert ctx.task.id in needs_review_ids
+    assert (project_root / "README.md").read_text(encoding="utf-8") == "captured\n"
 
 
 def test_auto_publish_all_policy_publishes_nontrivial_change_set(

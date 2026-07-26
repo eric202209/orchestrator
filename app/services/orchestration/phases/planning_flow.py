@@ -1383,6 +1383,11 @@ def execute_planning_phase(
                 semantic_violation_codes = _semantic_codes_for_immediate_repair_issues(
                     blocking_repair_issues
                 )
+                _record_repair_target(
+                    retry_state,
+                    codes=semantic_violation_codes,
+                    details={"immediate_repair_issues": blocking_repair_issues},
+                )
                 validation_knowledge_ctx = _retrieve_validation_repair_knowledge(
                     ctx,
                     query="Plan immediate repair issue: "
@@ -1456,6 +1461,7 @@ def execute_planning_phase(
                     oscillation_result = _abort_root_cause_oscillation_repair_loop(
                         ctx=ctx,
                         retry_state=retry_state,
+                        allow_targeted_repair=True,
                     )
                     if oscillation_result:
                         return oscillation_result
@@ -1873,6 +1879,12 @@ def execute_planning_phase(
                 continue
 
             if not plan_verdict.accepted:
+                second_repair_reason = _get_targeted_second_repair_reason(
+                    retry_state=retry_state,
+                    blocking_repair_issues=blocking_repair_issues,
+                    plan_verdict=plan_verdict,
+                    project_dir=ctx.orchestration_state.project_dir,
+                )
                 if retry_state.repair_prompt_used:
                     repeated_src_import_result = (
                         _abort_repeated_physical_src_import_repair(
@@ -1886,16 +1898,13 @@ def execute_planning_phase(
                     oscillation_result = _abort_root_cause_oscillation_repair_loop(
                         ctx=ctx,
                         retry_state=retry_state,
+                        allow_targeted_repair=bool(
+                            second_repair_reason and not second_repair_reason.cap_used
+                        ),
                     )
                     if oscillation_result:
                         return oscillation_result
 
-                second_repair_reason = _get_targeted_second_repair_reason(
-                    retry_state=retry_state,
-                    blocking_repair_issues=blocking_repair_issues,
-                    plan_verdict=plan_verdict,
-                    project_dir=ctx.orchestration_state.project_dir,
-                )
                 if second_repair_reason and not second_repair_reason.cap_used:
                     _record_repair_root_cause(
                         retry_state,
@@ -1907,6 +1916,7 @@ def execute_planning_phase(
                     oscillation_result = _abort_root_cause_oscillation_repair_loop(
                         ctx=ctx,
                         retry_state=retry_state,
+                        allow_targeted_repair=True,
                     )
                     if oscillation_result:
                         return oscillation_result

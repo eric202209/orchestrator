@@ -273,9 +273,59 @@ def repair_step_commands_with_self_correction(
         },
         expected_output="JSON object containing the repaired step fields.",
     )
-    repair_result = asyncio.run(
-        runtime_service.execute_task(repair_prompt, timeout_seconds=120)
-    )
+    repair_result: dict[str, Any] = {}
+    primary_error: Exception | None = None
+    try:
+        repair_result = asyncio.run(
+            runtime_service.execute_task(repair_prompt, timeout_seconds=120)
+        )
+    except Exception as exc:
+        primary_error = exc
+
+    repair_runtime_fallback = False
+    primary_output = str((repair_result or {}).get("output") or "").strip()
+    if (
+        primary_error is not None
+        or not primary_output
+        or (repair_result or {}).get("error")
+    ):
+        # A failed primary execution lane can return an empty response before
+        # the parser sees anything.  Give the existing role-owned repair lane
+        # one bounded attempt; this is provider/model agnostic and preserves
+        # the same strict JSON contract below.
+        try:
+            from app.services.agents.agent_runtime import (
+                BackendRole,
+                create_agent_runtime,
+            )
+
+            if getattr(runtime_service, "runtime_configuration", None) is not None:
+                fallback_runtime = create_agent_runtime(
+                    db, session_id, task_id, role=BackendRole.DEBUG_REPAIR
+                )
+                if fallback_runtime is not runtime_service:
+                    for attribute in ("project_id", "task_execution_id"):
+                        if hasattr(runtime_service, attribute) and hasattr(
+                            fallback_runtime, attribute
+                        ):
+                            setattr(
+                                fallback_runtime,
+                                attribute,
+                                getattr(runtime_service, attribute),
+                            )
+                    repair_result = asyncio.run(
+                        fallback_runtime.execute_task(
+                            repair_prompt, timeout_seconds=120
+                        )
+                    )
+                    repair_runtime_fallback = True
+        except Exception:
+            # Preserve the primary failure/empty result so the existing
+            # strict parser and diagnostic record remain authoritative.
+            pass
+
+    if primary_error is not None and not repair_runtime_fallback:
+        raise primary_error
     repair_output = extract_structured_text(repair_result.get("output", "{}"))
     success, repair_data, strategy_info = error_handler.attempt_json_parsing(
         repair_output, context="step_repair"
@@ -293,7 +343,11 @@ def repair_step_commands_with_self_correction(
             "WARN",
             f"[ORCHESTRATION] Step {step_index + 1} self-correction failed: {strategy_info}",
             session_instance_id=session_instance_id,
-            metadata={"phase": "step_validation", "strategy": strategy_info},
+            metadata={
+                "phase": "step_validation",
+                "strategy": strategy_info,
+                "repair_runtime_fallback": repair_runtime_fallback,
+            },
         )
         return None
 
@@ -317,7 +371,11 @@ def repair_step_commands_with_self_correction(
         "INFO",
         f"[ORCHESTRATION] Step {step_index + 1} repaired by self-correction",
         session_instance_id=session_instance_id,
-        metadata={"phase": "step_validation", "strategy": strategy_info},
+        metadata={
+            "phase": "step_validation",
+            "strategy": strategy_info,
+            "repair_runtime_fallback": repair_runtime_fallback,
+        },
     )
     return repaired_step
 

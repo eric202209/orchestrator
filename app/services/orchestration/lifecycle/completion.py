@@ -84,13 +84,15 @@ class TaskCompletionFinalizer:
             and task
             and ctx.runs_in_canonical_baseline
             and ctx.runtime_workspace_used
+            and not (
+                baseline_publish_result
+                and not baseline_publish_result.get("auto_publish_skipped")
+            )
         ):
-            # The task actually ran in a disposable Task Execution Sandbox
-            # (Runtime Workspace redirection): its output was captured into a
-            # durable, unapplied change-set artifact, not written into the
-            # canonical project root. Nothing has been applied, so this must
-            # not be labeled "promoted" -- only POST /tasks/{id}/accept may
-            # do that, after an operator reviews the captured change-set.
+            # A held runtime change set remains ready for operator review. An
+            # auto-promoted runtime change set has already crossed the physical
+            # publication boundary and falls through to the canonical-root
+            # promoted state below.
             task.workspace_status = "ready"
             existing_note = (getattr(task, "promotion_note", None) or "").strip()
             review_note = (

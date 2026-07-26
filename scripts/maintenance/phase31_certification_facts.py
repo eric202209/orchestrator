@@ -24,6 +24,7 @@ Read-only: only SQLAlchemy SELECT queries against the live DB. No mutation.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -80,6 +81,126 @@ def _mandatory_safety_flag_from_markers(
     return False
 
 
+def _structured_timestamp(entry: LogEntry) -> datetime | None:
+    value = getattr(entry, "created_at", None)
+    return value if isinstance(value, datetime) else None
+
+
+def _planning_entries_with_metadata(
+    entries: list[LogEntry],
+) -> list[tuple[LogEntry, dict[str, Any]]]:
+    return [
+        (entry, metadata)
+        for entry in entries
+        if (metadata := _load_metadata(entry)).get("phase") == "planning"
+    ]
+
+
+def assemble_timing_facts_from_live_run(
+    db: Session, *, session_id: int, task_id: int
+) -> dict[str, Any]:
+    """Read timing facts from structured phase metadata and LogEntry timestamps."""
+    entries = _completion_log_entries(db, session_id, task_id)
+    planning_entries = _planning_entries_with_metadata(entries)
+    planning_started = next(
+        (
+            _structured_timestamp(entry)
+            for entry, _metadata in planning_entries
+            if _structured_timestamp(entry) is not None
+        ),
+        None,
+    )
+    valid_plan_entry = next(
+        (
+            entry
+            for entry, metadata in planning_entries
+            if isinstance(metadata.get("steps"), int)
+            and metadata.get("steps", 0) > 0
+            and _structured_timestamp(entry) is not None
+        ),
+        None,
+    )
+    valid_plan_at = _structured_timestamp(valid_plan_entry) if valid_plan_entry else None
+    time_to_valid_plan = None
+    if planning_started is not None and valid_plan_at is not None:
+        time_to_valid_plan = round(
+            max(0.0, (valid_plan_at - planning_started).total_seconds()), 3
+        )
+
+    repair_durations = [
+        float(metadata["duration_seconds"])
+        for _entry, metadata in planning_entries
+        if metadata.get("attempt") == "repair"
+        and isinstance(metadata.get("duration_seconds"), (int, float))
+    ]
+    return {
+        "time_to_valid_plan_seconds": time_to_valid_plan,
+        "planning_repair_durations_seconds": repair_durations,
+    }
+
+
+def assemble_repair_telemetry_from_live_run(
+    db: Session, *, session_id: int, task_id: int
+) -> list[dict[str, Any]]:
+    """Expose existing structured planning-repair events without message parsing."""
+    entries = _completion_log_entries(db, session_id, task_id)
+    telemetry: list[dict[str, Any]] = []
+    for entry, metadata in _planning_entries_with_metadata(entries):
+        is_repair_completion = (
+            metadata.get("attempt") == "repair"
+            and isinstance(metadata.get("duration_seconds"), (int, float))
+        )
+        is_repair_outcome = isinstance(metadata.get("target_outcomes"), dict)
+        is_arbitration = "outcome" in metadata and "repair_attempts" in metadata
+        if not (is_repair_completion or is_repair_outcome or is_arbitration):
+            continue
+        telemetry.append(
+            {
+                "log_entry_id": entry.id,
+                "created_at": (
+                    _structured_timestamp(entry).isoformat()
+                    if _structured_timestamp(entry) is not None
+                    else None
+                ),
+                "event": (
+                    "planning_repair_completed"
+                    if is_repair_completion
+                    else (
+                        "planning_repair_outcome_final"
+                        if is_repair_outcome
+                        else "planning_repair_arbitration"
+                    )
+                ),
+                "metadata": metadata,
+            }
+        )
+    return telemetry
+
+
+def _repair_outcome_facts(
+    telemetry: list[dict[str, Any]],
+) -> tuple[Optional[bool], Optional[bool]]:
+    final_outcomes: list[dict[str, Any]] = []
+    for record in telemetry:
+        metadata = record.get("metadata") or {}
+        outcomes = metadata.get("target_outcomes")
+        if isinstance(outcomes, dict):
+            final_outcomes.extend(
+                value for value in outcomes.values() if isinstance(value, dict)
+            )
+    if not final_outcomes:
+        return None, None
+    consistent = all(
+        value.get("repair_outcome_consistent") is True for value in final_outcomes
+    )
+    repeated = any(
+        value.get("target_final_status")
+        in {"REPEATED_AND_EXHAUSTED", "OUTCOME_INCONSISTENT"}
+        for value in final_outcomes
+    )
+    return consistent, repeated
+
+
 def assemble_facts_from_live_run(
     db: Session,
     *,
@@ -105,6 +226,12 @@ def assemble_facts_from_live_run(
     execution_completed = task_status in {"done", "failed", "cancelled"}
 
     entries = _completion_log_entries(db, session_id, task_id)
+    repair_telemetry = assemble_repair_telemetry_from_live_run(
+        db, session_id=session_id, task_id=task_id
+    )
+    repair_outcome_consistent, target_repeated = _repair_outcome_facts(
+        repair_telemetry
+    )
 
     baseline_publish_result: Optional[dict[str, Any]] = None
     for entry in entries:
@@ -168,8 +295,8 @@ def assemble_facts_from_live_run(
         duplicate_execution=_mandatory_safety_flag_from_markers(
             entries, _DUPLICATE_EXECUTION_MARKERS
         ),
-        repair_outcome_consistent=None,
-        target_violation_repeated_after_repair=None,
+        repair_outcome_consistent=repair_outcome_consistent,
+        target_violation_repeated_after_repair=target_repeated,
         terminal_facts_contradictory=False,
         provider_identity=resolved_provider_identity,
         reason_hint=reason_hint,

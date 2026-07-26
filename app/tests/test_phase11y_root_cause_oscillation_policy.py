@@ -1,9 +1,33 @@
 from app.services.orchestration.phases.planning_support import (
     _PlanningRetryState,
+    _abort_root_cause_oscillation_repair_loop,
     _record_repair_root_cause,
     _root_cause_oscillation_details,
     _verifier_failures_decreased_materially,
 )
+
+
+def test_oscillation_guard_defers_to_available_targeted_repair():
+    retry_state = _PlanningRetryState()
+    _record_repair_root_cause(
+        retry_state,
+        root_cause="stale_replace",
+        stage="planning_immediate_repair_issue",
+    )
+    _record_repair_root_cause(
+        retry_state,
+        root_cause="missing_verification",
+        stage="planning_repair_arbitration",
+    )
+
+    assert (
+        _abort_root_cause_oscillation_repair_loop(
+            ctx=None,
+            retry_state=retry_state,
+            allow_targeted_repair=True,
+        )
+        is None
+    )
 
 
 def test_oscillation_policy_does_not_trigger_when_planning_repair_accepts():

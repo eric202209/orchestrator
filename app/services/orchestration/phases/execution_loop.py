@@ -1897,6 +1897,34 @@ def execute_step_loop(
 
         debug_runtime_kwargs: dict[str, Any] = {}
         debug_repair_runtime = None
+
+        def _ensure_role_owned_debug_repair_runtime():
+            nonlocal debug_repair_runtime
+            if debug_repair_runtime is not None:
+                return debug_repair_runtime
+            if getattr(runtime_service, "runtime_configuration", None) is None:
+                return None
+            from app.services.agents.agent_runtime import (
+                BackendRole,
+                create_agent_runtime,
+            )
+
+            candidate = create_agent_runtime(
+                ctx.db,
+                ctx.session_id,
+                ctx.task_id,
+                role=BackendRole.DEBUG_REPAIR,
+            )
+            if candidate is runtime_service:
+                return None
+            for attribute in ("project_id", "task_execution_id"):
+                if hasattr(runtime_service, attribute) and hasattr(
+                    candidate, attribute
+                ):
+                    setattr(candidate, attribute, getattr(runtime_service, attribute))
+            debug_repair_runtime = candidate
+            return debug_repair_runtime
+
         if is_bounded_debug_repair_mode(debug_prompt_mode):
             debug_runtime_kwargs = {
                 "diagnostic_label": BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL,
@@ -1927,37 +1955,57 @@ def execute_step_loop(
                 },
             }
 
-            if getattr(runtime_service, "runtime_configuration", None) is not None:
-                from app.services.agents.agent_runtime import (
-                    BackendRole,
-                    create_agent_runtime,
-                )
-
-                debug_repair_runtime = create_agent_runtime(
-                    ctx.db,
-                    ctx.session_id,
-                    ctx.task_id,
-                    role=BackendRole.DEBUG_REPAIR,
-                )
-                for attribute in ("project_id", "task_execution_id"):
-                    if hasattr(runtime_service, attribute) and hasattr(
-                        debug_repair_runtime, attribute
-                    ):
-                        setattr(
-                            debug_repair_runtime,
-                            attribute,
-                            getattr(runtime_service, attribute),
-                        )
+            _ensure_role_owned_debug_repair_runtime()
 
         def _invoke_debug_repair(prompt_text: str) -> dict[str, Any]:
             if debug_repair_runtime is None:
-                return _run_coroutine(
-                    runtime_service.execute_task(
-                        prompt_text,
-                        timeout_seconds=DEBUG_TIMEOUT_SECONDS,
-                        **debug_runtime_kwargs,
+                primary_error: Exception | None = None
+                try:
+                    result = _run_coroutine(
+                        runtime_service.execute_task(
+                            prompt_text,
+                            timeout_seconds=DEBUG_TIMEOUT_SECONDS,
+                            **debug_runtime_kwargs,
+                        )
                     )
+                except Exception as exc:
+                    primary_error = exc
+                    result = {}
+                result = dict(result or {})
+                primary_output = str(result.get("output") or "").strip()
+                needs_role_fallback = bool(
+                    primary_error
+                    or not primary_output
+                    or result.get("error")
+                    or result.get("status") == "failed"
                 )
+                if needs_role_fallback:
+                    try:
+                        fallback_runtime = _ensure_role_owned_debug_repair_runtime()
+                    except Exception:
+                        fallback_runtime = None
+                    if fallback_runtime is not None:
+                        try:
+                            fallback_result = dict(
+                                _run_coroutine(
+                                    fallback_runtime.execute_task(
+                                        prompt_text,
+                                        timeout_seconds=DEBUG_TIMEOUT_SECONDS,
+                                        **debug_runtime_kwargs,
+                                    )
+                                )
+                                or {}
+                            )
+                            diagnostics = dict(fallback_result.get("diagnostics") or {})
+                            diagnostics["repair_runtime_fallback"] = True
+                            fallback_result["diagnostics"] = diagnostics
+                            return fallback_result
+                        except Exception:
+                            if primary_error is None:
+                                raise
+                if primary_error is not None:
+                    raise primary_error
+                return result
             optimized_prompt = optimize_prompt(prompt_text, max_tokens=25000)
             options = RuntimeInvocationOptions(
                 timeout_seconds=float(DEBUG_TIMEOUT_SECONDS),
@@ -2155,6 +2203,59 @@ def execute_step_loop(
                         if success
                         else None
                     )
+                if (
+                    not diff_scoped_compliance_retry
+                    and success
+                    and normalization_result is not None
+                    and normalization_result.payload is None
+                    and not compliance_retry_attempted
+                ):
+                    # JSON shape compliance is a separate contract from JSON
+                    # syntax.  Give the bounded repair lane its existing one
+                    # retry with the concrete normalizer rejection instead of
+                    # terminalizing a parseable but repairable response.
+                    compliance_retry_attempted = True
+                    rejection_reason = (
+                        normalization_result.rejection_reason
+                        or "bounded_repair_shape_rejected"
+                    )
+                    compliance_prompt = (
+                        build_json_compliance_retry_prompt(
+                            repair_output,
+                            expected_shape="array or object",
+                        )
+                        + "\nThe JSON parsed, but the bounded repair contract rejected it for: "
+                        + str(rejection_reason)
+                        + ". Return a contract-compliant repair payload only."
+                    )
+                    try:
+                        compliance_result = _invoke_debug_repair(compliance_prompt)
+                        compliance_output = extract_structured_text(
+                            compliance_result.get("output", "{}")
+                        )
+                        final_repair_output = compliance_output
+                        success, parsed_repair, strategy_info = (
+                            error_handler.attempt_json_parsing(
+                                compliance_output,
+                                context=BOUNDED_DEBUG_REPAIR_COMPLIANCE_RETRY_CONTEXT,
+                            )
+                        )
+                        compliance_retry_succeeded = bool(success)
+                        if success:
+                            normalization_result = (
+                                normalize_bounded_debug_repair_payload_detailed(
+                                    parsed_repair,
+                                    envelope=debug_feedback_envelope,
+                                    source_edit_context=source_edit_context,
+                                )
+                            )
+                    except Exception as compliance_error:
+                        success = False
+                        parsed_repair = None
+                        strategy_info = (
+                            "Compliance retry failed: " f"{str(compliance_error)[:200]}"
+                        )
+                        compliance_retry_succeeded = False
                 debug_data = (
                     normalization_result.payload if normalization_result else None
                 )
@@ -2224,7 +2325,12 @@ def execute_step_loop(
                         },
                     )
                     raise ValueError(
-                        f"Invalid bounded debug repair output: {strategy_info}"
+                        "Invalid bounded debug repair output: "
+                        + str(
+                            debug_repair_rejection_reason
+                            or strategy_info
+                            or "bounded_repair_contract_rejected"
+                        )
                     )
             else:
                 success, debug_data, strategy_info = coerce_debug_step_result(

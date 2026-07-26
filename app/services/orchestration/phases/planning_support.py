@@ -1042,7 +1042,14 @@ def _abort_root_cause_oscillation_repair_loop(
     *,
     ctx: OrchestrationRunContext,
     retry_state: Any,
+    allow_targeted_repair: bool = False,
 ) -> dict[str, str] | None:
+    # A distinct root cause can be an intentional second-pass target (for
+    # example stale replacement followed by missing verification).  That is
+    # bounded repair progress, not oscillation; the caller still enforces the
+    # per-target repair cap.
+    if allow_targeted_repair:
+        return None
     details = _root_cause_oscillation_details(retry_state)
     if not details:
         return None

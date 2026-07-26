@@ -1081,7 +1081,16 @@ class CompletionCoordinator:
             )
         baseline_publish_result = None
         baseline_publish_validation = None
-        if project and task.task_subfolder and not runs_in_canonical_baseline:
+        publish_captured_change_set = bool(
+            project
+            and task_change_set
+            and runs_in_canonical_baseline
+            and ctx.runtime_workspace_used
+        )
+        if project and (
+            (task.task_subfolder and not runs_in_canonical_baseline)
+            or publish_captured_change_set
+        ):
             if should_hold_for_review:
                 baseline_publish_result = {
                     "auto_publish_skipped": True,
@@ -1108,9 +1117,19 @@ class CompletionCoordinator:
                     },
                 )
             else:
-                baseline_publish_result = task_service.auto_publish_task_into_baseline(
-                    project, task
-                )
+                if publish_captured_change_set:
+                    baseline_publish_result = (
+                        task_service.promote_change_set_into_baseline(
+                            project, task, task_change_set
+                        )
+                    )
+                    baseline_publish_result["materialization_mode"] = (
+                        "captured_change_set"
+                    )
+                else:
+                    baseline_publish_result = (
+                        task_service.auto_publish_task_into_baseline(project, task)
+                    )
                 baseline_publish_result["workspace_review_policy"] = (
                     workspace_review_policy
                 )
