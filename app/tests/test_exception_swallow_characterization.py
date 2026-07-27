@@ -251,15 +251,15 @@ def test_record_validation_verdict_event_write_failure_logs_warning_and_preserve
 _ARBI_MODULE = "app.services.orchestration.phases.planning_repair_arbitration_control"
 
 
-def test_arbitrate_bootstrap_contract_validator_exception_falls_through_to_accept(
+def test_arbitrate_bootstrap_contract_validator_exception_fails_closed(
     tmp_path, monkeypatch
 ):
-    """HIGH RISK #17: planning_repair_arbitration_control.py:167.
+    """HIGH RISK #17: planning_repair_arbitration_control.py:293.
 
     When ValidatorService.validate_plan raises inside the Bootstrap Contract
-    pre-check, the exception is swallowed and bootstrap_verdict is set to None.
-    Characterization: the candidate falls through to acceptance without a contract
-    verdict; arbitrate_planning_repair_candidate returns {"action": "none"}.
+    pre-check, the exception is swallowed and converted to a rejected verdict.
+    Characterization: the candidate is rejected closed and arbitration continues
+    through the bounded repair path.
     """
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
@@ -286,7 +286,7 @@ def test_arbitrate_bootstrap_contract_validator_exception_falls_through_to_accep
         f"{_ARBI_MODULE}._emit_planning_repair_arbitration",
         lambda *a, **kw: None,
     )
-    # Validator raises — the exception is swallowed at line 167.
+    # Validator raises — the exception is swallowed at the pre-check boundary.
     monkeypatch.setattr(
         f"{_ARBI_MODULE}.ValidatorService.validate_plan",
         _raising,
@@ -308,8 +308,8 @@ def test_arbitrate_bootstrap_contract_validator_exception_falls_through_to_accep
     )
 
     # Characterization: function returns without raising.
-    # Characterization: candidate is accepted with no contract verdict.
-    assert result.get("action") == "none"
+    # Characterization: candidate is rejected closed rather than accepted.
+    assert result.get("action") == "continue"
 
 
 def test_reject_repair_candidate_event_write_failure_continues(tmp_path, monkeypatch):
