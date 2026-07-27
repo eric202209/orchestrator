@@ -69,6 +69,27 @@ def _step(
     }
 
 
+def _planner_contract(
+    *,
+    source="SOURCE_MATERIALIZED",
+    tests="EXPECTED_TEST_NOT_REQUIRED",
+    scenario_id="S1-2",
+):
+    return {
+        "contract_id": "ST23-PLANNER-001",
+        "contract_version": "v1",
+        "scenario_id": scenario_id,
+        "source_expectation": source,
+        "test_expectation": tests,
+        "structural_evidence": [
+            "CONTRACT_REGISTERED",
+            "SCENARIO_ID_MATCH",
+            "SOURCE_EXPECTATION_DECLARED",
+            "TEST_EXPECTATION_DECLARED",
+        ],
+    }
+
+
 def test_task1_bootstrap_rejects_inspect_only_plan(tmp_path):
     verdict = ValidatorService.validate_plan(
         [
@@ -123,12 +144,13 @@ def test_task1_bootstrap_rejects_requested_tests_without_test_files(tmp_path):
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(tests="EXPECTED_TEST_PRESENT"),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
     assert not verdict.accepted
     assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
-    assert contract["expected_test_reason"] == "explicit_code_test_intent"
+    assert contract["expected_test_reason"] == "expected_test_present"
 
 
 def test_task1_artifact_checklist_test_lifecycle_word_does_not_require_test_files(
@@ -165,12 +187,16 @@ def test_task1_artifact_checklist_test_lifecycle_word_does_not_require_test_file
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(
+            source="SOURCE_NOT_REQUIRED",
+            tests="EXPECTED_TEST_NOT_REQUIRED",
+        ),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
     assert verdict.accepted
     assert contract["bootstrap_task_type"] == "ARTIFACT_ONLY"
-    assert contract["expected_test_reason"] == "artifact_only_no_code_test_intent"
+    assert contract["expected_test_reason"] == "expected_test_not_required"
     assert (
         "task1_bootstrap_missing_expected_test_files" not in contract["violation_codes"]
     )
@@ -204,11 +230,16 @@ def test_task1_existing_project_tests_source_fix_does_not_require_test_materiali
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(
+            source="SOURCE_PRESENT",
+            tests="EXPECTED_TEST_NOT_REQUIRED",
+            scenario_id="S1-3",
+        ),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
     assert verdict.accepted
-    assert contract["expected_test_reason"] == "existing_project_tests_present"
+    assert contract["expected_test_reason"] == "expected_test_not_required"
     assert (
         "task1_bootstrap_missing_expected_test_files" not in contract["violation_codes"]
     )
@@ -313,6 +344,7 @@ def test_task1_repair_source_preservation_is_not_enough_when_tests_disappear(tmp
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(tests="EXPECTED_TEST_PRESENT"),
     )
 
     assert arbitration["source_materialization"]["status"] == "preserved"
@@ -350,6 +382,7 @@ def test_task1_bootstrap_contract_reports_required_artifacts_for_repair(tmp_path
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(tests="EXPECTED_TEST_PRESENT"),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
@@ -387,6 +420,7 @@ def test_task1_repair_rejection_reasons_include_same_contract_payload(tmp_path):
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(tests="EXPECTED_TEST_PRESENT"),
     )
 
     reasons = _build_repair_rejection_reasons(verdict.reasons, verdict.details)
@@ -426,6 +460,7 @@ def test_post_repair_task1_bootstrap_failure_gets_targeted_second_pass(tmp_path)
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(tests="EXPECTED_TEST_PRESENT"),
     )
     retry_state = _PlanningRetryState()
     retry_state.repair_prompt_used = True
@@ -471,6 +506,7 @@ def test_task1_bootstrap_accepts_source_test_and_verification(tmp_path):
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(tests="EXPECTED_TEST_PRESENT"),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
@@ -514,6 +550,10 @@ def test_task1_artifact_only_bootstrap_does_not_require_source_materialization(
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(
+            source="SOURCE_NOT_REQUIRED",
+            tests="EXPECTED_TEST_NOT_REQUIRED",
+        ),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
@@ -569,13 +609,17 @@ def test_task1_artifact_only_ignores_negated_source_code_instruction(tmp_path):
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(
+            source="SOURCE_NOT_REQUIRED",
+            tests="EXPECTED_TEST_NOT_REQUIRED",
+        ),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
     assert verdict.accepted
     assert contract["bootstrap_task_type"] == "ARTIFACT_ONLY"
-    assert contract["classification_evidence"]["has_source_intent"] is False
-    assert contract["classification_evidence"]["negated_source_intent_removed"] is True
+    assert contract["source_expectation"] == "SOURCE_NOT_REQUIRED"
+    assert "SOURCE_NOT_REQUIRED" in contract["structural_evidence_used"]
 
 
 def test_task1_artifact_only_bootstrap_still_requires_verification(tmp_path):
@@ -628,6 +672,10 @@ def test_task1_artifact_only_bootstrap_rejects_placeholder_artifact(tmp_path):
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(
+            source="SOURCE_NOT_REQUIRED",
+            tests="EXPECTED_TEST_NOT_REQUIRED",
+        ),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
@@ -660,11 +708,13 @@ def test_task1_mixed_bootstrap_keeps_source_materialization_required(tmp_path):
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(source="SOURCE_MATERIALIZED"),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
     assert not verdict.accepted
-    assert contract["bootstrap_task_type"] == "MIXED"
+    assert contract["bootstrap_task_type"] == "UNKNOWN"
+    assert contract["terminal_classification"] == "missing_source"
     assert (
         "task1_bootstrap_missing_expected_source_files" in contract["violation_codes"]
     )

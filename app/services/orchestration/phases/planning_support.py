@@ -89,6 +89,7 @@ def _validate_planning_plan(
         workflow_stage=ctx.workflow_stage,
         is_first_ordered_task=_is_first_ordered_task(ctx.task),
         workspace_identity=_planner_workspace_identity(ctx),
+        planner_contract=ctx.planner_contract,
     )
 
 

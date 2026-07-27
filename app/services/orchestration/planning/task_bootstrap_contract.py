@@ -7,9 +7,19 @@ import ast
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from app.services.orchestration.validation.workspace_checks import SOURCE_EXTENSIONS
+from app.services.orchestration.planning.planner_contract_registry import (
+    PLANNER_CONTRACT_ID,
+    PLANNER_CONTRACT_VERSION,
+    REGISTERED_PLANNER_SCENARIO_IDS,
+    REGISTERED_STRUCTURAL_FACTS,
+    SOURCE_EXPECTATIONS,
+    TEST_EXPECTATIONS,
+    registered_planner_contract,
+    truthy_structural_facts,
+)
 
 
 TEST_ROOTS = {"test", "tests", "spec", "specs"}
@@ -21,6 +31,7 @@ EXPECTED_TEST_REASON_UNKNOWN_CONSERVATIVE = "unknown_conservative"
 EXPECTED_TEST_REASON_ARTIFACT_ONLY_NO_CODE_TEST_INTENT = (
     "artifact_only_no_code_test_intent"
 )
+EXPECTED_TEST_REASON_NOT_REQUIRED = "expected_test_not_required"
 PLACEHOLDER_RE = re.compile(
     r"\b(?:pass|todo|fixme|stub|placeholder|notimplemented|notimplementederror)\b|"
     r"\bnot[-_\s]*implemented\b",
@@ -53,6 +64,17 @@ class TaskBootstrapContract:
     expected_test_reason: str | None = None
     minimum_implementation_evidence: bool = False
     minimum_artifact_evidence: bool = False
+    contract_id: str | None = None
+    contract_version: str | None = None
+    scenario_id: str | None = None
+    source_expectation: str | None = None
+    test_expectation: str | None = None
+    structural_evidence_used: list[str] = field(default_factory=list)
+    selected_planning_path: str | None = None
+    rejected_alternatives: list[str] = field(default_factory=list)
+    terminal_classification: str | None = None
+    limitation_id: str | None = None
+    planner_contract_status: str = "legacy_compatibility"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -72,6 +94,17 @@ class TaskBootstrapContract:
             "expected_test_reason": self.expected_test_reason,
             "minimum_implementation_evidence": self.minimum_implementation_evidence,
             "minimum_artifact_evidence": self.minimum_artifact_evidence,
+            "contract_id": self.contract_id,
+            "contract_version": self.contract_version,
+            "scenario_id": self.scenario_id,
+            "source_expectation": self.source_expectation,
+            "test_expectation": self.test_expectation,
+            "structural_evidence_used": list(self.structural_evidence_used),
+            "selected_planning_path": self.selected_planning_path,
+            "rejected_alternatives": list(self.rejected_alternatives),
+            "terminal_classification": self.terminal_classification,
+            "limitation_id": self.limitation_id,
+            "planner_contract_status": self.planner_contract_status,
         }
 
 
@@ -186,6 +219,260 @@ def _declared_expected_files(plan: list[dict[str, Any]]) -> set[str]:
             if path:
                 paths.add(path)
     return paths
+
+
+def _contract_value(
+    planner_contract: Mapping[str, Any] | None,
+    *names: str,
+) -> Any:
+    if not planner_contract:
+        return None
+    for name in names:
+        if name in planner_contract and planner_contract[name] is not None:
+            return planner_contract[name]
+    return None
+
+
+def _single_fact_value(
+    facts: set[str],
+    allowed: set[str] | frozenset[str],
+) -> tuple[str | None, bool]:
+    matches = sorted(facts & set(allowed))
+    if len(matches) == 1:
+        return matches[0], True
+    return None, not matches
+
+
+def _registered_planner_contract_resolution(
+    planner_contract: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Validate explicit planner facts without inferring missing values."""
+
+    if not isinstance(planner_contract, Mapping):
+        return {
+            "status": "missing_registered_contract_facts",
+            "contract_id": PLANNER_CONTRACT_ID,
+            "contract_version": PLANNER_CONTRACT_VERSION,
+            "scenario_id": None,
+            "source_expectation": None,
+            "test_expectation": None,
+            "facts": [],
+            "unknown_facts": [],
+            "missing_facts": ["CONTRACT_REGISTERED", "SCENARIO_ID_MATCH"],
+            "reason": "planner contract facts were not supplied",
+        }
+
+    contract_id = str(
+        _contract_value(planner_contract, "contract_id", "planner_contract_id") or ""
+    ).strip()
+    registered = registered_planner_contract(contract_id)
+    facts = truthy_structural_facts(
+        _contract_value(planner_contract, "structural_evidence", "facts")
+    )
+    unknown_facts = sorted(facts - REGISTERED_STRUCTURAL_FACTS)
+    if registered is None:
+        return {
+            "status": "unregistered_contract",
+            "contract_id": contract_id or None,
+            "contract_version": None,
+            "scenario_id": str(_contract_value(planner_contract, "scenario_id") or "")
+            or None,
+            "source_expectation": None,
+            "test_expectation": None,
+            "facts": sorted(facts),
+            "unknown_facts": unknown_facts,
+            "missing_facts": [],
+            "reason": "planner contract ID is not registered",
+        }
+
+    scenario_id = str(_contract_value(planner_contract, "scenario_id") or "").strip()
+    if not scenario_id and contract_id in {
+        "ST23-S2-1-v1",
+        "ST23-S2-2-v1",
+        "ST23-S2-3-v1",
+        "ST23-S2-4-v1",
+        "ST23-S2-5-v1",
+        "ST23-S3-1-v1",
+        "ST23-S3-2-v1",
+        "ST23-S3-3-v1",
+    }:
+        scenario_id = contract_id.removeprefix("ST23-").removesuffix("-v1")
+
+    source_expectation = str(
+        _contract_value(
+            planner_contract,
+            "source_expectation",
+            "source_state",
+            "SOURCE_EXPECTATION_DECLARED",
+        )
+        or ""
+    ).strip()
+    test_expectation = str(
+        _contract_value(
+            planner_contract,
+            "test_expectation",
+            "TEST_EXPECTATION_DECLARED",
+        )
+        or ""
+    ).strip()
+    source_fact, source_fact_absent = _single_fact_value(facts, SOURCE_EXPECTATIONS)
+    test_fact, test_fact_absent = _single_fact_value(facts, TEST_EXPECTATIONS)
+    if not source_expectation and source_fact_absent:
+        source_expectation = source_fact or ""
+    if not test_expectation and test_fact_absent:
+        test_expectation = test_fact or ""
+
+    missing_facts = sorted(
+        set(registered.required_facts)
+        - facts
+        - {
+            "SOURCE_EXPECTATION_DECLARED" if source_expectation else "",
+            "TEST_EXPECTATION_DECLARED" if test_expectation else "",
+        }
+        - {"CONTRACT_REGISTERED", "SCENARIO_ID_MATCH"}
+    )
+    if not contract_id:
+        missing_facts.append("CONTRACT_REGISTERED")
+    if not scenario_id:
+        missing_facts.append("SCENARIO_ID_MATCH")
+    elif scenario_id not in REGISTERED_PLANNER_SCENARIO_IDS:
+        missing_facts.append("SCENARIO_ID_MATCH")
+    if not source_expectation:
+        missing_facts.append("SOURCE_EXPECTATION_DECLARED")
+    if not test_expectation:
+        missing_facts.append("TEST_EXPECTATION_DECLARED")
+    if source_expectation and source_expectation not in SOURCE_EXPECTATIONS:
+        missing_facts.append("SOURCE_EXPECTATION_VALUE")
+    if test_expectation and test_expectation not in TEST_EXPECTATIONS:
+        missing_facts.append("TEST_EXPECTATION_VALUE")
+    if source_fact and source_expectation and source_fact != source_expectation:
+        missing_facts.append("SOURCE_EXPECTATION_CONFLICT")
+    if test_fact and test_expectation and test_fact != test_expectation:
+        missing_facts.append("TEST_EXPECTATION_CONFLICT")
+
+    version = str(
+        _contract_value(planner_contract, "contract_version", "version")
+        or registered.version
+    ).strip()
+    if version != registered.version:
+        missing_facts.append("CONTRACT_VERSION_MATCH")
+
+    status = "registered" if not missing_facts and not unknown_facts else "incomplete"
+    return {
+        "status": status,
+        "contract_id": contract_id,
+        "contract_version": version,
+        "scenario_id": scenario_id or None,
+        "source_expectation": source_expectation or None,
+        "test_expectation": test_expectation or None,
+        "facts": sorted(facts),
+        "unknown_facts": unknown_facts,
+        "missing_facts": sorted(set(missing_facts)),
+        "reason": (
+            "registered planner facts accepted"
+            if status == "registered"
+            else "registered planner facts are incomplete or conflicting"
+        ),
+    }
+
+
+def _strict_bootstrap_classification(
+    *,
+    source_expectation: str,
+    source_candidates: list[str],
+    artifact_candidates: list[str],
+) -> tuple[BootstrapTaskType, str, list[str]]:
+    source_required = source_expectation not in {
+        "SOURCE_NOT_REQUIRED",
+        "SOURCE_NOT_REQUIRED_FOR_OBSERVATION",
+    }
+    if not source_required:
+        return (
+            (
+                BootstrapTaskType.MIXED
+                if source_candidates
+                else BootstrapTaskType.ARTIFACT_ONLY
+            ),
+            "artifact_or_observation_bootstrap",
+            ["source_materialization_bootstrap", "existing_source_bootstrap"],
+        )
+    if not source_candidates:
+        return (
+            BootstrapTaskType.UNKNOWN,
+            "source_materialization_bootstrap",
+            ["artifact_or_observation_bootstrap", "existing_source_bootstrap"],
+        )
+    if artifact_candidates:
+        return (
+            BootstrapTaskType.MIXED,
+            "source_and_artifact_bootstrap",
+            ["artifact_or_observation_bootstrap"],
+        )
+    return (
+        BootstrapTaskType.SOURCE_CODE,
+        (
+            "source_materialization_bootstrap"
+            if source_expectation == "SOURCE_MATERIALIZED"
+            else "existing_source_bootstrap"
+        ),
+        ["artifact_or_observation_bootstrap"],
+    )
+
+
+def _strict_test_evidence(
+    *,
+    test_expectation: str,
+    test_candidates: list[str],
+    materialized: set[str],
+    existing_files: set[str],
+) -> tuple[str, list[str], list[str], list[str]]:
+    existing_tests = sorted(path for path in existing_files if _is_test_path(path))
+    generated_tests = sorted(path for path in materialized if _is_test_path(path))
+    known_tests = sorted(set(generated_tests) | set(existing_tests))
+    evidence: list[str] = ["TEST_EXPECTATION_DECLARED", "TEST_INTENT_DECISION_RECORDED"]
+    rejected: list[str] = []
+    if test_expectation == "EXPECTED_TEST_NOT_REQUIRED":
+        evidence.append("EXPECTED_TEST_NOT_REQUIRED")
+        rejected.extend(["require_test_file", "generate_test_file"])
+        return (
+            "tests_intentionally_absent" if not known_tests else "ready",
+            [],
+            evidence,
+            rejected,
+        )
+    if test_expectation == "EXPECTED_TEST_PRESENT":
+        if known_tests:
+            evidence.append("EXPECTED_TEST_PRESENT")
+            rejected.extend(["tests_intentionally_absent", "generate_test_file"])
+            return (
+                "ready",
+                sorted(set(test_candidates) | set(existing_tests)),
+                evidence,
+                rejected,
+            )
+        rejected.extend(["tests_intentionally_absent", "accept_missing_test_file"])
+        return "missing_required_tests", [], evidence, rejected
+    if test_expectation == "EXPECTED_TEST_GENERATED":
+        if generated_tests:
+            evidence.append("EXPECTED_TEST_GENERATED")
+            rejected.extend(["tests_intentionally_absent", "accept_existing_test_file"])
+            return (
+                "ready",
+                sorted(set(test_candidates) | set(generated_tests)),
+                evidence,
+                rejected,
+            )
+        rejected.extend(["tests_intentionally_absent", "accept_existing_test_file"])
+        return "bootstrap_incomplete", sorted(set(test_candidates)), evidence, rejected
+    return (
+        "contract_limitation",
+        [],
+        evidence,
+        [
+            "accept_unregistered_test_policy",
+            "infer_test_policy_from_prompt",
+        ],
+    )
 
 
 def _classify_bootstrap_task_type(
@@ -500,6 +787,8 @@ def build_task1_bootstrap_contract(
     task_prompt: str = "",
     forbidden_path_drift: list[str] | None = None,
     existing_files: set[str] | None = None,
+    planner_contract: Mapping[str, Any] | None = None,
+    require_registered_contract: bool = False,
 ) -> TaskBootstrapContract:
     materialized = _materialized_file_targets(plan)
     declared = _declared_expected_files(plan)
@@ -508,12 +797,9 @@ def build_task1_bootstrap_contract(
         _normalize_path(path) for path in existing_files or set()
     }
     known_paths = all_paths | normalized_existing_files
-    bootstrap_task_type, classification_evidence = _classify_bootstrap_task_type(
-        task_prompt=task_prompt,
-        all_paths=all_paths,
-    )
     source_candidates = sorted(path for path in all_paths if _is_source_path(path))
     test_candidates = sorted(path for path in all_paths if _is_test_path(path))
+    artifact_candidates = sorted(path for path in all_paths if _is_artifact_path(path))
     import_targets = _python_import_targets(plan)
     package_markers = _required_python_package_markers(
         import_targets=import_targets,
@@ -529,6 +815,187 @@ def build_task1_bootstrap_contract(
     required_source_files = sorted(set(source_candidates) | set(package_markers))
     required_test_files = sorted(set(test_candidates))
     required_artifacts = sorted(set(required_source_files) | set(required_test_files))
+    strict_mode = require_registered_contract or planner_contract is not None
+    if strict_mode:
+        resolution = _registered_planner_contract_resolution(planner_contract)
+        if resolution["status"] == "registered":
+            bootstrap_task_type, selected_path, rejected_alternatives = (
+                _strict_bootstrap_classification(
+                    source_expectation=resolution["source_expectation"],
+                    source_candidates=source_candidates,
+                    artifact_candidates=artifact_candidates,
+                )
+            )
+            (
+                test_classification,
+                strict_required_test_files,
+                test_evidence,
+                test_rejected,
+            ) = _strict_test_evidence(
+                test_expectation=resolution["test_expectation"],
+                test_candidates=test_candidates,
+                materialized=materialized,
+                existing_files=normalized_existing_files,
+            )
+            expected_test_reason = (
+                EXPECTED_TEST_REASON_NOT_REQUIRED
+                if resolution["test_expectation"] == "EXPECTED_TEST_NOT_REQUIRED"
+                else resolution["test_expectation"].lower()
+            )
+            required_test_files = strict_required_test_files
+            if resolution["test_expectation"] == "EXPECTED_TEST_NOT_REQUIRED":
+                required_test_files = []
+            required_artifacts = sorted(
+                set(required_source_files) | set(required_test_files)
+            )
+            if bootstrap_task_type == BootstrapTaskType.ARTIFACT_ONLY:
+                required_source_files = []
+                required_test_files = []
+                required_artifacts = artifact_candidates
+            structural_evidence_used = sorted(
+                {
+                    "CONTRACT_REGISTERED",
+                    "SCENARIO_ID_MATCH",
+                    "SOURCE_EXPECTATION_DECLARED",
+                    resolution["source_expectation"],
+                    *test_evidence,
+                }
+                & REGISTERED_STRUCTURAL_FACTS
+            )
+            if resolution["source_expectation"] == "SOURCE_PRESENT" and any(
+                _is_source_path(path) for path in normalized_existing_files
+            ):
+                structural_evidence_used.append("SOURCE_PRESENT")
+            if resolution["source_expectation"] == "SOURCE_MATERIALIZED" and any(
+                path in materialized for path in source_candidates
+            ):
+                structural_evidence_used.append("SOURCE_MATERIALIZED")
+            terminal_classification = test_classification
+            if bootstrap_task_type == BootstrapTaskType.UNKNOWN:
+                terminal_classification = "missing_source"
+            elif terminal_classification == "ready":
+                terminal_classification = "ready"
+            selected_path = f"{selected_path}:{resolution['test_expectation'].lower()}"
+            rejected_alternatives.extend(test_rejected)
+            classification_evidence = {
+                "source_paths": source_candidates[:20],
+                "test_paths": test_candidates[:20],
+                "artifact_paths": artifact_candidates[:20],
+                "contract_facts": sorted(resolution["facts"]),
+                "contract_status": resolution["status"],
+                "source_expectation": resolution["source_expectation"],
+                "test_expectation": resolution["test_expectation"],
+                "structural_evidence_used": sorted(set(structural_evidence_used)),
+            }
+            return TaskBootstrapContract(
+                bootstrap_task_type=bootstrap_task_type,
+                classification_evidence=classification_evidence,
+                expected_source_files=source_candidates,
+                expected_test_files=test_candidates,
+                required_artifacts=required_artifacts,
+                required_source_files=required_source_files,
+                required_test_files=required_test_files,
+                required_verification=_verification_commands(plan),
+                forbidden_path_drift=sorted(set(forbidden_path_drift or [])),
+                python_package_markers=package_markers,
+                python_import_targets=import_targets,
+                forbidden_python_src_imports=forbidden_src_imports,
+                missing_python_package_markers=missing_package_markers,
+                expected_test_reason=expected_test_reason,
+                minimum_implementation_evidence=_minimum_implementation_evidence(plan),
+                minimum_artifact_evidence=_minimum_artifact_evidence(plan),
+                contract_id=resolution["contract_id"],
+                contract_version=resolution["contract_version"],
+                scenario_id=resolution["scenario_id"],
+                source_expectation=resolution["source_expectation"],
+                test_expectation=resolution["test_expectation"],
+                structural_evidence_used=sorted(set(structural_evidence_used)),
+                selected_planning_path=selected_path,
+                rejected_alternatives=sorted(set(rejected_alternatives)),
+                terminal_classification=terminal_classification,
+                limitation_id=(
+                    "LIM-31D-03"
+                    if terminal_classification
+                    in {
+                        "missing_required_tests",
+                        "bootstrap_incomplete",
+                    }
+                    else None
+                ),
+                planner_contract_status="registered",
+            )
+
+        # A missing or malformed contract is itself a deterministic terminal
+        # limitation. No source/test policy is guessed from prompt wording or
+        # from absence in the workspace.
+        limitation_id = (
+            "LIM-31D-03" if resolution["unknown_facts"] == [] else "LIM-31D-04"
+        )
+        structural_evidence_used = sorted(
+            set(resolution["facts"]) & REGISTERED_STRUCTURAL_FACTS
+        )
+        if source_candidates and artifact_candidates:
+            fallback_task_type = BootstrapTaskType.MIXED
+        elif source_candidates:
+            fallback_task_type = BootstrapTaskType.SOURCE_CODE
+        elif artifact_candidates:
+            fallback_task_type = BootstrapTaskType.ARTIFACT_ONLY
+        else:
+            fallback_task_type = BootstrapTaskType.UNKNOWN
+        fallback_required_source_files = required_source_files
+        fallback_required_test_files = []
+        fallback_required_artifacts = sorted(
+            set(fallback_required_source_files) | set(fallback_required_test_files)
+        )
+        if fallback_task_type == BootstrapTaskType.ARTIFACT_ONLY:
+            fallback_required_source_files = []
+            fallback_required_artifacts = artifact_candidates
+        return TaskBootstrapContract(
+            bootstrap_task_type=fallback_task_type,
+            classification_evidence={
+                "source_paths": source_candidates[:20],
+                "test_paths": test_candidates[:20],
+                "artifact_paths": artifact_candidates[:20],
+                "contract_status": resolution["status"],
+                "contract_reason": resolution["reason"],
+                "contract_facts": sorted(resolution["facts"]),
+                "unknown_facts": list(resolution["unknown_facts"]),
+                "missing_facts": list(resolution["missing_facts"]),
+                "structural_evidence_used": structural_evidence_used,
+            },
+            expected_source_files=source_candidates,
+            expected_test_files=test_candidates,
+            required_artifacts=fallback_required_artifacts,
+            required_source_files=fallback_required_source_files,
+            required_test_files=fallback_required_test_files,
+            required_verification=_verification_commands(plan),
+            forbidden_path_drift=sorted(set(forbidden_path_drift or [])),
+            python_package_markers=package_markers,
+            python_import_targets=import_targets,
+            forbidden_python_src_imports=forbidden_src_imports,
+            missing_python_package_markers=missing_package_markers,
+            expected_test_reason=None,
+            minimum_implementation_evidence=_minimum_implementation_evidence(plan),
+            minimum_artifact_evidence=_minimum_artifact_evidence(plan),
+            contract_id=resolution["contract_id"],
+            contract_version=resolution["contract_version"],
+            scenario_id=resolution["scenario_id"],
+            structural_evidence_used=structural_evidence_used,
+            selected_planning_path="hold_for_registered_contract_facts",
+            rejected_alternatives=[
+                "infer_source_policy_from_prompt",
+                "infer_test_policy_from_prompt",
+                "treat_missing_file_as_contract_evidence",
+            ],
+            terminal_classification="terminal_limitation",
+            limitation_id=limitation_id,
+            planner_contract_status=resolution["status"],
+        )
+
+    bootstrap_task_type, classification_evidence = _classify_bootstrap_task_type(
+        task_prompt=task_prompt,
+        all_paths=all_paths,
+    )
     expected_test_reason = _expected_test_reason(
         bootstrap_task_type=bootstrap_task_type,
         task_prompt=task_prompt,
@@ -568,12 +1035,16 @@ def validate_task1_bootstrap_contract(
     task_prompt: str = "",
     forbidden_path_drift: list[str] | None = None,
     existing_files: set[str] | None = None,
+    planner_contract: Mapping[str, Any] | None = None,
+    require_registered_contract: bool = False,
 ) -> TaskBootstrapContractVerdict:
     contract = build_task1_bootstrap_contract(
         plan=plan,
         task_prompt=task_prompt,
         forbidden_path_drift=forbidden_path_drift,
         existing_files=existing_files,
+        planner_contract=planner_contract,
+        require_registered_contract=require_registered_contract,
     )
     violations: list[str] = []
     codes: list[str] = []
@@ -589,7 +1060,44 @@ def validate_task1_bootstrap_contract(
         codes.append("task1_bootstrap_missing_expected_source_files")
 
     if (
-        contract.expected_test_reason
+        planner_contract is not None
+        and contract.planner_contract_status
+        in {
+            "registered",
+            "incomplete",
+            "unregistered_contract",
+            "missing_registered_contract_facts",
+        }
+        and contract.terminal_classification == "terminal_limitation"
+    ):
+        violations.append(
+            "Task 1 bootstrap requires a registered planner contract with explicit source/test facts"
+        )
+        codes.append("task1_bootstrap_missing_registered_contract_facts")
+
+    if (
+        contract.planner_contract_status == "registered"
+        and contract.test_expectation == "EXPECTED_TEST_PRESENT"
+        and not contract.expected_test_files
+    ):
+        violations.append(
+            "Task 1 bootstrap requires a declared test artifact, but no test file is present"
+        )
+        codes.append("task1_bootstrap_missing_expected_test_files")
+
+    if (
+        contract.planner_contract_status == "registered"
+        and contract.test_expectation == "EXPECTED_TEST_GENERATED"
+        and not any(_is_test_path(path) for path in _materialized_file_targets(plan))
+    ):
+        violations.append(
+            "Task 1 bootstrap requires a generated test artifact, but no test file is materialized"
+        )
+        codes.append("task1_bootstrap_expected_test_not_generated")
+
+    if (
+        contract.planner_contract_status == "legacy_compatibility"
+        and contract.expected_test_reason
         and contract.expected_test_reason
         != EXPECTED_TEST_REASON_ARTIFACT_ONLY_NO_CODE_TEST_INTENT
         and contract.expected_test_reason

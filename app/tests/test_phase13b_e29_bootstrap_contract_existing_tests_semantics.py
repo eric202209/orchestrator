@@ -60,6 +60,22 @@ def _write_source_op(path: str = "src/money/money.py") -> dict[str, Any]:
     }
 
 
+def _planner_contract(*, tests: str, source: str = "SOURCE_PRESENT") -> dict[str, Any]:
+    return {
+        "contract_id": "ST23-PLANNER-001",
+        "contract_version": "v1",
+        "scenario_id": "S1-3",
+        "source_expectation": source,
+        "test_expectation": tests,
+        "structural_evidence": [
+            "CONTRACT_REGISTERED",
+            "SCENARIO_ID_MATCH",
+            "SOURCE_EXPECTATION_DECLARED",
+            "TEST_EXPECTATION_DECLARED",
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Case 1: Existing-test project + source-fix + source ops + pytest → PASS
 # ---------------------------------------------------------------------------
@@ -93,16 +109,14 @@ def test_existing_tests_source_fix_with_verification_passes(tmp_path):
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(tests="EXPECTED_TEST_NOT_REQUIRED"),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
     assert (
         verdict.accepted
     ), f"Expected PASS but got violations: {contract['violation_codes']}"
-    assert (
-        contract["expected_test_reason"]
-        == EXPECTED_TEST_REASON_EXISTING_PROJECT_TESTS_PRESENT
-    )
+    assert contract["expected_test_reason"] == "expected_test_not_required"
     assert (
         "task1_bootstrap_missing_expected_test_files" not in contract["violation_codes"]
     )
@@ -138,6 +152,7 @@ def test_existing_tests_source_fix_no_verification_fails_on_verification_only(tm
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(tests="EXPECTED_TEST_NOT_REQUIRED"),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
@@ -182,14 +197,12 @@ def test_existing_tests_explicit_test_intent_still_requires_test_materialization
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(tests="EXPECTED_TEST_PRESENT"),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
     assert not verdict.accepted
-    assert (
-        contract["expected_test_reason"]
-        == EXPECTED_TEST_REASON_EXPLICIT_CODE_TEST_INTENT
-    )
+    assert contract["expected_test_reason"] == "expected_test_present"
     assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
 
 
@@ -215,14 +228,14 @@ def test_new_project_explicit_test_intent_still_requires_test_materialization(tm
         execution_profile="implementation",
         project_dir=tmp_path,
         is_first_ordered_task=True,
+        planner_contract=_planner_contract(
+            tests="EXPECTED_TEST_PRESENT", source="SOURCE_MATERIALIZED"
+        ),
     )
 
     contract = verdict.details["task1_bootstrap_contract"]
     assert not verdict.accepted
-    assert (
-        contract["expected_test_reason"]
-        == EXPECTED_TEST_REASON_EXPLICIT_CODE_TEST_INTENT
-    )
+    assert contract["expected_test_reason"] == "expected_test_present"
     assert "task1_bootstrap_missing_expected_test_files" in contract["violation_codes"]
 
 

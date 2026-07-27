@@ -6,7 +6,7 @@ import copy
 import re
 import shlex
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 from ..policy import apply_validation_policy
 from ..types import (
     PlanAccepted,
@@ -860,6 +860,7 @@ class ValidatorService:
         workflow_stage: Optional[str] = None,
         is_first_ordered_task: bool = False,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Mapping[str, Any] | None = None,
     ) -> PlanOutcome:
         plan = copy.deepcopy(plan)
         profile = cls.infer_validation_profile(
@@ -1230,6 +1231,8 @@ class ValidatorService:
                     for path in project_dir.rglob("*")
                     if path.is_file()
                 },
+                planner_contract=planner_contract,
+                require_registered_contract=is_first_ordered_task,
             )
             details["task1_bootstrap_contract"] = task1_bootstrap_contract.to_dict()
             if not task1_bootstrap_contract.passed:
