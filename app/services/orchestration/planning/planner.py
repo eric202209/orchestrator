@@ -52,7 +52,7 @@ from app.services.orchestration.planning.repair_prompts import (
 )
 from app.services.orchestration.planning.planner_contract_registry import (
     planner_grounding_evidence,
-    render_planner_contract_context,
+    render_planner_repair_contract_context,
 )
 from app.services.orchestration.planning.repair_evidence import (
     record_pending_planning_repair_triplet,
@@ -1708,7 +1708,7 @@ class PlannerService:
         planner_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
         del workflow_profile, workflow_phases, workspace_has_existing_files
-        grounding_block = render_planner_contract_context(planner_contract)
+        grounding_block = render_planner_repair_contract_context(planner_contract)
         effective_guidance_block = "\n\n".join(
             block for block in (grounding_block, "") if block
         )
@@ -1742,7 +1742,7 @@ class PlannerService:
         planner_contract: Optional[Dict[str, Any]] = None,
     ):
         del workflow_profile, workflow_phases, workspace_has_existing_files
-        grounding_block = render_planner_contract_context(planner_contract)
+        grounding_block = render_planner_repair_contract_context(planner_contract)
         effective_guidance_block = "\n\n".join(
             block for block in (grounding_block, guidance_block) if block
         )
@@ -1768,7 +1768,7 @@ class PlannerService:
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
-        grounding_block = render_planner_contract_context(planner_contract)
+        grounding_block = render_planner_repair_contract_context(planner_contract)
         effective_guidance_block = "\n\n".join(
             block for block in (grounding_block, guidance_block) if block
         )

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 from app.models import TaskExecution, TaskStatus
 from app.services.orchestration.context.assembly import compress_orchestration_context
@@ -19,10 +19,17 @@ from app.services.orchestration.planning.planner import (
 )
 from app.services.orchestration.planning.source_materialization import (
     plan_has_concrete_source_materialization,
+    repair_context_requires_source_materialization,
+)
+from app.services.orchestration.planning.planner_contract_registry import (
+    planner_contract_source_paths,
 )
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
     planner_workspace_identity_for_context,
+)
+from app.services.orchestration.phases.planning_guidance_enforcement import (
+    collect_repair_guidance_block as _collect_repair_guidance,
 )
 from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.state.persistence import append_orchestration_event
@@ -65,6 +72,124 @@ def _planner_workspace_identity(
     ctx: OrchestrationRunContext,
 ) -> PlannerWorkspaceIdentity:
     return planner_workspace_identity_for_context(ctx)
+
+
+def _retry_with_minimal_prompt(
+    *,
+    ctx: OrchestrationRunContext,
+    planning_timeout_seconds: int,
+    reason: str,
+    prompt_profile: str = "default",
+    knowledge_context: Any | None = None,
+) -> Dict[str, Any]:
+    return PlannerService.retry_with_minimal_prompt(
+        runtime_service=ctx.runtime_service,
+        task_description=ctx.prompt,
+        project_dir=ctx.orchestration_state.project_dir,
+        timeout_seconds=planning_timeout_seconds,
+        logger=ctx.logger,
+        emit_live=ctx.emit_live,
+        reason=reason,
+        prompt_profile=prompt_profile,
+        workflow_profile=ctx.workflow_profile,
+        workflow_phases=getattr(ctx, "workflow_phases", []),
+        workspace_has_existing_files=getattr(
+            ctx, "workspace_has_existing_files", False
+        ),
+        knowledge_context=_usable_knowledge_context(knowledge_context),
+        validation_profile=_planning_validation_profile(ctx),
+        project_context=ctx.orchestration_state.project_context,
+        workspace_identity=_planner_workspace_identity(ctx),
+        planner_contract=ctx.planner_contract,
+    )
+
+
+def _repair_planning_output(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: _PlanningRetryState | None = None,
+    planning_timeout_seconds: int,
+    malformed_output: str,
+    reason: str,
+    rejection_reasons: list[str] | None = None,
+    prompt_profile: str = "default",
+    knowledge_context: Any | None = None,
+) -> Dict[str, Any]:
+    if retry_state and repair_context_requires_source_materialization(
+        execution_profile=ctx.execution_profile,
+        reason=reason,
+        rejection_reasons=rejection_reasons,
+    ):
+        retry_state.source_materialization_required_after_repair = True
+    return PlannerService.repair_output(
+        runtime_service=ctx.runtime_service,
+        task_description=ctx.prompt,
+        malformed_output=malformed_output,
+        project_dir=ctx.orchestration_state.project_dir,
+        timeout_seconds=planning_timeout_seconds,
+        logger=ctx.logger,
+        emit_live=ctx.emit_live,
+        reason=reason,
+        rejection_reasons=rejection_reasons,
+        prompt_profile=prompt_profile,
+        workflow_profile=ctx.workflow_profile,
+        workflow_phases=getattr(ctx, "workflow_phases", []),
+        workspace_has_existing_files=getattr(
+            ctx, "workspace_has_existing_files", False
+        ),
+        knowledge_context=knowledge_context,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        guidance_block=_collect_repair_guidance(ctx),
+        workspace_identity=_planner_workspace_identity(ctx),
+        planner_contract=ctx.planner_contract,
+    )
+
+
+def _coerce_output_text(
+    *,
+    ctx: OrchestrationRunContext,
+    planning_result: Any,
+    output_result: Any,
+    extract_structured_text: Callable[[Any], str],
+) -> str:
+    ctx.logger.info(
+        "[ORCHESTRATION] Planning output type: %s, preview: %s",
+        type(output_result),
+        str(output_result)[:1500],
+    )
+    output_text = extract_structured_text(output_result)
+    if not output_text.strip() and isinstance(output_result, dict):
+        output_text = json.dumps(output_result)
+        ctx.logger.info(
+            "[ORCHESTRATION] Structured text extraction empty; using full JSON"
+        )
+    if not output_text.strip():
+        fallback_text = extract_structured_text(planning_result)
+        if fallback_text.strip():
+            output_text = fallback_text
+            ctx.logger.info(
+                "[ORCHESTRATION] Output field was empty; recovered planning text from full result payload"
+            )
+    if (
+        not output_text.strip()
+        and isinstance(planning_result, dict)
+        and planning_result
+    ):
+        output_text = json.dumps(planning_result)
+        ctx.logger.info(
+            "[ORCHESTRATION] Using serialized full planning result payload as final fallback"
+        )
+    elif isinstance(output_result, str):
+        ctx.logger.info("[ORCHESTRATION] Raw string response")
+    else:
+        ctx.logger.info(
+            "[ORCHESTRATION] Structured text extracted from %s",
+            type(output_result),
+        )
+    if isinstance(output_text, str):
+        output_text = re.sub(r"^\s*```(?:json)?\s*|\s*```$", "", output_text.strip())
+    return output_text
 
 
 def _validate_planning_plan(
@@ -975,6 +1100,9 @@ def _abort_missing_source_materialization_repair(
         and not plan_has_concrete_source_materialization(
             ctx.orchestration_state.plan,
             ctx.orchestration_state.project_dir,
+            authoritative_source_paths=planner_contract_source_paths(
+                getattr(ctx, "planner_contract", None)
+            ),
         )
     ):
         return None

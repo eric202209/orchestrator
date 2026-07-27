@@ -232,6 +232,170 @@ def render_planner_contract_context(
     )
 
 
+def _contract_nested_mapping(
+    planner_contract: Mapping[str, Any], name: str
+) -> Mapping[str, Any]:
+    value = planner_contract.get(name)
+    return value if isinstance(value, Mapping) else {}
+
+
+def _contract_first_value(planner_contract: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        value = planner_contract.get(name)
+        if value not in (None, "", [], ()):
+            return value
+    return None
+
+
+def planner_contract_source_paths(
+    planner_contract: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Return only the source paths explicitly named by a planner contract."""
+
+    if not isinstance(planner_contract, Mapping):
+        return ()
+    registered = _contract_nested_mapping(
+        planner_contract, "registered_scenario_contract"
+    )
+    values = _contract_first_value(
+        planner_contract,
+        "required_source_inventory",
+        "source_inventory",
+        "source_paths",
+    )
+    if values in (None, [], ()):
+        values = _contract_first_value(
+            registered,
+            "required_source_inventory",
+            "source_inventory",
+            "source_paths",
+        )
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            str(path).strip().replace("\\", "/").lstrip("./")
+            for path in values
+            if str(path).strip()
+        )
+    )
+
+
+def planner_contract_test_paths(
+    planner_contract: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """Return only the test paths explicitly named by a planner contract."""
+
+    if not isinstance(planner_contract, Mapping):
+        return ()
+    registered = _contract_nested_mapping(
+        planner_contract, "registered_scenario_contract"
+    )
+    values = _contract_first_value(
+        planner_contract,
+        "required_test_inventory",
+        "test_inventory",
+        "test_paths",
+    )
+    if values in (None, [], ()):
+        values = _contract_first_value(
+            registered,
+            "required_test_inventory",
+            "test_inventory",
+            "test_paths",
+        )
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return ()
+    return tuple(
+        dict.fromkeys(
+            str(path).strip().replace("\\", "/").lstrip("./")
+            for path in values
+            if str(path).strip()
+        )
+    )
+
+
+def render_planner_repair_contract_context(
+    planner_contract: Mapping[str, Any] | None,
+) -> str:
+    """Render a compact repair contract with explicit materialization duties.
+
+    The initial planner benefits from the complete registered payload. Repair
+    needs a smaller operational capsule: retaining the same authoritative facts
+    while removing duplicated nested contract JSON keeps the bounded repair
+    prompt below its fail-closed character limit.
+    """
+
+    if not isinstance(planner_contract, Mapping) or not planner_contract:
+        return ""
+
+    registered = _contract_nested_mapping(
+        planner_contract, "registered_scenario_contract"
+    )
+    review = _contract_nested_mapping(planner_contract, "review_contract")
+    if not review:
+        review = _contract_nested_mapping(registered, "review_contract")
+    publication = _contract_nested_mapping(planner_contract, "publication_contract")
+    if not publication:
+        publication = _contract_nested_mapping(registered, "publication_contract")
+    scenario_id = _contract_first_value(
+        planner_contract, "scenario_id"
+    ) or registered.get("scenario_id")
+    contract_id = _contract_first_value(planner_contract, "contract_id")
+    contract_version = _contract_first_value(
+        planner_contract, "contract_version", "version"
+    )
+    source_expectation = _contract_first_value(
+        planner_contract, "source_expectation"
+    ) or registered.get("source_expectation")
+    test_expectation = _contract_first_value(
+        planner_contract, "test_expectation"
+    ) or registered.get("test_expectation")
+    review_expectation = _contract_first_value(
+        planner_contract, "review_expectation"
+    ) or review.get("expectation")
+    publication_expectation = _contract_first_value(
+        planner_contract, "publication_expectation"
+    ) or publication.get("expectation")
+    source_paths = planner_contract_source_paths(planner_contract)
+    test_paths = planner_contract_test_paths(planner_contract)
+    specification_version = registered.get("specification_version")
+
+    def render_paths(paths: tuple[str, ...]) -> str:
+        return ", ".join(paths) if paths else "(none declared)"
+
+    lines = [
+        "## AUTHORITATIVE REGISTERED PLANNER REPAIR CONTRACT",
+        "Use these registered facts unchanged. Do not infer or override them from task wording or workspace discovery.",
+        "registered_contract_identity: "
+        + json.dumps(
+            {
+                "contract_id": contract_id,
+                "contract_version": contract_version,
+                "scenario_id": scenario_id,
+            },
+            separators=(",", ":"),
+        ),
+        f"contract_id: {contract_id or '(missing)'}",
+        f"contract_version: {contract_version or '(missing)'}",
+        f"scenario_id: {scenario_id or '(missing)'}",
+        f"specification_version: {specification_version or '(not supplied)'}",
+        f"source_expectation: {source_expectation or '(missing)'}",
+        f"authoritative source paths requiring concrete operations: {render_paths(source_paths)}",
+        f"test_expectation: {test_expectation or '(missing)'}",
+        f"authoritative test paths requiring concrete operations: {render_paths(test_paths)}",
+        f"review_expectation: {review_expectation or '(not supplied)'}",
+        f"publication_expectation: {publication_expectation or '(not supplied)'}",
+        "Repair obligations:",
+        "- Workspace discovery is not a prerequisite; the named paths may be absent until this plan creates them.",
+        "- For SOURCE_PRESENT, use concrete structured ops.write_file, ops.append_file, or ops.replace_in_file operations for every authoritative source path.",
+        "- For EXPECTED_TEST_PRESENT or EXPECTED_TEST_GENERATED, use concrete structured file operations for every authoritative test path.",
+        "- Include runnable implementation and test steps plus a real verification command; inspection-only, verification-only, test-only, placeholder-only, and expected_files-only plans are invalid.",
+        "- Use only the exact registered paths above; do not fabricate unrelated paths or change review/publication policy.",
+    ]
+    return "\n".join(lines)
+
+
 __all__ = [
     "PLANNER_CONTRACT_ID",
     "PLANNER_CONTRACT_VERSION",
@@ -244,6 +408,9 @@ __all__ = [
     "RegisteredPlannerContract",
     "registered_planner_contract",
     "planner_grounding_evidence",
+    "planner_contract_source_paths",
+    "planner_contract_test_paths",
     "render_planner_contract_context",
+    "render_planner_repair_contract_context",
     "truthy_structural_facts",
 ]

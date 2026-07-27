@@ -54,6 +54,10 @@ from app.services.orchestration.planning.task_bootstrap_contract import (
     build_task1_bootstrap_contract,
     validate_task1_bootstrap_contract,
 )
+from app.services.orchestration.planning.planner_contract_registry import (
+    planner_contract_source_paths,
+    planner_contract_test_paths,
+)
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
 )
@@ -820,6 +824,23 @@ class ValidatorService:
         return files
 
     @staticmethod
+    def _planner_contract_unexpected_materialization_paths(
+        plan: List[Dict[str, Any]],
+        planner_contract: Mapping[str, Any] | None,
+    ) -> list[str]:
+        """Return materialized paths outside an explicit registered inventory."""
+
+        if not isinstance(planner_contract, Mapping):
+            return []
+        allowed_paths = set(planner_contract_source_paths(planner_contract)) | set(
+            planner_contract_test_paths(planner_contract)
+        )
+        if not allowed_paths:
+            return []
+        materialized_paths = _plan_materialized_file_targets(plan)
+        return sorted(materialized_paths.difference(allowed_paths))
+
+    @staticmethod
     def _task_prompt_requires_materialization(
         task_prompt: str,
         title: Optional[str] = None,
@@ -989,6 +1010,19 @@ class ValidatorService:
 
         declared_expected_files = cls._plan_declared_expected_files(plan)
         materialized_targets = cls._plan_materialized_file_targets(plan)
+        unexpected_contract_paths = (
+            cls._planner_contract_unexpected_materialization_paths(
+                plan, planner_contract
+            )
+        )
+        if unexpected_contract_paths:
+            repairable.append(
+                "Plan materializes paths outside the registered planner contract "
+                f"inventory (paths: {unexpected_contract_paths[:8]})"
+            )
+            details["unexpected_registered_contract_paths"] = unexpected_contract_paths[
+                :20
+            ]
         existing_expected_files = {
             path
             for path in declared_expected_files

@@ -375,6 +375,44 @@ def test_arbitration_rejects_bootstrap_invalid_repaired_plan(tmp_path, monkeypat
     ), "repair_candidate_rejected_by_bootstrap_contract diagnostic was not emitted"
 
 
+def test_arbitration_bootstrap_precheck_exception_fails_closed(tmp_path, monkeypatch):
+    """A pre-check exception must not fall through as accepted progress."""
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.planning_repair_arbitration_control"
+        ".append_orchestration_event",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        ValidatorService,
+        "validate_plan",
+        classmethod(
+            lambda cls, *args, **kwargs: (_ for _ in ()).throw(
+                AttributeError("planner_contract")
+            )
+        ),
+    )
+
+    ctx = _make_ctx(plan=_source_code_plan(), project_dir=tmp_path, plan_position=1)
+    result = arbitrate_planning_repair_candidate(
+        ctx=ctx,
+        retry_state=_make_retry_state(),
+        previous_plan=[],
+        immediate_repair_issues={},
+        planning_phase_event=None,
+        output_text="[]",
+        planning_timeout_seconds=60,
+        prompt_profile=None,
+        repair_planning_output=_null_repair,
+    )
+
+    assert result.get("action") != "none"
+    assert any(
+        (call.kwargs.get("metadata") or {}).get("event")
+        == "repair_candidate_rejected_by_bootstrap_contract"
+        for call in ctx.emit_live.call_args_list
+    )
+
+
 def test_arbitration_skips_bootstrap_check_for_later_tasks(tmp_path, monkeypatch):
     """Bootstrap Contract pre-check only applies to first ordered tasks.
     Later tasks (plan_position != 1) must still get action=none."""

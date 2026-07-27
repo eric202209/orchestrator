@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Collection
 
 SOURCE_MATERIALIZATION_EXTENSIONS = ".py .js .jsx .ts .tsx .css .html .md".split()
 IMPLEMENTATION_SOURCE_EXTENSIONS = ".py .js .jsx .ts .tsx .css .html".split()
@@ -97,9 +97,38 @@ def is_concrete_source_materialization_path(path_text: str, project_dir: Path) -
     return parts[0] in top_level_package_roots(project_dir)
 
 
-def plan_has_concrete_source_materialization(plan: Any, project_dir: Path) -> bool:
+def plan_has_concrete_source_materialization(
+    plan: Any,
+    project_dir: Path,
+    *,
+    authoritative_source_paths: Collection[str] | None = None,
+) -> bool:
+    """Return whether a plan writes a concrete implementation source file.
+
+    A registered planner contract may name a source file that is intentionally
+    absent from a fresh runtime workspace. Such a path is accepted only when a
+    structured file operation targets that exact relative contract path; the
+    ordinary project/package-root guard remains the default for legacy plans.
+    """
+
     if not isinstance(plan, list):
         return False
+
+    def safe_relative_path(path_text: Any) -> str:
+        raw_path = str(path_text or "").strip().replace("\\", "/")
+        parsed_path = Path(raw_path)
+        if not raw_path or parsed_path.is_absolute() or ".." in parsed_path.parts:
+            return ""
+        return raw_path.rstrip("/").lstrip("./")
+
+    contract_paths = {
+        normalized
+        for raw_path in (authoritative_source_paths or ())
+        for normalized in [safe_relative_path(raw_path)]
+        if normalized
+        and Path(normalized).suffix.lower() in IMPLEMENTATION_SOURCE_EXTENSIONS
+        and Path(normalized).parts[0] not in {"test", "tests"}
+    }
     for step in plan:
         if not isinstance(step, dict):
             continue
@@ -112,9 +141,13 @@ def plan_has_concrete_source_materialization(plan: Any, project_dir: Path) -> bo
                 "replace_in_file",
             }:
                 continue
-            if is_concrete_source_materialization_path(
-                str(operation.get("path") or ""),
-                project_dir,
+            operation_path = str(operation.get("path") or "")
+            normalized_operation_path = safe_relative_path(operation_path)
+            if normalized_operation_path in contract_paths or (
+                is_concrete_source_materialization_path(
+                    operation_path,
+                    project_dir,
+                )
             ):
                 return True
     return False

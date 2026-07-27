@@ -11,7 +11,6 @@ from typing import Any, Callable, Dict
 
 from celery.exceptions import SoftTimeLimitExceeded
 
-from app.schemas.knowledge import KnowledgeContext
 from app.services.orchestration.context.assembly import (
     assemble_planning_prompt,
     compress_orchestration_context,
@@ -33,7 +32,6 @@ from app.services.orchestration.planning.planner_contract_registry import (
     planner_grounding_evidence,
 )
 from app.services.orchestration.planning.source_materialization import (
-    repair_context_requires_source_materialization as _repair_context_requires_source_materialization,
     repair_removed_source_materialization as _repair_removed_source_materialization,
 )
 from app.services.orchestration.planning.normalization import (
@@ -92,7 +90,6 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
     task1_plan_failed_only_brittle_command_shape as _task1_plan_failed_only_brittle_command_shape,
 )
 from app.services.orchestration.phases.planning_guidance_enforcement import (
-    collect_repair_guidance_block as _collect_repair_guidance,
     run_guidance_plan_enforcement as _run_guidance_plan_enforcement,
 )
 from app.services.orchestration.phases.planning_candidate_recovery import (
@@ -115,6 +112,7 @@ from app.services.orchestration.phases.planning_support import (
     _classify_planning_timeout_failure,
     classify_planning_failure_taxonomy,
     _compress_project_context_for_planning,
+    _coerce_output_text as __coerce_output_text,
     _count_prior_failed_planning_executions,
     _emit_planning_diagnostics_contract_violation,
     _emit_repair_outcome_if_pending,
@@ -127,7 +125,6 @@ from app.services.orchestration.phases.planning_support import (
     _extract_stale_old_text_from_plan,
     _model_lane_limitation_for_invalid_planning_commands,
     _plan_contract_diagnostics,
-    _planning_validation_profile,
     _planning_root_cause_from_immediate_repair_issues,
     _planning_root_cause_from_issue_key,
     _planning_root_cause_from_plan_verdict,
@@ -135,7 +132,8 @@ from app.services.orchestration.phases.planning_support import (
     _record_repair_target,
     _record_repair_root_cause,
     _repair_root_cause_from_plan_verdict,
-    _planner_workspace_identity,
+    _repair_planning_output as __repair_planning_output,
+    _retry_with_minimal_prompt as __retry_with_minimal_prompt,
     _semantic_codes_for_immediate_repair_issues,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
@@ -2494,121 +2492,3 @@ def execute_planning_phase(
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed("planning parse error")
         return {"status": "failed", "reason": "planning_parse_error"}
-
-
-def __retry_with_minimal_prompt(
-    *,
-    ctx: OrchestrationRunContext,
-    planning_timeout_seconds: int,
-    reason: str,
-    prompt_profile: str = "default",
-    knowledge_context: KnowledgeContext | None = None,
-) -> Dict[str, Any]:
-    return PlannerService.retry_with_minimal_prompt(
-        runtime_service=ctx.runtime_service,
-        task_description=ctx.prompt,
-        project_dir=ctx.orchestration_state.project_dir,
-        timeout_seconds=planning_timeout_seconds,
-        logger=ctx.logger,
-        emit_live=ctx.emit_live,
-        reason=reason,
-        prompt_profile=prompt_profile,
-        workflow_profile=ctx.workflow_profile,
-        workflow_phases=getattr(ctx, "workflow_phases", []),
-        workspace_has_existing_files=getattr(
-            ctx, "workspace_has_existing_files", False
-        ),
-        knowledge_context=_usable_knowledge_context(knowledge_context),
-        validation_profile=_planning_validation_profile(ctx),
-        project_context=ctx.orchestration_state.project_context,
-        workspace_identity=_planner_workspace_identity(ctx),
-        planner_contract=ctx.planner_contract,
-    )
-
-
-def __repair_planning_output(
-    *,
-    ctx: OrchestrationRunContext,
-    retry_state: _PlanningRetryState | None = None,
-    planning_timeout_seconds: int,
-    malformed_output: str,
-    reason: str,
-    rejection_reasons: list[str] | None = None,
-    prompt_profile: str = "default",
-    knowledge_context: KnowledgeContext | None = None,
-) -> Dict[str, Any]:
-    if retry_state and _repair_context_requires_source_materialization(
-        execution_profile=ctx.execution_profile,
-        reason=reason,
-        rejection_reasons=rejection_reasons,
-    ):
-        retry_state.source_materialization_required_after_repair = True
-    return PlannerService.repair_output(
-        runtime_service=ctx.runtime_service,
-        task_description=ctx.prompt,
-        malformed_output=malformed_output,
-        project_dir=ctx.orchestration_state.project_dir,
-        timeout_seconds=planning_timeout_seconds,
-        logger=ctx.logger,
-        emit_live=ctx.emit_live,
-        reason=reason,
-        rejection_reasons=rejection_reasons,
-        prompt_profile=prompt_profile,
-        workflow_profile=ctx.workflow_profile,
-        workflow_phases=getattr(ctx, "workflow_phases", []),
-        workspace_has_existing_files=getattr(
-            ctx, "workspace_has_existing_files", False
-        ),
-        knowledge_context=knowledge_context,
-        session_id=ctx.session_id,
-        task_id=ctx.task_id,
-        guidance_block=_collect_repair_guidance(ctx),
-        workspace_identity=_planner_workspace_identity(ctx),
-        planner_contract=ctx.planner_contract,
-    )
-
-
-def __coerce_output_text(
-    *,
-    ctx: OrchestrationRunContext,
-    planning_result: Any,
-    output_result: Any,
-    extract_structured_text: Callable[[Any], str],
-) -> str:
-    ctx.logger.info(
-        "[ORCHESTRATION] Planning output type: %s, preview: %s",
-        type(output_result),
-        str(output_result)[:1500],
-    )
-    output_text = extract_structured_text(output_result)
-    if not output_text.strip() and isinstance(output_result, dict):
-        output_text = json.dumps(output_result)
-        ctx.logger.info(
-            "[ORCHESTRATION] Structured text extraction empty; using full JSON"
-        )
-    if not output_text.strip():
-        fallback_text = extract_structured_text(planning_result)
-        if fallback_text.strip():
-            output_text = fallback_text
-            ctx.logger.info(
-                "[ORCHESTRATION] Output field was empty; recovered planning text from full result payload"
-            )
-    if (
-        not output_text.strip()
-        and isinstance(planning_result, dict)
-        and planning_result
-    ):
-        output_text = json.dumps(planning_result)
-        ctx.logger.info(
-            "[ORCHESTRATION] Using serialized full planning result payload as final fallback"
-        )
-    elif isinstance(output_result, str):
-        ctx.logger.info("[ORCHESTRATION] Raw string response")
-    else:
-        ctx.logger.info(
-            "[ORCHESTRATION] Structured text extracted from %s",
-            type(output_result),
-        )
-    if isinstance(output_text, str):
-        output_text = re.sub(r"^\s*```(?:json)?\s*|\s*```$", "", output_text.strip())
-    return output_text

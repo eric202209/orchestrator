@@ -54,7 +54,7 @@ from app.services.orchestration.planning.source_materialization import (
     plan_source_materialization_paths,
 )
 from app.services.orchestration.state.persistence import append_orchestration_event
-from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.prompt_templates import OrchestrationStatus
 
@@ -292,10 +292,32 @@ def arbitrate_planning_repair_candidate(
             except Exception as exc:
                 ctx.logger.warning(
                     "[ORCHESTRATION] Bootstrap Contract pre-check in arbitration "
-                    "raised an exception; falling through to accept: %s",
-                    exc,
+                    "raised an exception; rejecting candidate closed: %s",
+                    type(exc).__name__,
                 )
-                bootstrap_verdict = None
+                failure_reason = (
+                    "Bootstrap Contract pre-check failed before a verdict was "
+                    f"available ({type(exc).__name__})"
+                )
+                bootstrap_verdict = ValidationVerdict(
+                    stage="planning",
+                    status="rejected",
+                    profile="implementation",
+                    reasons=[failure_reason],
+                    details={
+                        "task1_bootstrap_contract": {
+                            "passed": False,
+                            "violation_codes": [
+                                "bootstrap_contract_precheck_exception"
+                            ],
+                            "violations": [failure_reason],
+                            "required_artifacts": [],
+                            "required_source_files": [],
+                            "required_test_files": [],
+                            "required_verification": [],
+                        }
+                    },
+                )
             if bootstrap_verdict is not None:
                 bootstrap_contract = (bootstrap_verdict.details or {}).get(
                     "task1_bootstrap_contract"
