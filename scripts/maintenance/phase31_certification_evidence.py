@@ -93,6 +93,7 @@ class CertificationEvidenceSession:
         operator_identity: str,
         declared_scenario_set: list[str],
         dispatch_budget: int,
+        matrix_classification: Optional[str] = None,
     ) -> Path:
         payload = {
             "session_number": self.session_number,
@@ -100,6 +101,7 @@ class CertificationEvidenceSession:
             "operator_identity": operator_identity,
             "declared_scenario_set": declared_scenario_set,
             "dispatch_budget": dispatch_budget,
+            "matrix_classification": matrix_classification,
             "f10_result": f10_result,
             "f11_result": f11_result,
             "f12_result": f12_result,
@@ -143,10 +145,12 @@ class CertificationEvidenceSession:
         timings: dict[str, Any],
         repair_telemetry: list[dict[str, Any]],
         event_journal_pointer: Optional[str],
+        scenario_specification: Optional[dict[str, Any]] = None,
     ) -> Path:
         payload = {
             "scenario_id": scenario_id,
             "run": run,
+            "scenario_specification": scenario_specification,
             "declared_contract": (
                 asdict(contract) if is_dataclass(contract) else contract
             ),

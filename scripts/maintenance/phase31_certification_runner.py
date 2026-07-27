@@ -27,9 +27,9 @@ Platform. Coordinates, for one certification session:
 A failed F10/F11 precondition aborts before any scenario dispatch.
 
 Only scenarios registered in `phase31_certification_scenarios.py` can be
-run (Stage 0 gating + Stage 1 core, per Phase 31B scope). Only S1-1 is
-exercised as the Phase 31B pilot; the runner itself is generic and is
-meant to be reused unchanged by Phase 31C-31F for the remaining stages.
+run. The canonical Stage 1 certification selection is the complete S1-1
+through S1-6 matrix. A deliberate subset is retained for debugging and is
+marked non-certification in every inspection/evidence summary.
 """
 
 from __future__ import annotations
@@ -72,7 +72,14 @@ from scripts.maintenance.phase31_certification_facts import (  # noqa: E402
     assemble_timing_facts_from_live_run,
 )
 from scripts.maintenance.phase31_certification_scenarios import (  # noqa: E402
-    scenario_contract,
+    DEBUG_SUBSET_CLASSIFICATION,
+    STAGE1_CERTIFICATION_CLASSIFICATION,
+    STAGE1_SCENARIO_IDS,
+    ScenarioRegistryError,
+    _SCENARIO_TASKS,
+    scenario_spec,
+    validate_requested_scenario_ids,
+    validate_scenario_registry,
 )
 from scripts.maintenance.phase31_certification_validation import (  # noqa: E402
     validate_session_evidence,
@@ -91,21 +98,6 @@ BASE_URL = os.environ.get("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:8080")
 OPERATOR_EMAIL = os.environ.get("ORCHESTRATOR_USER_EMAIL", "eval@local.dev")
 WORKSPACE_BASE = Path("/root/.openclaw/workspace/vault/projects")
 TERMINAL_TASK_STATUSES = {"done", "failed", "cancelled"}
-
-# Scenario -> (title, description) dispatched exactly as declared in the
-# scenario matrix's "Objective" column. Only scenarios with a registered
-# ScenarioAcceptanceContract can be dispatched by this runner.
-_SCENARIO_TASKS: dict[str, dict[str, str]] = {
-    "S1-1": {
-        "title": "Phase 31B pilot: documentation-only change",
-        "description": (
-            "Add a short 'Overview' section to a new file README-PILOT.md "
-            "at the project root describing this is a Phase 31B "
-            "certification pilot workspace. This is a documentation-only "
-            "task: do not touch any other file, do not add code."
-        ),
-    },
-}
 
 
 def _api(token: str, method: str, path: str, **kwargs: Any) -> Any:
@@ -209,7 +201,8 @@ def run_scenario(
     scenario_id: str,
     run: int = 1,
 ) -> dict[str, Any]:
-    contract = scenario_contract(scenario_id)
+    specification = scenario_spec(scenario_id)
+    contract = specification.acceptance_contract
 
     pre_hash = _workspace_content_hash(workspace_root)
     dispatch_started = time.monotonic()
@@ -219,7 +212,9 @@ def run_scenario(
     task_id = dispatched["task_id"]
     session_id = dispatched["session_id"]
 
-    final_status = wait_for_terminal_task(token, task_id)
+    final_status = wait_for_terminal_task(
+        token, task_id, timeout_seconds=specification.timeout_seconds
+    )
     total_seconds = time.monotonic() - dispatch_started
     post_hash = _workspace_content_hash(workspace_root)
 
@@ -250,6 +245,7 @@ def run_scenario(
         },
         repair_telemetry=repair_telemetry,
         event_journal_pointer=f"session_id={session_id} task_id={task_id}",
+        scenario_specification=specification.to_dict(),
     )
 
     # Replay: reclassify from the retained facts/contract (pure, no I/O)
@@ -276,8 +272,23 @@ def main() -> int:
     parser.add_argument(
         "--scenario-ids",
         nargs="+",
-        default=["S1-1"],
-        help="Matrix scenario IDs to run.",
+        default=None,
+        help="Scenario IDs to run (default: complete S1-1 through S1-6 matrix).",
+    )
+    parser.add_argument(
+        "--list-scenarios",
+        action="store_true",
+        help="Validate and list the complete declarative Stage 1 registry; never dispatches.",
+    )
+    parser.add_argument(
+        "--validate-scenarios",
+        action="store_true",
+        help="Validate the requested registry/matrix selection; never dispatches.",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit machine-readable output for inspection modes.",
     )
     parser.add_argument("--phase-letter", default="b")
     parser.add_argument(
@@ -288,10 +299,63 @@ def main() -> int:
     parser.add_argument("--session-number", type=int, default=1)
     args = parser.parse_args()
 
+    requested_ids = tuple(args.scenario_ids or STAGE1_SCENARIO_IDS)
+    try:
+        selection = validate_requested_scenario_ids(requested_ids)
+        validate_scenario_registry()
+    except ScenarioRegistryError as exc:
+        payload = {
+            "valid": False,
+            "error": str(exc),
+            "scenario_ids": list(requested_ids),
+            "mutation": "none",
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(f"[validation] FAILED before project creation: {exc}")
+        return 2
+
+    if args.list_scenarios or args.validate_scenarios:
+        payload = {
+            "valid": True,
+            "registry_version": scenario_spec(STAGE1_SCENARIO_IDS[0]).specification_version,
+            "scenario_ids": list(selection.scenario_ids),
+            "registered_scenario_ids": list(STAGE1_SCENARIO_IDS),
+            "classification": selection.certification_classification,
+            "is_certification_matrix": selection.is_certification_matrix,
+            "mutation": "none",
+            "dispatch": "none",
+            "scenarios": [
+                scenario_spec(scenario_id).to_dict()
+                for scenario_id in selection.scenario_ids
+            ],
+        }
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True))
+        else:
+            print(
+                f"[validation] passed: {len(selection.scenario_ids)} registered "
+                f"scenario(s); classification={selection.certification_classification}; "
+                "dispatch=none; mutation=none"
+            )
+            for scenario_id in selection.scenario_ids:
+                print(f"  - {scenario_id}")
+        return 0
+
     slug = args.slug or "certification-execution-platform"
     evidence = CertificationEvidenceSession(
         args.phase_letter, slug, args.session_number
     )
+
+    # F11 is a launch prerequisite.  Check it before creating the target
+    # project; F10/F12 are re-run after creation because their authoritative
+    # checks require the newly assigned project ID.
+    initial_f11 = check_daemon(lookback_minutes=60)
+    if not initial_f11["passed"]:
+        print("[abort] F11 failed before project creation; no dispatch.")
+        print(json.dumps(initial_f11, indent=2, sort_keys=True))
+        return 1
 
     token = create_access_token({"sub": OPERATOR_EMAIL})
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -322,8 +386,9 @@ def main() -> int:
         f12_result=f12_result,
         environment_baseline=baseline,
         operator_identity=OPERATOR_EMAIL,
-        declared_scenario_set=args.scenario_ids,
-        dispatch_budget=len(args.scenario_ids),
+        declared_scenario_set=list(selection.scenario_ids),
+        dispatch_budget=len(selection.scenario_ids),
+        matrix_classification=selection.certification_classification,
     )
     print(
         f"[preamble] F10 passed={f10_result['passed']} "
@@ -359,7 +424,12 @@ def main() -> int:
         )
 
     scenario_results = []
-    for scenario_id in args.scenario_ids:
+    if selection.certification_classification == DEBUG_SUBSET_CLASSIFICATION:
+        print(
+            "[mode] requested subset is NON_CERTIFICATION_DEBUG_SUBSET; "
+            "no full Stage 1 certification decision may be produced."
+        )
+    for scenario_id in selection.scenario_ids:
         print(f"[dispatch] {scenario_id}")
         outcome = run_scenario(
             token,
@@ -396,12 +466,14 @@ def main() -> int:
     validation = validate_session_evidence(
         evidence.evidence_dir,
         session_number=args.session_number,
-        scenario_ids=args.scenario_ids,
+        scenario_ids=list(selection.scenario_ids),
     )
     print(f"[validation] valid={validation['valid']} failures={validation['failures']}")
 
     summary = {
         "session_number": args.session_number,
+        "certification_classification": selection.certification_classification,
+        "certification_decision_eligible": selection.is_certification_matrix,
         "project_id": project_id,
         "project_slug": project_slug,
         "scenario_results": scenario_results,
