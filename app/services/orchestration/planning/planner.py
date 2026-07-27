@@ -50,6 +50,10 @@ from app.services.orchestration.planning.repair_prompts import (
     compact_invalid_output_excerpt as _compact_invalid_output_excerpt,
     render_repair_knowledge_block as _render_repair_knowledge_block,
 )
+from app.services.orchestration.planning.planner_contract_registry import (
+    planner_grounding_evidence,
+    render_planner_contract_context,
+)
 from app.services.orchestration.planning.repair_evidence import (
     record_pending_planning_repair_triplet,
 )
@@ -1158,6 +1162,7 @@ class PlannerService:
         validation_profile: Optional[str] = None,
         project_context: Optional[str] = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
         return _build_minimal_planning_prompt(
             task_description,
@@ -1171,6 +1176,7 @@ class PlannerService:
             validation_profile=validation_profile,
             project_context=project_context,
             workspace_identity=workspace_identity,
+            planner_contract=planner_contract,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
 
@@ -1185,6 +1191,7 @@ class PlannerService:
         validation_profile: Optional[str] = None,
         project_context: Optional[str] = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
         return _build_ultra_minimal_planning_prompt(
             task_description,
@@ -1196,6 +1203,7 @@ class PlannerService:
             validation_profile=validation_profile,
             project_context=project_context,
             workspace_identity=workspace_identity,
+            planner_contract=planner_contract,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
 
@@ -1697,8 +1705,13 @@ class PlannerService:
         workspace_has_existing_files: bool = False,
         knowledge_context: Any = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
         del workflow_profile, workflow_phases, workspace_has_existing_files
+        grounding_block = render_planner_contract_context(planner_contract)
+        effective_guidance_block = "\n\n".join(
+            block for block in (grounding_block, "") if block
+        )
         return _build_planning_repair_prompt(
             task_description=task_description,
             malformed_output=malformed_output,
@@ -1708,6 +1721,7 @@ class PlannerService:
             apply_prompt_profile=PlannerService.apply_prompt_profile,
             knowledge_context=knowledge_context,
             workspace_identity=workspace_identity,
+            guidance_block=effective_guidance_block,
             project_structure_capsule=cls._build_project_structure_capsule(project_dir),
         )
 
@@ -1725,8 +1739,13 @@ class PlannerService:
         knowledge_context: Any = None,
         guidance_block: str = "",
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Optional[Dict[str, Any]] = None,
     ):
         del workflow_profile, workflow_phases, workspace_has_existing_files
+        grounding_block = render_planner_contract_context(planner_contract)
+        effective_guidance_block = "\n\n".join(
+            block for block in (grounding_block, guidance_block) if block
+        )
         return _build_planning_repair_prompt_with_metadata(
             task_description=task_description,
             malformed_output=malformed_output,
@@ -1737,7 +1756,7 @@ class PlannerService:
             knowledge_context=knowledge_context,
             workspace_identity=workspace_identity,
             project_structure_capsule=cls._build_project_structure_capsule(project_dir),
-            guidance_block=guidance_block,
+            guidance_block=effective_guidance_block,
         )
 
     @staticmethod
@@ -1747,13 +1766,18 @@ class PlannerService:
         prompt_profile: str = "default",
         guidance_block: str = "",
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
+        grounding_block = render_planner_contract_context(planner_contract)
+        effective_guidance_block = "\n\n".join(
+            block for block in (grounding_block, guidance_block) if block
+        )
         return _build_compact_planning_repair_prompt(
             malformed_output=malformed_output,
             rejection_reasons=rejection_reasons,
             prompt_profile=prompt_profile,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
-            guidance_block=guidance_block,
+            guidance_block=effective_guidance_block,
             workspace_identity=workspace_identity,
         )
 
@@ -1783,6 +1807,7 @@ class PlannerService:
         validation_profile: Optional[str] = None,
         project_context: Optional[str] = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         can_store_retry_guard = hasattr(runtime_service, "__dict__")
         if can_store_retry_guard:
@@ -1826,6 +1851,7 @@ class PlannerService:
             validation_profile=validation_profile,
             project_context=project_context,
             workspace_identity=workspace_identity,
+            planner_contract=planner_contract,
         )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)
@@ -1857,6 +1883,18 @@ class PlannerService:
                 "retry": "minimal_prompt_first" if minimal_first else "minimal_prompt",
                 "reason": reason[:240],
                 "timeout_seconds": minimal_timeout,
+                "planner_grounding": planner_grounding_evidence(
+                    planner_contract,
+                    runtime_context={
+                        "planning_attempt": "minimal",
+                        "project_dir": str(project_dir),
+                        "workflow_profile": workflow_profile,
+                        "validation_profile": validation_profile,
+                        "project_context_available": bool(project_context),
+                        "workspace_has_existing_files": workspace_has_existing_files,
+                    },
+                    planner_prompt=minimal_prompt,
+                ),
                 **minimal_prompt_diagnostics,
             },
         )
@@ -1928,6 +1966,18 @@ class PlannerService:
             ultra_minimal_timeout = min(
                 timeout_seconds, ULTRA_MINIMAL_PLANNING_TIMEOUT_SECONDS
             )
+            ultra_minimal_prompt = cls.build_ultra_minimal_planning_prompt(
+                task_description,
+                project_dir,
+                prompt_profile=prompt_profile,
+                workflow_profile=workflow_profile,
+                workflow_phases=workflow_phases,
+                workspace_has_existing_files=workspace_has_existing_files,
+                validation_profile=validation_profile,
+                project_context=project_context,
+                workspace_identity=workspace_identity,
+                planner_contract=planner_contract,
+            )
             logger.warning(
                 "[ORCHESTRATION] Minimal planning prompt timed out; retrying with ultra-minimal prompt"
             )
@@ -1942,6 +1992,18 @@ class PlannerService:
                     "retry": "ultra_minimal_prompt",
                     "reason": str(exc)[:240],
                     "timeout_seconds": ultra_minimal_timeout,
+                    "planner_grounding": planner_grounding_evidence(
+                        planner_contract,
+                        runtime_context={
+                            "planning_attempt": "ultra_minimal",
+                            "project_dir": str(project_dir),
+                            "workflow_profile": workflow_profile,
+                            "validation_profile": validation_profile,
+                            "project_context_available": bool(project_context),
+                            "workspace_has_existing_files": workspace_has_existing_files,
+                        },
+                        planner_prompt=ultra_minimal_prompt,
+                    ),
                 },
             )
             emit_live(
@@ -1955,22 +2017,24 @@ class PlannerService:
                     "attempt": 3,
                     "strategy": "ultra_minimal_prompt",
                     "timeout_seconds": ultra_minimal_timeout,
+                    "planner_grounding": planner_grounding_evidence(
+                        planner_contract,
+                        runtime_context={
+                            "planning_attempt": "ultra_minimal",
+                            "project_dir": str(project_dir),
+                            "workflow_profile": workflow_profile,
+                            "validation_profile": validation_profile,
+                            "project_context_available": bool(project_context),
+                            "workspace_has_existing_files": workspace_has_existing_files,
+                        },
+                        planner_prompt=ultra_minimal_prompt,
+                    ),
                 },
             )
             return _run_coroutine_from_sync(
                 cls._execute_task_with_planning_lock(
                     runtime_service,
-                    cls.build_ultra_minimal_planning_prompt(
-                        task_description,
-                        project_dir,
-                        prompt_profile=prompt_profile,
-                        workflow_profile=workflow_profile,
-                        workflow_phases=workflow_phases,
-                        workspace_has_existing_files=workspace_has_existing_files,
-                        validation_profile=validation_profile,
-                        project_context=project_context,
-                        workspace_identity=workspace_identity,
-                    ),
+                    ultra_minimal_prompt,
                     timeout_seconds=ultra_minimal_timeout,
                     reuse_task_session=False,
                     diagnostic_label="ULTRA_MINIMAL_PLANNING",
@@ -2007,6 +2071,7 @@ class PlannerService:
         _compact_no_output_retry: bool = False,
         guidance_block: str = "",
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         repair_build_started_at = time.monotonic()
         logger.warning(
@@ -2024,6 +2089,7 @@ class PlannerService:
                 prompt_profile=prompt_profile,
                 guidance_block=guidance_block,
                 workspace_identity=workspace_identity,
+                planner_contract=planner_contract,
             )
             repair_prompt_metadata: Dict[str, Any] = {
                 "source_api_contract_available": False,
@@ -2045,6 +2111,7 @@ class PlannerService:
                 knowledge_context=knowledge_context,
                 workspace_identity=workspace_identity,
                 guidance_block=guidance_block,
+                planner_contract=planner_contract,
             )
             repair_prompt = repair_prompt_result.prompt
             repair_prompt_metadata = dict(repair_prompt_result.metadata)
@@ -2144,6 +2211,19 @@ class PlannerService:
                     ),
                     "repair_attempts": 0,
                     **repair_prompt_metadata,
+                    "planner_grounding": planner_grounding_evidence(
+                        planner_contract,
+                        runtime_context={
+                            "planning_attempt": "repair",
+                            "repair_attempt": _repair_attempt_number,
+                            "session_id": session_id,
+                            "task_id": task_id,
+                            "project_dir": str(project_dir),
+                            "workflow_profile": workflow_profile,
+                            "knowledge_context_available": bool(knowledge_context),
+                        },
+                        planner_prompt=repair_prompt,
+                    ),
                 },
             )
             raise PlanningRepairBudgetExceeded(budget_error)
@@ -2165,6 +2245,19 @@ class PlannerService:
                 "repair_prompt_build_seconds": round(repair_prompt_build_seconds, 3),
                 "repair_attempts": _repair_attempt_number,
                 **repair_prompt_metadata,
+                "planner_grounding": planner_grounding_evidence(
+                    planner_contract,
+                    runtime_context={
+                        "planning_attempt": "repair",
+                        "repair_attempt": _repair_attempt_number,
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "project_dir": str(project_dir),
+                        "workflow_profile": workflow_profile,
+                        "knowledge_context_available": bool(knowledge_context),
+                    },
+                    planner_prompt=repair_prompt,
+                ),
             },
         )
         emit_live(
@@ -2438,6 +2531,7 @@ class PlannerService:
                         _compact_no_output_retry=True,
                         guidance_block=guidance_block,
                         workspace_identity=workspace_identity,
+                        planner_contract=planner_contract,
                     )
                 timeout_exc = PlanningRepairNoOutputTimeout(
                     (

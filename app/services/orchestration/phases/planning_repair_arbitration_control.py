@@ -172,6 +172,7 @@ def arbitrate_planning_repair_candidate(
                     project_dir=ctx.orchestration_state.project_dir,
                     title=ctx.task.title if ctx.task else None,
                     task_type=getattr(ctx.task, "task_type", None),
+                    planner_contract=ctx.planner_contract,
                 )
             except Exception as exc:
                 ctx.logger.debug(
@@ -286,6 +287,7 @@ def arbitrate_planning_repair_candidate(
                     workflow_profile=ctx.workflow_profile,
                     workflow_stage=ctx.workflow_stage,
                     is_first_ordered_task=True,
+                    planner_contract=ctx.planner_contract,
                 )
             except Exception as exc:
                 ctx.logger.warning(
@@ -335,6 +337,7 @@ def arbitrate_planning_repair_candidate(
         workflow_profile=ctx.workflow_profile,
         workflow_stage=ctx.workflow_stage,
         is_first_ordered_task=_is_first_ordered_task(ctx.task),
+        planner_contract=ctx.planner_contract,
     )
     second_repair_reason = _get_targeted_second_repair_reason(
         retry_state=retry_state,
@@ -1069,6 +1072,7 @@ def _maybe_apply_slot_repair_experiment(
         workflow_profile=ctx.workflow_profile,
         workflow_stage=ctx.workflow_stage,
         is_first_ordered_task=_is_first_ordered_task(ctx.task),
+        planner_contract=ctx.planner_contract,
     )
     diagnostics["compiled_plan_validator_result"] = (
         "accepted" if verdict.accepted else "rejected"

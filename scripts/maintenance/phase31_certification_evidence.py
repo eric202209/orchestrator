@@ -144,6 +144,7 @@ class CertificationEvidenceSession:
         post_hash: Optional[str],
         timings: dict[str, Any],
         repair_telemetry: list[dict[str, Any]],
+        planner_grounding: list[dict[str, Any]],
         event_journal_pointer: Optional[str],
         scenario_specification: Optional[dict[str, Any]] = None,
     ) -> Path:
@@ -166,6 +167,7 @@ class CertificationEvidenceSession:
             "post_run_content_hash": post_hash,
             "timings": timings,
             "repair_telemetry": repair_telemetry,
+            "planner_grounding": planner_grounding,
             "event_journal_pointer": event_journal_pointer,
             "captured_at": now_iso(),
         }

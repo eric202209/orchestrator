@@ -6,7 +6,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -77,6 +77,7 @@ class TaskRetryRequest(BaseModel):
     session_id: Optional[int] = None
     execution_scope: Optional[str] = None
     create_new_session: bool = False
+    planner_contract: Optional[Dict[str, Any]] = None
 
 
 class DirectExecuteRequest(BaseModel):
@@ -456,6 +457,11 @@ def _queue_task_retry(
         )
 
     retry_request = retry_request or TaskRetryRequest()
+    planner_context = (
+        {"planner_contract": retry_request.planner_contract}
+        if retry_request.planner_contract is not None
+        else None
+    )
     explicit_new_session = (
         retry_request.create_new_session
         or str(retry_request.execution_scope or "").lower() == "new_session"
@@ -632,6 +638,7 @@ def _queue_task_retry(
             "model_family": get_effective_agent_model_family(
                 settings.AGENT_MODEL, db=db
             ),
+            "planner_contract": retry_request.planner_contract,
         },
     )
 
@@ -664,6 +671,7 @@ def _queue_task_retry(
                     "repair_archive_result": repair_archive_result,
                     "request_changes_repair_context": bool(latest_change_set)
                     or bool(getattr(task, "promotion_note", None)),
+                    "planner_contract": retry_request.planner_contract,
                 }
             ),
         )
@@ -689,6 +697,7 @@ def _queue_task_retry(
             expected_session_instance_id=selected_session.instance_id,
             task_execution_id=task_execution.id,
             queued_event_id=(queued_event or {}).get("event_id"),
+            context=planner_context,
         )
     except Exception:
         mark_session_stopped(selected_session, stopped_at=datetime.now(timezone.utc))

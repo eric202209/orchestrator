@@ -29,6 +29,9 @@ from app.services.orchestration.planning.planner import (
     PlanningRepairBudgetExceeded,
     PlanningRepairOutputContractViolation,
 )
+from app.services.orchestration.planning.planner_contract_registry import (
+    planner_grounding_evidence,
+)
 from app.services.orchestration.planning.source_materialization import (
     repair_context_requires_source_materialization as _repair_context_requires_source_materialization,
     repair_removed_source_materialization as _repair_removed_source_materialization,
@@ -164,6 +167,15 @@ def execute_planning_phase(
         details={
             "project_context_chars": len(ctx.orchestration_state.project_context or ""),
             "task_chars": len(ctx.prompt or ""),
+            "planner_grounding": planner_grounding_evidence(
+                ctx.planner_contract,
+                runtime_context={
+                    "session_id": ctx.session_id,
+                    "task_id": ctx.task_id,
+                    "task_execution_id": ctx.task_execution_id,
+                    "stage": "planning_phase_start",
+                },
+            ),
         },
     )
     planning_phase_event = None
@@ -282,6 +294,16 @@ def execute_planning_phase(
             "task_chars": len(ctx.prompt or ""),
             "prompt_profile": prompt_profile,
             "planning_prompt_ref": planning_prompt_ref,
+            "planner_grounding": planner_grounding_evidence(
+                ctx.planner_contract,
+                runtime_context={
+                    "session_id": ctx.session_id,
+                    "task_id": ctx.task_id,
+                    "task_execution_id": ctx.task_execution_id,
+                    "stage": "planning_prompt",
+                },
+                planner_prompt=planning_prompt,
+            ),
             "model_capability_label": model_capability_label,
             "context_budget_status": (
                 "dense" if planning_prompt_tokens > 8000 else "normal"
@@ -2500,6 +2522,7 @@ def __retry_with_minimal_prompt(
         validation_profile=_planning_validation_profile(ctx),
         project_context=ctx.orchestration_state.project_context,
         workspace_identity=_planner_workspace_identity(ctx),
+        planner_contract=ctx.planner_contract,
     )
 
 
@@ -2541,6 +2564,7 @@ def __repair_planning_output(
         task_id=ctx.task_id,
         guidance_block=_collect_repair_guidance(ctx),
         workspace_identity=_planner_workspace_identity(ctx),
+        planner_contract=ctx.planner_contract,
     )
 
 

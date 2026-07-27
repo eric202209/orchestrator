@@ -138,6 +138,7 @@ def try_candidate_recovery_after_validation(
             workflow_profile=ctx.workflow_profile,
             workflow_stage=ctx.workflow_stage,
             is_first_ordered_task=_is_first_ordered_task(ctx.task),
+            planner_contract=ctx.planner_contract,
         )
 
     def _generate_sibling() -> tuple[list[dict[str, Any]], str]:
@@ -289,6 +290,7 @@ def try_slot_merge_recovery_after_validation(
             workflow_profile=ctx.workflow_profile,
             workflow_stage=ctx.workflow_stage,
             is_first_ordered_task=_is_first_ordered_task(ctx.task),
+            planner_contract=ctx.planner_contract,
         )
 
     runtime_result_holder: dict[str, Any] = {}

@@ -162,6 +162,7 @@ def build_minimal_planning_prompt(
     validation_profile: Optional[str] = None,
     project_context: Optional[str] = None,
     workspace_identity: PlannerWorkspaceIdentity | None = None,
+    planner_contract: dict[str, Any] | None = None,
     apply_prompt_profile: Any = None,
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:1200]
@@ -250,7 +251,14 @@ Valid minimal JSON example:
 
 Return only a JSON array matching this shape. No markdown. No prose.
 """
-    return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+    prompt = _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+    if planner_contract:
+        from app.services.orchestration.planning.planner_contract_registry import (
+            render_planner_contract_context,
+        )
+
+        prompt = f"{prompt}\n\n{render_planner_contract_context(planner_contract)}"
+    return prompt
 
 
 def build_ultra_minimal_planning_prompt(
@@ -263,6 +271,7 @@ def build_ultra_minimal_planning_prompt(
     validation_profile: Optional[str] = None,
     project_context: Optional[str] = None,
     workspace_identity: PlannerWorkspaceIdentity | None = None,
+    planner_contract: dict[str, Any] | None = None,
     apply_prompt_profile: Any = None,
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:700]
@@ -329,4 +338,11 @@ Valid minimal JSON example:
 
 Return only a JSON array matching this shape. No markdown. No prose.
 """
-    return _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+    prompt = _apply_profile(prompt, prompt_profile, apply_prompt_profile)
+    if planner_contract:
+        from app.services.orchestration.planning.planner_contract_registry import (
+            render_planner_contract_context,
+        )
+
+        prompt = f"{prompt}\n\n{render_planner_contract_context(planner_contract)}"
+    return prompt

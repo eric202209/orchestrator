@@ -8,6 +8,7 @@ absence.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -136,6 +137,101 @@ def truthy_structural_facts(value: Any) -> set[str]:
     return set()
 
 
+def planner_grounding_evidence(
+    planner_contract: Mapping[str, Any] | None,
+    *,
+    runtime_context: Mapping[str, Any] | None = None,
+    planner_prompt: str | None = None,
+) -> dict[str, Any]:
+    """Return inspectable evidence for one planner grounding boundary.
+
+    The payload is observational.  It never fills missing contract values from
+    task prose or workspace inspection; an absent contract remains visibly
+    absent so legacy, non-certification planning keeps its existing path.
+    """
+
+    contract = dict(planner_contract) if isinstance(planner_contract, Mapping) else {}
+    registered = contract.get("registered_scenario_contract")
+    registered_contract = dict(registered) if isinstance(registered, Mapping) else None
+    propagated = contract.get("propagated_planner_contract")
+    propagated_contract = (
+        dict(propagated)
+        if isinstance(propagated, Mapping)
+        else (dict(contract) if contract else None)
+    )
+    review_contract = contract.get("review_contract")
+    publication_contract = contract.get("publication_contract")
+    review = dict(review_contract) if isinstance(review_contract, Mapping) else {}
+    publication = (
+        dict(publication_contract) if isinstance(publication_contract, Mapping) else {}
+    )
+    return {
+        "authoritative_contract_available": bool(contract),
+        "registered_scenario_contract": registered_contract,
+        "propagated_planner_contract": propagated_contract,
+        "source_expectations": {
+            "source": contract.get("source_expectation"),
+            "scenario_source": (
+                registered_contract.get("source_expectation")
+                if registered_contract
+                else None
+            ),
+        },
+        "test_expectations": {
+            "test": contract.get("test_expectation"),
+            "scenario_test": (
+                registered_contract.get("test_expectation")
+                if registered_contract
+                else None
+            ),
+        },
+        "review_expectations": {
+            "review": review.get("expectation"),
+            "contract": review,
+        },
+        "publication_expectations": {
+            "publication": publication.get("expectation"),
+            "contract": publication,
+        },
+        "required_source_inventory": list(
+            contract.get("required_source_inventory")
+            or contract.get("source_paths")
+            or []
+        ),
+        "required_test_inventory": list(
+            contract.get("required_test_inventory") or contract.get("test_paths") or []
+        ),
+        "runtime_planner_context": dict(runtime_context or {}),
+        "planner_prompt": (
+            planner_prompt if contract and planner_prompt is not None else None
+        ),
+        "authority": (
+            "registered_certification_contract"
+            if contract
+            else "legacy_runtime_inference"
+        ),
+    }
+
+
+def render_planner_contract_context(
+    planner_contract: Mapping[str, Any] | None,
+) -> str:
+    """Render authoritative planner facts as a prompt block when supplied."""
+
+    if not isinstance(planner_contract, Mapping) or not planner_contract:
+        return ""
+    payload = json.dumps(
+        dict(planner_contract), ensure_ascii=True, sort_keys=True, indent=2
+    )
+    return (
+        "## AUTHORITATIVE REGISTERED PLANNER CONTRACT\n"
+        "These facts come from the registered certification scenario contract. "
+        "Use them unchanged for planning and repair; do not infer, replace, or "
+        "override them from task wording or repository inspection.\n\n"
+        f"{payload}"
+    )
+
+
 __all__ = [
     "PLANNER_CONTRACT_ID",
     "PLANNER_CONTRACT_VERSION",
@@ -147,5 +243,7 @@ __all__ = [
     "TEST_EXPECTATIONS",
     "RegisteredPlannerContract",
     "registered_planner_contract",
+    "planner_grounding_evidence",
+    "render_planner_contract_context",
     "truthy_structural_facts",
 ]

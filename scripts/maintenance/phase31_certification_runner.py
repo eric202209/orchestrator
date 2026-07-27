@@ -68,6 +68,7 @@ from scripts.maintenance.phase31_certification_evidence import (  # noqa: E402
 )
 from scripts.maintenance.phase31_certification_facts import (  # noqa: E402
     assemble_facts_from_live_run,
+    assemble_planner_grounding_from_live_run,
     assemble_repair_telemetry_from_live_run,
     assemble_timing_facts_from_live_run,
 )
@@ -98,6 +99,51 @@ BASE_URL = os.environ.get("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:8080")
 OPERATOR_EMAIL = os.environ.get("ORCHESTRATOR_USER_EMAIL", "eval@local.dev")
 WORKSPACE_BASE = Path("/root/.openclaw/workspace/vault/projects")
 TERMINAL_TASK_STATUSES = {"done", "failed", "cancelled"}
+
+
+def planner_contract_payload_for_scenario(
+    specification: Any,
+) -> Optional[dict[str, Any]]:
+    """Build the immutable planner payload carried into a live task dispatch."""
+
+    binding = getattr(specification, "planner_contract", None)
+    if binding is None:
+        return None
+
+    registered_scenario_contract = {
+        "specification_version": specification.specification_version,
+        "scenario_id": specification.scenario_id,
+        "source_expectation": binding.source_expectation,
+        "test_expectation": specification.test_expectation,
+        "source_inventory": list(specification.source_paths),
+        "test_inventory": list(specification.test_paths),
+        "review_contract": specification.review_contract.to_payload(),
+        "publication_contract": specification.publication_contract.to_payload(),
+    }
+    review_contract = specification.review_contract.to_payload()
+    publication_contract = specification.publication_contract.to_payload()
+    payload = binding.to_payload()
+    payload.update(
+        {
+            "contract_source": "phase31_certification_runner",
+            "registered_scenario_contract": registered_scenario_contract,
+            "review_contract": review_contract,
+            "publication_contract": publication_contract,
+            "source_expectations": {
+                "registered": binding.source_expectation,
+                "scenario": binding.source_expectation,
+            },
+            "test_expectations": {
+                "registered": binding.test_expectation,
+                "scenario": specification.test_expectation,
+            },
+            "review_expectation": review_contract["expectation"],
+            "publication_expectation": publication_contract["expectation"],
+            "required_source_inventory": list(specification.source_paths),
+            "required_test_inventory": list(specification.test_paths),
+        }
+    )
+    return payload
 
 
 def _api(token: str, method: str, path: str, **kwargs: Any) -> Any:
@@ -172,7 +218,17 @@ def dispatch_scenario(
     )
     task_id = int(created_task["id"])
 
-    queued = _api(token, "POST", f"/api/v1/tasks/{task_id}/retry", json={})
+    planner_contract = planner_contract_payload_for_scenario(scenario_spec(scenario_id))
+    queued = _api(
+        token,
+        "POST",
+        f"/api/v1/tasks/{task_id}/retry",
+        json=(
+            {"planner_contract": planner_contract}
+            if planner_contract is not None
+            else {}
+        ),
+    )
     session_id = int(queued["session_id"])
 
     return {"task_id": task_id, "session_id": session_id}
@@ -226,6 +282,9 @@ def run_scenario(
         repair_telemetry = assemble_repair_telemetry_from_live_run(
             db, session_id=session_id, task_id=task_id
         )
+        planner_grounding = assemble_planner_grounding_from_live_run(
+            db, session_id=session_id, task_id=task_id
+        )
 
     result = classify_acceptance(contract, facts)
 
@@ -244,6 +303,7 @@ def run_scenario(
             **timing_facts,
         },
         repair_telemetry=repair_telemetry,
+        planner_grounding=planner_grounding,
         event_journal_pointer=f"session_id={session_id} task_id={task_id}",
         scenario_specification=specification.to_dict(),
     )
@@ -319,7 +379,9 @@ def main() -> int:
     if args.list_scenarios or args.validate_scenarios:
         payload = {
             "valid": True,
-            "registry_version": scenario_spec(STAGE1_SCENARIO_IDS[0]).specification_version,
+            "registry_version": scenario_spec(
+                STAGE1_SCENARIO_IDS[0]
+            ).specification_version,
             "scenario_ids": list(selection.scenario_ids),
             "registered_scenario_ids": list(STAGE1_SCENARIO_IDS),
             "classification": selection.certification_classification,

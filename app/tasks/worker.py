@@ -384,6 +384,12 @@ def execute_orchestration_task(
         if not session or not task:
             raise ValueError("Session or task not found")
 
+        planner_contract = None
+        if isinstance(context, dict) and isinstance(
+            context.get("planner_contract"), dict
+        ):
+            planner_contract = dict(context["planner_contract"])
+
         execution_configuration = resolve_runtime_configuration(
             db,
             BackendRole.EXECUTION,
@@ -667,6 +673,7 @@ def execute_orchestration_task(
             project_name=project.name if project else "",
             project_context=context.get("project_context", "") if context else "",
             task_id=task_id,  # Pass task ID for subfolder generation
+            planner_contract=planner_contract,
         )
 
         # If project has workspace_path configured, use it
@@ -1628,6 +1635,7 @@ def execute_orchestration_task(
                     validation_severity=active_policy.validation_severity,
                     workflow_stage=getattr(task, "workflow_stage", None),
                     is_first_ordered_task=getattr(task, "plan_position", None) == 1,
+                    planner_contract=planner_contract,
                 )
                 _record_validation_verdict(
                     db,
@@ -1739,6 +1747,35 @@ def execute_orchestration_task(
             guidance_model_name=guidance_model_name,
             guidance_model_family=guidance_model_family,
             runtime_workspace_used=_runtime_sandbox is not None,
+            planner_contract=planner_contract,
+        )
+
+        from app.services.orchestration.planning.planner_contract_registry import (
+            planner_grounding_evidence,
+        )
+
+        emit_live(
+            "INFO",
+            "[ORCHESTRATION] Planner contract grounding propagated",
+            metadata={
+                "event_type": "planner_contract_grounding_propagated",
+                "phase": "planning",
+                "planner_grounding": planner_grounding_evidence(
+                    planner_contract,
+                    runtime_context={
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "task_execution_id": task_execution_id,
+                        "project_context_available": bool(
+                            orchestration_state.project_context
+                        ),
+                        "execution_profile": execution_profile,
+                        "workflow_stage": getattr(task, "workflow_stage", None),
+                        "planning_backend": resolved_planning_backend,
+                        "project_dir": str(orchestration_state.project_dir),
+                    },
+                ),
+            },
         )
 
         gate_error = _run_virtual_merge_gate(
@@ -1807,6 +1844,7 @@ def execute_orchestration_task(
                         validation_severity=active_policy.validation_severity,
                         workflow_stage=getattr(task, "workflow_stage", None),
                         is_first_ordered_task=getattr(task, "plan_position", None) == 1,
+                        planner_contract=planner_contract,
                     )
                     _record_validation_verdict(
                         db,
@@ -2063,6 +2101,49 @@ def execute_orchestration_task(
                         session.escalation_backend_id = None
                         db.add(session)
                         db.commit()
+            terminal_grounding = planner_grounding_evidence(
+                planner_contract,
+                runtime_context={
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "task_execution_id": task_execution_id,
+                    "stage": "planner_terminal",
+                    "execution_profile": execution_profile,
+                    "workflow_stage": getattr(task, "workflow_stage", None),
+                    "planning_backend": resolved_planning_backend,
+                    "project_dir": str(orchestration_state.project_dir),
+                },
+            )
+            last_plan_validation = (
+                orchestration_state.last_plan_validation
+                if isinstance(orchestration_state.last_plan_validation, dict)
+                else {}
+            )
+            terminal_evidence = {
+                "event_type": "planner_terminal_evidence",
+                "phase": "planning",
+                "planner_grounding": terminal_grounding,
+                "planner_terminal_reason": planning_phase_result.get("reason"),
+                "planner_status": planning_phase_result.get("status"),
+                "selected_planning_path": (
+                    (last_plan_validation.get("details") or {})
+                    .get("task1_bootstrap_contract", {})
+                    .get("selected_planning_path")
+                ),
+                "rejected_alternatives": (
+                    (last_plan_validation.get("details") or {})
+                    .get("task1_bootstrap_contract", {})
+                    .get("rejected_alternatives", [])
+                ),
+                "compiled_plan": orchestration_state.plan or [],
+                "execution_start_reached": planning_phase_result.get("status")
+                == "completed",
+            }
+            emit_live(
+                "INFO" if terminal_evidence["execution_start_reached"] else "WARN",
+                "[ORCHESTRATION] Planner terminal evidence retained",
+                metadata=terminal_evidence,
+            )
             if planning_phase_result.get("status") != "completed":
                 mark_session_paused(
                     session,
@@ -2094,6 +2175,29 @@ def execute_orchestration_task(
 
         _save_orchestration_checkpoint(
             db, session_id, task_id, prompt, orchestration_state
+        )
+
+        emit_live(
+            "INFO",
+            "[ORCHESTRATION] Planner execution start reached",
+            metadata={
+                "event_type": "planner_execution_start",
+                "phase": "execution",
+                "planner_grounding": planner_grounding_evidence(
+                    planner_contract,
+                    runtime_context={
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "task_execution_id": task_execution_id,
+                        "stage": "execution_start",
+                        "execution_profile": execution_profile,
+                        "workflow_stage": getattr(task, "workflow_stage", None),
+                        "planning_backend": resolved_planning_backend,
+                        "project_dir": str(orchestration_state.project_dir),
+                    },
+                ),
+                "compiled_plan": orchestration_state.plan or [],
+            },
         )
 
         with start_langfuse_observation(

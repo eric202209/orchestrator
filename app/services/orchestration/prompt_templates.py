@@ -97,6 +97,7 @@ class OrchestrationState:
     project_name: str = ""  # project slug, no spaces
     project_context: str = ""
     task_id: Optional[int] = None  # For generating task subfolder
+    planner_contract: Optional[Dict[str, Any]] = None
     plan: List[Dict[str, Any]] = field(default_factory=list)
     current_step_index: int = 0
     execution_results: List[StepResult] = field(default_factory=list)
@@ -946,6 +947,7 @@ Examples:
         workflow_phases: Optional[List[str]] = None,
         project_structure_capsule: Optional[str] = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Build a reduced planning prompt for the Arm B experiment (Priority 8).
 
@@ -1018,8 +1020,14 @@ Examples:
                 execution_profile
             ),
         }
+        prompt = cls.TASK_PLANNING_ARM_B.format(**context)
+        if planner_contract:
+            from app.services.orchestration.planning.planner_contract_registry import (
+                render_planner_contract_context,
+            )
 
-        return cls.TASK_PLANNING_ARM_B.format(**context)
+            prompt = f"{prompt}\n\n{render_planner_contract_context(planner_contract)}"
+        return prompt
 
     @classmethod
     def get_template(cls, template_name: str) -> Optional[str]:
@@ -1077,6 +1085,7 @@ Examples:
         workflow_phases: Optional[List[str]] = None,
         project_structure_capsule: Optional[str] = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
+        planner_contract: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Build a prompt for task planning phase.
@@ -1103,6 +1112,7 @@ Examples:
                 workflow_phases=workflow_phases,
                 project_structure_capsule=project_structure_capsule,
                 workspace_identity=workspace_identity,
+                planner_contract=planner_contract,
             )
 
         ws_root = workspace_root or str(get_effective_workspace_root())
@@ -1172,7 +1182,14 @@ Examples:
             "operation_choice_contract": render_operation_choice_contract(),
         }
 
-        return cls.render("task_planning", **context)
+        prompt = cls.render("task_planning", **context)
+        if planner_contract:
+            from app.services.orchestration.planning.planner_contract_registry import (
+                render_planner_contract_context,
+            )
+
+            prompt = f"{prompt}\n\n{render_planner_contract_context(planner_contract)}"
+        return prompt
 
     @classmethod
     def build_execution_prompt(

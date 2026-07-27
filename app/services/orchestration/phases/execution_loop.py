@@ -2752,6 +2752,7 @@ def execute_step_loop(
                     workflow_profile=getattr(ctx, "workflow_profile", None),
                     workflow_stage=getattr(ctx, "workflow_stage", None),
                     is_first_ordered_task=getattr(task, "plan_position", None) == 1,
+                    planner_contract=ctx.planner_contract,
                 )
                 record_validation_verdict(
                     db,

@@ -869,6 +869,7 @@ def assemble_planning_prompt(
             Path(ctx.orchestration_state.project_dir)
         ),
         workspace_identity=planner_workspace_identity,
+        planner_contract=getattr(ctx, "planner_contract", None),
     )
     artifact_supplement = getattr(ctx.orchestration_state, "artifact_supplement", None)
     if artifact_supplement:

@@ -431,6 +431,7 @@ def queue_task_for_session(
     timeout_seconds: int = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS,
     planning_backend_override: Optional[str] = None,
     planning_escalation_metadata: Optional[Dict[str, Any]] = None,
+    planner_contract: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from app.tasks.worker import execute_orchestration_task
 
@@ -518,6 +519,9 @@ def queue_task_for_session(
         TaskStatus.CANCELLED,
     )
     task_prompt = build_task_execution_prompt(task)
+    planner_context = (
+        {"planner_contract": planner_contract} if planner_contract is not None else None
+    )
     prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
 
     mark_session_running(
@@ -544,6 +548,7 @@ def queue_task_for_session(
             "workflow_stage": getattr(task, "workflow_stage", None),
             "planning_backend_override": planning_backend_override,
             "planning_escalation": planning_escalation_metadata,
+            "planner_contract": planner_contract,
             **build_runtime_identity_projection(
                 db,
                 task_execution=task_execution,
@@ -563,6 +568,7 @@ def queue_task_for_session(
             queued_event_id=(queued_event or {}).get("event_id"),
             planning_backend_override=planning_backend_override,
             planning_escalation_metadata=planning_escalation_metadata,
+            context=planner_context,
         )
     except Exception as exc:
         completed_at = datetime.now(timezone.utc)

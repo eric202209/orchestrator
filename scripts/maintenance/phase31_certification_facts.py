@@ -120,7 +120,9 @@ def assemble_timing_facts_from_live_run(
         ),
         None,
     )
-    valid_plan_at = _structured_timestamp(valid_plan_entry) if valid_plan_entry else None
+    valid_plan_at = (
+        _structured_timestamp(valid_plan_entry) if valid_plan_entry else None
+    )
     time_to_valid_plan = None
     if planning_started is not None and valid_plan_at is not None:
         time_to_valid_plan = round(
@@ -146,9 +148,8 @@ def assemble_repair_telemetry_from_live_run(
     entries = _completion_log_entries(db, session_id, task_id)
     telemetry: list[dict[str, Any]] = []
     for entry, metadata in _planning_entries_with_metadata(entries):
-        is_repair_completion = (
-            metadata.get("attempt") == "repair"
-            and isinstance(metadata.get("duration_seconds"), (int, float))
+        is_repair_completion = metadata.get("attempt") == "repair" and isinstance(
+            metadata.get("duration_seconds"), (int, float)
         )
         is_repair_outcome = isinstance(metadata.get("target_outcomes"), dict)
         is_arbitration = "outcome" in metadata and "repair_attempts" in metadata
@@ -175,6 +176,36 @@ def assemble_repair_telemetry_from_live_run(
             }
         )
     return telemetry
+
+
+def assemble_planner_grounding_from_live_run(
+    db: Session, *, session_id: int, task_id: int
+) -> list[dict[str, Any]]:
+    """Expose planner-grounding evidence retained by every planning attempt."""
+    entries = _completion_log_entries(db, session_id, task_id)
+    grounding: list[dict[str, Any]] = []
+    for entry, metadata in _planning_entries_with_metadata(entries):
+        planner_evidence = metadata.get("planner_grounding")
+        bootstrap_contract = metadata.get("task1_bootstrap_contract")
+        if not isinstance(planner_evidence, dict) and not isinstance(
+            bootstrap_contract, dict
+        ):
+            continue
+        grounding.append(
+            {
+                "log_entry_id": entry.id,
+                "created_at": (
+                    _structured_timestamp(entry).isoformat()
+                    if _structured_timestamp(entry) is not None
+                    else None
+                ),
+                "event_type": metadata.get("event_type"),
+                "planner_grounding": planner_evidence,
+                "task1_bootstrap_contract": bootstrap_contract,
+                "metadata": metadata,
+            }
+        )
+    return grounding
 
 
 def _repair_outcome_facts(
@@ -229,9 +260,7 @@ def assemble_facts_from_live_run(
     repair_telemetry = assemble_repair_telemetry_from_live_run(
         db, session_id=session_id, task_id=task_id
     )
-    repair_outcome_consistent, target_repeated = _repair_outcome_facts(
-        repair_telemetry
-    )
+    repair_outcome_consistent, target_repeated = _repair_outcome_facts(repair_telemetry)
 
     baseline_publish_result: Optional[dict[str, Any]] = None
     for entry in entries:
