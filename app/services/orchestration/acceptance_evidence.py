@@ -16,6 +16,26 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Sequence
 
+from app.services.orchestration.outcome_adjudication import (
+    CertificationOutcome,
+    ExpectationComparison,
+    OutcomeAdjudicationResult,
+    OutcomeEvidenceError,
+    ProductOutcome,
+    PublicationExpectation,
+    PublicationExpectationComparison,
+    PublicationOutcome,
+    RegisteredOutcomeContract,
+    RegisteredStructuralEvidence,
+    ReviewExpectation,
+    ReviewOutcome,
+    RuntimeOutcome,
+    derive_independent_outcomes,
+    derive_publication_outcome,
+    derive_review_outcome,
+    derive_review_publication_outcomes,
+)
+
 
 class OutcomeClass(str, Enum):
     SUCCESS_PUBLISHED = "SUCCESS_PUBLISHED"
