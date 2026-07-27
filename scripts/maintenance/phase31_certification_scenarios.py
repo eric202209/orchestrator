@@ -1,10 +1,11 @@
 """Declarative Phase 31 Stage 1 scenario and contract registry.
 
 The six Stage 1 task title/description pairs are copied verbatim from the
-retained Phase 31C-V4 evidence artifact
-``frozen-scenario-task-specs.json``.  That artifact records the temporary
-in-process dispatch input used by V4; this module is the first promotion of
-that frozen input into the canonical runner.
+tracked test/harness fixture
+``app/tests/fixtures/phase31c_v4_frozen_scenario_task_specs.json``.  That
+fixture preserves the temporary in-process dispatch input used by V4 in
+clean CI checkouts; this module is the first promotion of that frozen input
+into the canonical runner.
 
 This module owns harness declarations only.  It does not infer planner,
 review, publication, or test intent from prompt wording and it does not

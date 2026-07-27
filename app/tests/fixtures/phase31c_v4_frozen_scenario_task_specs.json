@@ -1,0 +1,37 @@
+{
+  "source_phase": "Phase 31C-V3",
+  "source_task_ids": {
+    "S1-1": 111,
+    "S1-2": 112,
+    "S1-3": 113,
+    "S1-4": 114,
+    "S1-5": 115,
+    "S1-6": 116
+  },
+  "specs": {
+    "S1-1": {
+      "description": "Add a short 'Overview' section to a new file README-PILOT.md at the project root describing this is a Phase 31C certification workspace. This is a documentation-only task: do not touch any other file, do not add code.",
+      "title": "Phase 31C S1-1: documentation-only change"
+    },
+    "S1-2": {
+      "description": "Add one new GET endpoint at /api/certification/status in the existing app/main.py module. Return JSON with status='ok' and certification_stage='31C'. Keep the change limited to the backend endpoint and its focused test if the repository has a test layout; do not change frontend files or unrelated code.",
+      "title": "Phase 31C S1-2: new backend API endpoint"
+    },
+    "S1-3": {
+      "description": "Fix the documented parity bug in app/calculator.py: is_even currently returns True for odd integers and False for even integers. Correct the implementation, preserve the public function name, and update only the focused test or explanation needed to demonstrate the fix. Do not redesign the module.",
+      "title": "Phase 31C S1-3: bug fix in existing code"
+    },
+    "S1-4": {
+      "description": "Add a reusable StatusBadge component under frontend/src/components/StatusBadge.tsx and render it from the existing frontend/src/App.tsx with the label 'Ready'. Keep the change limited to this component and its focused App usage; do not change backend files or package configuration.",
+      "title": "Phase 31C S1-4: new frontend component"
+    },
+    "S1-5": {
+      "description": "Implement a small notification feature across the existing backend: add app/notifications.py with a pure format_notification(message) helper, expose a GET /api/certification/notification endpoint from app/main.py, and add a focused test under tests/test_notifications.py. Keep the public behavior simple and the diff limited to those three feature files.",
+      "title": "Phase 31C S1-5: multi-file feature change"
+    },
+    "S1-6": {
+      "description": "Implement the requested review-held change: add a short 'Review checklist' section to README-PILOT.md describing that a human must verify the Stage 1 evidence before publication. This scenario's acceptance target is a held-for-review outcome. Prepare the change set and leave it for human review; do not publish or modify unrelated files.",
+      "title": "Phase 31C S1-6: review-required change"
+    }
+  }
+}

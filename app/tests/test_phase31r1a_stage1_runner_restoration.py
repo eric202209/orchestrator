@@ -150,9 +150,10 @@ def test_validation_inspection_does_not_create_projects_tasks_or_workspace_mutat
 
 
 def test_retained_v4_fixtures_match_the_promoted_task_specs():
-    fixture = Path(
-        "docs/roadmap/reports/evidence/phase31c-v4-stage1-recertification/"
-        "frozen-scenario-task-specs.json"
+    fixture = (
+        Path(__file__).resolve().parent
+        / "fixtures"
+        / "phase31c_v4_frozen_scenario_task_specs.json"
     )
     payload = json.loads(fixture.read_text(encoding="utf-8"))
     assert tuple(payload["specs"]) == STAGE1_SCENARIO_IDS
