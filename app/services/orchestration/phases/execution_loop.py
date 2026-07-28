@@ -7,6 +7,7 @@ import json
 import logging
 import subprocess
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -24,6 +25,7 @@ from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.diagnostics.debug_feedback import (
     build_bounded_debug_repair_prompt_with_metadata,
+    build_bounded_debug_repair_observability,
     build_debug_feedback_envelope,
     normalize_bounded_debug_repair_payload_detailed,
     normalize_diff_scoped_compliance_retry_command_list,
@@ -1897,6 +1899,7 @@ def execute_step_loop(
 
         debug_runtime_kwargs: dict[str, Any] = {}
         debug_repair_runtime = None
+        debug_repair_request_ids: list[str] = []
 
         def _ensure_role_owned_debug_repair_runtime():
             nonlocal debug_repair_runtime
@@ -1958,6 +1961,19 @@ def execute_step_loop(
             _ensure_role_owned_debug_repair_runtime()
 
         def _invoke_debug_repair(prompt_text: str) -> dict[str, Any]:
+            request_id = str(uuid.uuid4())
+            debug_repair_request_ids.append(request_id)
+            if is_bounded_debug_repair_mode(debug_prompt_mode):
+                diagnostic_metadata = debug_runtime_kwargs.setdefault(
+                    "diagnostic_metadata", {}
+                )
+                diagnostic_metadata["debug_repair_request_id"] = request_id
+
+            def _annotate(result: Any) -> dict[str, Any]:
+                annotated = dict(result or {})
+                annotated["_debug_repair_request_id"] = request_id
+                return annotated
+
             if debug_repair_runtime is None:
                 primary_error: Exception | None = None
                 try:
@@ -1971,7 +1987,7 @@ def execute_step_loop(
                 except Exception as exc:
                     primary_error = exc
                     result = {}
-                result = dict(result or {})
+                result = _annotate(result)
                 primary_output = str(result.get("output") or "").strip()
                 needs_role_fallback = bool(
                     primary_error
@@ -1986,7 +2002,7 @@ def execute_step_loop(
                         fallback_runtime = None
                     if fallback_runtime is not None:
                         try:
-                            fallback_result = dict(
+                            fallback_result = _annotate(
                                 _run_coroutine(
                                     fallback_runtime.execute_task(
                                         prompt_text,
@@ -1994,7 +2010,6 @@ def execute_step_loop(
                                         **debug_runtime_kwargs,
                                     )
                                 )
-                                or {}
                             )
                             diagnostics = dict(fallback_result.get("diagnostics") or {})
                             diagnostics["repair_runtime_fallback"] = True
@@ -2014,11 +2029,13 @@ def execute_step_loop(
                 reasoning_enabled=(not settings.DEBUG_REPAIR_DISABLE_THINKING),
                 stream=False,
             )
-            return _run_coroutine(
-                _invoke_role_owned_debug_repair(
-                    debug_repair_runtime,
-                    optimized_prompt,
-                    options,
+            return _annotate(
+                _run_coroutine(
+                    _invoke_role_owned_debug_repair(
+                        debug_repair_runtime,
+                        optimized_prompt,
+                        options,
+                    )
                 )
             )
 
@@ -2058,6 +2075,7 @@ def execute_step_loop(
 
         try:
             debug_result = _invoke_debug_repair(debug_prompt)
+            debug_provider_response = debug_result
         except Exception as debug_error:
             _mark_bounded_debug_repair_timeout_if_applicable(
                 debug_error,
@@ -2100,6 +2118,7 @@ def execute_step_loop(
                 ),
             )
             debug_result = _invoke_debug_repair(compact_debug_prompt)
+            debug_provider_response = debug_result
 
         # Remove debug artifacts the agent may have written to disk.
         for _artifact in ("debug_report.json", "analysis.json", "debug_analysis.json"):
@@ -2129,6 +2148,7 @@ def execute_step_loop(
                     )
                     try:
                         compliance_result = _invoke_debug_repair(compliance_prompt)
+                        debug_provider_response = compliance_result
                         compliance_output = extract_structured_text(
                             compliance_result.get("output", "{}")
                         )
@@ -2230,6 +2250,7 @@ def execute_step_loop(
                     )
                     try:
                         compliance_result = _invoke_debug_repair(compliance_prompt)
+                        debug_provider_response = compliance_result
                         compliance_output = extract_structured_text(
                             compliance_result.get("output", "{}")
                         )
@@ -2285,6 +2306,23 @@ def execute_step_loop(
                     debug_repair_raw_output_excerpt = _debug_repair_output_excerpt(
                         final_repair_output
                     )
+                    debug_repair_observability = (
+                        build_bounded_debug_repair_observability(
+                            request_id=(
+                                debug_repair_request_ids[-1]
+                                if debug_repair_request_ids
+                                else None
+                            ),
+                            provider_response=debug_provider_response,
+                            normalized_response=final_repair_output,
+                            parsed_data=parsed_repair,
+                            parsed_shape=debug_repair_parsed_shape,
+                            parser_branch=str(strategy_info or "unknown"),
+                            rejection_reason=debug_repair_rejection_reason,
+                            exception_type="ValueError",
+                            workspace_mutated=False,
+                        )
+                    )
                     append_orchestration_event(
                         project_dir=orchestration_state.project_dir,
                         session_id=session_id,
@@ -2314,6 +2352,8 @@ def execute_step_loop(
                             "debug_repair_rejection_reason": debug_repair_rejection_reason,
                             "debug_repair_parsed_shape": debug_repair_parsed_shape,
                             "debug_repair_raw_output_excerpt": debug_repair_raw_output_excerpt,
+                            "debug_repair_request_ids": list(debug_repair_request_ids),
+                            **debug_repair_observability,
                             "repair_output_sha256": hashlib.sha256(
                                 str(final_repair_output or "").encode("utf-8")
                             ).hexdigest(),

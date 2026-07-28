@@ -18,6 +18,7 @@ from app.models import (
 from app.services.orchestration.error_handler import error_handler
 from app.services.orchestration.diagnostics.debug_feedback import (
     build_bounded_debug_repair_prompt,
+    build_bounded_debug_repair_observability,
     build_debug_feedback_envelope,
     classify_debug_failure,
     normalize_bounded_debug_repair_payload,
@@ -1282,6 +1283,65 @@ def test_bounded_debug_repair_normalizer_keeps_multi_command_list_shape_rejected
 
     assert result.payload is None
     assert result.rejection_reason == "unsupported_shape"
+
+
+def test_bounded_debug_repair_observability_classifies_rejected_live_boundary():
+    parsed = [
+        {
+            "title": "Run first verifier",
+            "command": "python3 -m pytest -q",
+            "verification_command": "python3 -m pytest -q",
+        },
+        {
+            "title": "Run second verifier",
+            "command": "python3 -m pytest -q",
+            "verification_command": "python3 -m pytest -q",
+        },
+    ]
+
+    evidence = build_bounded_debug_repair_observability(
+        request_id="debug-repair-test-1",
+        provider_response={
+            "backend": "openai_chat_completions",
+            "output": json.dumps(parsed),
+            "provider_response_observability": {
+                "raw_response_type": "dict",
+                "raw_response_length": 321,
+                "raw_top_level_json_type": "dict",
+                "raw_top_level_keys": ["choices", "id"],
+                "raw_nested_candidate_keys": {
+                    "choices[0]": ["message"],
+                    "choices[0].message": ["content"],
+                },
+                "content_type": "str",
+                "normalization_branch": "choices_message_content_string",
+            },
+        },
+        normalized_response=json.dumps(parsed),
+        parsed_data=parsed,
+        parser_branch="json.loads",
+        rejection_reason="unsupported_shape",
+        exception_type="ValueError",
+        workspace_mutated=False,
+    )
+
+    assert evidence["request_id"] == "debug-repair-test-1"
+    assert evidence["provider_classification"] == "openai_chat_completions"
+    assert evidence["raw_response_type"] == "dict"
+    assert evidence["raw_response_length"] == 321
+    assert evidence["top_level_json_type"] == "list"
+    assert evidence["top_level_keys"] == []
+    assert evidence["nested_candidate_keys"] == [
+        "command",
+        "title",
+        "verification_command",
+    ]
+    assert evidence["shape_classification"] == "multi_repair_item_list"
+    assert evidence["supported_shapes"]
+    assert evidence["rejection_code"] == "unsupported_shape"
+    assert evidence["exception_type"] == "ValueError"
+    assert evidence["candidate_operations_extracted"] == 0
+    assert evidence["workspace_mutation_occurred"] is False
 
 
 def test_diff_scoped_compliance_retry_requires_command_and_verification():
@@ -2891,6 +2951,17 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
         rejected[-1]["details"]["bounded_execution_debug_repair_raw_output_excerpt"]
         == "[]"
     )
+    details = rejected[-1]["details"]
+    assert details["debug_repair_request_ids"]
+    assert details["request_id"] == details["debug_repair_request_ids"][-1]
+    assert details["raw_response_type"] == "dict"
+    assert details["normalized_response_type"] == "str"
+    assert details["top_level_json_type"] == "list"
+    assert details["shape_classification"] == "empty_list"
+    assert details["rejection_code"] == "unsupported_shape"
+    assert details["exception_type"] == "ValueError"
+    assert details["candidate_operations_extracted"] == 0
+    assert details["workspace_mutation_occurred"] is False
     assert (
         rejected[-1]["details"]["bounded_execution_debug_repair_raw_output_excerpt"]
         == "[]"

@@ -163,6 +163,55 @@ def test_supported_adapters_preserve_repair_chat_contract(
     }
 
 
+def test_openai_chat_repair_retains_redacted_response_shape_observability(
+    db_session, monkeypatch
+):
+    _Client.captured = []
+    _Client.response_body = {
+        "id": "chatcmpl-test",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "[]"},
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        "app.services.agents.providers.openai_chat_adapter.httpx.AsyncClient", _Client
+    )
+    runtime = OpenAIChatCompletionsRuntime(
+        db_session,
+        None,
+        runtime_configuration=_config(
+            "openai_chat_completions", BackendRole.DEBUG_REPAIR, "debug-model"
+        ),
+    )
+
+    result = asyncio.run(
+        runtime.invoke_prompt(
+            "debug bytes",
+            timeout_seconds=45,
+            session_prefix="debug-repair",
+            invocation_options=_options(),
+        )
+    )
+
+    evidence = result["provider_response_observability"]
+    assert result["output"] == "[]"
+    assert evidence["raw_response_type"] == "dict"
+    assert evidence["raw_top_level_json_type"] == "dict"
+    assert evidence["raw_top_level_keys"] == ["choices", "id"]
+    assert evidence["raw_nested_candidate_keys"]["choices[0]"] == [
+        "index",
+        "message",
+    ]
+    assert evidence["content_type"] == "str"
+    assert evidence["normalization_branch"] == "choices_message_content_string"
+    assert evidence["normalized_response_length"] == 2
+    assert '"[]"' not in json.dumps(evidence)
+    _Client.response_body = {"choices": [{"message": {"content": "ok"}}]}
+
+
 def test_invocation_options_are_typed_secret_free_and_reject_unsupported_values():
     options = _options()
     assert options.to_dict()["extra_provider_options"] is None

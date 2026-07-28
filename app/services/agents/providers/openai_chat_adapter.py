@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from typing import Any, Optional
@@ -54,6 +55,66 @@ def _normalize_chat_content_value(value: Any) -> str:
 def _strip_thinking(text: Any) -> str:
     normalized = _normalize_chat_content_value(text)
     return re.sub(r"<think>.*?</think>", "", normalized, flags=re.DOTALL).strip()
+
+
+def _response_shape_observability(body: Any, content: str) -> dict[str, Any]:
+    """Return bounded response-envelope shape metadata without content."""
+
+    raw_type = type(body).__name__
+    try:
+        raw_length = len(json.dumps(body, ensure_ascii=True, sort_keys=True))
+    except (TypeError, ValueError):
+        raw_length = len(str(body or ""))
+    top_level_keys = (
+        sorted(str(key) for key in body)[:20] if isinstance(body, dict) else []
+    )
+    nested_candidate_keys: dict[str, list[str]] = {}
+    choices = body.get("choices") if isinstance(body, dict) else None
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        nested_candidate_keys["choices[0]"] = sorted(
+            str(key) for key in choices[0].keys()
+        )[:20]
+        message = choices[0].get("message")
+        if isinstance(message, dict):
+            nested_candidate_keys["choices[0].message"] = sorted(
+                str(key) for key in message.keys()
+            )[:20]
+            message_content = message.get("content")
+            if isinstance(message_content, list):
+                nested_candidate_keys["choices[0].message.content[0]"] = (
+                    sorted(str(key) for key in message_content[0].keys())[:20]
+                    if message_content and isinstance(message_content[0], dict)
+                    else []
+                )
+            content_type = type(message_content).__name__
+        else:
+            content_type = "missing"
+    else:
+        content_type = "missing"
+    if isinstance(choices, list) and choices:
+        branch = (
+            "choices_message_content_list"
+            if content_type == "list"
+            else (
+                "choices_message_content_string"
+                if content_type == "str"
+                else "choices_message_content_unsupported"
+            )
+        )
+    else:
+        branch = "unsupported_top_level_shape"
+    return {
+        "provider_classification": "openai_chat_completions",
+        "raw_response_type": raw_type,
+        "raw_response_length": raw_length,
+        "raw_top_level_json_type": raw_type,
+        "raw_top_level_keys": top_level_keys,
+        "raw_nested_candidate_keys": nested_candidate_keys,
+        "content_type": content_type,
+        "normalization_branch": branch,
+        "normalized_response_type": type(content).__name__,
+        "normalized_response_length": len(content or ""),
+    }
 
 
 class OpenAIChatCompletionsRuntime:
@@ -252,6 +313,9 @@ class OpenAIChatCompletionsRuntime:
 
         body = response.json()
         content = _extract_chat_completion_content(body)
+        self._last_response_shape_observability = _response_shape_observability(
+            body, content
+        )
         return content if exact_contract else _strip_thinking(content)
 
     async def create_session(
@@ -278,7 +342,13 @@ class OpenAIChatCompletionsRuntime:
             user=prompt,
             timeout_seconds=timeout_seconds,
         )
-        return {"status": "completed", "output": output}
+        return {
+            "status": "completed",
+            "output": output,
+            "provider_response_observability": dict(
+                getattr(self, "_last_response_shape_observability", {})
+            ),
+        }
 
     async def invoke_prompt(
         self,
@@ -309,6 +379,9 @@ class OpenAIChatCompletionsRuntime:
             "backend": self.backend_descriptor.name,
             "model_family": self._model_name(),
             "role": self.backend_role,
+            "provider_response_observability": dict(
+                getattr(self, "_last_response_shape_observability", {})
+            ),
             "runtime_configuration": (
                 self.runtime_configuration.to_dict()
                 if self.runtime_configuration is not None

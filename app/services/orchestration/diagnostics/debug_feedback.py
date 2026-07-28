@@ -7,6 +7,7 @@ responsible for those control decisions.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -46,6 +47,12 @@ _SOURCE_STEP_EXCERPT_TOTAL_CHARS = 2600
 _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_FILES = 3
 _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_PER_FILE_CHARS = 1200
 _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_CHARS = 3000
+BOUNDED_DEBUG_REPAIR_SUPPORTED_SHAPES = (
+    "object: fix_type in {code_fix, command_fix, ops_fix, revise_plan} "
+    "with expected_files, verification, or ops",
+    "list: exactly one object with command and verification_command, or "
+    "one source ops_fix object with verification_command",
+)
 
 _CANNOT_IMPORT_FROM_FILE_RE = re.compile(
     r"cannot import name '([A-Za-z_][A-Za-z0-9_]*)' from '([A-Za-z_][A-Za-z0-9_.]*)'"
@@ -1571,6 +1578,127 @@ def _debug_repair_parsed_shape(parsed_data: Any) -> dict[str, Any]:
                 shape["first_item_keys"] = sorted(str(key) for key in first.keys())[:20]
         return shape
     return shape
+
+
+def _bounded_debug_repair_shape_classification(parsed_data: Any) -> str:
+    if isinstance(parsed_data, dict):
+        return "top_level_object"
+    if isinstance(parsed_data, list):
+        if not parsed_data:
+            return "empty_list"
+        if len(parsed_data) != 1:
+            return "multi_repair_item_list"
+        if not isinstance(parsed_data[0], dict):
+            return "single_item_list_non_object"
+        return "single_repair_item_list"
+    if parsed_data is None:
+        return "null"
+    return f"top_level_{type(parsed_data).__name__}"
+
+
+def _bounded_debug_repair_candidate_operation_count(parsed_data: Any) -> int:
+    candidates: list[Any] = []
+    if isinstance(parsed_data, dict):
+        candidates.append(parsed_data)
+    elif isinstance(parsed_data, list):
+        candidates.extend(item for item in parsed_data if isinstance(item, dict))
+    return sum(
+        len(candidate.get("ops") or [])
+        for candidate in candidates
+        if isinstance(candidate.get("ops"), list)
+    )
+
+
+def build_bounded_debug_repair_observability(
+    *,
+    request_id: Optional[str],
+    provider_response: Any,
+    normalized_response: Any,
+    parsed_data: Any,
+    parser_branch: Optional[str],
+    rejection_reason: Optional[str],
+    exception_type: Optional[str],
+    workspace_mutated: bool,
+    parsed_shape: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Build bounded, secret-free evidence for a debug-repair rejection."""
+
+    response = provider_response if isinstance(provider_response, dict) else {}
+    provider_observability = response.get("provider_response_observability")
+    if not isinstance(provider_observability, dict):
+        provider_observability = {}
+    diagnostics = response.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    parsed_shape = parsed_shape or _debug_repair_parsed_shape(parsed_data)
+    normalized_text = str(normalized_response or "")
+    provider_classification = (
+        provider_observability.get("provider_classification")
+        or response.get("backend")
+        or diagnostics.get("debug_repair_backend")
+        or diagnostics.get("backend")
+        or "unknown"
+    )
+    raw_response_type = provider_observability.get(
+        "raw_response_type", type(provider_response).__name__
+    )
+    raw_response_length = provider_observability.get("raw_response_length")
+    if raw_response_length is None:
+        raw_response_length = len(str(response.get("output") or ""))
+    nested_candidate_keys = parsed_shape.get("first_item_keys", [])
+    if not isinstance(nested_candidate_keys, list):
+        nested_candidate_keys = []
+
+    return {
+        "request_id": str(request_id or "") or None,
+        "provider_classification": str(provider_classification),
+        "raw_response_type": str(raw_response_type),
+        "raw_response_length": int(raw_response_length or 0),
+        "raw_top_level_json_type": provider_observability.get(
+            "raw_top_level_json_type"
+        ),
+        "raw_top_level_keys": list(
+            provider_observability.get("raw_top_level_keys") or []
+        )[:20],
+        "raw_nested_candidate_keys": provider_observability.get(
+            "raw_nested_candidate_keys", {}
+        ),
+        "content_type": provider_observability.get(
+            "content_type", type(response.get("output")).__name__
+        ),
+        "parser_branch": str(parser_branch or "unknown"),
+        "top_level_json_type": parsed_shape.get("type"),
+        "top_level_keys": list(parsed_shape.get("keys") or [])[:20],
+        "nested_candidate_keys": list(nested_candidate_keys)[:20],
+        "shape_classification": (
+            _bounded_debug_repair_shape_classification(parsed_data)
+            if parsed_data is not None
+            else (
+                "empty_list"
+                if parsed_shape.get("type") == "list"
+                and parsed_shape.get("length") == 0
+                else (
+                    "multi_repair_item_list"
+                    if parsed_shape.get("type") == "list"
+                    and int(parsed_shape.get("length") or 0) != 1
+                    else str(parsed_shape.get("type") or "unknown")
+                )
+            )
+        ),
+        "supported_shapes": list(BOUNDED_DEBUG_REPAIR_SUPPORTED_SHAPES),
+        "rejection_code": rejection_reason,
+        "exception_type": exception_type,
+        "candidate_operations_extracted": _bounded_debug_repair_candidate_operation_count(
+            parsed_data
+        ),
+        "workspace_mutation_occurred": bool(workspace_mutated),
+        "normalized_response_type": type(normalized_response).__name__,
+        "normalized_response_length": len(normalized_text),
+        "normalized_response_sha256": hashlib.sha256(
+            normalized_text.encode("utf-8")
+        ).hexdigest(),
+        "parsed_shape": parsed_shape,
+    }
 
 
 def _semantic_pytest_string_edit_repair(
