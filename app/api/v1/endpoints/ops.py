@@ -36,6 +36,7 @@ from app.services.orchestration.recovery.recovery_metrics import (
     collect_recovery_ops_metrics,
 )
 from app.services.observability.metrics_collector import MetricsCollector
+from app.services.observability.maintenance_observability import maintenance_health
 from app.services.project.state_summary import build_project_state_summary
 from app.services.workspace.system_settings import diagnose_runtime_lane
 
@@ -167,6 +168,7 @@ def ops_health(
         "redis": _redis_health(),
         "qdrant": _qdrant_health(),
         "celery": _celery_health(),
+        "maintenance": maintenance_health(db),
     }
     return {
         "status": _overall_status(components),

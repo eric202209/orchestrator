@@ -5,9 +5,7 @@ from __future__ import annotations
 import json
 import asyncio
 import logging
-import os
 import re
-import socket
 import uuid
 from datetime import UTC, datetime, timezone
 from pathlib import Path
@@ -65,6 +63,7 @@ from app.services.orchestration.state.session_state import (
 )
 from app.services.tasks.service import TaskService
 from app.services.tasks.execution import create_task_execution
+from app.services.session.orphan_ownership import evaluate_execution_ownership
 
 logger = logging.getLogger(__name__)
 
@@ -83,15 +82,10 @@ def _coerce_naive_utc_datetime(value: datetime | None) -> datetime | None:
 
 
 def _execution_owner_is_alive(execution: TaskExecution) -> bool:
-    if execution.worker_hostname != socket.gethostname() or not execution.worker_pid:
-        return False
-    try:
-        os.kill(execution.worker_pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
+    """Compatibility projection: unknown ownership is treated as still held."""
+
+    evaluation = evaluate_execution_ownership(execution)
+    return not evaluation.recovery_eligible
 
 
 def _latest_task_execution(db: Session, session_id: int) -> TaskExecution | None:
@@ -469,6 +463,7 @@ def recover_stale_running_sessions(
     *,
     stale_after_seconds: int = _STALE_RUNNING_SESSION_SWEEP_SECONDS,
     session_ids: list[int] | None = None,
+    decision_records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     now = datetime.now(UTC).replace(tzinfo=None)
     running_sessions = db.query(SessionModel).filter(
@@ -552,8 +547,18 @@ def recover_stale_running_sessions(
             .order_by(TaskExecution.id.desc())
             .first()
         )
-        if active_execution and _execution_owner_is_alive(active_execution):
-            continue
+        ownership = None
+        if active_execution:
+            ownership = evaluate_execution_ownership(
+                active_execution,
+                runtime_lease=getattr(active_execution, "runtime_lease", None),
+                now=now.replace(tzinfo=UTC),
+                stale_after_seconds=stale_after_seconds,
+            )
+            if decision_records is not None:
+                decision_records.append(ownership.to_dict())
+            if not ownership.recovery_eligible:
+                continue
 
         latest_log = (
             db.query(LogEntry)
@@ -587,6 +592,10 @@ def recover_stale_running_sessions(
             now - _coerce_naive_utc_datetime(last_progress_at)
         ).total_seconds()
         if age_seconds < stale_after_seconds:
+            if ownership is not None and decision_records:
+                decision_records[-1][
+                    "decision_reason"
+                ] = "ownership was stale-eligible but progress evidence is still within threshold"
             continue
 
         stop_reason = (
@@ -594,22 +603,36 @@ def recover_stale_running_sessions(
             if latest_log and latest_log.created_at
             else "hard_time_limit_or_worker_killed"
         )
-        knowledge_recorded = _stop_running_session_for_recovery(
-            db,
-            session=session,
-            task=task,
-            session_task=latest_link,
-            stop_reason=stop_reason,
-            task_error_message=(
-                "Recovered stale running session after runtime stopped making progress."
-            ),
-            alert_message=(
-                "Recovered stale running session after runtime stopped making progress."
-            ),
-            recovery_log_message=(
-                "Recovered stale running session after no progress timeout."
-            ),
-        )
+        try:
+            knowledge_recorded = _stop_running_session_for_recovery(
+                db,
+                session=session,
+                task=task,
+                session_task=latest_link,
+                stop_reason=stop_reason,
+                task_error_message=(
+                    "Recovered stale running session after runtime stopped making progress."
+                ),
+                alert_message=(
+                    "Recovered stale running session after runtime stopped making progress."
+                ),
+                recovery_log_message=(
+                    "Recovered stale running session after no progress timeout."
+                ),
+            )
+        except Exception as exc:
+            db.rollback()
+            if ownership is not None and decision_records is not None:
+                decision_records[-1]["error_category"] = exc.__class__.__name__
+                decision_records[-1][
+                    "decision_reason"
+                ] = "recovery mutation failed; this execution was isolated and left unchanged"
+            logger.exception(
+                "Orphan recovery mutation failed for session=%s task=%s",
+                session.id,
+                task.id,
+            )
+            continue
         recovered_sessions.append(
             {
                 "session_id": session.id,

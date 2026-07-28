@@ -1,7 +1,9 @@
 """Maintenance Celery tasks: webhook processing, recovery sweeps, cleanup, report generation."""
 
 import logging
-from datetime import timezone, timedelta
+import time
+import uuid
+from datetime import UTC, datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 
 from app.celery_app import celery_app
@@ -14,6 +16,14 @@ from app.services.orchestration import (
 from app.services.orchestration.run_state import (
     mark_task_attempt_done,
     mark_task_attempt_running,
+)
+from app.services.observability.maintenance_observability import (
+    MAINTENANCE_COMPLETED,
+    MAINTENANCE_FAILED,
+    MAINTENANCE_RECEIVED,
+    MAINTENANCE_STARTED,
+    build_sweep_result_counts,
+    record_maintenance_event,
 )
 
 logger = logging.getLogger(__name__)
@@ -104,20 +114,64 @@ def sweep_orphaned_running_sessions(
     self, stale_after_seconds: int = 2100
 ) -> Dict[str, Any]:
     db = get_db_session()
+    request = getattr(self, "request", None)
+    invocation_id = str(getattr(request, "id", None) or uuid.uuid4())
+    worker_identity = getattr(request, "hostname", None)
+    started_monotonic = time.monotonic()
+
+    def _record(event_type: str, **kwargs: Any) -> None:
+        try:
+            record_maintenance_event(
+                db,
+                event_type=event_type,
+                invocation_id=invocation_id,
+                worker_identity=worker_identity,
+                **kwargs,
+            )
+            db.commit()
+        except Exception as record_exc:
+            db.rollback()
+            logger.warning(
+                "Maintenance observability record failed event=%s: %s",
+                event_type,
+                record_exc,
+            )
+
     try:
         from app.services.session.session_lifecycle_service import (
             recover_stale_running_sessions,
         )
 
+        _record(MAINTENANCE_RECEIVED, dispatch_source="celery_worker")
+        _record(MAINTENANCE_STARTED)
+        decision_records: list[dict[str, Any]] = []
         recovered = recover_stale_running_sessions(
-            db, stale_after_seconds=stale_after_seconds
+            db,
+            stale_after_seconds=stale_after_seconds,
+            decision_records=decision_records,
+        )
+        counts = build_sweep_result_counts(
+            decision_records, recovered_count=len(recovered)
+        )
+        status = "completed_with_errors" if counts["error_count"] else "completed"
+        _record(
+            MAINTENANCE_COMPLETED,
+            counts=counts,
+            duration_seconds=time.monotonic() - started_monotonic,
+            decision_evidence=decision_records,
         )
         return {
-            "status": "completed",
-            "recovered_count": len(recovered),
+            "status": status,
+            **counts,
             "recovered_sessions": recovered,
         }
     except Exception as exc:
+        _record(
+            MAINTENANCE_FAILED,
+            error_category=exc.__class__.__name__,
+            error_timestamp=datetime.now(UTC),
+            duration_seconds=time.monotonic() - started_monotonic,
+        )
         logger.error("Orphaned running session sweep failed: %s", exc)
         raise self.retry(exc=exc, max_retries=3)
     finally:

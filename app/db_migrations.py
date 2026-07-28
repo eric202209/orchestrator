@@ -4681,6 +4681,36 @@ def _migration_051_project_type_override(engine: Engine) -> None:
             )
 
 
+def _migration_052_orphan_ownership_observability(engine: Engine) -> None:
+    """Add the legacy-to-canonical ownership bridge and process identity."""
+
+    if "task_executions" not in _table_names(engine):
+        return
+    additions = [
+        (
+            "runtime_lease_id",
+            "ALTER TABLE task_executions ADD COLUMN runtime_lease_id INTEGER",
+        ),
+        (
+            "worker_process_start_identity",
+            "ALTER TABLE task_executions ADD COLUMN worker_process_start_identity VARCHAR(255)",
+        ),
+    ]
+    with engine.begin() as connection:
+        for column_name, statement in additions:
+            if not _has_column(engine, "task_executions", column_name):
+                connection.execute(text(statement))
+        if not _has_index(
+            engine, "task_executions", "ix_task_executions_runtime_lease_id"
+        ):
+            connection.execute(
+                text(
+                    "CREATE INDEX ix_task_executions_runtime_lease_id "
+                    "ON task_executions (runtime_lease_id)"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -4945,6 +4975,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="051_project_type_override",
         description="Add Phase 30C manual project-type override column to projects",
         upgrade=_migration_051_project_type_override,
+    ),
+    Migration(
+        version="052_orphan_ownership_observability",
+        description=(
+            "Add canonical runtime-lease bridge and PID-reuse-safe process identity "
+            "for orphan recovery"
+        ),
+        upgrade=_migration_052_orphan_ownership_observability,
     ),
 )
 

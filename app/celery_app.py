@@ -17,8 +17,10 @@ try:
 except Exception:
     pass  # tzdata package unavailable; system files used as-is
 
+from datetime import UTC, datetime
+
 from celery import Celery
-from celery.signals import worker_process_init
+from celery.signals import after_task_publish, worker_process_init
 from .config import settings
 
 celery_app = Celery(
@@ -69,3 +71,58 @@ def _install_subprocess_lifecycle_sigterm_handler(**_kwargs) -> None:
     from app.services.agents.subprocess_lifecycle import install_sigterm_handler
 
     install_sigterm_handler()
+
+
+@after_task_publish.connect
+def _record_orphan_sweep_dispatch(sender=None, headers=None, **_kwargs) -> None:
+    """Persist Beat/publisher dispatch evidence for the canonical sweep."""
+
+    from app.services.observability.maintenance_observability import (
+        MAINTENANCE_DISPATCHED,
+        ORPHAN_SWEEP_SCHEDULE_ID,
+        ORPHAN_SWEEP_TASK_NAME,
+        record_maintenance_event,
+    )
+
+    if sender != ORPHAN_SWEEP_TASK_NAME:
+        return
+    headers = headers or {}
+    invocation_id = str(headers.get("id") or "")
+    if not invocation_id:
+        return
+    observed_at = datetime.now(UTC)
+    scheduled_at = None
+    raw_eta = headers.get("eta")
+    if raw_eta:
+        try:
+            scheduled_at = datetime.fromisoformat(str(raw_eta).replace("Z", "+00:00"))
+        except ValueError:
+            scheduled_at = None
+    dispatch_source = str(headers.get("periodic_task_name") or "celery_publisher")
+    db = None
+    try:
+        from app.database import get_db_session
+
+        db = get_db_session()
+        record_maintenance_event(
+            db,
+            event_type=MAINTENANCE_DISPATCHED,
+            invocation_id=invocation_id,
+            observed_at=observed_at,
+            schedule_identity=(
+                dispatch_source
+                if dispatch_source != "celery_publisher"
+                else ORPHAN_SWEEP_SCHEDULE_ID
+            ),
+            dispatch_source=dispatch_source,
+            scheduled_at=scheduled_at or observed_at,
+        )
+        db.commit()
+    except Exception:
+        if db is not None:
+            db.rollback()
+        # Dispatch evidence must never break task publication.
+        return
+    finally:
+        if db is not None:
+            db.close()

@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models import SessionTask, Task, TaskExecution, TaskStatus
+from app.services.execution.process_identity import current_process_start_identity
 
 
 def _workspace_status_for_attempt_status(
@@ -57,6 +58,10 @@ def mark_task_attempt_running(
         task_execution.completed_at = None
         task_execution.worker_pid = os.getpid()
         task_execution.worker_hostname = socket.gethostname()
+        if hasattr(task_execution, "worker_process_start_identity"):
+            task_execution.worker_process_start_identity = (
+                current_process_start_identity(task_execution.worker_pid)
+            )
         task_execution.heartbeat_at = started_at
     return started_at
 

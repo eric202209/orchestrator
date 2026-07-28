@@ -6,9 +6,6 @@ PLANNING → EXECUTING (step-by-step) → DEBUGGING (on failure) → PLAN_REVISI
 """
 
 import os
-import socket
-import time
-import uuid
 import logging
 import json
 import asyncio
@@ -31,30 +28,13 @@ from app.services import (
     get_session_or_404,
 )
 from app.config import settings
-
-
-_RUNTIME_WORKER_PID: int | None = None
-_RUNTIME_WORKER_PROCESS_START_IDENTITY: str | None = None
-_RUNTIME_WORKER_INSTANCE_ID: str | None = None
+from app.services.execution.process_identity import current_worker_identity
 
 
 def _runtime_worker_identity() -> tuple[str, str, str, int]:
-    """Return a stable per-process identity, including after Celery forks."""
+    """Return the shared PID-reuse-safe worker identity."""
 
-    global _RUNTIME_WORKER_PID
-    global _RUNTIME_WORKER_PROCESS_START_IDENTITY
-    global _RUNTIME_WORKER_INSTANCE_ID
-    pid = os.getpid()
-    if _RUNTIME_WORKER_PID != pid:
-        _RUNTIME_WORKER_PID = pid
-        _RUNTIME_WORKER_PROCESS_START_IDENTITY = f"{time.time_ns()}-{uuid.uuid4().hex}"
-        _RUNTIME_WORKER_INSTANCE_ID = f"{socket.gethostname()}-{pid}-{uuid.uuid4().hex}"
-    return (
-        _RUNTIME_WORKER_INSTANCE_ID or "",
-        socket.gethostname(),
-        _RUNTIME_WORKER_PROCESS_START_IDENTITY or "",
-        pid,
-    )
+    return current_worker_identity()
 
 
 from app.services.agents.agent_runtime import (

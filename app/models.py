@@ -4325,6 +4325,16 @@ class TaskExecution(Base):
     completed_at = Column(DateTime(timezone=True), nullable=True)
     worker_pid = Column(Integer, nullable=True)
     worker_hostname = Column(String(255), nullable=True)
+    # Additive bridge to the canonical Phase 29 runtime ownership record.
+    # Legacy executions without this reference remain evaluable only from the
+    # strongest legacy facts and fail safe when those facts are ambiguous.
+    runtime_lease_id = Column(
+        Integer,
+        ForeignKey("execution_task_runtime_leases.id"),
+        nullable=True,
+        index=True,
+    )
+    worker_process_start_identity = Column(String(255), nullable=True)
     heartbeat_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
@@ -4341,6 +4351,11 @@ class TaskExecution(Base):
     session = relationship("Session", back_populates="task_executions")
     task = relationship("Task", back_populates="executions")
     planning_session = relationship("PlanningSession")
+    runtime_lease = relationship(
+        "ExecutionTaskRuntimeLease",
+        foreign_keys=[runtime_lease_id],
+        uselist=False,
+    )
     logs = relationship("LogEntry", back_populates="task_execution")
     change_sets = relationship(
         "TaskExecutionChangeSet",
