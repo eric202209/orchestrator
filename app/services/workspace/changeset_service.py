@@ -247,6 +247,7 @@ class ChangesetService:
         workflow_profile: Optional[str] = None,
         evaluator_evidence: Optional[dict[str, Any]] = None,
         template_review_policy: Optional[dict[str, Any]] = None,
+        planner_contract: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         return decide_change_set_review(
             change_set,
@@ -254,6 +255,7 @@ class ChangesetService:
             workflow_profile=workflow_profile,
             evaluator_evidence=evaluator_evidence,
             template_review_policy=template_review_policy,
+            planner_contract=planner_contract,
         )
 
     def build_task_execution_change_set(
@@ -404,6 +406,7 @@ class ChangesetService:
         review_decision: Optional[dict[str, Any]] = None,
         workflow_profile: Optional[str] = None,
         evaluator_evidence: Optional[dict[str, Any]] = None,
+        planner_contract: Optional[dict[str, Any]] = None,
     ) -> TaskExecutionChangeSet:
         task_execution_id = int(change_set["task_execution_id"])
         record = (
@@ -447,6 +450,7 @@ class ChangesetService:
                 workspace_review_policy=workspace_review_policy,
                 workflow_profile=workflow_profile,
                 evaluator_evidence=evaluator_evidence,
+                planner_contract=planner_contract,
             )
         record.review_decision = review_decision
         record.review_reason = (
@@ -495,6 +499,7 @@ class ChangesetService:
         review_decision: Optional[dict[str, Any]] = None,
         workflow_profile: Optional[str] = None,
         evaluator_evidence: Optional[dict[str, Any]] = None,
+        planner_contract: Optional[dict[str, Any]] = None,
         commit: bool = True,
     ) -> dict[str, Any]:
         change_set = self.build_task_execution_change_set(
@@ -520,6 +525,7 @@ class ChangesetService:
             review_decision=review_decision,
             workflow_profile=workflow_profile,
             evaluator_evidence=evaluator_evidence,
+            planner_contract=planner_contract,
         )
         existing = (
             self.db.query(LogEntry)

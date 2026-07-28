@@ -16,6 +16,7 @@ from app.services.orchestration.coordinators.completion_coordinator import (
     CompletionCoordinator,
     CompletionOutcome,
 )
+from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.state.execution_states import TerminalReason
 from app.services.orchestration.types import ValidationVerdict
 
@@ -259,6 +260,126 @@ def test_complete_task_validation_success(tmp_path, monkeypatch):
     assert result["session_id"] == 1
 
 
+def _completion_registered_contract(
+    *,
+    review_expectation="REVIEW_NOT_REQUIRED",
+    publication_expectation="PUBLICATION_REQUIRED",
+):
+    review = {
+        "contract_id": "ST23-REVIEW-001",
+        "contract_version": "v1",
+        "expectation": review_expectation,
+        "scenario_id": "S1-2",
+    }
+    publication = {
+        "contract_id": "ST23-PUBLICATION-001",
+        "contract_version": "v1",
+        "expectation": publication_expectation,
+        "scenario_id": "S1-2",
+    }
+    return {
+        "contract_source": "phase31_certification_runner",
+        "contract_id": "ST23-PLANNER-001",
+        "contract_version": "v1",
+        "scenario_id": "S1-2",
+        "review_expectation": review_expectation,
+        "publication_expectation": publication_expectation,
+        "review_contract": review,
+        "publication_contract": publication,
+        "registered_scenario_contract": {
+            "scenario_id": "S1-2",
+            "review_contract": review,
+            "publication_contract": publication,
+        },
+    }
+
+
+def test_completion_propagates_registered_intent_and_publishes_when_eligible(
+    tmp_path, monkeypatch
+):
+    ctx = _make_ctx(tmp_path)
+    ctx.task_execution_id = 42
+    ctx.runs_in_canonical_baseline = True
+    ctx.runtime_workspace_used = True
+    ctx.planner_contract = _completion_registered_contract()
+    ctx.task_service.persist_task_execution_change_set.return_value = {
+        "changed_count": 2,
+        "warning_flags": ["scaffold_or_test_surface_changed"],
+    }
+    ctx.task_service.change_set_review_decision.side_effect = decide_change_set_review
+    ctx.task_service.promote_change_set_into_baseline.return_value = {
+        "files_copied": 2,
+        "auto_publish_skipped": False,
+    }
+    ctx.task_service.validate_task_baseline_materialization.return_value = {
+        "baseline_path": str(tmp_path),
+        "baseline_file_count": 2,
+        "missing_expected_files": [],
+        "consistency_issues": [],
+    }
+    ctx.task_service.validate_project_baseline.return_value = {
+        "missing_expected_files": []
+    }
+    accepted_verdict = _make_validation_verdict(status="accepted", accepted=True)
+    _patch_coordinator_delegates(monkeypatch, validation_verdict=accepted_verdict)
+    monkeypatch.setattr(
+        "app.services.orchestration.coordinators.completion_coordinator.ValidatorService.validate_baseline_publish",
+        lambda **kwargs: accepted_verdict,
+    )
+
+    with patch(
+        "app.services.human_guidance.post_write_checker.run_post_write_check_if_enabled",
+        _NOOP_FN,
+    ):
+        result = CompletionCoordinator().complete_task(
+            ctx=ctx,
+            write_project_state_snapshot_fn=_NOOP_FN,
+            save_orchestration_checkpoint_fn=_NOOP_FN,
+        )
+
+    assert result["status"] == "completed"
+    persist_kwargs = ctx.task_service.persist_task_execution_change_set.call_args.kwargs
+    review_kwargs = ctx.task_service.change_set_review_decision.call_args.kwargs
+    assert persist_kwargs["planner_contract"] == ctx.planner_contract
+    assert review_kwargs["planner_contract"] == ctx.planner_contract
+    assert review_kwargs["template_review_policy"] is None
+    assert ctx.task_service.promote_change_set_into_baseline.called
+    ctx.task_service.auto_publish_task_into_baseline.assert_not_called()
+
+
+def test_completion_does_not_publish_when_registered_publication_is_not_required(
+    tmp_path, monkeypatch
+):
+    ctx = _make_ctx(tmp_path)
+    ctx.task_execution_id = 42
+    ctx.runs_in_canonical_baseline = True
+    ctx.runtime_workspace_used = True
+    ctx.planner_contract = _completion_registered_contract(
+        publication_expectation="PUBLICATION_NOT_REQUIRED"
+    )
+    ctx.task_service.persist_task_execution_change_set.return_value = {
+        "changed_count": 1,
+        "warning_flags": [],
+    }
+    ctx.task_service.change_set_review_decision.side_effect = decide_change_set_review
+    accepted_verdict = _make_validation_verdict(status="accepted", accepted=True)
+    _patch_coordinator_delegates(monkeypatch, validation_verdict=accepted_verdict)
+
+    with patch(
+        "app.services.human_guidance.post_write_checker.run_post_write_check_if_enabled",
+        _NOOP_FN,
+    ):
+        result = CompletionCoordinator().complete_task(
+            ctx=ctx,
+            write_project_state_snapshot_fn=_NOOP_FN,
+            save_orchestration_checkpoint_fn=_NOOP_FN,
+        )
+
+    assert result["status"] == "completed"
+    ctx.task_service.promote_change_set_into_baseline.assert_not_called()
+    ctx.task_service.auto_publish_task_into_baseline.assert_not_called()
+
+
 def test_complete_task_verification_success(tmp_path, monkeypatch):
     """Coordinator passes through when verification command succeeds."""
     ctx = _make_ctx(tmp_path)
@@ -478,6 +599,8 @@ def test_complete_task_verification_integrity_failure(tmp_path, monkeypatch):
 
     assert result["status"] == "failed"
     assert result["reason"] == TerminalReason.VERIFICATION_INTEGRITY_FAILED
+    ctx.task_service.promote_change_set_into_baseline.assert_not_called()
+    ctx.task_service.auto_publish_task_into_baseline.assert_not_called()
 
 
 def test_complete_task_writes_report_to_durable_project_root(tmp_path, monkeypatch):

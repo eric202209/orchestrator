@@ -963,6 +963,7 @@ class CompletionCoordinator:
                     status=TaskStatus.DONE.value,
                     workspace_review_policy=workspace_review_policy,
                     workflow_profile=getattr(ctx, "workflow_profile", None),
+                    planner_contract=getattr(ctx, "planner_contract", None),
                     commit=False,
                 ),
             )
@@ -1076,6 +1077,7 @@ class CompletionCoordinator:
                     workspace_review_policy=workspace_review_policy,
                     workflow_profile=getattr(ctx, "workflow_profile", None),
                     template_review_policy=_tmpl_review_policy,
+                    planner_contract=getattr(ctx, "planner_contract", None),
                 ),
             )
         else:
@@ -1086,14 +1088,24 @@ class CompletionCoordinator:
                     workspace_review_policy=workspace_review_policy,
                     workflow_profile=getattr(ctx, "workflow_profile", None),
                     template_review_policy=_tmpl_review_policy,
+                    planner_contract=getattr(ctx, "planner_contract", None),
                 ),
             )
         should_hold_for_review = bool(review_decision["held_for_review"])
+        publication_allowed = bool(review_decision.get("publication_allowed", True))
+        review_decision = {
+            **review_decision,
+            "review_required": should_hold_for_review,
+            "publication_eligible": bool(
+                publication_allowed and not should_hold_for_review
+            ),
+        }
         evaluator_result = None
         if (
             task_change_set
             and ctx.task_execution_id
             and not should_hold_for_review
+            and publication_allowed
             and review_decision.get("outcome") == "auto_promote"
         ):
             evaluator_result = _checkpointed(
@@ -1143,7 +1155,34 @@ class CompletionCoordinator:
             (task.task_subfolder and not runs_in_canonical_baseline)
             or publish_captured_change_set
         ):
-            if should_hold_for_review:
+            if not publication_allowed:
+                baseline_publish_result = {
+                    "auto_publish_skipped": True,
+                    "reason": review_decision.get("reason")
+                    or "publication_not_required",
+                    "held_for_review": should_hold_for_review,
+                    "review_decision": review_decision,
+                    "files_copied": 0,
+                    "accepted_change_set": task_change_set,
+                    "warning_flags": nontrivial_change_flags,
+                    "workspace_review_policy": workspace_review_policy,
+                    "publication_eligible": False,
+                }
+                emit_live(
+                    "INFO",
+                    "[ORCHESTRATION] Task change set retained without automatic publication",
+                    metadata={
+                        "phase": "baseline_publish",
+                        "reason": baseline_publish_result["reason"],
+                        "held_for_review": should_hold_for_review,
+                        "publication_allowed": False,
+                        "publication_required": review_decision.get(
+                            "publication_required"
+                        ),
+                        "policy_source": review_decision.get("policy_source"),
+                    },
+                )
+            elif should_hold_for_review:
                 baseline_publish_result = {
                     "auto_publish_skipped": True,
                     "reason": review_decision["reason"],
@@ -1166,6 +1205,7 @@ class CompletionCoordinator:
                             "changed_count", 0
                         ),
                         "workspace_review_policy": workspace_review_policy,
+                        "publication_eligible": False,
                     },
                 )
             else:
@@ -1194,6 +1234,7 @@ class CompletionCoordinator:
                 )
                 baseline_publish_result["held_for_review"] = False
                 baseline_publish_result["review_decision"] = review_decision
+                baseline_publish_result["publication_eligible"] = True
                 if task_change_set:
                     baseline_publish_result["accepted_change_set"] = {
                         "task_execution_id": ctx.task_execution_id,
@@ -1299,6 +1340,7 @@ class CompletionCoordinator:
             task_change_set
             and ctx.task_execution_id
             and not should_hold_for_review
+            and publication_allowed
             and review_decision.get("outcome") == "auto_promote"
             and (
                 (

@@ -421,6 +421,7 @@ class TaskService:
         workflow_profile: Optional[str] = None,
         evaluator_evidence: Optional[dict[str, Any]] = None,
         template_review_policy: Optional[dict[str, Any]] = None,
+        planner_contract: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         return self.changesets.change_set_review_decision(
             change_set,
@@ -428,6 +429,7 @@ class TaskService:
             workflow_profile=workflow_profile,
             evaluator_evidence=evaluator_evidence,
             template_review_policy=template_review_policy,
+            planner_contract=planner_contract,
         )
 
     def build_task_execution_change_set(
@@ -483,6 +485,7 @@ class TaskService:
         review_decision: Optional[dict[str, Any]] = None,
         workflow_profile: Optional[str] = None,
         evaluator_evidence: Optional[dict[str, Any]] = None,
+        planner_contract: Optional[dict[str, Any]] = None,
         commit: bool = True,
     ) -> dict[str, Any]:
         return self.changesets.persist_task_execution_change_set(
@@ -498,6 +501,7 @@ class TaskService:
             review_decision=review_decision,
             workflow_profile=workflow_profile,
             evaluator_evidence=evaluator_evidence,
+            planner_contract=planner_contract,
             commit=commit,
         )
 
