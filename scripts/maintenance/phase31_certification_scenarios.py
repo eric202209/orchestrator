@@ -67,6 +67,50 @@ class ScenarioRegistryError(ValueError):
 
 
 @dataclass(frozen=True)
+class CapabilityBinding:
+    """Declare ownership and certification treatment for one capability lane."""
+
+    capability_id: str
+    requirement: str
+    independently_classified: bool = True
+
+    @property
+    def required(self) -> bool:
+        return self.requirement == "required"
+
+    @property
+    def optional(self) -> bool:
+        return self.requirement == "optional"
+
+    @property
+    def not_applicable(self) -> bool:
+        return self.requirement == "not_applicable"
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "capability_id": self.capability_id,
+            "requirement": self.requirement,
+            "required": self.required,
+            "optional": self.optional,
+            "not_applicable": self.not_applicable,
+            "independently_classified": self.independently_classified,
+        }
+
+
+_CAPABILITY_IDS = {
+    "planning_execution",
+    "completion_publication",
+    "execution_debug_repair",
+}
+_CAPABILITY_REQUIREMENTS = {"required", "optional", "not_applicable"}
+_SAFE_DEFAULT_CAPABILITIES = (
+    CapabilityBinding("planning_execution", "required"),
+    CapabilityBinding("completion_publication", "required"),
+    CapabilityBinding("execution_debug_repair", "optional"),
+)
+
+
+@dataclass(frozen=True)
 class PlannerContractBinding:
     """Explicit Phase 31D-3 planner/bootstrap declarations for one scenario."""
 
@@ -140,6 +184,13 @@ class ScenarioSpecification:
     cleanup_requirements: tuple[str, ...]
     prior_scenarios: tuple[str, ...]
     acceptance_contract: ScenarioAcceptanceContract
+    capability_bindings: tuple[CapabilityBinding, ...] = ()
+
+    @property
+    def capabilities(self) -> tuple[CapabilityBinding, ...]:
+        """Return explicit bindings, or a safe legacy-compatible default."""
+
+        return self.capability_bindings or _SAFE_DEFAULT_CAPABILITIES
 
     def to_dict(self) -> dict[str, Any]:
         """Return a stable, JSON-compatible declaration for evidence/replay."""
@@ -152,13 +203,19 @@ class ScenarioSpecification:
             if isinstance(value, Mapping):
                 return {
                     str(key): normalize(item)
-                    for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+                    for key, item in sorted(
+                        value.items(), key=lambda pair: str(pair[0])
+                    )
                 }
             if hasattr(value, "__dataclass_fields__"):
                 return normalize(asdict(value))
             return value
 
-        return normalize(asdict(self))
+        payload = normalize(asdict(self))
+        payload["capabilities"] = [
+            binding.to_payload() for binding in self.capabilities
+        ]
+        return payload
 
     def registered_outcome_contract(self) -> RegisteredOutcomeContract:
         """Build the Phase 31D adjudication envelope from explicit bindings.
@@ -255,7 +312,9 @@ def _publication(scenario_id: str, expectation: str) -> ContractBinding:
     )
 
 
-def _controls(*, timeout_seconds: int = 1800, **values: str) -> tuple[tuple[str, str], ...]:
+def _controls(
+    *, timeout_seconds: int = 1800, **values: str
+) -> tuple[tuple[str, str], ...]:
     controls = {"timeout_seconds": str(timeout_seconds), **values}
     return tuple(sorted(controls.items()))
 
@@ -373,6 +432,13 @@ _SCENARIO_SPECIFICATIONS: tuple[ScenarioSpecification, ...] = (
             human_review_expected=False,
             evaluator_required=False,
         ),
+        capability_bindings=(
+            CapabilityBinding("planning_execution", "required"),
+            CapabilityBinding("completion_publication", "required"),
+            CapabilityBinding(
+                "execution_debug_repair", "optional", independently_classified=True
+            ),
+        ),
     ),
     ScenarioSpecification(
         specification_version=SCENARIO_SPEC_VERSION,
@@ -449,7 +515,10 @@ _SCENARIO_SPECIFICATIONS: tuple[ScenarioSpecification, ...] = (
         target_project_requirement="One fresh Phase 31C target project, F10-verified; frontend source is within the same target.",
         workspace_requirement="Reuse the same serial target workspace and capture the frontend-only diff boundary.",
         source_bootstrap_setup="Existing frontend/src/App.tsx is updated and frontend/src/components/StatusBadge.tsx is materialized; no test artifact is declared by the retained V4 plan.",
-        source_paths=("frontend/src/App.tsx", "frontend/src/components/StatusBadge.tsx"),
+        source_paths=(
+            "frontend/src/App.tsx",
+            "frontend/src/components/StatusBadge.tsx",
+        ),
         test_expectation="EXPECTED_TEST_NOT_REQUIRED",
         test_paths=(),
         planner_contract=None,
@@ -633,9 +702,7 @@ def validate_scenario_specification(specification: ScenarioSpecification) -> Non
     if not specification.cleanup_requirements:
         errors.append("missing required field: cleanup_requirements")
     if specification.test_expectation not in TEST_EXPECTATIONS:
-        errors.append(
-            f"invalid test_expectation: {specification.test_expectation!r}"
-        )
+        errors.append(f"invalid test_expectation: {specification.test_expectation!r}")
 
     expected_contract = _REGISTRY.get(specification.scenario_id)
     if expected_contract is None:
@@ -701,6 +768,46 @@ def validate_scenario_specification(specification: ScenarioSpecification) -> Non
         for value in getattr(specification, field_name):
             if value not in known_outcome_values:
                 errors.append(f"unknown {field_name} value: {value}")
+
+    capabilities = specification.capabilities
+    capability_ids = [binding.capability_id for binding in capabilities]
+    duplicate_capabilities = sorted(
+        {
+            capability_id
+            for capability_id in capability_ids
+            if capability_ids.count(capability_id) > 1
+        }
+    )
+    if duplicate_capabilities:
+        errors.append(
+            "duplicate capability bindings: " + ", ".join(duplicate_capabilities)
+        )
+    for binding in capabilities:
+        if binding.capability_id not in _CAPABILITY_IDS:
+            errors.append(f"unknown capability binding: {binding.capability_id}")
+        if binding.requirement not in _CAPABILITY_REQUIREMENTS:
+            errors.append(
+                f"invalid capability requirement: {binding.capability_id}="
+                f"{binding.requirement!r}"
+            )
+        if not binding.independently_classified:
+            errors.append(
+                f"capability is not independently classified: {binding.capability_id}"
+            )
+    if specification.scenario_id == "S1-2":
+        expected_capabilities = {
+            "planning_execution": "required",
+            "completion_publication": "required",
+            "execution_debug_repair": "optional",
+        }
+        observed_capabilities = {
+            binding.capability_id: binding.requirement for binding in capabilities
+        }
+        if observed_capabilities != expected_capabilities:
+            errors.append(
+                "S1-2 capability bindings must require planning/execution and "
+                "completion/publication while keeping execution debug repair optional"
+            )
     if errors:
         raise ScenarioRegistryError(
             f"{specification.scenario_id}: " + "; ".join(errors)
@@ -718,16 +825,14 @@ def validate_scenario_registry(
         _SCENARIO_SPECIFICATIONS if specifications is None else specifications
     )
     ids = [specification.scenario_id for specification in values]
-    duplicates = sorted({scenario_id for scenario_id in ids if ids.count(scenario_id) > 1})
+    duplicates = sorted(
+        {scenario_id for scenario_id in ids if ids.count(scenario_id) > 1}
+    )
     if duplicates:
-        raise ScenarioRegistryError(
-            "duplicate scenario IDs: " + ", ".join(duplicates)
-        )
+        raise ScenarioRegistryError("duplicate scenario IDs: " + ", ".join(duplicates))
     unknown = sorted(set(ids) - set(STAGE1_SCENARIO_IDS))
     if unknown:
-        raise ScenarioRegistryError(
-            "unknown scenario IDs: " + ", ".join(unknown)
-        )
+        raise ScenarioRegistryError("unknown scenario IDs: " + ", ".join(unknown))
     if require_stage1_complete and set(ids) != set(STAGE1_SCENARIO_IDS):
         missing = sorted(set(STAGE1_SCENARIO_IDS) - set(ids))
         raise ScenarioRegistryError(
@@ -869,6 +974,7 @@ SCENARIO_REGISTRY = _build_registry()
 
 __all__ = [
     "CONTRACT_VERSION",
+    "CapabilityBinding",
     "DEBUG_SUBSET_CLASSIFICATION",
     "GATING_SCENARIO_IDS",
     "PlannerContractBinding",

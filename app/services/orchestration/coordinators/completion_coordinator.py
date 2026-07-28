@@ -106,6 +106,126 @@ class CompletionCoordinator:
     generation) are delegated to helpers and services.
     """
 
+    def evaluate_completed_execution(
+        self,
+        *,
+        db: Any,
+        project: Any,
+        task: Any,
+        task_execution: Any,
+        session_id: Optional[int],
+        change_set: Dict[str, Any],
+        workspace_review_policy: str,
+        planner_contract: Optional[Dict[str, Any]],
+        publish: bool = True,
+        task_service: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Evaluate a previously verified execution at the completion boundary.
+
+        This is a narrow seam for callers that already possess authoritative
+        successful-execution evidence. It reuses the same task/change-set,
+        review-policy, and baseline-promotion services as the normal
+        completion lifecycle; it does not execute verification, retry, repair,
+        or alter the execution loop.
+        """
+
+        if not change_set:
+            raise ValueError("completed execution requires a persisted change set")
+
+        if task_service is None:
+            from app.services.tasks.service import TaskService
+
+            task_service = TaskService(db)
+
+        review_decision = task_service.change_set_review_decision(
+            change_set,
+            workspace_review_policy=workspace_review_policy,
+            planner_contract=planner_contract,
+        )
+        publication_allowed = bool(review_decision.get("publication_allowed", True))
+        publication_eligible = bool(
+            publication_allowed and not review_decision.get("held_for_review", False)
+        )
+        review_decision = {
+            **review_decision,
+            "review_required": bool(review_decision.get("held_for_review", False)),
+            "publication_eligible": publication_eligible,
+        }
+
+        publication_expectation = str(
+            review_decision.get("registered_publication_expectation") or ""
+        )
+        publication_attempted = False
+        publication_result: Dict[str, Any]
+        if not publication_allowed:
+            publication_result = {
+                "status": "not_published",
+                "reason": review_decision.get("reason") or "publication_forbidden",
+                "publication_eligible": False,
+            }
+        elif not publication_eligible:
+            publication_result = {
+                "status": "held_for_review",
+                "reason": review_decision.get("reason") or "review_required",
+                "publication_eligible": False,
+            }
+        elif not publish:
+            publication_result = {
+                "status": "not_published",
+                "reason": "publication_attempt_disabled_by_caller",
+                "publication_eligible": True,
+            }
+        elif publication_expectation in {
+            "PUBLICATION_REQUIRED",
+            "PUBLICATION_ALLOWED",
+        }:
+            publication_attempted = True
+            try:
+                publication_result = task_service.promote_change_set_into_baseline(
+                    project,
+                    task,
+                    change_set,
+                )
+                publication_result = {
+                    **publication_result,
+                    "status": "published",
+                    "publication_eligible": True,
+                }
+            except Exception as exc:
+                publication_result = {
+                    "status": "failed",
+                    "reason": f"{type(exc).__name__}: {str(exc)[:500]}",
+                    "publication_eligible": True,
+                }
+        else:
+            publication_result = {
+                "status": "not_published",
+                "reason": "publication_not_required",
+                "publication_eligible": True,
+            }
+
+        if hasattr(db, "commit"):
+            db.commit()
+
+        publication_status = publication_result.get("status")
+        terminal_classification = {
+            "held_for_review": "REVIEW_HELD",
+            "failed": "PUBLICATION_FAILED",
+            "published": "COMPLETED_PUBLISHED",
+            "not_published": "COMPLETED_NO_PUBLICATION",
+        }.get(str(publication_status), "COMPLETION_UNCLASSIFIED")
+        return {
+            "status": "failed" if publication_status == "failed" else "completed",
+            "terminal_classification": terminal_classification,
+            "task_id": getattr(task, "id", None),
+            "task_execution_id": getattr(task_execution, "id", None),
+            "session_id": session_id,
+            "review_decision": review_decision,
+            "publication_result": publication_result,
+            "publication_attempted": publication_attempted,
+            "publication_persisted": publication_status == "published",
+        }
+
     def complete_task(
         self,
         *,
