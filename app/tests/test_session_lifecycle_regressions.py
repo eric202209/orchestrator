@@ -32,6 +32,7 @@ from app.services.session.session_lifecycle_service import (
     start_session_lifecycle,
     stop_session_lifecycle,
 )
+from app.services.session.orphan_ownership import ProcessObservation
 import app.services.session.session_lifecycle_service as session_lifecycle_service
 from app.services.session import session_runtime_service
 from app.services.session.session_inspection_service import (
@@ -541,6 +542,12 @@ def test_recover_stale_running_session_cancels_active_execution(
     db_session, monkeypatch
 ):
     monkeypatch.setattr(
+        "app.services.session.orphan_ownership.probe_process_identity",
+        lambda *_args: ProcessObservation(
+            state="not_found", exists=False, process_start_identity=None
+        ),
+    )
+    monkeypatch.setattr(
         "app.services.session.session_lifecycle_service._record_failure_knowledge_for_recovery",
         lambda *args, **kwargs: False,
     )
@@ -558,6 +565,9 @@ def test_recover_stale_running_session_cancels_active_execution(
         task_id=task.id,
         attempt_number=1,
         status=TaskStatus.RUNNING,
+        worker_hostname=socket.gethostname(),
+        worker_pid=4242,
+        worker_process_start_identity="worker-start-1",
         started_at=datetime(2026, 1, 1, 0, 0, 0),
     )
     db_session.add_all([link, execution])

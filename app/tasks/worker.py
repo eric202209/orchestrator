@@ -223,19 +223,24 @@ def on_worker_ready(sender, **kwargs):
     try:
         db = get_db_session()
         try:
-            from app.services.session.session_lifecycle_service import (
-                recover_stale_running_sessions,
+            from app.services.session.recovery_coordinator import (
+                inspect_startup_running_executions,
             )
 
-            recovered = recover_stale_running_sessions(db, stale_after_seconds=60)
-            if recovered:
+            observed = inspect_startup_running_executions(
+                db,
+                stale_after_seconds=60,
+            )
+            requested = [item for item in observed if item.get("recovery_eligible")]
+            if requested:
                 logger.warning(
-                    "Worker boot recovery: recovered %d orphaned session(s): %s",
-                    len(recovered),
-                    [r.get("session_id") for r in recovered],
+                    "Worker boot recovery: deferred %d stale execution(s) to periodic "
+                    "orphan maintenance: %s",
+                    len(requested),
+                    [r.get("execution_id") for r in requested],
                 )
             else:
-                logger.info("Worker boot recovery: no orphaned sessions found.")
+                logger.info("Worker boot reconciliation: no stale executions found.")
         finally:
             db.close()
     except Exception as exc:
@@ -548,11 +553,15 @@ def execute_orchestration_task(
         )
         if stale_dispatch_reason:
             task_execution = get_task_execution(db, task_execution_id)
-            mark_execution_cancelled(
-                task=None,
-                task_execution=task_execution,
-                completed_at=datetime.now(timezone.utc),
-            )
+            if (
+                task_execution is not None
+                and task_execution.status == TaskStatus.PENDING
+            ):
+                mark_execution_cancelled(
+                    task=None,
+                    task_execution=task_execution,
+                    completed_at=datetime.now(timezone.utc),
+                )
             db.commit()
             return _emit_dispatch_rejected(
                 reason=stale_dispatch_reason,
@@ -597,11 +606,31 @@ def execute_orchestration_task(
                 break
         if not claim_ok:
             task_execution = get_task_execution(db, task_execution_id)
-            mark_execution_cancelled(
-                task=None,
-                task_execution=task_execution,
-                completed_at=datetime.now(timezone.utc),
-            )
+            if (
+                claim_reason == "task_not_claimable:running"
+                and task_execution is not None
+                and task_execution.status == TaskStatus.RUNNING
+            ):
+                from app.services.session.recovery_coordinator import (
+                    inspect_running_claim,
+                )
+
+                inspect_running_claim(
+                    db,
+                    session_id=session_id,
+                    task_id=task_id,
+                    execution_id=task_execution.id,
+                    stale_after_seconds=2100,
+                )
+            elif (
+                task_execution is not None
+                and task_execution.status == TaskStatus.PENDING
+            ):
+                mark_execution_cancelled(
+                    task=None,
+                    task_execution=task_execution,
+                    completed_at=datetime.now(timezone.utc),
+                )
             db.commit()
             return _emit_dispatch_rejected(
                 reason=claim_reason,
