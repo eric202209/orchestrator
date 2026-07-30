@@ -30,6 +30,7 @@ from app.services.agents.backend_concurrency import (
     release_backend_slot,
 )
 from app.services.orchestration.run_state import (
+    EXECUTION_PROGRESS_METADATA_KEY,
     mark_task_attempt_cancelled,
     mark_task_attempt_pending,
 )
@@ -168,30 +169,98 @@ def _load_graph(db: Session, execution_id: int, *, lock: bool) -> RecoveryGraph 
     )
 
 
-def _last_progress_at(db: Session, graph: RecoveryGraph) -> datetime | None:
-    latest_log = (
-        db.query(LogEntry)
-        .filter(
-            LogEntry.session_id == graph.session.id,
-            LogEntry.task_id == graph.task.id,
-        )
-        .order_by(LogEntry.id.desc())
-        .first()
+def _log_counts_as_execution_progress(log: LogEntry) -> bool:
+    """Return whether a structured log explicitly proves execution progress."""
+
+    if not log.log_metadata:
+        return False
+    try:
+        metadata = json.loads(log.log_metadata)
+    except (TypeError, ValueError):
+        return False
+    return (
+        isinstance(metadata, dict)
+        and metadata.get(EXECUTION_PROGRESS_METADATA_KEY) is True
     )
+
+
+def _latest_explicit_execution_progress_at(
+    db: Session, *, session_id: int, task_id: int
+) -> datetime | None:
+    """Find only explicitly progress-bearing logs for one session/task scope."""
+
+    candidates = [
+        log.created_at
+        for log in (
+            db.query(LogEntry)
+            .filter(
+                LogEntry.session_id == session_id,
+                LogEntry.task_id == task_id,
+                LogEntry.created_at.isnot(None),
+            )
+            .all()
+        )
+        if _log_counts_as_execution_progress(log)
+    ]
+    return max(candidates, key=_utc) if candidates else None
+
+
+def _progress_at_for_scope(
+    db: Session,
+    *,
+    session: SessionModel,
+    task: Task,
+    session_task: SessionTask | None,
+    execution: TaskExecution | None,
+) -> datetime | None:
+    """Resolve progress from authoritative facts, then deterministic starts.
+
+    Recovery and maintenance LogEntry rows are intentionally excluded.  The
+    only log fallback is an explicit ``counts_as_execution_progress`` marker;
+    otherwise the execution heartbeat/start and graph start timestamps provide
+    stable historical behavior without manufacturing freshness from generic
+    ``updated_at`` or inspection evidence.
+    """
+
+    explicit_log_at = _latest_explicit_execution_progress_at(
+        db, session_id=session.id, task_id=task.id
+    )
+    authoritative = [
+        getattr(execution, "heartbeat_at", None) if execution is not None else None,
+        explicit_log_at,
+    ]
+    authoritative_candidates = [value for value in authoritative if value is not None]
+    if authoritative_candidates:
+        return max(authoritative_candidates, key=_utc)
+
+    # Starts are a fallback chain, not a max across mutable graph timestamps.
+    # This prevents a newer session creation/update timestamp from masking the
+    # original execution start when no genuine progress has been recorded.
     return next(
         (
             value
             for value in (
-                latest_log.created_at if latest_log else None,
-                graph.session_task.started_at if graph.session_task else None,
-                graph.task.started_at,
-                graph.session.updated_at,
-                graph.session.started_at,
-                graph.session.created_at,
+                execution.started_at if execution is not None else None,
+                session_task.started_at if session_task is not None else None,
+                task.started_at,
+                session.started_at,
+                session.created_at,
             )
             if value is not None
         ),
         None,
+    )
+
+
+def _last_progress_at(db: Session, graph: RecoveryGraph) -> datetime | None:
+    """Return the latest genuine execution progress, never latest evidence."""
+
+    return _progress_at_for_scope(
+        db,
+        session=graph.session,
+        task=graph.task,
+        session_task=graph.session_task,
+        execution=graph.execution,
     )
 
 
@@ -229,6 +298,7 @@ def _event(
         "session_id": graph.session.id if graph else metadata.get("session_id"),
         "task_id": graph.task.id if graph else metadata.get("task_id"),
         **metadata,
+        EXECUTION_PROGRESS_METADATA_KEY: False,
     }
     db.add(
         LogEntry(
@@ -481,26 +551,12 @@ def recover_running_residue(
         },
         "execution": None,
     }
-    latest_log = (
-        db.query(LogEntry)
-        .filter(LogEntry.session_id == session.id, LogEntry.task_id == task.id)
-        .order_by(LogEntry.id.desc())
-        .first()
-    )
-    progress_at = next(
-        (
-            value
-            for value in (
-                latest_log.created_at if latest_log else None,
-                session_task.started_at,
-                task.started_at,
-                session.updated_at,
-                session.started_at,
-                session.created_at,
-            )
-            if value is not None
-        ),
-        None,
+    progress_at = _progress_at_for_scope(
+        db,
+        session=session,
+        task=task,
+        session_task=session_task,
+        execution=None,
     )
     age_seconds = (
         (observed_at - _utc(progress_at)).total_seconds() if progress_at else None
@@ -537,7 +593,7 @@ def recover_running_residue(
     completed_at = observed_at.astimezone(timezone.utc)
     stop_reason = (
         "no_progress_timeout"
-        if latest_log and latest_log.created_at
+        if progress_at is not None
         else "hard_time_limit_or_worker_killed"
     )
     mark_task_attempt_pending(

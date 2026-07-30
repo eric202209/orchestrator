@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from app.models import TaskExecution
 from app.services.agents.interfaces import RuntimeBackendResult
+from app.services.orchestration.run_state import execution_progress_metadata
 
 
 def _run_coroutine(coro: Any) -> Any:
@@ -83,18 +84,21 @@ def _persist_runtime_backend_result(
                 LogEntry(
                     session_id=task_execution.session_id,
                     task_id=task_execution.task_id,
+                    task_execution_id=task_execution_id,
                     session_instance_id=(_session.instance_id if _session else None),
                     level="INFO",
                     message="[TOKEN_USAGE_RECORDED]",
                     log_metadata=json.dumps(
-                        {
-                            "task_execution_id": task_execution_id,
-                            "task_id": task_execution.task_id,
-                            "session_id": task_execution.session_id,
-                            "tokens_in": result.tokens_in,
-                            "tokens_out": result.tokens_out,
-                            "token_source": result.token_source,
-                        }
+                        execution_progress_metadata(
+                            {
+                                "task_execution_id": task_execution_id,
+                                "task_id": task_execution.task_id,
+                                "session_id": task_execution.session_id,
+                                "tokens_in": result.tokens_in,
+                                "tokens_out": result.tokens_out,
+                                "token_source": result.token_source,
+                            }
+                        )
                     ),
                 )
             )

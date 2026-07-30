@@ -15,11 +15,14 @@ from .transitions import (
     reset_active_attempts_for_session_stop,
 )
 from .context import task_execution_id_from_context
+from .progress import EXECUTION_PROGRESS_METADATA_KEY, execution_progress_metadata
 from .snapshot import RunStateSnapshot, read_run_state_snapshot
 
 __all__ = [
     "RunStateSnapshot",
     "cancel_attempt_for_session_pause_stop",
+    "EXECUTION_PROGRESS_METADATA_KEY",
+    "execution_progress_metadata",
     "finalize_attempt_completion_validation_failure",
     "finalize_attempt_execution_failure",
     "finalize_attempt_planning_failure",

@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.models import LogEntry
+from app.services.orchestration.run_state import EXECUTION_PROGRESS_METADATA_KEY
 
 
 ORPHAN_SWEEP_TASK_NAME = "app.tasks.maintenance.sweep_orphaned_running_sessions"
@@ -50,6 +51,7 @@ def record_maintenance_event(
     observed = _utc(observed_at)
     metadata: dict[str, Any] = {
         "event_type": event_type,
+        EXECUTION_PROGRESS_METADATA_KEY: False,
         "task_name": task_name,
         "schedule_identity": schedule_identity,
         "invocation_id": str(invocation_id),

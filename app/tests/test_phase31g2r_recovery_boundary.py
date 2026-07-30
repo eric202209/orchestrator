@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import socket
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.exc import OperationalError
@@ -21,7 +21,9 @@ from app.models import (
 )
 from app.services.session.orphan_ownership import ProcessObservation
 from app.services.session.recovery_coordinator import (
+    EXECUTION_PROGRESS_METADATA_KEY,
     RECOVERY_SOURCE_PERIODIC,
+    _last_progress_at,
     inspect_running_claim,
     inspect_startup_running_executions,
     recover_stale_execution,
@@ -409,3 +411,272 @@ def test_backend_slot_failure_rolls_back_recovery_graph(db_session, monkeypatch)
     assert task.status == TaskStatus.RUNNING
     assert link.status == TaskStatus.RUNNING
     assert execution.status == TaskStatus.RUNNING
+
+
+def test_recovery_skip_does_not_refresh_execution_progress(db_session):
+    _project, session, task, link, execution = _graph(db_session)
+    session.created_at = STALE_AT
+    genuine_progress_at = datetime.now(UTC) - timedelta(minutes=10)
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            task_execution_id=execution.id,
+            created_at=genuine_progress_at,
+            level="INFO",
+            message="agent output",
+            log_metadata=json.dumps({EXECUTION_PROGRESS_METADATA_KEY: True}),
+        )
+    )
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            task_execution_id=execution.id,
+            created_at=datetime.now(UTC),
+            level="INFO",
+            message="[RECOVERY_SKIPPED] stale execution recovery",
+            log_metadata=json.dumps(
+                {"event_type": "RECOVERY_SKIPPED", "source": "PERIODIC_SWEEP"}
+            ),
+        )
+    )
+    db_session.commit()
+
+    observed = _last_progress_at(
+        db_session, _graph_from_rows(session, task, link, execution)
+    )
+    assert observed.replace(tzinfo=UTC) == genuine_progress_at.replace(tzinfo=UTC)
+
+
+def test_periodic_inspections_monotonically_age_without_execution_progress(
+    db_session, monkeypatch
+):
+    _dead_owner(monkeypatch)
+    _project, session, task, _link, execution = _graph(db_session)
+    session.created_at = STALE_AT
+    genuine_progress_at = datetime.now(UTC) - timedelta(hours=1)
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            task_execution_id=execution.id,
+            created_at=genuine_progress_at,
+            level="INFO",
+            message="execution progress",
+            log_metadata=json.dumps({EXECUTION_PROGRESS_METADATA_KEY: True}),
+        )
+    )
+    db_session.commit()
+
+    first_now = datetime.now(UTC)
+    first = inspect_running_claim(
+        db_session,
+        session_id=session.id,
+        task_id=task.id,
+        execution_id=execution.id,
+        stale_after_seconds=2100,
+        now=first_now,
+    )
+    second = inspect_running_claim(
+        db_session,
+        session_id=session.id,
+        task_id=task.id,
+        execution_id=execution.id,
+        stale_after_seconds=2100,
+        now=first_now + timedelta(seconds=10),
+    )
+
+    assert first["outcome"] == "recovery_requested"
+    assert second["outcome"] == "recovery_requested"
+    assert second["age_seconds"] > first["age_seconds"]
+
+
+def test_boot_observation_does_not_refresh_progress(db_session, monkeypatch):
+    _dead_owner(monkeypatch)
+    _project, session, _task, _link, execution = _graph(db_session)
+    session.created_at = STALE_AT
+    genuine_progress_at = datetime.now(UTC) - timedelta(hours=1)
+    execution.heartbeat_at = genuine_progress_at
+    db_session.commit()
+    observed_at = genuine_progress_at + timedelta(seconds=2200)
+
+    result = inspect_startup_running_executions(
+        db_session,
+        stale_after_seconds=2100,
+        now=observed_at,
+    )[0]
+
+    assert result["source"] == "BOOT_RECOVERY"
+    assert result["outcome"] == "recovery_requested"
+    assert result["progress_at"] == genuine_progress_at.isoformat()
+    assert result["selected_action"] == "periodic_sweep"
+
+
+def test_claim_observation_does_not_refresh_progress(db_session, monkeypatch):
+    _dead_owner(monkeypatch)
+    _project, session, task, _link, execution = _graph(db_session)
+    session.created_at = STALE_AT
+    genuine_progress_at = datetime.now(UTC) - timedelta(hours=1)
+    execution.heartbeat_at = genuine_progress_at
+    db_session.commit()
+
+    result = inspect_running_claim(
+        db_session,
+        session_id=session.id,
+        task_id=task.id,
+        execution_id=execution.id,
+        stale_after_seconds=2100,
+        now=genuine_progress_at + timedelta(seconds=2200),
+    )
+
+    assert result["outcome"] == "recovery_requested"
+    assert result["progress_at"] == genuine_progress_at.isoformat()
+    assert result["selected_action"] == "periodic_sweep"
+
+
+def test_repeated_skipped_periodic_sweeps_reach_eligibility(db_session, monkeypatch):
+    _dead_owner(monkeypatch)
+    _project, session, _task, _link, execution = _graph(db_session)
+    session.created_at = STALE_AT
+    first_now = datetime.now(UTC)
+    genuine_progress_at = first_now - timedelta(seconds=2090)
+    execution.heartbeat_at = genuine_progress_at
+    db_session.commit()
+
+    first = recover_stale_execution(
+        db_session,
+        execution.id,
+        stale_after_seconds=2100,
+        source=RECOVERY_SOURCE_PERIODIC,
+        now=first_now,
+    )
+    second = recover_stale_execution(
+        db_session,
+        execution.id,
+        stale_after_seconds=2100,
+        source=RECOVERY_SOURCE_PERIODIC,
+        now=first_now + timedelta(seconds=20),
+    )
+
+    assert first["outcome"] == "skipped_live_or_ambiguous"
+    assert first["age_seconds"] < 2100
+    assert second["outcome"] == "recovered"
+    assert second["age_seconds"] >= 2100
+
+
+def test_genuine_progress_log_refreshes_age_over_stale_heartbeat(db_session):
+    _project, session, task, link, execution = _graph(db_session)
+    session.created_at = STALE_AT
+    now = datetime.now(UTC)
+    execution.heartbeat_at = now - timedelta(seconds=2000)
+    progress_at = now - timedelta(seconds=10)
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            task_execution_id=execution.id,
+            created_at=progress_at,
+            level="INFO",
+            message="tool response persisted",
+            log_metadata=json.dumps({EXECUTION_PROGRESS_METADATA_KEY: True}),
+        )
+    )
+    db_session.commit()
+
+    observed = _last_progress_at(
+        db_session, _graph_from_rows(session, task, link, execution)
+    )
+
+    assert observed.replace(tzinfo=UTC) == progress_at
+
+
+def test_no_qualifying_log_uses_execution_start_fallback(db_session):
+    _project, session, task, link, execution = _graph(db_session)
+    session.created_at = datetime.now(UTC)
+    execution.heartbeat_at = None
+    db_session.add(
+        LogEntry(
+            session_id=session.id,
+            task_id=task.id,
+            task_execution_id=execution.id,
+            created_at=datetime.now(UTC),
+            level="INFO",
+            message="[MAINTENANCE_COMPLETED] orphan sweep",
+            log_metadata=json.dumps(
+                {
+                    "event_type": "MAINTENANCE_COMPLETED",
+                    EXECUTION_PROGRESS_METADATA_KEY: False,
+                }
+            ),
+        )
+    )
+    db_session.commit()
+
+    observed = _last_progress_at(
+        db_session, _graph_from_rows(session, task, link, execution)
+    )
+
+    assert observed.replace(tzinfo=UTC) == STALE_AT.replace(tzinfo=UTC)
+
+
+def test_live_owner_remains_non_eligible_with_fresh_progress(db_session, monkeypatch):
+    _live_owner(monkeypatch)
+    _project, session, task, _link, execution = _graph(db_session)
+    execution.worker_pid = os.getpid()
+    execution.worker_process_start_identity = "g2r-live-start"
+    execution.heartbeat_at = datetime.now(UTC)
+    db_session.commit()
+
+    result = inspect_running_claim(
+        db_session,
+        session_id=session.id,
+        task_id=task.id,
+        execution_id=execution.id,
+        stale_after_seconds=0,
+        now=datetime.now(UTC),
+    )
+
+    assert result["outcome"] == "duplicate_delivery_ignored"
+    assert result["recovery_eligible"] is False
+
+
+def test_recovery_evidence_is_retained_as_non_progress(db_session, monkeypatch):
+    _dead_owner(monkeypatch)
+    _project, session, task, link, execution = _graph(db_session)
+    session.created_at = STALE_AT
+    execution.heartbeat_at = datetime.now(UTC) - timedelta(seconds=10)
+    db_session.commit()
+
+    result = recover_stale_execution(
+        db_session,
+        execution.id,
+        stale_after_seconds=2100,
+        source=RECOVERY_SOURCE_PERIODIC,
+        now=datetime.now(UTC),
+    )
+    event = (
+        db_session.query(LogEntry)
+        .filter(LogEntry.task_execution_id == execution.id)
+        .order_by(LogEntry.id.desc())
+        .first()
+    )
+
+    assert result["outcome"] == "skipped_live_or_ambiguous"
+    payload = json.loads(event.log_metadata)
+    assert payload["event_type"] == "RECOVERY_SKIPPED"
+    assert payload[EXECUTION_PROGRESS_METADATA_KEY] is False
+    assert _last_progress_at(
+        db_session, _graph_from_rows(session, task, link, execution)
+    ).replace(tzinfo=UTC) == execution.heartbeat_at.replace(tzinfo=UTC)
+
+
+def _graph_from_rows(session, task, link, execution):
+    from app.services.session.recovery_coordinator import RecoveryGraph
+
+    return RecoveryGraph(
+        session=session,
+        task=task,
+        session_task=link,
+        execution=execution,
+    )
