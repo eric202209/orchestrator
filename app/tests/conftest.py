@@ -93,6 +93,90 @@ INTEGRATION_TEST_MODULE_KEYWORDS = (
     "workspace_restore",
 )
 
+PRIMARY_CATEGORY_MARKERS = {
+    "critical_regression",
+    "product_contract",
+    "api_contract",
+    "integration_contract",
+    "recovery",
+    "deployment",
+    "security",
+    "compatibility",
+    "live_validation",
+    "evidence_historical",
+}
+
+
+def primary_test_category(item: pytest.Item) -> str:
+    """Return the one ownership category for a collected backend test."""
+    module_name = item.path.name.lower()
+
+    if item.get_closest_marker("live"):
+        return "live_validation"
+    if any(word in module_name for word in ("evidence", "certification", "historical")):
+        return "evidence_historical"
+    if any(
+        word in module_name
+        for word in (
+            "recovery",
+            "orphan",
+            "resume",
+            "restore",
+            "checkpoint",
+            "rollback",
+        )
+    ):
+        return "recovery"
+    if any(
+        word in module_name
+        for word in (
+            "deploy",
+            "start_script",
+            "celery",
+            "docker",
+            "runtime_identity",
+            "readiness",
+        )
+    ):
+        return "deployment"
+    if any(
+        word in module_name
+        for word in (
+            "auth",
+            "permission",
+            "isolation",
+            "containment",
+            "security",
+            "delete",
+        )
+    ):
+        return "security"
+    if any(word in module_name for word in ("compat", "migration", "legacy")):
+        return "compatibility"
+    if any(
+        word in module_name for word in ("api", "endpoint", "schema", "mobile", "sse")
+    ):
+        return "api_contract"
+    if item.get_closest_marker("integration"):
+        return "integration_contract"
+    if any(
+        word in module_name
+        for word in (
+            "session",
+            "task",
+            "project",
+            "planner",
+            "planning",
+            "review",
+            "github",
+            "knowledge",
+            "guidance",
+            "dashboard",
+        )
+    ):
+        return "product_contract"
+    return "critical_regression"
+
 
 def pytest_collection_modifyitems(config, items):
     for item in items:
@@ -108,6 +192,7 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.integration)
         else:
             item.add_marker(pytest.mark.unit)
+        item.add_marker(getattr(pytest.mark, primary_test_category(item)))
 
 
 @pytest.fixture(autouse=True)
