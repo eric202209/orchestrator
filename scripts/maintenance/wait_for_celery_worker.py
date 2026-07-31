@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import re
 import subprocess
@@ -16,6 +15,7 @@ from dataclasses import dataclass
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_INTERVAL_SECONDS = 1.0
+MAX_PROBE_SECONDS = 1.0
 _RESPONDING_NODE = re.compile(r"^\s*->\s+(?P<node>\S+):\s+OK\s*$", re.MULTILINE)
 
 
@@ -86,7 +86,10 @@ def wait_for_celery_worker(
             break
 
         attempt += 1
-        result = probe(remaining)
+        # A control request published before the worker's pidbox consumer is
+        # ready can receive no reply. Keep each request short so one lost
+        # startup probe cannot consume the complete readiness deadline.
+        result = probe(min(remaining, MAX_PROBE_SECONDS))
         last_result = result
         nodes = _responding_nodes(result.output)
         if result.returncode == 0 and expected_node in nodes:
@@ -143,7 +146,7 @@ def _worker_alive(pid: int) -> bool:
     return True
 
 
-def _celery_probe(celery: str, expected_node: str, remaining: float) -> ProbeResult:
+def _celery_probe(celery: str, expected_node: str, timeout: float) -> ProbeResult:
     command = [
         celery,
         "-A",
@@ -153,7 +156,7 @@ def _celery_probe(celery: str, expected_node: str, remaining: float) -> ProbeRes
         "--destination",
         expected_node,
         "--timeout",
-        str(max(1, math.ceil(remaining))),
+        str(max(timeout, 0.1)),
     ]
     try:
         completed = subprocess.run(
@@ -161,7 +164,10 @@ def _celery_probe(celery: str, expected_node: str, remaining: float) -> ProbeRes
             capture_output=True,
             check=False,
             text=True,
-            timeout=max(remaining, 0.1),
+            # Allow the CLI a small bounded teardown margin after its own
+            # control timeout so Python does not misclassify a normal
+            # "no nodes replied" result as a hung probe.
+            timeout=max(timeout, 0.1) + 0.5,
         )
     except subprocess.TimeoutExpired as exc:
         output = (exc.stdout or "") + (exc.stderr or "")

@@ -27,18 +27,25 @@ def _pong(node=EXPECTED):
 def test_delayed_control_readiness_retries_then_succeeds():
     clock = Clock()
     probes = iter([ProbeResult(1, "Error: No nodes replied"), _pong()])
+    probe_budgets = []
+
+    def probe(remaining):
+        probe_budgets.append(remaining)
+        return next(probes)
+
     result = wait_for_celery_worker(
         expected_node=EXPECTED,
         worker_pid=123,
         timeout_seconds=5,
         interval_seconds=1,
-        probe=lambda remaining: next(probes),
+        probe=probe,
         process_alive=lambda pid: True,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
     )
     assert result[0] is True
     assert "attempt 2" in result[1]
+    assert probe_budgets == [1, 1]
     assert clock.now == 1
 
 
