@@ -51,6 +51,10 @@ class Project(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     deleted_at = Column(DateTime(timezone=True), nullable=True)  # Soft delete tracking
+    # Retirement removes runtime eligibility without deleting the historical graph.
+    retired_at = Column(DateTime(timezone=True), nullable=True)
+    retirement_reason = Column(String(255), nullable=True)
+    retired_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     tasks = relationship("Task", back_populates="project", cascade="all, delete-orphan")
     plans = relationship("Plan", back_populates="project", cascade="all, delete-orphan")

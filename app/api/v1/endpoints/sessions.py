@@ -139,6 +139,11 @@ from app.services.auth.authorization import (
     get_project_for_user,
     project_access_filter,
 )
+from app.services.workspace.workspace_admission import (
+    WorkspaceAdmissionError,
+    admit_dogfood_workspace,
+)
+from app.services.project.lifecycle import assert_project_launch_eligible
 
 router = APIRouter()
 
@@ -155,9 +160,15 @@ def create_session(
 ):
     """Create a new orchestration session."""
     # Verify project exists and is accessible to this user.
-    get_project_for_user(db, session.project_id, current_user)
+    project = get_project_for_user(db, session.project_id, current_user)
+    assert_project_launch_eligible(project)
+    if session.dogfood_admission:
+        try:
+            admit_dogfood_workspace(db, project)
+        except WorkspaceAdmissionError as exc:
+            raise HTTPException(status_code=409, detail=exc.payload()) from exc
 
-    session_data = session.model_dump()
+    session_data = session.model_dump(exclude={"dogfood_admission"})
     session_data["name"] = _ensure_unique_session_name(
         db,
         session.project_id,
@@ -230,6 +241,7 @@ def list_sessions(
         .filter(
             SessionModel.deleted_at.is_(None),
             Project.deleted_at.is_(None),
+            Project.retired_at.is_(None),
             project_access_filter(db, current_user),
         )
     )
@@ -292,6 +304,7 @@ def list_stuck_sessions(
             SessionModel.status == "running",
             SessionModel.deleted_at.is_(None),
             Project.deleted_at.is_(None),
+            Project.retired_at.is_(None),
             project_access_filter(db, current_user),
             not_(
                 sa_exists().where(

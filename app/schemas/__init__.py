@@ -52,6 +52,23 @@ class ProjectResponse(ProjectBase):
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
+    deleted_at: Optional[datetime] = None
+    retired_at: Optional[datetime] = None
+    retirement_reason: Optional[str] = None
+
+    @computed_field
+    @property
+    def lifecycle_status(self) -> str:
+        if self.deleted_at is not None:
+            return "deleted"
+        if self.retired_at is not None:
+            return "retired"
+        return "active"
+
+    @computed_field
+    @property
+    def is_launch_eligible(self) -> bool:
+        return self.deleted_at is None and self.retired_at is None
 
     @computed_field
     @property
@@ -285,6 +302,7 @@ class SessionCreate(SessionBase):
     project_id: int
     execution_mode: Optional[str] = "automatic"
     default_execution_profile: Optional[str] = "full_lifecycle"
+    dogfood_admission: bool = False
 
 
 class SessionUpdate(BaseModel):

@@ -4711,6 +4711,28 @@ def _migration_052_orphan_ownership_observability(engine: Engine) -> None:
             )
 
 
+def _migration_053_project_retirement(engine: Engine) -> None:
+    """Add non-destructive Project retirement metadata without touching rows."""
+
+    if "projects" not in _table_names(engine):
+        return
+    additions = [
+        ("retired_at", "ALTER TABLE projects ADD COLUMN retired_at DATETIME"),
+        (
+            "retirement_reason",
+            "ALTER TABLE projects ADD COLUMN retirement_reason VARCHAR(255)",
+        ),
+        (
+            "retired_by_user_id",
+            "ALTER TABLE projects ADD COLUMN retired_by_user_id INTEGER",
+        ),
+    ]
+    with engine.begin() as connection:
+        for column_name, statement in additions:
+            if not _has_column(engine, "projects", column_name):
+                connection.execute(text(statement))
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -4983,6 +5005,11 @@ MIGRATIONS: tuple[Migration, ...] = (
             "for orphan recovery"
         ),
         upgrade=_migration_052_orphan_ownership_observability,
+    ),
+    Migration(
+        version="053_project_retirement",
+        description="Add non-destructive Project retirement lifecycle metadata",
+        upgrade=_migration_053_project_retirement,
     ),
 )
 

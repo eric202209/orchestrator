@@ -36,6 +36,11 @@ from app.services.workspace.project_mutation_lock import ProjectMutationLockErro
 from app.config import settings
 from app.dependencies import get_current_active_user
 from app.services.auth.authorization import get_project_for_user, project_access_filter
+from app.services.workspace.workspace_admission import (
+    WorkspaceAdmissionError,
+    admit_dogfood_workspace,
+)
+from app.services.project.lifecycle import is_project_retired
 
 router = APIRouter()
 
@@ -60,7 +65,11 @@ def _assert_unique_resolved_workspace(
     exclude_project_id: Optional[int] = None,
 ) -> None:
     target_root = resolve_project_workspace_path(workspace_path, project_name, db=db)
-    active_projects = db.query(Project).filter(Project.deleted_at.is_(None)).all()
+    active_projects = (
+        db.query(Project)
+        .filter(Project.deleted_at.is_(None), Project.retired_at.is_(None))
+        .all()
+    )
     for existing in active_projects:
         if exclude_project_id is not None and existing.id == exclude_project_id:
             continue
@@ -143,7 +152,9 @@ def get_projects(
         )
 
     query = db.query(Project).filter(
-        Project.deleted_at.is_(None), project_access_filter(db, current_user)
+        Project.deleted_at.is_(None),
+        Project.retired_at.is_(None),
+        project_access_filter(db, current_user),
     )
     if search:
         query = query.filter(Project.name.ilike(f"%{search}%"))
@@ -327,6 +338,48 @@ def get_project(
 ):
     """Get a specific project"""
     return get_project_for_user(db, project_id, current_user)
+
+
+@router.get("/projects/{project_id}/dogfood-admission")
+def check_dogfood_workspace_admission(
+    project_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Read-only dogfood workspace admission check; never repairs or mutates."""
+
+    project = get_project_for_user(db, project_id, current_user)
+    try:
+        admitted = admit_dogfood_workspace(db, project)
+    except WorkspaceAdmissionError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload()) from exc
+    return {"status": "admitted", **admitted.__dict__}
+
+
+class ProjectRetirementRequest(BaseModel):
+    reason: str = "legacy_duplicate_workspace_owner"
+
+
+@router.post("/projects/{project_id}/retire", response_model=ProjectResponse)
+def retire_project(
+    project_id: int,
+    payload: Optional[ProjectRetirementRequest] = None,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_active_user),
+):
+    """Retire a Project from runtime ownership without deleting its history."""
+
+    project = get_project_for_user(db, project_id, current_user)
+    if is_project_retired(project):
+        return project
+    project.retired_at = datetime.now(timezone.utc)
+    project.retirement_reason = (
+        payload.reason.strip() if payload else ""
+    ) or "operator_retired"
+    project.retired_by_user_id = current_user.id
+    db.commit()
+    db.refresh(project)
+    return project
 
 
 @router.post("/projects/{project_id}/baseline/rebuild")

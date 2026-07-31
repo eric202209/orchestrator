@@ -141,7 +141,7 @@ class PlanningSessionService:
 
     def list_sessions(self, project_id: Optional[int] = None) -> list[PlanningSession]:
         query = self.db.query(PlanningSession).join(Project)
-        query = query.filter(Project.deleted_at.is_(None))
+        query = query.filter(Project.deleted_at.is_(None), Project.retired_at.is_(None))
         if project_id is not None:
             query = query.filter(PlanningSession.project_id == project_id)
         return query.order_by(
@@ -711,7 +711,7 @@ class PlanningSessionService:
         active_sessions = (
             self.db.query(PlanningSession)
             .join(Project)
-            .filter(Project.deleted_at.is_(None))
+            .filter(Project.deleted_at.is_(None), Project.retired_at.is_(None))
             .filter(PlanningSession.status == "active")
             .filter(PlanningSession.current_prompt_id.is_(None))
             .filter(

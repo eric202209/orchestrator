@@ -24,6 +24,7 @@ from app.schemas import (
 from app.services.planning.planning_session_service import PlanningSessionService
 from app.tasks.planning_dispatch import ensure_planning_task_dispatcher
 from app.services.auth.authorization import get_project_for_user, project_access_filter
+from app.services.project.lifecycle import assert_project_launch_eligible
 
 router = APIRouter(prefix="/planning")
 ensure_planning_task_dispatcher()
@@ -50,7 +51,11 @@ def list_planning_sessions(
 ):
     if project_id is not None:
         get_project_for_user(db, project_id, current_user)
-    query = db.query(PlanningSession).join(Project).filter(Project.deleted_at.is_(None))
+    query = (
+        db.query(PlanningSession)
+        .join(Project)
+        .filter(Project.deleted_at.is_(None), Project.retired_at.is_(None))
+    )
     query = query.filter(project_access_filter(db, current_user))
     if project_id is not None:
         query = query.filter(PlanningSession.project_id == project_id)
@@ -70,6 +75,7 @@ def start_planning_session(
     current_user: User = Depends(get_current_active_user),
 ):
     project = get_project_for_user(db, payload.project_id, current_user)
+    assert_project_launch_eligible(project)
 
     service = PlanningSessionService(db)
     session = service.start_session(

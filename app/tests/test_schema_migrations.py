@@ -11,6 +11,7 @@ from app.db_migrations import (
     MIGRATIONS,
     _migration_036_execution_task_runtime_ownership,
     _migration_037_execution_task_runtime_evidence,
+    _migration_053_project_retirement,
     run_schema_migrations,
 )
 
@@ -99,7 +100,15 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
         column["name"] for column in inspector.get_columns("planning_sessions")
     }
 
-    assert {"github_url", "branch", "workspace_path", "deleted_at"} <= project_columns
+    assert {
+        "github_url",
+        "branch",
+        "workspace_path",
+        "deleted_at",
+        "retired_at",
+        "retirement_reason",
+        "retired_by_user_id",
+    } <= project_columns
     assert {
         "plan_id",
         "plan_position",
@@ -178,6 +187,43 @@ def test_schema_migrations_add_template_id_when_runtime_migration_already_applie
 
     task_columns = {column["name"] for column in inspect(engine).get_columns("tasks")}
     assert "template_id" in task_columns
+
+
+def test_project_retirement_migration_preserves_existing_project_and_history_rows(
+    tmp_path,
+):
+    engine = create_engine(f"sqlite:///{tmp_path / 'project-retirement.db'}")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY, name VARCHAR(255), deleted_at DATETIME)"
+            )
+        )
+        connection.execute(
+            text("CREATE TABLE tasks (id INTEGER PRIMARY KEY, project_id INTEGER)")
+        )
+        connection.execute(
+            text(
+                "INSERT INTO projects (id, name, deleted_at) VALUES "
+                "(2, 'active duplicate', NULL), (13, 'deleted history', '2026-07-10')"
+            )
+        )
+        connection.execute(text("INSERT INTO tasks (id, project_id) VALUES (1, 2)"))
+
+    _migration_053_project_retirement(engine)
+
+    project_columns = {
+        column["name"] for column in inspect(engine).get_columns("projects")
+    }
+    assert {"retired_at", "retirement_reason", "retired_by_user_id"} <= project_columns
+    with engine.connect() as connection:
+        rows = connection.execute(
+            text("SELECT id, deleted_at, retired_at FROM projects ORDER BY id")
+        ).all()
+        task_count = connection.execute(text("SELECT COUNT(*) FROM tasks")).scalar_one()
+    assert rows == [(2, None, None), (13, "2026-07-10", None)]
+    assert task_count == 1
+    assert "053_project_retirement" in {migration.version for migration in MIGRATIONS}
 
 
 def test_attempt_rebuild_preserves_child_foreign_keys_with_sqlite_enforcement(

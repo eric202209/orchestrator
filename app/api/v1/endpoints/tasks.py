@@ -35,6 +35,7 @@ from app.services.orchestration.state.session_state import (
     mark_session_stopped,
 )
 from app.services.auth.authorization import project_access_filter
+from app.services.project.lifecycle import assert_project_launch_eligible
 from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.tasks.execution import (
     create_task_execution,
@@ -269,6 +270,7 @@ def _get_task_for_user(db: Session, task_id: int, current_user) -> Task:
     )
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    assert_project_launch_eligible(task.project)
     return task
 
 
@@ -841,7 +843,11 @@ def get_all_tasks(
     query = (
         db.query(Task)
         .join(Project, Project.id == Task.project_id)
-        .filter(Project.deleted_at.is_(None), project_access_filter(db, current_user))
+        .filter(
+            Project.deleted_at.is_(None),
+            Project.retired_at.is_(None),
+            project_access_filter(db, current_user),
+        )
     )
     query = _apply_task_filters(
         query,
@@ -887,6 +893,7 @@ def create_task(
     )
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
+    assert_project_launch_eligible(project)
 
     if task.template_id is not None:
         from app.services.orchestration.workflow_templates import known_template_ids

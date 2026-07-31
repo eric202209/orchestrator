@@ -82,6 +82,7 @@ def _paths_match(left: str, right: str) -> bool:
 
 def _find_template_agent_id(config: Dict[str, Any], workspace: Path) -> Optional[str]:
     agents = (config.get("agents") or {}).get("list") or []
+    matches: list[str] = []
     for agent in agents:
         if not isinstance(agent, dict):
             continue
@@ -92,8 +93,13 @@ def _find_template_agent_id(config: Dict[str, Any], workspace: Path) -> Optional
             and agent_workspace
             and _paths_match(agent_workspace, str(workspace))
         ):
-            return agent_id
-    return None
+            matches.append(agent_id)
+    if len(matches) > 1:
+        raise ExecutorWorkspaceBindingError(
+            "Multiple OpenClaw agents are configured with a workspace matching "
+            f"Project Workspace {workspace}: {matches}; refusing heuristic selection."
+        )
+    return matches[0] if matches else None
 
 
 def bind_openclaw_workspace(
