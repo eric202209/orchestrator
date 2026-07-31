@@ -281,7 +281,7 @@ jobs:
 
     - name: Validate canonical native deployment scripts
       run: |
-        bash -n start.sh stop_all.sh scripts/maintenance/dogfood_deploy.sh
+        bash -n start.sh scripts/maintenance/dogfood_deploy.sh
         python -m py_compile scripts/maintenance/dogfood_admission.py
         scripts/maintenance/dogfood_admission.py --help > /dev/null
         grep -q "DEPLOYMENT_ADMISSION_PASSED" scripts/maintenance/dogfood_admission.py

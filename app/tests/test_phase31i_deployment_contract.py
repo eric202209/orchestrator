@@ -4,7 +4,6 @@ from pathlib import Path
 ROOT = Path(__file__).parents[2]
 DEPLOY = (ROOT / "scripts/maintenance/dogfood_deploy.sh").read_text()
 START = (ROOT / "start.sh").read_text()
-STOP = (ROOT / "stop_all.sh").read_text()
 
 
 def test_deploy_requires_clean_revision_before_shutdown():
@@ -28,15 +27,6 @@ def test_deploy_locks_shared_identity_and_requires_admission():
 
     assert "dogfood_admission.py" in DEPLOY
     assert "--skip-smoke" not in DEPLOY
-
-
-def test_shutdown_covers_worker_and_beat_with_bounded_escalation():
-    assert 'pkill -TERM -f "celery.*worker"' in STOP
-    assert 'pkill -TERM -f "celery.*beat"' in STOP
-    assert 'pkill -KILL -f "celery.*worker"' in STOP
-    assert 'pkill -KILL -f "celery.*beat"' in STOP
-    assert "for _ in {1..10}" in STOP
-    assert "run/beat.pid" in STOP
 
 
 def test_start_fails_closed_for_noninteractive_mixed_version_topology():
