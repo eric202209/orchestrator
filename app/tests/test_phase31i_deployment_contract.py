@@ -33,3 +33,11 @@ def test_start_fails_closed_for_noninteractive_mixed_version_topology():
     assert "Existing processes detected in non-interactive mode." in START
     assert "refusing a mixed-version start" in START
     assert "Refusing to preserve a potentially mixed-version scheduler" in START
+
+
+def test_start_uses_bounded_expected_node_celery_control_readiness():
+    assert "wait_for_celery_worker.py" in START
+    assert "--expected-node" in START
+    assert "CELERY_CONTROL_READINESS_TIMEOUT_SECONDS:-30" in START
+    assert "CELERY_CONTROL_READINESS_INTERVAL_SECONDS:-1" in START
+    assert 'local expected_worker_node="celery@$(hostname)"' in START

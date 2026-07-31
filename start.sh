@@ -445,7 +445,7 @@ start_workers() {
         sleep 1
     done
     
-    if [ "${worker_ok}" = true ] || check_process "celery -A app.celery_app worker"; then
+    if [ "${worker_ok}" = true ] || kill -0 "${worker_pid}" 2>/dev/null; then
         echo -e "${GREEN}✅ Celery worker started${NC}"
         echo -e "${GREEN}🆔 Worker PID: ${worker_pid}${NC}"
         echo -e "${GREEN}📝 Worker logs: tail -f logs/worker.log${NC}"
@@ -569,12 +569,29 @@ check_health() {
         success=false
     fi
 
-    # Check worker control-plane reachability.
-    if "${VENV_DIR}/bin/celery" -A app.celery_app inspect ping \
-        --timeout=5 > /dev/null 2>&1; then
+    # A worker process and its log-level "ready" message are not sufficient:
+    # Celery remote control can become available just after process startup.
+    # Require the worker started by this topology to answer within a bounded
+    # monotonic window; the helper fails closed on PID exit, no response,
+    # broker/probe failure, or an unexpected node.
+    cleanup_pid_file "${PID_DIR}/worker.pid"
+    local worker_pid=""
+    if [ -f "${PID_DIR}/worker.pid" ]; then
+        worker_pid="$(cat "${PID_DIR}/worker.pid")"
+    fi
+    local expected_worker_node="celery@$(hostname)"
+    if [ -n "${worker_pid}" ] && "${VENV_DIR}/bin/python3" \
+        "${PROJECT_ROOT}/scripts/maintenance/wait_for_celery_worker.py" \
+        --celery "${VENV_DIR}/bin/celery" \
+        --pid "${worker_pid}" \
+        --expected-node "${expected_worker_node}" \
+        --timeout-seconds "${CELERY_CONTROL_READINESS_TIMEOUT_SECONDS:-30}" \
+        --interval-seconds "${CELERY_CONTROL_READINESS_INTERVAL_SECONDS:-1}"; then
         echo -e "${GREEN}✅ Celery worker is responding${NC}"
     else
         echo -e "${RED}❌ Celery worker is not responding${NC}"
+        echo -e "${YELLOW}Expected worker node: ${expected_worker_node}${NC}"
+        echo -e "${YELLOW}Check logs: tail -40 logs/worker.log${NC}"
         success=false
     fi
 
