@@ -47,6 +47,15 @@ load_env() {
         key="${key#"${key%%[![:space:]]*}"}"
         key="${key%"${key##*[![:space:]]}"}"
 
+        case "${key}" in
+            ORCHESTRATOR_GIT_SHA|ORCHESTRATOR_REPO_GIT_SHA|ORCHESTRATOR_BUILD_TIME|ORCHESTRATOR_CONFIG_SHA256|ORCHESTRATOR_CONFIG_SOURCE)
+                # The canonical deploy wrapper locks these values before
+                # startup. A stale .env identity must not override them.
+                if [[ -v "${key}" ]]; then
+                    continue
+                fi
+                ;;
+        esac
         export "${key}=${value}"
     done < "${env_file}"
 }
@@ -448,8 +457,9 @@ start_workers() {
     fi
 
     if check_process "celery -A app.celery_app beat"; then
-        echo -e "${YELLOW}⚠️  Celery Beat already running; leaving the existing scheduler in place${NC}"
-        return 0
+        echo -e "${RED}❌ Celery Beat was already running after shutdown preflight.${NC}"
+        echo -e "${YELLOW}Refusing to preserve a potentially mixed-version scheduler.${NC}"
+        return 1
     fi
 
     cleanup_pid_file "${PID_DIR}/beat.pid"
@@ -559,6 +569,27 @@ check_health() {
         success=false
     fi
 
+    # Check worker control-plane reachability.
+    if "${VENV_DIR}/bin/celery" -A app.celery_app inspect ping \
+        --timeout=5 > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Celery worker is responding${NC}"
+    else
+        echo -e "${RED}❌ Celery worker is not responding${NC}"
+        success=false
+    fi
+
+    # Beat has no remote-control ping; its singleton PID is the bounded
+    # startup liveness contract. Durable dispatch freshness remains visible
+    # through /api/v1/ops/health.
+    cleanup_pid_file "${PID_DIR}/beat.pid"
+    if [ -f "${PID_DIR}/beat.pid" ] \
+        && kill -0 "$(cat "${PID_DIR}/beat.pid")" 2>/dev/null; then
+        echo -e "${GREEN}✅ Celery Beat is running${NC}"
+    else
+        echo -e "${RED}❌ Celery Beat is not running${NC}"
+        success=false
+    fi
+
     # Check Qdrant
     if curl -fsS http://localhost:6333/healthz > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Qdrant is responding${NC}"
@@ -573,6 +604,7 @@ check_health() {
     else
         echo -e "${RED}⚠️  Some services failed health checks${NC}"
         echo "Check logs: tail -20 logs/backend.log logs/frontend.log logs/worker.log"
+        return 1
     fi
 }
 
@@ -586,16 +618,22 @@ main() {
     load_env
     prepare_logs
 
-    # Ask if user wants to stop existing processes
+    # A start is either from a stopped topology or an explicit interactive
+    # restart. Preserving any existing component risks a mixed-version stack.
     if check_process "uvicorn app.main:app" || check_process "vite" || check_process "celery"; then
         if [ -t 0 ]; then
             read -p "Existing processes detected. Stop them and restart? (y/n): " -n 1 -r
             echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
                 stop_existing
+            else
+                echo -e "${RED}Startup cancelled; existing topology was not changed.${NC}"
+                return 1
             fi
         else
-            echo -e "${YELLOW}Existing processes detected; leaving them running in non-interactive mode.${NC}"
+            echo -e "${RED}Existing processes detected in non-interactive mode.${NC}"
+            echo -e "${YELLOW}Run ./stop_all.sh first; refusing a mixed-version start.${NC}"
+            return 1
         fi
     fi
     

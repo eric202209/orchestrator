@@ -662,6 +662,7 @@ class TestOpsBuildIdentityEndpoint:
             "build_time",
             "image_tag",
             "image_id",
+            "configuration_sha256",
             "migration_version",
             "expected_migration_version",
             "planning_backend",

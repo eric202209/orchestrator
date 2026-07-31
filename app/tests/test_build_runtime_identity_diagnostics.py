@@ -123,6 +123,14 @@ def test_build_identity_includes_config_source_summary(mem_db):
     assert isinstance(css["legacy_aliases_in_use"], bool)
 
 
+def test_build_identity_includes_immutable_configuration_identity(mem_db, monkeypatch):
+    monkeypatch.setenv("ORCHESTRATOR_CONFIG_SHA256", "config-sha256")
+
+    payload = build_identity_payload(mem_db)
+
+    assert payload["configuration_sha256"] == "config-sha256"
+
+
 def test_config_source_summary_detects_primary_env_var(monkeypatch):
     monkeypatch.setenv("AGENT_BACKEND", "local_openclaw")
     summary = _config_source_summary()
@@ -219,6 +227,7 @@ def test_build_identity_shape_includes_all_new_fields(mem_db):
         "build_time",
         "image_tag",
         "image_id",
+        "configuration_sha256",
         "planning_backend",
         "active_backend_lanes",
         "stale_container_check",

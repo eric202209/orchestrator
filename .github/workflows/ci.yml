@@ -251,13 +251,26 @@ jobs:
 
     - name: Build Docker image
       run: |
-        docker build -t orchestrator:${{ github.sha }} .
+        BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        docker build \
+          --build-arg ORCHESTRATOR_GIT_SHA="${{ github.sha }}" \
+          --build-arg ORCHESTRATOR_BUILD_TIME="${BUILD_TIME}" \
+          --build-arg ORCHESTRATOR_IMAGE_TAG="orchestrator:${{ github.sha }}" \
+          --build-arg ORCHESTRATOR_IMAGE_ID="${{ github.run_id }}" \
+          -t orchestrator:${{ github.sha }} .
 
-    - name: Test Docker image
+    - name: Smoke Docker image identity and application import
       run: |
-        docker run --rm orchestrator:${{ github.sha }} python --version
+        test "$(docker image inspect orchestrator:${{ github.sha }} \
+          --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')" \
+          = "${{ github.sha }}"
+        test "$(docker run --rm orchestrator:${{ github.sha }} \
+          sh -c 'printf %s \"$ORCHESTRATOR_GIT_SHA\"')" = "${{ github.sha }}"
+        docker run --rm orchestrator:${{ github.sha }} \
+          python -c "from app.main import app; assert app.version"
 
-  deploy:
+  deployment-contract:
+    name: Deployment contract validation (no deployment)
     runs-on: ubuntu-latest
     needs: [build]
     if: github.ref == 'refs/heads/main'
@@ -266,10 +279,9 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Deploy to production
+    - name: Validate canonical native deployment scripts
       run: |
-        echo "Deployment step - configure your deployment script here"
-        # Add your deployment commands (e.g., SSH to server, Docker pull, etc.)
-      env:
-        DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
-        PROD_SERVER: ${{ secrets.PROD_SERVER }}
+        bash -n start.sh stop_all.sh scripts/maintenance/dogfood_deploy.sh
+        python -m py_compile scripts/maintenance/dogfood_admission.py
+        scripts/maintenance/dogfood_admission.py --help > /dev/null
+        grep -q "DEPLOYMENT_ADMISSION_PASSED" scripts/maintenance/dogfood_admission.py

@@ -238,6 +238,7 @@ def build_identity_payload(
         "build_time": _env("ORCHESTRATOR_BUILD_TIME", "BUILD_TIME"),
         "image_tag": _env("ORCHESTRATOR_IMAGE_TAG", "IMAGE_TAG"),
         "image_id": _env("ORCHESTRATOR_IMAGE_ID", "IMAGE_ID"),
+        "configuration_sha256": _env("ORCHESTRATOR_CONFIG_SHA256"),
         **migration,
         "runtime_profile": settings.RUNTIME_PROFILE,
         "timeout_settings": _timeout_settings(),
