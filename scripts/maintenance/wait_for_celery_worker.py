@@ -10,6 +10,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 
 DEFAULT_TIMEOUT_SECONDS = 30.0
@@ -193,6 +194,10 @@ def main() -> int:
     args = parser.parse_args()
     if args.timeout_seconds <= 0 or args.interval_seconds <= 0:
         parser.error("timeout and interval must be positive")
+
+    project_root = str(Path(__file__).resolve().parents[2])
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
 
     from app.celery_app import celery_app
 

@@ -1,5 +1,9 @@
 """Deterministic regressions for the canonical Celery startup gate."""
 
+import subprocess
+import sys
+from pathlib import Path
+
 from scripts.maintenance.wait_for_celery_worker import (
     ProbeResult,
     _celery_probe,
@@ -8,6 +12,12 @@ from scripts.maintenance.wait_for_celery_worker import (
 
 
 EXPECTED = "celery@canonical-host"
+HELPER = (
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "maintenance"
+    / "wait_for_celery_worker.py"
+)
 
 
 class Clock:
@@ -36,6 +46,34 @@ def test_in_process_probe_uses_the_bounded_control_timeout():
 
     assert result == _pong()
     assert calls == [([EXPECTED], 0.8)]
+
+
+def test_direct_helper_invocation_can_import_the_canonical_celery_app(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(HELPER),
+            "--celery",
+            sys.executable,
+            "--pid",
+            "999999999",
+            "--expected-node",
+            EXPECTED,
+            "--timeout-seconds",
+            "0.1",
+            "--interval-seconds",
+            "0.1",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 1
+    assert "worker process exited during control readiness" in result.stderr
+    assert "ModuleNotFoundError" not in result.stderr
 
 
 def test_delayed_control_readiness_retries_then_succeeds():
