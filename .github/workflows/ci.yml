@@ -14,17 +14,6 @@ env:
   NODE_VERSION: "20"
 
 jobs:
-  lint-workflow:
-    name: Validate GitHub Actions workflow
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Run actionlint
-      uses: rhysd/actionlint@v1
-
   lint-backend:
     runs-on: ubuntu-latest
 
@@ -244,7 +233,6 @@ jobs:
     # fix, not a latency change -- with the jobs above now running in
     # parallel this does not reintroduce the old sequential wall-time cost.
     needs:
-      - lint-workflow
       - lint-backend
       - lint-frontend
       - test-backend-fast

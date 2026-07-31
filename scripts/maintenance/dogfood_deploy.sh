@@ -19,6 +19,12 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    echo "Usage: scripts/maintenance/dogfood_deploy.sh"
+    echo "Deploy the clean, committed native dogfood revision and run admission."
+    exit 0
+fi
+
 if [ "$#" -ne 0 ]; then
     echo "Usage: scripts/maintenance/dogfood_deploy.sh" >&2
     echo "The dogfood admission gate cannot be skipped." >&2
