@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -16,7 +15,6 @@ from dataclasses import dataclass
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_INTERVAL_SECONDS = 1.0
 MAX_PROBE_SECONDS = 1.0
-PROBE_TEARDOWN_MARGIN_SECONDS = 0.1
 _RESPONDING_NODE = re.compile(r"^\s*->\s+(?P<node>\S+):\s+OK\s*$", re.MULTILINE)
 
 
@@ -149,37 +147,32 @@ def _worker_alive(pid: int) -> bool:
     return True
 
 
-def _celery_probe(celery: str, expected_node: str, timeout: float) -> ProbeResult:
-    control_timeout = max(timeout - PROBE_TEARDOWN_MARGIN_SECONDS, 0.05)
-    command = [
-        celery,
-        "-A",
-        "app.celery_app",
-        "inspect",
-        "ping",
-        "--destination",
-        expected_node,
-        "--timeout",
-        str(control_timeout),
-    ]
+def _celery_probe(
+    ping: Callable[..., list[dict[str, object]]],
+    expected_node: str,
+    timeout: float,
+) -> ProbeResult:
     try:
-        completed = subprocess.run(
-            command,
-            capture_output=True,
-            check=False,
-            text=True,
-            # The CLI teardown margin is contained inside the caller's
-            # per-probe budget, never added beyond the overall deadline.
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        output = (exc.stdout or "") + (exc.stderr or "")
-        return ProbeResult(returncode=124, output=output or "probe command timed out")
-    except OSError as exc:
+        responses = ping(destination=[expected_node], timeout=timeout)
+    except Exception as exc:
         return ProbeResult(
-            returncode=127, output=f"could not execute Celery probe: {exc}"
+            returncode=1,
+            output=f"Celery control probe failed: {type(exc).__name__}: {exc}",
         )
-    return ProbeResult(completed.returncode, completed.stdout + completed.stderr)
+
+    if not responses:
+        return ProbeResult(returncode=1, output="Error: No nodes replied")
+
+    output: list[str] = []
+    returncode = 0
+    for response in responses:
+        for node, payload in response.items():
+            if isinstance(payload, dict) and payload.get("ok"):
+                output.append(f"->  {node}: OK\n        {payload['ok']}")
+            else:
+                returncode = 1
+                output.append(f"->  {node}: ERROR\n        {payload}")
+    return ProbeResult(returncode=returncode, output="\n".join(output) + "\n")
 
 
 def main() -> int:
@@ -201,13 +194,15 @@ def main() -> int:
     if args.timeout_seconds <= 0 or args.interval_seconds <= 0:
         parser.error("timeout and interval must be positive")
 
+    from app.celery_app import celery_app
+
     succeeded, diagnostic = wait_for_celery_worker(
         expected_node=args.expected_node,
         worker_pid=args.pid,
         timeout_seconds=args.timeout_seconds,
         interval_seconds=args.interval_seconds,
         probe=lambda remaining: _celery_probe(
-            args.celery, args.expected_node, remaining
+            celery_app.control.ping, args.expected_node, remaining
         ),
         process_alive=_worker_alive,
     )

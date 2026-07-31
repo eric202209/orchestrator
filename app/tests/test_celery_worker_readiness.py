@@ -2,6 +2,7 @@
 
 from scripts.maintenance.wait_for_celery_worker import (
     ProbeResult,
+    _celery_probe,
     wait_for_celery_worker,
 )
 
@@ -22,6 +23,19 @@ class Clock:
 
 def _pong(node=EXPECTED):
     return ProbeResult(0, f"->  {node}: OK\n        pong\n")
+
+
+def test_in_process_probe_uses_the_bounded_control_timeout():
+    calls = []
+
+    def ping(*, destination, timeout):
+        calls.append((destination, timeout))
+        return [{EXPECTED: {"ok": "pong"}}]
+
+    result = _celery_probe(ping, EXPECTED, 0.8)
+
+    assert result == _pong()
+    assert calls == [([EXPECTED], 0.8)]
 
 
 def test_delayed_control_readiness_retries_then_succeeds():
