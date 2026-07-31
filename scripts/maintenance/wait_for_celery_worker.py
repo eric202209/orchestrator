@@ -16,6 +16,7 @@ from dataclasses import dataclass
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_INTERVAL_SECONDS = 1.0
 MAX_PROBE_SECONDS = 1.0
+PROBE_TEARDOWN_MARGIN_SECONDS = 0.1
 _RESPONDING_NODE = re.compile(r"^\s*->\s+(?P<node>\S+):\s+OK\s*$", re.MULTILINE)
 
 
@@ -88,8 +89,10 @@ def wait_for_celery_worker(
         attempt += 1
         # A control request published before the worker's pidbox consumer is
         # ready can receive no reply. Keep each request short so one lost
-        # startup probe cannot consume the complete readiness deadline.
-        result = probe(min(remaining, MAX_PROBE_SECONDS))
+        # startup probe cannot consume the complete readiness deadline. Half
+        # of the remaining deadline is reserved for later polling/failure
+        # accounting even in the final portion of the window.
+        result = probe(min(MAX_PROBE_SECONDS, remaining / 2))
         last_result = result
         nodes = _responding_nodes(result.output)
         if result.returncode == 0 and expected_node in nodes:
@@ -147,6 +150,7 @@ def _worker_alive(pid: int) -> bool:
 
 
 def _celery_probe(celery: str, expected_node: str, timeout: float) -> ProbeResult:
+    control_timeout = max(timeout - PROBE_TEARDOWN_MARGIN_SECONDS, 0.05)
     command = [
         celery,
         "-A",
@@ -156,7 +160,7 @@ def _celery_probe(celery: str, expected_node: str, timeout: float) -> ProbeResul
         "--destination",
         expected_node,
         "--timeout",
-        str(max(timeout, 0.1)),
+        str(control_timeout),
     ]
     try:
         completed = subprocess.run(
@@ -164,10 +168,9 @@ def _celery_probe(celery: str, expected_node: str, timeout: float) -> ProbeResul
             capture_output=True,
             check=False,
             text=True,
-            # Allow the CLI a small bounded teardown margin after its own
-            # control timeout so Python does not misclassify a normal
-            # "no nodes replied" result as a hung probe.
-            timeout=max(timeout, 0.1) + 0.5,
+            # The CLI teardown margin is contained inside the caller's
+            # per-probe budget, never added beyond the overall deadline.
+            timeout=timeout,
         )
     except subprocess.TimeoutExpired as exc:
         output = (exc.stdout or "") + (exc.stderr or "")

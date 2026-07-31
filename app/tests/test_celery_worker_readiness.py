@@ -51,12 +51,18 @@ def test_delayed_control_readiness_retries_then_succeeds():
 
 def test_permanent_control_unavailability_fails_at_bounded_deadline():
     clock = Clock()
+    probe_budgets = []
+
+    def probe(remaining):
+        probe_budgets.append(remaining)
+        return ProbeResult(1, "Error: No nodes replied")
+
     result = wait_for_celery_worker(
         expected_node=EXPECTED,
         worker_pid=123,
         timeout_seconds=3,
         interval_seconds=1,
-        probe=lambda remaining: ProbeResult(1, "Error: No nodes replied"),
+        probe=probe,
         process_alive=lambda pid: True,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
@@ -64,6 +70,11 @@ def test_permanent_control_unavailability_fails_at_bounded_deadline():
     assert result[0] is False
     assert "deadline expired" in result[1]
     assert "process remained alive but no Celery control response" in result[1]
+    assert probe_budgets == [1, 1, 0.5]
+    assert all(
+        budget < remaining
+        for budget, remaining in zip(probe_budgets, [3, 2, 1], strict=True)
+    )
     assert clock.now == 3
 
 
