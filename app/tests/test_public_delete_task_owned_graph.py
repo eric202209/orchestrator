@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from app.models import (
     ExecutionFailureSummary,
     LogEntry,
@@ -188,6 +190,21 @@ def test_project_retirement_preserves_graph_and_blocks_new_runtime_work(
     assert db_session.get(ExecutionFailureSummary, ids["failure"]) is not None
 
     assert authenticated_client.get(f"/api/v1/projects/{project.id}").status_code == 200
+    direct_task = authenticated_client.get(f"/api/v1/tasks/{task.id}")
+    assert direct_task.status_code == 200
+    assert direct_task.json()["id"] == task.id
+    assert direct_task.json()["title"] == "Public delete task"
+    assert (
+        direct_task.json()["latest_execution_identity"]["task_execution_id"]
+        == execution.id
+    )
+    direct_change_set = authenticated_client.get(f"/api/v1/tasks/{task.id}/change-set")
+    assert direct_change_set.status_code == 200
+    assert direct_change_set.json()["task_execution_id"] == execution.id
+    assert (
+        authenticated_client.get(f"/api/v1/tasks/{task.id}/logs/sorted").status_code
+        == 200
+    )
     assert project.id not in {
         item["id"] for item in authenticated_client.get("/api/v1/projects").json()
     }
@@ -240,3 +257,15 @@ def test_project_retirement_preserves_graph_and_blocks_new_runtime_work(
         db_session.query(TaskExecution).filter(TaskExecution.task_id == task.id).count()
         == 1
     )
+
+
+def test_retired_project_task_history_still_requires_authentication(
+    api_client, db_session
+):
+    project, _, task, _, _, _ = _task_graph(db_session)
+    project.retired_at = datetime.now(timezone.utc)
+    db_session.commit()
+
+    response = api_client.get(f"/api/v1/tasks/{task.id}")
+
+    assert response.status_code == 401

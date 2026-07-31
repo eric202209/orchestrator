@@ -257,7 +257,9 @@ def _operator_identifier(current_user) -> Optional[str]:
     return f"user:{user_id}" if user_id is not None else None
 
 
-def _get_task_for_user(db: Session, task_id: int, current_user) -> Task:
+def require_task_read_access(db: Session, task_id: int, current_user) -> Task:
+    """Return an authorized non-deleted Task, including retired Project history."""
+
     task = (
         db.query(Task)
         .join(Project, Project.id == Task.project_id)
@@ -270,6 +272,13 @@ def _get_task_for_user(db: Session, task_id: int, current_user) -> Task:
     )
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+def require_task_runtime_eligibility(db: Session, task_id: int, current_user) -> Task:
+    """Return an authorized Task whose Project can receive new runtime work."""
+
+    task = require_task_read_access(db, task_id, current_user)
     assert_project_launch_eligible(task.project)
     return task
 
@@ -1028,7 +1037,7 @@ def queue_task_with_canonical_execution(
     current_user=Depends(get_current_active_user),
 ):
     """Queue the compatibility route through the Canonical Execution Loop."""
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_runtime_eligibility(db, task_id, current_user)
     if task.status == TaskStatus.RUNNING:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -1067,7 +1076,7 @@ def get_task(
 ):
     """Get a task by ID"""
     task_service = TaskService(db)
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_read_access(db, task_id, current_user)
 
     # Prefer the most recent task/session relationship so Task Detail reflects
     # the latest execution context instead of an arbitrary historical row.
@@ -1123,7 +1132,7 @@ def get_latest_task_change_set(
     current_user=Depends(get_current_active_user),
 ):
     """Return the latest deterministic workspace change set for a task."""
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_read_access(db, task_id, current_user)
 
     task_service = TaskService(db)
     latest_change_set = task_service.get_latest_task_change_set_for_task(task_id)
@@ -1188,7 +1197,7 @@ def reject_latest_task_change_set(
     current_user=Depends(get_current_active_user),
 ):
     """Archive candidate files and restore the pre-run snapshot for a task execution."""
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_runtime_eligibility(db, task_id, current_user)
     project = (
         db.query(Project)
         .filter(
@@ -1256,7 +1265,7 @@ def accept_latest_task_change_set(
     current_user=Depends(get_current_active_user),
 ):
     """Record operator acceptance for a captured task execution change set."""
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_runtime_eligibility(db, task_id, current_user)
     project = db.query(Project).filter(Project.id == task.project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -1471,7 +1480,7 @@ def retry_task(
     current_user=Depends(get_current_active_user),
 ):
     """Queue a fresh execution for a failed or timed-out task."""
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_runtime_eligibility(db, task_id, current_user)
 
     if task.status == TaskStatus.RUNNING:
         raise HTTPException(
@@ -1494,7 +1503,7 @@ def accept_task_workspace(
     current_user=Depends(get_current_active_user),
 ):
     """Accept a reviewed task workspace into the project baseline."""
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_runtime_eligibility(db, task_id, current_user)
     if task.status != TaskStatus.DONE:
         raise HTTPException(
             status_code=409, detail="Only completed tasks can be accepted"
@@ -1736,7 +1745,7 @@ def request_task_workspace_changes(
     current_user=Depends(get_current_active_user),
 ):
     """Mark a completed task workspace as needing follow-up before promotion."""
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_runtime_eligibility(db, task_id, current_user)
     if not task.task_subfolder:
         raise HTTPException(
             status_code=409, detail="Task has no workspace folder to review"
@@ -1765,7 +1774,7 @@ def update_task(
     current_user=Depends(get_current_active_user),
 ):
     """Update a task"""
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_runtime_eligibility(db, task_id, current_user)
 
     update_data = task_update.model_dump(exclude_unset=True)
     if not update_data:
@@ -1829,7 +1838,7 @@ def delete_task(
     current_user=Depends(get_current_active_user),
 ):
     """Delete a task"""
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_read_access(db, task_id, current_user)
     delete_task_owned_graph(db, [task.id])
     db.commit()
     return None
@@ -1858,7 +1867,7 @@ def get_sorted_task_logs(
     Returns:
         Sorted list of log entries
     """
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_read_access(db, task_id, current_user)
 
     effective_limit = min(limit if limit else 100, 1000)
 
@@ -1926,7 +1935,7 @@ async def check_task_overwrites(
         Overwrite protection result with safety status and warnings
     """
     # Verify task exists and belongs to the current user.
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_read_access(db, task_id, current_user)
     if task.project_id != request.project_id:
         raise HTTPException(
             status_code=400,
@@ -1980,7 +1989,7 @@ async def create_task_backup(
         Backup result with path and file count
     """
     # Verify task exists and belongs to the current user.
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_runtime_eligibility(db, task_id, current_user)
 
     try:
         from app.services.workspace.overwrite_protection_service import (
@@ -2022,7 +2031,7 @@ async def get_workspace_info(
         Workspace details including file count and last modified date
     """
     # Verify task exists and belongs to the current user.
-    task = _get_task_for_user(db, task_id, current_user)
+    task = require_task_read_access(db, task_id, current_user)
 
     try:
         from app.services.workspace.overwrite_protection_service import (
