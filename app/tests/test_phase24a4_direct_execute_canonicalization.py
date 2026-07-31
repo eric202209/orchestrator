@@ -25,7 +25,9 @@ def test_direct_execute_route_is_queued_and_delegates_to_canonical(monkeypatch):
     )
     captured = {}
 
-    monkeypatch.setattr(tasks_module, "_get_task_for_user", lambda *args: task)
+    monkeypatch.setattr(
+        tasks_module, "require_task_runtime_eligibility", lambda *args: task
+    )
 
     def fake_queue(*args, **kwargs):
         captured.update(kwargs)
@@ -58,7 +60,9 @@ def test_direct_execute_rejects_active_task(monkeypatch):
     from app.api.v1.endpoints import tasks as tasks_module
 
     task = SimpleNamespace(id=41, status=TaskStatus.RUNNING)
-    monkeypatch.setattr(tasks_module, "_get_task_for_user", lambda *args: task)
+    monkeypatch.setattr(
+        tasks_module, "require_task_runtime_eligibility", lambda *args: task
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         tasks_module.queue_task_with_canonical_execution(
@@ -76,7 +80,9 @@ def test_direct_execute_rejects_missing_prompt_and_task_text(monkeypatch):
     task = SimpleNamespace(
         id=41, status=TaskStatus.PENDING, description=None, title=None
     )
-    monkeypatch.setattr(tasks_module, "_get_task_for_user", lambda *args: task)
+    monkeypatch.setattr(
+        tasks_module, "require_task_runtime_eligibility", lambda *args: task
+    )
 
     with pytest.raises(HTTPException) as exc_info:
         tasks_module.queue_task_with_canonical_execution(
