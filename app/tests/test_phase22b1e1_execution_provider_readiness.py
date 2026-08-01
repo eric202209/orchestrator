@@ -24,6 +24,7 @@ def test_execution_context_below_contract_is_rejected(monkeypatch):
             descriptor,
             BackendRole.EXECUTION,
             effective_context_tokens=8192,
+            dispatch=False,
         )
 
     assert exc_info.value.code == "provider_context_insufficient"
@@ -38,6 +39,7 @@ def test_execution_context_at_contract_is_accepted(monkeypatch):
         descriptor,
         BackendRole.EXECUTION,
         effective_context_tokens=65536,
+        dispatch=False,
     )
 
     assert result["effective_context_tokens"] == 65536
@@ -62,7 +64,11 @@ def test_execution_model_catalog_context_is_verified_before_dispatch(
     )
 
     with pytest.raises(RuntimeCapabilityError) as exc_info:
-        validate_runtime_provider_contract(db_session, BackendRole.EXECUTION)
+        validate_runtime_provider_contract(
+            db_session,
+            BackendRole.EXECUTION,
+            dispatch=False,
+        )
 
     assert exc_info.value.code == "provider_context_insufficient"
 
@@ -84,7 +90,11 @@ def test_execution_model_catalog_identity_and_context_are_retained(
         ],
     )
 
-    result = validate_runtime_provider_contract(db_session, BackendRole.EXECUTION)
+    result = validate_runtime_provider_contract(
+        db_session,
+        BackendRole.EXECUTION,
+        dispatch=False,
+    )
 
     assert result["backend"] == "local_openclaw"
     assert result["model"] == "qwen3-coder:30b"

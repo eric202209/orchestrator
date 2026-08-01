@@ -135,38 +135,6 @@ def validate_runtime_capabilities(
             f"Runtime backend '{descriptor.name}' is not implemented.",
             code="provider_model_unavailable",
         )
-    if dispatch and (not descriptor.health.available or not descriptor.health.ready):
-        errors = "; ".join(descriptor.health.errors) or descriptor.health.status
-        raise RuntimeCapabilityError(
-            f"Runtime backend '{descriptor.name}' is not ready for {role.value}: {errors}.",
-            code="provider_unavailable",
-        )
-    provider_errors = _role_provider_configuration_errors(role)
-    if dispatch and provider_errors:
-        raise RuntimeCapabilityError(
-            f"Runtime role '{role.value}' is not provider-ready: "
-            + "; ".join(provider_errors)
-            + ".",
-            code=(
-                "provider_endpoint_incompatible"
-                if "endpoint" in " ".join(provider_errors)
-                else "provider_model_unavailable"
-            ),
-        )
-
-    role_supported = {
-        BackendRole.PLANNING: descriptor.capabilities.supports_planning,
-        BackendRole.EXECUTION: descriptor.capabilities.supports_step_execution,
-        BackendRole.REPAIR: descriptor.capabilities.supports_planning,
-        BackendRole.DEBUG_REPAIR: descriptor.capabilities.supports_debug_repair,
-        BackendRole.COMPLETION_REPAIR: descriptor.capabilities.supports_planning,
-    }[role]
-    if dispatch and not role_supported:
-        raise RuntimeCapabilityError(
-            f"Runtime backend '{descriptor.name}' does not support the {role.value} role.",
-            code="provider_endpoint_incompatible",
-        )
-
     resolved_context = effective_context_tokens
     if resolved_context is None:
         resolved_context = _configured_context_tokens(role)
@@ -202,6 +170,38 @@ def validate_runtime_capabilities(
                 f"the required {required} tokens.",
                 code="provider_context_insufficient",
             )
+
+    if dispatch and (not descriptor.health.available or not descriptor.health.ready):
+        errors = "; ".join(descriptor.health.errors) or descriptor.health.status
+        raise RuntimeCapabilityError(
+            f"Runtime backend '{descriptor.name}' is not ready for {role.value}: {errors}.",
+            code="provider_unavailable",
+        )
+    provider_errors = _role_provider_configuration_errors(role)
+    if dispatch and provider_errors:
+        raise RuntimeCapabilityError(
+            f"Runtime role '{role.value}' is not provider-ready: "
+            + "; ".join(provider_errors)
+            + ".",
+            code=(
+                "provider_endpoint_incompatible"
+                if "endpoint" in " ".join(provider_errors)
+                else "provider_model_unavailable"
+            ),
+        )
+
+    role_supported = {
+        BackendRole.PLANNING: descriptor.capabilities.supports_planning,
+        BackendRole.EXECUTION: descriptor.capabilities.supports_step_execution,
+        BackendRole.REPAIR: descriptor.capabilities.supports_planning,
+        BackendRole.DEBUG_REPAIR: descriptor.capabilities.supports_debug_repair,
+        BackendRole.COMPLETION_REPAIR: descriptor.capabilities.supports_planning,
+    }[role]
+    if dispatch and not role_supported:
+        raise RuntimeCapabilityError(
+            f"Runtime backend '{descriptor.name}' does not support the {role.value} role.",
+            code="provider_endpoint_incompatible",
+        )
 
     return {
         "backend": descriptor.name,
@@ -293,6 +293,7 @@ def validate_runtime_provider_contract(
     role: BackendRole | str,
     *,
     runtime_configuration: RoleRuntimeConfiguration | None = None,
+    dispatch: bool = True,
 ) -> dict[str, Any]:
     """Validate the configured provider/model contract before role dispatch."""
 
@@ -303,7 +304,7 @@ def validate_runtime_provider_contract(
         descriptor,
         role,
         effective_context_tokens=_configured_context_tokens(role),
-        dispatch=True,
+        dispatch=dispatch,
     )
     result: dict[str, Any] = {
         **readiness,
@@ -768,8 +769,6 @@ def invoke_runtime_prompt(
     started_at = time.monotonic()
     role_name = role.value if isinstance(role, BackendRole) else str(role or "legacy")
     try:
-        if role is not None:
-            validate_runtime_provider_contract(db, role)
         runtime = create_agent_runtime(
             db,
             session_id,
@@ -797,14 +796,23 @@ def invoke_runtime_prompt(
 
     if role is not None:
         descriptor = getattr(runtime, "backend_descriptor", None)
+        runtime_configuration = getattr(runtime, "runtime_configuration", None)
         if isinstance(descriptor, BackendDescriptor):
-            validate_runtime_capabilities(
-                descriptor,
-                role,
-                effective_context_tokens=_configured_context_tokens(
-                    _coerce_backend_role(role)
-                ),
-            )
+            normalized_role = _coerce_backend_role(role)
+            if isinstance(runtime_configuration, RoleRuntimeConfiguration):
+                validate_runtime_provider_contract(
+                    db,
+                    normalized_role,
+                    runtime_configuration=runtime_configuration,
+                )
+            else:
+                validate_runtime_capabilities(
+                    descriptor,
+                    normalized_role,
+                    effective_context_tokens=_configured_context_tokens(
+                        normalized_role
+                    ),
+                )
 
     if project_id is not None and hasattr(runtime, "project_id"):
         runtime.project_id = project_id

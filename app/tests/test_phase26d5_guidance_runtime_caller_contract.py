@@ -282,6 +282,11 @@ def _run_worker_handoff(monkeypatch, tmp_path, *, mixed_lane, legacy_nulls=False
     monkeypatch.setattr(
         worker, "resolve_guidance_runtime_target", resolve_guidance_runtime_target
     )
+    monkeypatch.setattr(
+        worker,
+        "validate_runtime_provider_contract",
+        lambda *args, **kwargs: {},
+    )
 
     result = worker.execute_orchestration_task.run(
         session_id=session.id,

@@ -293,6 +293,7 @@ def execute_orchestration_task(
     db = get_db_session()
     session: Optional[SessionModel] = None
     task: Optional[Task] = None
+    project: Optional[Project] = None
     orchestration_state: Optional[OrchestrationState] = None
     session_task_link: Optional[SessionTask] = None
     trace_context_manager = None
