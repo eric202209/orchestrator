@@ -129,6 +129,11 @@ def _configured_backend_roles() -> Dict[str, list[str]]:
     role_settings = {
         "planning": settings.PLANNING_BACKEND or settings.AGENT_BACKEND,
         "execution": settings.EXECUTION_BACKEND or settings.AGENT_BACKEND,
+        "debug_repair": (
+            settings.DEBUG_REPAIR_BACKEND
+            or settings.REPAIR_BACKEND
+            or settings.AGENT_BACKEND
+        ),
         "repair": settings.REPAIR_BACKEND or settings.AGENT_BACKEND,
     }
     roles_by_backend: Dict[str, list[str]] = {}
@@ -362,6 +367,7 @@ def ops_backends_health(
 ) -> Dict[str, Any]:
     """Health status for each registered backend, including runtime lane verdict."""
     from app.services.agents.agent_backends import list_supported_backends
+    from app.services.agents.agent_runtime import runtime_provider_role_matrix
 
     backends = list_supported_backends()
     lane = diagnose_runtime_lane(db)
@@ -373,6 +379,7 @@ def ops_backends_health(
             "container_path_on_host": lane.get("container_path_on_host"),
             "reasons": lane.get("reasons"),
         },
+        "provider_role_matrix": runtime_provider_role_matrix(db),
         "backends": [
             {
                 "name": b.name,

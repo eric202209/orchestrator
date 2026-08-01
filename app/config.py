@@ -184,6 +184,7 @@ class Settings(BaseSettings):
     AGENT_MODEL: str = "local"
     PLANNER_MODEL: str = ""
     EXECUTION_MODEL: str = ""
+    EXECUTION_CONTEXT_TOKENS: Optional[int] = None
     PLANNING_ADAPTATION_PROFILE: Optional[str] = None
     EXECUTION_ADAPTATION_PROFILE: Optional[str] = None
     REPAIR_ADAPTATION_PROFILE: Optional[str] = None

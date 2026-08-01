@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import Session
 
@@ -52,14 +55,21 @@ class UnsupportedRuntimeProfileError(ValueError):
 
 
 MIN_REPAIR_CONTEXT_TOKENS = 16_000
+MIN_EXECUTION_CONTEXT_TOKENS = 16_000
 
 
 class RuntimeCapabilityError(ValueError):
     """Raised when a role cannot satisfy its dispatch-time requirements."""
 
+    def __init__(self, message: str, *, code: str = "provider_configuration_invalid"):
+        super().__init__(message)
+        self.code = code
+
 
 def _configured_context_tokens(role: BackendRole) -> Optional[int]:
-    if role is BackendRole.DEBUG_REPAIR:
+    if role is BackendRole.EXECUTION:
+        value = getattr(settings, "EXECUTION_CONTEXT_TOKENS", None)
+    elif role is BackendRole.DEBUG_REPAIR:
         value = getattr(settings, "DEBUG_REPAIR_CONTEXT_TOKENS", None)
         if value is None:
             value = getattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", None)
@@ -78,6 +88,11 @@ def _configured_context_tokens(role: BackendRole) -> Optional[int]:
 
 
 def _role_provider_configuration_errors(role: BackendRole) -> list[str]:
+    if role is BackendRole.EXECUTION:
+        errors: list[str] = []
+        if not str(getattr(settings, "EXECUTION_MODEL", "") or "").strip():
+            errors.append("execution model is not configured")
+        return errors
     if role not in {
         BackendRole.REPAIR,
         BackendRole.DEBUG_REPAIR,
@@ -117,19 +132,26 @@ def validate_runtime_capabilities(
     role = _coerce_backend_role(role)
     if not descriptor.implemented:
         raise RuntimeCapabilityError(
-            f"Runtime backend '{descriptor.name}' is not implemented."
+            f"Runtime backend '{descriptor.name}' is not implemented.",
+            code="provider_model_unavailable",
         )
     if dispatch and (not descriptor.health.available or not descriptor.health.ready):
         errors = "; ".join(descriptor.health.errors) or descriptor.health.status
         raise RuntimeCapabilityError(
-            f"Runtime backend '{descriptor.name}' is not ready for {role.value}: {errors}."
+            f"Runtime backend '{descriptor.name}' is not ready for {role.value}: {errors}.",
+            code="provider_unavailable",
         )
     provider_errors = _role_provider_configuration_errors(role)
     if dispatch and provider_errors:
         raise RuntimeCapabilityError(
             f"Runtime role '{role.value}' is not provider-ready: "
             + "; ".join(provider_errors)
-            + "."
+            + ".",
+            code=(
+                "provider_endpoint_incompatible"
+                if "endpoint" in " ".join(provider_errors)
+                else "provider_model_unavailable"
+            ),
         )
 
     role_supported = {
@@ -141,28 +163,44 @@ def validate_runtime_capabilities(
     }[role]
     if dispatch and not role_supported:
         raise RuntimeCapabilityError(
-            f"Runtime backend '{descriptor.name}' does not support the {role.value} role."
+            f"Runtime backend '{descriptor.name}' does not support the {role.value} role.",
+            code="provider_endpoint_incompatible",
         )
 
     resolved_context = effective_context_tokens
     if resolved_context is None:
         resolved_context = _configured_context_tokens(role)
-    if resolved_context is None and dispatch:
-        resolved_context = descriptor.capabilities.max_context_tokens
-    if role in {
+    role_requires_context = role in {
+        BackendRole.EXECUTION,
         BackendRole.REPAIR,
         BackendRole.DEBUG_REPAIR,
         BackendRole.COMPLETION_REPAIR,
-    }:
-        if resolved_context is None and dispatch:
+    }
+    if resolved_context is None and dispatch and role_requires_context:
+        required = (
+            MIN_EXECUTION_CONTEXT_TOKENS
+            if role is BackendRole.EXECUTION
+            else required_context_tokens
+        )
+        if role is not BackendRole.EXECUTION:
+            resolved_context = descriptor.capabilities.max_context_tokens
+        if resolved_context is None:
             raise RuntimeCapabilityError(
                 f"Runtime role '{role.value}' has no verified effective context capacity; "
-                f"at least {required_context_tokens} tokens are required."
+                f"at least {required} tokens are required.",
+                code="provider_context_insufficient",
             )
-        if resolved_context is not None and resolved_context < required_context_tokens:
+    if role_requires_context:
+        required = (
+            MIN_EXECUTION_CONTEXT_TOKENS
+            if role is BackendRole.EXECUTION
+            else required_context_tokens
+        )
+        if resolved_context is not None and resolved_context < required:
             raise RuntimeCapabilityError(
                 f"Runtime role '{role.value}' effective context {resolved_context} is below "
-                f"the required {required_context_tokens} tokens."
+                f"the required {required} tokens.",
+                code="provider_context_insufficient",
             )
 
     return {
@@ -171,16 +209,214 @@ def validate_runtime_capabilities(
         "provider_ready": True,
         "effective_context_tokens": resolved_context,
         "required_context_tokens": (
-            required_context_tokens
-            if role
-            in {
-                BackendRole.REPAIR,
-                BackendRole.DEBUG_REPAIR,
-                BackendRole.COMPLETION_REPAIR,
-            }
-            else None
+            MIN_EXECUTION_CONTEXT_TOKENS
+            if role is BackendRole.EXECUTION
+            else required_context_tokens if role_requires_context else None
         ),
     }
+
+
+def _read_openclaw_model_catalog() -> list[dict[str, Any]]:
+    """Read the effective OpenClaw model registry without invoking a task."""
+
+    configured_path = os.environ.get("OPENCLAW_CONFIG_PATH", "").strip()
+    state_dir = os.environ.get("OPENCLAW_STATE_DIR", "").strip()
+    config_path = (
+        Path(configured_path).expanduser()
+        if configured_path
+        else (
+            Path(state_dir).expanduser() / "openclaw.json"
+            if state_dir
+            else Path.home() / ".openclaw" / "openclaw.json"
+        )
+    )
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeCapabilityError(
+            f"OpenClaw model registry could not be read from {config_path}: {exc}",
+            code="provider_model_unavailable",
+        ) from exc
+
+    providers = (config.get("models") or {}).get("providers") or {}
+    if not isinstance(providers, dict):
+        raise RuntimeCapabilityError(
+            "OpenClaw model registry omitted its providers map.",
+            code="provider_model_unavailable",
+        )
+
+    catalog: list[dict[str, Any]] = []
+    for provider_name, provider in providers.items():
+        if not isinstance(provider, dict):
+            continue
+        models = provider.get("models")
+        if not isinstance(models, list):
+            continue
+        for model in models:
+            if not isinstance(model, dict):
+                continue
+            model_copy = dict(model)
+            model_id = str(model_copy.get("id") or "").strip()
+            if not model_id:
+                continue
+            model_copy.setdefault("key", f"{provider_name}/{model_id}")
+            model_copy.setdefault("name", model_id)
+            model_copy.setdefault("missing", False)
+            catalog.append(model_copy)
+    if not catalog:
+        raise RuntimeCapabilityError(
+            "OpenClaw model registry contains no configured provider models.",
+            code="provider_model_unavailable",
+        )
+    return catalog
+
+
+def _model_catalog_match(
+    model_family: str, catalog: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    requested = str(model_family or "").strip().lower()
+    for model in catalog:
+        candidates = {
+            str(model.get("key") or "").strip().lower(),
+            str(model.get("name") or "").strip().lower(),
+        }
+        candidates.update(
+            candidate.split("/", 1)[-1] for candidate in tuple(candidates) if candidate
+        )
+        if requested and requested in candidates:
+            return model
+    return None
+
+
+def validate_runtime_provider_contract(
+    db: Session,
+    role: BackendRole | str,
+    *,
+    runtime_configuration: RoleRuntimeConfiguration | None = None,
+) -> dict[str, Any]:
+    """Validate the configured provider/model contract before role dispatch."""
+
+    role = _coerce_backend_role(role)
+    configuration = runtime_configuration or resolve_runtime_configuration(db, role)
+    descriptor = require_backend_descriptor(configuration.backend_name)
+    readiness = validate_runtime_capabilities(
+        descriptor,
+        role,
+        effective_context_tokens=_configured_context_tokens(role),
+        dispatch=True,
+    )
+    result: dict[str, Any] = {
+        **readiness,
+        "backend": configuration.backend_name,
+        "model": configuration.model_family,
+        "role": role.value,
+        "adaptation_profile": configuration.adaptation_profile,
+    }
+
+    if role is BackendRole.EXECUTION and configuration.backend_name == "local_openclaw":
+        model = _model_catalog_match(
+            configuration.model_family,
+            _read_openclaw_model_catalog(),
+        )
+        if model is None or model.get("missing") is True:
+            raise RuntimeCapabilityError(
+                f"Execution model '{configuration.model_family}' is not available in the OpenClaw catalog.",
+                code="provider_model_unavailable",
+            )
+        observed_context = model.get("contextWindow")
+        try:
+            observed_context = int(observed_context)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeCapabilityError(
+                f"Execution model '{configuration.model_family}' has no verified context window.",
+                code="provider_context_insufficient",
+            ) from exc
+        if observed_context < MIN_EXECUTION_CONTEXT_TOKENS:
+            raise RuntimeCapabilityError(
+                f"Execution model '{configuration.model_family}' exposes {observed_context} tokens; "
+                f"at least {MIN_EXECUTION_CONTEXT_TOKENS} are required.",
+                code="provider_context_insufficient",
+            )
+        configured_context = readiness.get("effective_context_tokens")
+        if configured_context is not None and configured_context > observed_context:
+            raise RuntimeCapabilityError(
+                f"Configured execution context {configured_context} exceeds the provider's "
+                f"usable {observed_context} tokens.",
+                code="provider_context_insufficient",
+            )
+        result.update(
+            {
+                "provider_model": model.get("key") or model.get("name"),
+                "provider_context_tokens": observed_context,
+                "effective_context_tokens": min(
+                    configured_context or observed_context,
+                    observed_context,
+                ),
+            }
+        )
+
+    if role is BackendRole.DEBUG_REPAIR:
+        if configuration.backend_name == "openai_chat_completions":
+            base_url = (
+                (
+                    getattr(settings, "DEBUG_REPAIR_BASE_URL", "")
+                    or getattr(settings, "PLANNING_REPAIR_BASE_URL", "")
+                )
+                .strip()
+                .rstrip("/")
+            )
+            parsed = urlparse(base_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise RuntimeCapabilityError(
+                    "Debug repair endpoint must be an absolute HTTP(S) base URL.",
+                    code="provider_endpoint_incompatible",
+                )
+            if parsed.path.rstrip("/").endswith("/chat/completions"):
+                raise RuntimeCapabilityError(
+                    "Debug repair endpoint must be a provider base URL, not a chat path.",
+                    code="provider_endpoint_incompatible",
+                )
+            if (
+                parsed.hostname == "api.openai.com"
+                and not (
+                    getattr(settings, "DEBUG_REPAIR_API_KEY", "")
+                    or getattr(settings, "PLANNING_REPAIR_API_KEY", "")
+                    or getattr(settings, "OPENAI_API_KEY", "")
+                ).strip()
+            ):
+                raise RuntimeCapabilityError(
+                    "Debug repair endpoint requires an API key.",
+                    code="provider_authentication_missing",
+                )
+            result.update(
+                {
+                    "base_url": base_url,
+                    "endpoint": f"{base_url}/chat/completions",
+                }
+            )
+    return result
+
+
+def runtime_provider_role_matrix(db: Session) -> dict[str, dict[str, Any]]:
+    """Return fail-closed readiness for the configured runtime role matrix."""
+
+    matrix: dict[str, dict[str, Any]] = {}
+    for role in (
+        BackendRole.PLANNING,
+        BackendRole.EXECUTION,
+        BackendRole.REPAIR,
+        BackendRole.DEBUG_REPAIR,
+    ):
+        try:
+            matrix[role.value] = validate_runtime_provider_contract(db, role)
+        except Exception as exc:
+            matrix[role.value] = {
+                "role": role.value,
+                "ready": False,
+                "error_code": getattr(exc, "code", "provider_configuration_invalid"),
+                "error": str(exc),
+            }
+    return matrix
 
 
 def _test_runtime_backends_enabled() -> bool:
@@ -532,6 +768,8 @@ def invoke_runtime_prompt(
     started_at = time.monotonic()
     role_name = role.value if isinstance(role, BackendRole) else str(role or "legacy")
     try:
+        if role is not None:
+            validate_runtime_provider_contract(db, role)
         runtime = create_agent_runtime(
             db,
             session_id,

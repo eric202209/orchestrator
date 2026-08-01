@@ -132,6 +132,20 @@ def main() -> int:
         for label, (actual, expected) in identity_checks.items():
             check(actual == expected, label, str(actual))
 
+        role_matrix = identity.get("provider_role_matrix") or {}
+        for role in ("planning", "execution", "repair", "debug_repair"):
+            role_readiness = role_matrix.get(role) or {}
+            check(
+                role_readiness.get("provider_ready", role_readiness.get("ready"))
+                is True,
+                f"provider role readiness ({role})",
+                str(
+                    role_readiness.get("error_code")
+                    or role_readiness.get("error")
+                    or role_readiness.get("backend")
+                ),
+            )
+
         lanes = identity.get("active_backend_lanes") or {}
         configured_backends = {value for value in lanes.values() if value}
         check(bool(lanes.get("execution")), "configured execution lane")

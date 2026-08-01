@@ -229,6 +229,16 @@ def build_identity_payload(
     active_backend_lanes = lanes["active_backend_lanes"]
     active_model_names = lanes["active_model_names"]
     stale_check = _stale_container_check(build_sha, repo_sha)
+    try:
+        from app.services.agents.agent_runtime import runtime_provider_role_matrix
+
+        provider_role_matrix = runtime_provider_role_matrix(db)
+    except Exception as exc:  # pragma: no cover - defensive diagnostics boundary
+        provider_role_matrix = {
+            "ready": False,
+            "error_code": "provider_configuration_invalid",
+            "error": str(exc),
+        }
     return {
         "computed_at": datetime.now(UTC).isoformat(),
         "version": settings.VERSION,
@@ -252,6 +262,7 @@ def build_identity_payload(
         "planning_repair_model": active_model_names["planning_repair"],
         "active_backend_lanes": active_backend_lanes,
         "active_model_names": active_model_names,
+        "provider_role_matrix": provider_role_matrix,
         "config_source": _env("ORCHESTRATOR_CONFIG_SOURCE"),
         "config_sources": ["environment", ".env"],
         "config_source_summary": _config_source_summary(),

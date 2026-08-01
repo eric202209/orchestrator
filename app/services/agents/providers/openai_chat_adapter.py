@@ -149,6 +149,19 @@ class OpenAIChatCompletionsRuntime:
 
     @property
     def _base_url(self) -> str:
+        if self.backend_role in {
+            "repair",
+            "debug_repair",
+            "completion_repair",
+        }:
+            if self.backend_role == "debug_repair":
+                role_url = (
+                    settings.DEBUG_REPAIR_BASE_URL or settings.PLANNING_REPAIR_BASE_URL
+                )
+            else:
+                role_url = settings.PLANNING_REPAIR_BASE_URL
+            if role_url:
+                return role_url.rstrip("/")
         return (
             settings.OPENAI_CHAT_COMPLETIONS_BASE_URL
             or settings.OPENAI_BASE_URL
@@ -156,6 +169,19 @@ class OpenAIChatCompletionsRuntime:
         ).rstrip("/")
 
     def _api_key(self) -> str:
+        if self.backend_role in {
+            "repair",
+            "debug_repair",
+            "completion_repair",
+        }:
+            if self.backend_role == "debug_repair":
+                role_key = (
+                    settings.DEBUG_REPAIR_API_KEY or settings.PLANNING_REPAIR_API_KEY
+                )
+            else:
+                role_key = settings.PLANNING_REPAIR_API_KEY
+            if role_key:
+                return role_key.strip()
         return (
             settings.OPENAI_CHAT_COMPLETIONS_API_KEY or settings.OPENAI_API_KEY or ""
         ).strip()
