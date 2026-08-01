@@ -266,6 +266,11 @@ def build_planning_repair_prompt_with_metadata(
         full_block=source_api_contract_block,
         compact_block=source_api_contract_compact_block,
     )
+    structure_capsule = (
+        project_structure_capsule
+        if project_structure_capsule is not None
+        else _build_project_structure_capsule(project_dir)
+    )
     # Stale exact replacements are a distinct repair contract.  Route them
     # before the generic prompt and before the source-API specialization gate:
     # real projects can use app/, backend/, or other roots, and the repair
@@ -280,34 +285,61 @@ def build_planning_repair_prompt_with_metadata(
             apply_prompt_profile=apply_prompt_profile,
             source_api_contract_block=source_api_contract_compact_block
             or source_api_contract_block,
+            source_api_contract_fallback_blocks=[
+                source_api_contract_minimal_block,
+            ],
+            source_context_block=source_context_block,
+            structure_capsule=structure_capsule,
             knowledge_block=knowledge_block,
             guidance_block=_join_optional_blocks(
                 render_planner_workspace_identity(workspace_identity),
                 guidance_block,
             ),
         )
+        selected_source_api_contract_block = next(
+            (
+                block
+                for block in (
+                    source_api_contract_compact_block,
+                    source_api_contract_minimal_block,
+                    source_api_contract_block,
+                )
+                if block and block in stale_prompt
+            ),
+            "",
+        )
         return PlanningRepairPromptBuildResult(
             prompt=stale_prompt,
             metadata={
                 **source_api_metadata,
                 "source_api_contract_included": bool(
-                    source_api_contract_compact_block or source_api_contract_block
+                    selected_source_api_contract_block
                 ),
-                "source_api_contract_chars": len(
-                    source_api_contract_compact_block or source_api_contract_block
-                ),
+                "source_api_contract_chars": len(selected_source_api_contract_block),
                 "source_api_contract_compacted": bool(
-                    source_api_contract_compact_block
+                    selected_source_api_contract_block
+                    and selected_source_api_contract_block != source_api_contract_block
                 ),
-                "source_api_contract_omitted_reason": None,
+                "source_api_contract_omitted_reason": (
+                    None
+                    if selected_source_api_contract_block
+                    else (
+                        "over_budget"
+                        if source_api_metadata["source_api_contract_available"]
+                        else "not_available"
+                    )
+                ),
+                "source_api_contract_included_reason": (
+                    "hard_budget_minimal_capsule"
+                    if "Minimal hard-budget repair contract."
+                    in selected_source_api_contract_block
+                    else (
+                        "repair_context" if selected_source_api_contract_block else None
+                    )
+                ),
                 "repair_prompt_strategy": "compact_stale_replace",
             },
         )
-    structure_capsule = (
-        project_structure_capsule
-        if project_structure_capsule is not None
-        else _build_project_structure_capsule(project_dir)
-    )
     specialized_prompt, specialized_metadata = _build_specialized_prompt_protected(
         task_description=task_description,
         malformed_output=malformed_output,
@@ -1996,6 +2028,9 @@ def build_compact_stale_replace_repair_prompt(
     prompt_profile: str = "default",
     apply_prompt_profile: Any = None,
     source_api_contract_block: str = "",
+    source_api_contract_fallback_blocks: Optional[list[str]] = None,
+    source_context_block: str = "",
+    structure_capsule: str = "",
     knowledge_block: str = "",
     guidance_block: str = "",
 ) -> str:
@@ -2030,6 +2065,8 @@ def build_compact_stale_replace_repair_prompt(
         reason_chars: int,
         *,
         current_source_api_contract_block: str,
+        current_source_context_block: str,
+        current_structure_capsule: str,
         current_knowledge_block: str,
     ) -> str:
         broken_output = compact_invalid_output_excerpt(malformed_output)[:output_chars]
@@ -2056,14 +2093,18 @@ Invalid plan excerpt:
 {broken_output}
 
 {current_knowledge_block + chr(10) if current_knowledge_block else ""}
+{current_source_context_block + chr(10) if current_source_context_block else ""}
+{current_structure_capsule + chr(10) if current_structure_capsule else ""}
 {excerpt_block}
 {current_source_api_contract_block + chr(10) if current_source_api_contract_block else ""}
 Required repair:
 - Stale replace fixes: use identifiers and exact text from the current file excerpt.
+- {render_operation_choice_contract()}
 - Do not use replace_in_file for the stale target.
 - do not emit another replace_in_file for the same missing old text or stale target.
 - Use a write_file op for `{target_line}` with the full corrected file content.
 - Preserve existing imports, public functions, and CLI shape from the current file excerpt.
+- Do not invent helper variables or paths absent from the current workspace evidence.
 Stale replace second-pass target preservation:
 - Preserve existing valid source ops from the invalid plan; do not drop unrelated src edits while fixing this stale target.
 - Only convert stale replace_in_file ops for the same target into grounded write_file or valid ops for that same target.
@@ -2081,15 +2122,74 @@ Stale replace second-pass target preservation:
 - Do not remove, comment out, or weaken existing test assertions; preserve all original assertions unless the task explicitly requests test changes.
 """
 
-    compact_attempts = [
-        (source_api_contract_block, knowledge_block),
-        (source_api_contract_block, ""),
-        ("", knowledge_block),
+    source_api_contract_candidates: list[str] = []
+    for candidate in [
+        source_api_contract_block,
+        *(source_api_contract_fallback_blocks or []),
+    ]:
+        if candidate and candidate not in source_api_contract_candidates:
+            source_api_contract_candidates.append(candidate)
+
+    context_candidates = [
+        (source_context_block, structure_capsule),
+        (
+            _truncate_text(source_context_block, 1400),
+            _truncate_repair_structure_capsule(structure_capsule, 1800),
+        ),
+        (
+            _truncate_text(source_context_block, 900),
+            _truncate_repair_structure_capsule(structure_capsule, 1100),
+        ),
+        ("", _truncate_repair_structure_capsule(structure_capsule, 420)),
+        ("", _truncate_repair_structure_capsule(structure_capsule, 1200)),
         ("", ""),
     ]
+    knowledge_candidates = [
+        knowledge_block,
+        _truncate_text(knowledge_block, 320),
+        _truncate_text(knowledge_block, 240),
+        "",
+    ]
+    compact_attempts = []
+    for current_knowledge_block in knowledge_candidates:
+        for candidate in source_api_contract_candidates:
+            for (
+                current_source_context_block,
+                current_structure_capsule,
+            ) in context_candidates:
+                compact_attempts.append(
+                    (
+                        candidate,
+                        current_source_context_block,
+                        current_structure_capsule,
+                        current_knowledge_block,
+                    )
+                )
+        for (
+            current_source_context_block,
+            current_structure_capsule,
+        ) in context_candidates:
+            compact_attempts.append(
+                (
+                    "",
+                    current_source_context_block,
+                    current_structure_capsule,
+                    current_knowledge_block,
+                )
+            )
     seen_attempts: set[tuple[str, str]] = set()
-    for current_source_api_contract_block, current_knowledge_block in compact_attempts:
-        attempt_key = (current_source_api_contract_block, current_knowledge_block)
+    for (
+        current_source_api_contract_block,
+        current_source_context_block,
+        current_structure_capsule,
+        current_knowledge_block,
+    ) in compact_attempts:
+        attempt_key = (
+            current_source_api_contract_block,
+            current_source_context_block,
+            current_structure_capsule,
+            current_knowledge_block,
+        )
         if attempt_key in seen_attempts:
             continue
         seen_attempts.add(attempt_key)
@@ -2111,6 +2211,8 @@ Stale replace second-pass target preservation:
                     excerpt_chars,
                     reason_chars,
                     current_source_api_contract_block=current_source_api_contract_block,
+                    current_source_context_block=current_source_context_block,
+                    current_structure_capsule=current_structure_capsule,
                     current_knowledge_block=current_knowledge_block,
                 ),
                 prompt_profile,
@@ -2288,6 +2390,8 @@ def _build_over_budget_compact_repair_prompt(
             prompt_profile=prompt_profile,
             apply_prompt_profile=apply_prompt_profile,
             source_api_contract_block=source_api_contract_block,
+            source_context_block="",
+            structure_capsule="",
             knowledge_block=knowledge_block,
             guidance_block=guidance_block,
         )
