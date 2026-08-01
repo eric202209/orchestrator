@@ -6,6 +6,8 @@ import pytest
 
 from app.models import (
     LogEntry,
+    Plan,
+    PlanningSession,
     Project,
     Session as SessionModel,
     SessionTask,
@@ -399,6 +401,313 @@ def test_task_retry_explicit_new_session_preserves_legacy_isolated_session_creat
         .one()
     )
     assert new_session.name == "Retry isolated session"
+
+
+def test_task_retry_new_session_isolates_historical_ordered_tasks(
+    authenticated_client, db_session, monkeypatch
+):
+    """Explicit isolated retry must not inherit unrelated project history."""
+    project = Project(name="Historical Queue Isolation Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    historical_pending = Task(
+        project_id=project.id,
+        title="Historical pending task",
+        description="Belongs to an earlier workflow record.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        title="Selected isolated task",
+        description="Run in an explicitly isolated execution session.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    db_session.add_all([historical_pending, selected_task])
+    db_session.commit()
+    db_session.refresh(selected_task)
+
+    _stub_retry_dispatch(monkeypatch)
+
+    workflow_response = authenticated_client.post(
+        f"/api/v1/tasks/{selected_task.id}/retry"
+    )
+    assert workflow_response.status_code == 409
+    assert "Earlier ordered tasks must finish" in workflow_response.json()["detail"]
+
+    isolated_response = authenticated_client.post(
+        f"/api/v1/tasks/{selected_task.id}/retry",
+        json={"execution_scope": "new_session"},
+    )
+
+    assert isolated_response.status_code == 200
+    payload = isolated_response.json()
+    assert payload["execution_scope"] == "isolated_session"
+    assert payload["isolated_session"] is True
+    assert payload["task_id"] == selected_task.id
+
+
+def test_task_retry_new_session_keeps_plan_scoped_ordering(
+    authenticated_client, db_session
+):
+    """Isolation must not bypass predecessors in the same explicit Plan."""
+    project = Project(name="Plan Scoped Queue Isolation Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    plan = Plan(
+        project_id=project.id,
+        title="Bounded plan",
+        source_brain="local",
+        requirement="Preserve ordered execution.",
+        markdown="1. predecessor\n2. selected task",
+        status="committed",
+    )
+    db_session.add(plan)
+    db_session.flush()
+    predecessor = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Plan predecessor",
+        description="Must remain first.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Plan selected task",
+        description="Must remain ordered.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    db_session.add_all([predecessor, selected_task])
+    db_session.commit()
+    db_session.refresh(selected_task)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{selected_task.id}/retry",
+        json={"execution_scope": "new_session"},
+    )
+
+    assert response.status_code == 409
+    assert "Earlier ordered tasks must finish" in response.json()["detail"]
+    assert db_session.query(SessionTask).count() == 0
+    assert db_session.query(TaskExecution).count() == 0
+
+
+def test_dogfood_admission_persists_queue_isolation_authority(
+    authenticated_client, db_session, monkeypatch
+):
+    project = Project(name="Dogfood Admission Persistence Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    monkeypatch.setattr(
+        "app.api.v1.endpoints.sessions.admit_dogfood_workspace",
+        lambda *args, **kwargs: None,
+    )
+
+    response = authenticated_client.post(
+        "/api/v1/sessions",
+        json={
+            "project_id": project.id,
+            "name": "admitted bounded session",
+            "execution_mode": "manual",
+            "dogfood_admission": True,
+        },
+    )
+
+    assert response.status_code == 201
+    created = db_session.query(SessionModel).filter_by(id=response.json()["id"]).one()
+    assert created.dogfood_admitted is True
+
+
+def test_admitted_dogfood_session_isolates_legacy_project_queue(
+    authenticated_client, db_session, monkeypatch
+):
+    """Dogfood admission isolates only the historical unplanned queue."""
+    project = Project(name="Admitted Historical Queue Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    historical_planning = PlanningSession(
+        project_id=project.id,
+        title="Historical planning session",
+        prompt="Preserve the original planning history.",
+        status="completed",
+        source_brain="local",
+    )
+    historical_pending = Task(
+        project_id=project.id,
+        title="Historical pending task",
+        description="Belongs to an earlier workflow record.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+    )
+    historical_failed = Task(
+        project_id=project.id,
+        title="Historical failed task",
+        description="Failed in an earlier workflow record.",
+        status=TaskStatus.FAILED,
+        plan_position=2,
+    )
+    historical_cancelled = Task(
+        project_id=project.id,
+        title="Historical cancelled task",
+        description="Was cancelled in an earlier workflow record.",
+        status=TaskStatus.CANCELLED,
+        plan_position=3,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        title="Selected dogfood task",
+        description="Run in the admitted bounded execution session.",
+        status=TaskStatus.PENDING,
+        plan_position=4,
+    )
+    standard_session = SessionModel(
+        project_id=project.id,
+        name="Standard session",
+        status="pending",
+        execution_mode="manual",
+        instance_id="standard-session-instance",
+    )
+    admitted_session = SessionModel(
+        project_id=project.id,
+        name="Admitted dogfood session",
+        status="pending",
+        execution_mode="manual",
+        instance_id="admitted-dogfood-session-instance",
+    )
+    # This attribute is the persisted admission marker added by the fix.
+    admitted_session.dogfood_admitted = True
+    db_session.add_all(
+        [
+            historical_planning,
+            historical_pending,
+            historical_failed,
+            historical_cancelled,
+            selected_task,
+            standard_session,
+            admitted_session,
+        ]
+    )
+    db_session.commit()
+    db_session.refresh(selected_task)
+    db_session.refresh(standard_session)
+    db_session.refresh(admitted_session)
+    db_session.refresh(historical_planning)
+
+    from app.tasks import worker as worker_module
+
+    monkeypatch.setattr(
+        "app.services.session.session_runtime_service.ensure_task_workspace",
+        lambda *a, **kw: {
+            "workspace_path": "/tmp/admitted-dogfood-project",
+            "task_subfolder": None,
+            "stored_task_subfolder": "selected-dogfood-task",
+            "workspace_scope": "isolated_task_workspace",
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_runtime_service.append_orchestration_event",
+        lambda **kwargs: {"event_id": "queued-event-1"},
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_runtime_service._maybe_compact_checkpoint_before_dispatch",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        worker_module.execute_orchestration_task,
+        "delay",
+        lambda **kwargs: _FakeAsyncResult(),
+    )
+
+    standard_response = authenticated_client.post(
+        f"/api/v1/sessions/{standard_session.id}/tasks/{selected_task.id}/run"
+    )
+    assert standard_response.status_code == 409
+
+    admitted_response = authenticated_client.post(
+        f"/api/v1/sessions/{admitted_session.id}/tasks/{selected_task.id}/run"
+    )
+
+    assert admitted_response.status_code == 200
+    assert admitted_response.json()["queued_task"]["task_id"] == selected_task.id
+    assert db_session.query(SessionTask).count() == 1
+    assert db_session.query(TaskExecution).count() == 1
+    assert db_session.get(Task, historical_pending.id).status == TaskStatus.PENDING
+    assert db_session.get(Task, historical_failed.id).status == TaskStatus.FAILED
+    assert db_session.get(Task, historical_cancelled.id).status == TaskStatus.CANCELLED
+    preserved_planning = db_session.get(PlanningSession, historical_planning.id)
+    assert preserved_planning is not None
+    assert preserved_planning.status == "completed"
+    assert preserved_planning.prompt == "Preserve the original planning history."
+
+
+def test_admitted_dogfood_session_keeps_plan_scoped_ordering(
+    authenticated_client, db_session
+):
+    """Admission cannot bypass a predecessor in the same explicit Plan."""
+    project = Project(name="Admitted Plan Scoped Queue Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    plan = Plan(
+        project_id=project.id,
+        title="Bounded plan",
+        source_brain="local",
+        requirement="Preserve ordered execution.",
+        markdown="1. predecessor\n2. selected task",
+        status="committed",
+    )
+    db_session.add(plan)
+    db_session.flush()
+    predecessor = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Plan predecessor",
+        description="Must remain first.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Plan selected task",
+        description="Must remain ordered.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    admitted_session = SessionModel(
+        project_id=project.id,
+        name="Admitted plan session",
+        status="pending",
+        execution_mode="manual",
+        instance_id="admitted-plan-session-instance",
+    )
+    admitted_session.dogfood_admitted = True
+    db_session.add_all([predecessor, selected_task, admitted_session])
+    db_session.commit()
+    db_session.refresh(selected_task)
+    db_session.refresh(admitted_session)
+
+    response = authenticated_client.post(
+        f"/api/v1/sessions/{admitted_session.id}/tasks/{selected_task.id}/run"
+    )
+
+    assert response.status_code == 409
+    assert "earlier ordered work" in response.json()["detail"]
+    assert db_session.query(SessionTask).count() == 0
+    assert db_session.query(TaskExecution).count() == 0
 
 
 def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(

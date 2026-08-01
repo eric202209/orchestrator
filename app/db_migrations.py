@@ -4733,6 +4733,21 @@ def _migration_053_project_retirement(engine: Engine) -> None:
                 connection.execute(text(statement))
 
 
+def _migration_054_dogfood_queue_isolation(engine: Engine) -> None:
+    """Persist the admission authority used to isolate historical queue work."""
+
+    if "sessions" not in _table_names(engine):
+        return
+    if not _has_column(engine, "sessions", "dogfood_admitted"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "ALTER TABLE sessions ADD COLUMN dogfood_admitted "
+                    "BOOLEAN NOT NULL DEFAULT 0"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -5010,6 +5025,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="053_project_retirement",
         description="Add non-destructive Project retirement lifecycle metadata",
         upgrade=_migration_053_project_retirement,
+    ),
+    Migration(
+        version="054_dogfood_queue_isolation",
+        description="Persist bounded dogfood admission for historical queue isolation",
+        upgrade=_migration_054_dogfood_queue_isolation,
     ),
 )
 

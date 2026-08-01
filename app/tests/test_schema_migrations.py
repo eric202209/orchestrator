@@ -121,6 +121,7 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
         "deleted_at",
         "instance_id",
         "execution_mode",
+        "dogfood_admitted",
         "model_lane_label",
         "model_lane_metadata",
     } <= session_columns

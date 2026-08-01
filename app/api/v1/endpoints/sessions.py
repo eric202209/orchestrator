@@ -169,6 +169,7 @@ def create_session(
             raise HTTPException(status_code=409, detail=exc.payload()) from exc
 
     session_data = session.model_dump(exclude={"dogfood_admission"})
+    session_data["dogfood_admitted"] = bool(session.dogfood_admission)
     session_data["name"] = _ensure_unique_session_name(
         db,
         session.project_id,

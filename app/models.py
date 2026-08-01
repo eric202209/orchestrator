@@ -135,6 +135,9 @@ class Session(Base):
         String(50), default="pending"
     )  # pending, running, paused, stopped, completed
     execution_mode = Column(String(20), default="automatic")
+    # Set only after the session-create dogfood admission gate passes. This is
+    # an execution authority marker, not a client-selectable queue override.
+    dogfood_admitted = Column(Boolean, nullable=False, default=False)
     default_execution_profile = Column(String(30), default="full_lifecycle")
     is_active = Column(Boolean, default=False)
     started_at = Column(DateTime(timezone=True), nullable=True)

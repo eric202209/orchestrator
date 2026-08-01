@@ -473,7 +473,13 @@ def queue_task_for_session(
         )
 
     blocking_tasks = TaskService(db).get_blocking_prior_tasks(task)
-    if blocking_tasks:
+    # A dogfood-admitted session is an explicit bounded execution scope for a
+    # legacy project queue. It may isolate one unplanned task from unrelated
+    # historical backlog, while explicit Plan predecessors remain mandatory.
+    isolates_historical_queue = bool(
+        getattr(session, "dogfood_admitted", False) and task.plan_id is None
+    )
+    if blocking_tasks and not isolates_historical_queue:
         blocking_summary = ", ".join(
             f"#{item.plan_position} {item.title} ({item.status.value})"
             for item in blocking_tasks[:3]

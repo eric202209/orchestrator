@@ -447,8 +447,17 @@ def _queue_task_retry(
     from app.tasks.worker import execute_orchestration_task
     from app.services.tasks.service import TaskService
 
+    retry_request = retry_request or TaskRetryRequest()
+    explicit_new_session = (
+        retry_request.create_new_session
+        or str(retry_request.execution_scope or "").lower() == "new_session"
+    )
     blocking_tasks = TaskService(db).get_blocking_prior_tasks(task)
-    if blocking_tasks:
+    # A task without plan_id belongs to the legacy project-wide queue. An
+    # explicitly isolated retry is the supported boundary for running one
+    # such historical task without inheriting unrelated backlog. Plan-scoped
+    # tasks retain strict predecessor ordering even in a new session.
+    if blocking_tasks and (not explicit_new_session or task.plan_id is not None):
         blocking_summary = ", ".join(
             f"#{item.plan_position} {item.title} ({item.status.value})"
             for item in blocking_tasks[:3]
@@ -467,15 +476,10 @@ def _queue_task_retry(
             status_code=400, detail="Task is missing a description or title to execute"
         )
 
-    retry_request = retry_request or TaskRetryRequest()
     planner_context = (
         {"planner_contract": retry_request.planner_contract}
         if retry_request.planner_contract is not None
         else None
-    )
-    explicit_new_session = (
-        retry_request.create_new_session
-        or str(retry_request.execution_scope or "").lower() == "new_session"
     )
 
     if explicit_new_session:
