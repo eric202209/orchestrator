@@ -266,6 +266,43 @@ def build_planning_repair_prompt_with_metadata(
         full_block=source_api_contract_block,
         compact_block=source_api_contract_compact_block,
     )
+    # Stale exact replacements are a distinct repair contract.  Route them
+    # before the generic prompt and before the source-API specialization gate:
+    # real projects can use app/, backend/, or other roots, and the repair
+    # still needs the current target-file evidence for every root.
+    if _is_stale_replace_repair(malformed_output, rejection_reasons):
+        stale_prompt = build_compact_stale_replace_repair_prompt(
+            task_description=task_description,
+            malformed_output=malformed_output,
+            project_dir=project_dir,
+            rejection_reasons=rejection_reasons,
+            prompt_profile=prompt_profile,
+            apply_prompt_profile=apply_prompt_profile,
+            source_api_contract_block=source_api_contract_compact_block
+            or source_api_contract_block,
+            knowledge_block=knowledge_block,
+            guidance_block=_join_optional_blocks(
+                render_planner_workspace_identity(workspace_identity),
+                guidance_block,
+            ),
+        )
+        return PlanningRepairPromptBuildResult(
+            prompt=stale_prompt,
+            metadata={
+                **source_api_metadata,
+                "source_api_contract_included": bool(
+                    source_api_contract_compact_block or source_api_contract_block
+                ),
+                "source_api_contract_chars": len(
+                    source_api_contract_compact_block or source_api_contract_block
+                ),
+                "source_api_contract_compacted": bool(
+                    source_api_contract_compact_block
+                ),
+                "source_api_contract_omitted_reason": None,
+                "repair_prompt_strategy": "compact_stale_replace",
+            },
+        )
     structure_capsule = (
         project_structure_capsule
         if project_structure_capsule is not None

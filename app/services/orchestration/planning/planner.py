@@ -1376,7 +1376,16 @@ class PlannerService:
         """Normalize fenced JSON arrays before the main planning parser runs."""
         stripped = str(output_text or "").strip()
         if not stripped.startswith("```"):
-            return stripped if stripped.startswith("[") else None
+            if not stripped.startswith("["):
+                return None
+            decoder = json.JSONDecoder()
+            try:
+                parsed, end_index = decoder.raw_decode(stripped)
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(parsed, list) or stripped[end_index:].strip():
+                return None
+            return stripped[:end_index].strip()
 
         match = re.match(
             r"^```(?:json)?\s*(?P<body>.*?)\s*```\s*.*$",
