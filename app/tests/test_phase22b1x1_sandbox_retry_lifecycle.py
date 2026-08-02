@@ -11,6 +11,7 @@ import subprocess
 
 import pytest
 
+from app.models import Project, Session as SessionModel, Task, TaskExecution, TaskStatus
 from app.services.workspace.sandbox_branch_maintenance import (
     cleanup_sandbox_branches,
     inventory_sandbox_branches,
@@ -47,6 +48,47 @@ def _branches(repo_dir):
         check=True,
     )
     return set(result.stdout.split())
+
+
+def _seed_execution(db_session, *, status=TaskStatus.DONE):
+    project = Project(name="inventory-project", workspace_path="/tmp/inventory")
+    db_session.add(project)
+    db_session.flush()
+    session = SessionModel(project_id=project.id, name="inventory-session")
+    task = Task(project_id=project.id, title="inventory-task")
+    db_session.add_all([session, task])
+    db_session.flush()
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=status,
+    )
+    db_session.add(execution)
+    db_session.commit()
+    db_session.refresh(execution)
+    return execution
+
+
+def _add_unique_commit(repo, branch):
+    canonical = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    subprocess.run(["git", "switch", branch], cwd=repo, check=True, capture_output=True)
+    (repo / f"{branch.rsplit('-', 1)[-1]}.txt").write_text("unique\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "retained implementation evidence"],
+        cwd=repo,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "switch", canonical], cwd=repo, check=True, capture_output=True
+    )
 
 
 @pytest.fixture()
@@ -218,6 +260,38 @@ class TestRetryReallocation:
             )
         assert "branch_checked_out" in str(excinfo.value)
 
+    def test_unique_commit_exact_match_fails_closed(self, repo, runtime_root):
+        subprocess.run(["git", "branch", "orchestrator/task-250"], cwd=repo, check=True)
+        _add_unique_commit(repo, "orchestrator/task-250")
+
+        with pytest.raises(TaskSandboxError) as excinfo:
+            allocate_task_sandbox(
+                repo, project_id=1, task_execution_id=250, runtime_root=runtime_root
+            )
+
+        assert "branch_unique_commits" in str(excinfo.value)
+        assert "orchestrator/task-250" in _branches(repo)
+
+    def test_ambiguous_git_reachability_fails_closed(
+        self, repo, runtime_root, monkeypatch
+    ):
+        import app.services.workspace.task_sandbox_allocator as allocator
+
+        subprocess.run(["git", "branch", "orchestrator/task-251"], cwd=repo, check=True)
+        monkeypatch.setattr(
+            allocator,
+            "managed_branch_commit_evidence",
+            lambda *_args, **_kwargs: {"error": "branch_reachability_ambiguous"},
+        )
+
+        with pytest.raises(TaskSandboxError) as excinfo:
+            allocate_task_sandbox(
+                repo, project_id=1, task_execution_id=251, runtime_root=runtime_root
+            )
+
+        assert "branch_reachability_ambiguous" in str(excinfo.value)
+        assert "orchestrator/task-251" in _branches(repo)
+
     def test_repeated_retry_allocation_cycles(self, repo, runtime_root):
         for _ in range(3):
             sandbox = allocate_task_sandbox(
@@ -331,7 +405,9 @@ class TestRetryReallocation:
 
 
 class TestHistoricalBranchInventory:
-    def test_inventory_reports_managed_residue_only(self, repo, runtime_root):
+    def test_inventory_reports_managed_residue_only(
+        self, repo, runtime_root, db_session
+    ):
         for branch in ("orchestrator/task-241", "orchestrator/task-242"):
             subprocess.run(["git", "branch", branch], cwd=repo, check=True)
         subprocess.run(["git", "branch", "operator/keep-me"], cwd=repo, check=True)
@@ -339,7 +415,7 @@ class TestHistoricalBranchInventory:
             repo, project_id=1, task_execution_id=243, runtime_root=runtime_root
         )
 
-        inventory = inventory_sandbox_branches(repo)
+        inventory = inventory_sandbox_branches(repo, db=db_session)
         names = {item["branch"] for item in inventory["branches"]}
         assert names == {
             "orchestrator/task-241",
@@ -353,9 +429,9 @@ class TestHistoricalBranchInventory:
         assert by_name["orchestrator/task-243"]["safe_to_remove"] is False
         assert by_name["orchestrator/task-243"]["checked_out_in"] == str(live.path)
 
-    def test_cleanup_is_read_only_without_apply(self, repo):
+    def test_cleanup_is_read_only_without_apply(self, repo, db_session):
         subprocess.run(["git", "branch", "orchestrator/task-241"], cwd=repo, check=True)
-        report = cleanup_sandbox_branches(repo)
+        report = cleanup_sandbox_branches(repo, db=db_session)
         assert report["applied"] is False
         assert report["deleted_count"] == 0
         assert report["results"] == [
@@ -367,7 +443,9 @@ class TestHistoricalBranchInventory:
         ]
         assert "orchestrator/task-241" in _branches(repo)
 
-    def test_cleanup_applies_with_before_after_ledger(self, repo, runtime_root):
+    def test_cleanup_applies_with_before_after_ledger(
+        self, repo, runtime_root, db_session
+    ):
         for branch in ("orchestrator/task-241", "orchestrator/task-242"):
             subprocess.run(["git", "branch", branch], cwd=repo, check=True)
         subprocess.run(["git", "branch", "operator/keep-me"], cwd=repo, check=True)
@@ -375,7 +453,7 @@ class TestHistoricalBranchInventory:
             repo, project_id=1, task_execution_id=243, runtime_root=runtime_root
         )
 
-        report = cleanup_sandbox_branches(repo, apply=True)
+        report = cleanup_sandbox_branches(repo, db=db_session, apply=True)
 
         assert report["deleted_count"] == 2
         assert report["before"]["count"] == 3
@@ -386,12 +464,98 @@ class TestHistoricalBranchInventory:
         assert "operator/keep-me" in remaining
         assert live.branch in remaining
 
-    def test_cleanup_restricted_to_requested_branches(self, repo):
+    def test_cleanup_restricted_to_requested_branches(self, repo, db_session):
         for branch in ("orchestrator/task-241", "orchestrator/task-242"):
             subprocess.run(["git", "branch", branch], cwd=repo, check=True)
         report = cleanup_sandbox_branches(
-            repo, branches=["orchestrator/task-241"], apply=True
+            repo, branches=["orchestrator/task-241"], db=db_session, apply=True
         )
         assert report["deleted_count"] == 1
         assert "orchestrator/task-241" not in _branches(repo)
         assert "orchestrator/task-242" in _branches(repo)
+
+    def test_database_unavailable_is_ambiguous_and_not_deleted(self, repo):
+        subprocess.run(["git", "branch", "orchestrator/task-241"], cwd=repo, check=True)
+
+        report = cleanup_sandbox_branches(repo, apply=True)
+
+        assert report["before"]["unsafe_count"] == 1
+        assert report["before"]["classification_counts"] == {"AMBIGUOUS_FAIL_SAFE": 1}
+        assert report["results"] == [
+            {
+                "branch": "orchestrator/task-241",
+                "deleted": False,
+                "reason": "task_execution_ownership_unavailable",
+            }
+        ]
+        assert "orchestrator/task-241" in _branches(repo)
+
+    def test_safe_historical_branch_unrelated_to_next_execution_does_not_block(
+        self, repo, db_session
+    ):
+        subprocess.run(["git", "branch", "orchestrator/task-241"], cwd=repo, check=True)
+
+        inventory = inventory_sandbox_branches(
+            repo, db=db_session, proposed_task_execution_id=245
+        )
+
+        assert inventory["managed_branch_count"] == 1
+        assert inventory["unsafe_count"] == 0
+        assert inventory["exact_collision_count"] == 0
+        assert inventory["unsafe_exact_collision_count"] == 0
+        assert inventory["preflight_admission"] == "admitted"
+        assert inventory["branches"][0]["cleanup_classification"] == (
+            "SAFE_STALE_BRANCH"
+        )
+
+    def test_preflight_reports_unsafe_count_and_exact_collision(self, repo, db_session):
+        execution = _seed_execution(db_session)
+        branch = f"orchestrator/task-{execution.id}"
+        subprocess.run(["git", "branch", branch], cwd=repo, check=True)
+        _add_unique_commit(repo, branch)
+
+        inventory = inventory_sandbox_branches(
+            repo, db=db_session, proposed_task_execution_id=execution.id
+        )
+
+        assert inventory["count"] == 1
+        assert inventory["unsafe_count"] == 1
+        assert inventory["exact_collision_count"] == 1
+        assert inventory["unsafe_exact_collision_count"] == 1
+        assert inventory["unsafe_exact_collision_branches"] == [branch]
+        assert inventory["preflight_admission"] == "blocked"
+        item = inventory["branches"][0]
+        assert item["can_collide_with_future_execution"] is True
+        assert (
+            item["task_execution_identity"]["project"]["id"]
+            == execution.task.project_id
+        )
+        assert item["task_execution_identity"]["session"]["id"] == execution.session_id
+        assert item["task_execution_identity"]["task"]["id"] == execution.task_id
+        assert item["retained_implementation_evidence"] is True
+        assert item["cleanup_classification"] == "RETAINED_HISTORICAL_BRANCH"
+
+    def test_multiple_historical_branches_do_not_prevent_new_sandbox(
+        self, repo, runtime_root
+    ):
+        for execution_id in (888002, 888900, 999001):
+            subprocess.run(
+                ["git", "branch", f"orchestrator/task-{execution_id}"],
+                cwd=repo,
+                check=True,
+            )
+
+        sandbox = allocate_task_sandbox(
+            repo, project_id=1, task_execution_id=245, runtime_root=runtime_root
+        )
+        try:
+            assert sandbox.branch == "orchestrator/task-245"
+            assert all(
+                f"orchestrator/task-{execution_id}" in _branches(repo)
+                for execution_id in (888002, 888900, 999001)
+            )
+        finally:
+            assert (
+                dispose_task_sandbox(sandbox, project_root=repo).cleanup_complete
+                is True
+            )

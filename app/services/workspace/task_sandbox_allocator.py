@@ -212,6 +212,68 @@ def branch_exists(project_root: Path, branch: str) -> bool:
     return result.returncode == 0
 
 
+def managed_branch_commit_evidence(project_root: Path, branch: str) -> Dict[str, Any]:
+    """Return the Git evidence needed before deleting a managed branch.
+
+    ``unique_commits`` is measured against the current canonical checkout. A
+    non-zero value is retained as implementation evidence even when another
+    ref also reaches the tip: automatic sandbox cleanup must never discard a
+    branch whose content is not already part of the canonical base. Any Git
+    inspection failure is represented as an error so callers can fail closed.
+    """
+
+    project_root = Path(project_root).expanduser().resolve()
+    canonical_result = _git(project_root, "rev-parse", "--abbrev-ref", "HEAD")
+    if canonical_result.returncode != 0:
+        return {"error": "canonical_branch_unavailable"}
+    canonical_branch = canonical_result.stdout.strip()
+    if not canonical_branch or canonical_branch == "HEAD":
+        return {"error": "canonical_branch_ambiguous"}
+
+    canonical_sha_result = _git(project_root, "rev-parse", canonical_branch)
+    tip_result = _git(project_root, "rev-parse", branch)
+    if canonical_sha_result.returncode != 0 or tip_result.returncode != 0:
+        return {"error": "branch_tip_unavailable"}
+
+    canonical_sha = canonical_sha_result.stdout.strip()
+    branch_tip_sha = tip_result.stdout.strip()
+    unique_result = _git(
+        project_root, "rev-list", "--count", f"{canonical_branch}..{branch}"
+    )
+    if unique_result.returncode != 0:
+        return {"error": "branch_reachability_ambiguous"}
+    try:
+        unique_commits = int(unique_result.stdout.strip())
+    except ValueError:
+        return {"error": "branch_reachability_ambiguous"}
+
+    containing_refs_result = _git(
+        project_root,
+        "for-each-ref",
+        "--contains",
+        branch_tip_sha,
+        "--format=%(refname:short)",
+        "refs/heads",
+        "refs/remotes",
+    )
+    if containing_refs_result.returncode != 0:
+        return {"error": "containing_refs_unavailable"}
+    containing_refs = [
+        ref.strip()
+        for ref in containing_refs_result.stdout.splitlines()
+        if ref.strip() and ref.strip() != branch
+    ]
+    return {
+        "canonical_branch": canonical_branch,
+        "canonical_sha": canonical_sha,
+        "base_sha": canonical_sha,
+        "branch_tip_sha": branch_tip_sha,
+        "unique_commits": unique_commits,
+        "reachable_elsewhere": bool(containing_refs),
+        "reachable_elsewhere_refs": containing_refs,
+    }
+
+
 def delete_managed_sandbox_branch(
     project_root: Path,
     branch: str,
@@ -256,6 +318,23 @@ def delete_managed_sandbox_branch(
             "reason": "branch_checked_out",
             "branch": branch,
             "checked_out_in": checked_out_in,
+        }
+
+    commit_evidence = managed_branch_commit_evidence(project_root, branch)
+    if commit_evidence.get("error"):
+        return {
+            "deleted": False,
+            "reason": commit_evidence["error"],
+            "branch": branch,
+        }
+    if commit_evidence["unique_commits"]:
+        return {
+            "deleted": False,
+            "reason": "branch_unique_commits",
+            "branch": branch,
+            "unique_commits": commit_evidence["unique_commits"],
+            "branch_tip_sha": commit_evidence["branch_tip_sha"],
+            "canonical_sha": commit_evidence["canonical_sha"],
         }
 
     # -D, not -d: a disposable sandbox branch is unmerged by design. The

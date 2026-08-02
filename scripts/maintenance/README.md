@@ -43,7 +43,14 @@ harness layout remains stable.
   inventory and supported cleanup. Read-only by default (`--inventory-only`
   or no `--apply`); `--apply` deletes only `orchestrator/task-<execution_id>`
   branches through the same ownership validation as sandbox disposal and
-  prints a before/after ledger. See
+  prints a before/after ledger. For dogfood admission, the managed-branch
+  count is informational: require the inventory's `unsafe_count` and
+  `unsafe_exact_collision_count` to be zero for the proposed next
+  TaskExecution. A terminal/missing exact branch with zero commits ahead of
+  canonical is cleaned by allocation; active, unique-commit, ambiguous, or
+  canonical exact matches fail closed. Historical safe branches unrelated to
+  the proposed execution do not block admission. Database-unavailable
+  ownership is ambiguous and never authorizes automatic cleanup. See
   `docs/roadmap/done/phase22/phase22b1x1-dispatch-capacity-and-sandbox-retry-20260802.md`.
 - `phase31_launch_precondition_f10_workspace_uniqueness.py` - Phase 31
   launch check (Phase 30F finding F10, closed operationally in Phase 30L):
