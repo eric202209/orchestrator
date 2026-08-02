@@ -313,11 +313,24 @@ def repair_step_commands_with_self_correction(
                                 attribute,
                                 getattr(runtime_service, attribute),
                             )
-                    repair_result = asyncio.run(
-                        fallback_runtime.execute_task(
-                            repair_prompt, timeout_seconds=120
-                        )
+                    runtime_context = getattr(
+                        runtime_service, "runtime_executor_context", None
                     )
+                    if runtime_context is not None and hasattr(
+                        fallback_runtime, "bind_runtime_workspace"
+                    ):
+                        fallback_runtime.bind_runtime_workspace(runtime_context)
+                    try:
+                        repair_result = asyncio.run(
+                            fallback_runtime.execute_task(
+                                repair_prompt, timeout_seconds=120
+                            )
+                        )
+                    finally:
+                        if hasattr(
+                            fallback_runtime, "release_runtime_workspace_binding"
+                        ):
+                            fallback_runtime.release_runtime_workspace_binding()
                     repair_runtime_fallback = True
         except Exception:
             # Preserve the primary failure/empty result so the existing

@@ -218,7 +218,20 @@ class FailureCoordinator:
             is_retry_exempt_category as _is_retry_exempt_category,
         )
 
-        failure_category_for_retry = _classify_failure_category(str(exc), "", {})
+        failure_category_for_retry = _classify_failure_category(
+            str(exc),
+            "",
+            {
+                **runtime_diagnostics,
+                "failure_phase": (
+                    "planning" if "planning" in str(exc).lower() else "execution"
+                ),
+                "failure_category": getattr(exc, "failure_category", None),
+                "provider_failure_classification": getattr(
+                    exc, "provider_failure_classification", None
+                ),
+            },
+        )
         auto_recovery_eligible = bool(
             session
             and task
@@ -234,6 +247,8 @@ class FailureCoordinator:
         # recovery/annotation return can mutate durable state.
         task_execution = _task_execution_for_context(db, ctx)
         task_execution_id = task_execution.id if task_execution else None
+        if task_execution is not None and hasattr(task_execution, "failure_category"):
+            task_execution.failure_category = failure_category_for_retry
         task_status_before_failure = getattr(task, "status", None)
         session_task_status_before_failure = getattr(session_task_link, "status", None)
         task_execution_status_before_failure = getattr(task_execution, "status", None)
@@ -368,6 +383,9 @@ class FailureCoordinator:
                         ),
                         "planning_lock_wait_timeout": is_planning_lock_wait_timeout,
                         "project_mutation_lock_conflict": is_project_mutation_lock_conflict,
+                        "failure_category": failure_category_for_retry,
+                        "terminal_cause": failure_category_for_retry,
+                        "operator_pause_requested": False,
                         "reason": diagnostic_reason,
                         "reason_architecture": (
                             BOUNDED_DEBUG_REPAIR_TIMEOUT_REASON

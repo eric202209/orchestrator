@@ -1899,10 +1899,11 @@ def execute_step_loop(
 
         debug_runtime_kwargs: dict[str, Any] = {}
         debug_repair_runtime = None
+        debug_repair_runtime_context = None
         debug_repair_request_ids: list[str] = []
 
         def _ensure_role_owned_debug_repair_runtime():
-            nonlocal debug_repair_runtime
+            nonlocal debug_repair_runtime, debug_repair_runtime_context
             if debug_repair_runtime is not None:
                 return debug_repair_runtime
             if getattr(runtime_service, "runtime_configuration", None) is None:
@@ -1925,6 +1926,13 @@ def execute_step_loop(
                     candidate, attribute
                 ):
                     setattr(candidate, attribute, getattr(runtime_service, attribute))
+            runtime_context = getattr(runtime_service, "runtime_executor_context", None)
+            if runtime_context is not None:
+                debug_repair_runtime_context = runtime_context
+                if hasattr(candidate, "execution_cwd_override"):
+                    candidate.execution_cwd_override = str(
+                        runtime_context.runtime_workspace
+                    )
             debug_repair_runtime = candidate
             return debug_repair_runtime
 
@@ -2001,6 +2009,16 @@ def execute_step_loop(
                     except Exception:
                         fallback_runtime = None
                     if fallback_runtime is not None:
+                        fallback_bound = False
+                        if (
+                            fallback_runtime is not runtime_service
+                            and debug_repair_runtime_context is not None
+                            and hasattr(fallback_runtime, "bind_runtime_workspace")
+                        ):
+                            fallback_runtime.bind_runtime_workspace(
+                                debug_repair_runtime_context
+                            )
+                            fallback_bound = True
                         try:
                             fallback_result = _annotate(
                                 _run_coroutine(
@@ -2018,6 +2036,12 @@ def execute_step_loop(
                         except Exception:
                             if primary_error is None:
                                 raise
+                        finally:
+                            if fallback_bound and hasattr(
+                                fallback_runtime,
+                                "release_runtime_workspace_binding",
+                            ):
+                                fallback_runtime.release_runtime_workspace_binding()
                 if primary_error is not None:
                     raise primary_error
                 return result
@@ -2050,6 +2074,12 @@ def execute_step_loop(
                     "timeout_boundary": "debug_repair_runtime",
                 }
             )
+            runtime_bound = False
+            if debug_repair_runtime_context is not None and hasattr(
+                runtime, "bind_runtime_workspace"
+            ):
+                runtime.bind_runtime_workspace(debug_repair_runtime_context)
+                runtime_bound = True
             try:
                 result = await runtime.invoke_prompt(
                     prompt_text,
@@ -2065,13 +2095,19 @@ def execute_step_loop(
                 diagnostics.update(diagnostic_metadata)
                 exc.runtime_diagnostics = diagnostics  # type: ignore[attr-defined]
                 raise
-            result = dict(result or {})
-            diagnostics = result.get("diagnostics")
-            if not isinstance(diagnostics, dict):
-                diagnostics = {}
-            diagnostics.update(diagnostic_metadata)
-            result["diagnostics"] = diagnostics
-            return result
+            else:
+                result = dict(result or {})
+                diagnostics = result.get("diagnostics")
+                if not isinstance(diagnostics, dict):
+                    diagnostics = {}
+                diagnostics.update(diagnostic_metadata)
+                result["diagnostics"] = diagnostics
+                return result
+            finally:
+                if runtime_bound and hasattr(
+                    runtime, "release_runtime_workspace_binding"
+                ):
+                    runtime.release_runtime_workspace_binding()
 
         try:
             debug_result = _invoke_debug_repair(debug_prompt)

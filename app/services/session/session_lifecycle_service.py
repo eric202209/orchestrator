@@ -1691,6 +1691,7 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 log_metadata=json.dumps(
                     {
                         "event_type": "session_paused",
+                        "failure_cause": "operator_requested_pause",
                         "session_id": session_id,
                         "revoked_task_ids": revoked_ids,
                         "checkpoint_name": checkpoint_name,

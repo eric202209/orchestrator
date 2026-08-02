@@ -158,8 +158,18 @@ def derive_orchestration_state_block(
     current_phase = _STATUS_TO_PHASE.get(status)
 
     terminal_reason: Optional[str] = None
+    if latest_task_execution is not None and latest_task_execution.failure_category:
+        latest_execution_status = (
+            latest_task_execution.status.value
+            if hasattr(latest_task_execution.status, "value")
+            else str(latest_task_execution.status or "")
+        )
+        if latest_execution_status in {"failed", "cancelled", "canceled"}:
+            terminal_reason = (
+                str(latest_task_execution.failure_category).strip() or None
+            )
     if current_phase in _TERMINAL_PHASES:
-        if latest_task_execution is not None:
+        if terminal_reason is None and latest_task_execution is not None:
             terminal_reason = (
                 str(latest_task_execution.failure_category).strip() or None
                 if latest_task_execution.failure_category
@@ -2092,7 +2102,11 @@ def get_session_timeline_payload(
             token_cost_int = int(token_cost) if token_cost is not None else None
         except (TypeError, ValueError):
             token_cost_int = None
-        cause = metadata.get("reason") or metadata.get("failure_category")
+        cause = (
+            metadata.get("failure_cause")
+            or metadata.get("reason")
+            or metadata.get("failure_category")
+        )
         _append_timeline_event(
             events,
             at=_timeline_iso(entry.created_at),
@@ -2246,7 +2260,7 @@ def _extract_stop_reasons(
         db.query(LogEntry)
         .filter(
             LogEntry.session_id == session.id,
-            LogEntry.level.in_(["ERROR", "WARNING"]),
+            LogEntry.level.in_(["INFO", "ERROR", "WARNING"]),
             LogEntry.log_metadata.isnot(None),
         )
         .order_by(LogEntry.created_at.desc())
@@ -2264,6 +2278,14 @@ def _extract_stop_reasons(
 
         reason_val = meta.get("reason") or ""
         reason_text = str(reason_val).lower()
+        durable_cause = str(meta.get("failure_cause") or "").strip()
+        if durable_cause:
+            if durable_cause == "operator_requested_pause":
+                category = "operator_paused"
+                reasons.append("Session paused by operator.")
+            else:
+                category = durable_cause
+                reasons.append(f"Session stopped with cause: {durable_cause}.")
         if (
             meta.get("model_lane_limitation")
             or meta.get("failure_cause_bucket")
@@ -2317,7 +2339,11 @@ def _extract_stop_reasons(
         if reasons:
             break
 
-    if category not in {"backend_capacity_error", "checkpoint_conflict"}:
+    if category not in {
+        "backend_capacity_error",
+        "checkpoint_conflict",
+        "operator_paused",
+    }:
         recent_failure = (
             db.query(TaskExecution)
             .filter(
@@ -2332,7 +2358,14 @@ def _extract_stop_reasons(
             .first()
         )
         failure_category = str(getattr(recent_failure, "failure_category", "") or "")
-        if failure_category == "backend_capacity_limit":
+        if failure_category and failure_category not in {
+            "manual_stop",
+            "operator_requested_pause",
+        }:
+            category = failure_category
+            if not reasons:
+                reasons.append(f"Session stopped with cause: {failure_category}.")
+        elif failure_category == "backend_capacity_limit":
             category = "backend_capacity_error"
             if not reasons:
                 reasons.append("Backend capacity unavailable or overloaded.")

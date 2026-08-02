@@ -153,6 +153,20 @@ class PlanningRepairNoOutputTimeout(TimeoutError):
         self.runtime_diagnostics = diagnostics or {}
 
 
+class PlanningRepairTimeout(TimeoutError):
+    """Raised when the bounded repair call reaches a known timeout boundary."""
+
+    def __init__(self, message: str, diagnostics: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.runtime_diagnostics = diagnostics or {}
+        self.failure_category = self.runtime_diagnostics.get(
+            "failure_category", "planning_repair_timeout"
+        )
+        self.provider_failure_classification = self.runtime_diagnostics.get(
+            "provider_failure_classification"
+        )
+
+
 class PlanningRepairOutputContractViolation(RuntimeError):
     """Raised when repair returns prose or markdown-fenced JSON instead of a bare JSON array."""
 
@@ -1452,6 +1466,11 @@ class PlannerService:
                         attribute,
                         getattr(runtime_service, attribute),
                     )
+            runtime_context = getattr(runtime_service, "runtime_executor_context", None)
+            if runtime_context is not None and hasattr(
+                repair_runtime, "bind_runtime_workspace"
+            ):
+                repair_runtime.bind_runtime_workspace(runtime_context)
 
         async def _invoke_registry_fallback(primary_error: Exception | None = None):
             """Preserve the pre-Stage-C repair fallback behind a role runtime."""
@@ -1485,6 +1504,15 @@ class PlannerService:
                             getattr(runtime_service, attribute),
                         )
 
+            fallback_bound = False
+            runtime_context = getattr(runtime_service, "runtime_executor_context", None)
+            if (
+                fallback_runtime is not runtime_service
+                and runtime_context is not None
+                and hasattr(fallback_runtime, "bind_runtime_workspace")
+            ):
+                fallback_runtime.bind_runtime_workspace(runtime_context)
+                fallback_bound = True
             try:
                 invoke_prompt = getattr(fallback_runtime, "invoke_prompt", None)
                 if callable(invoke_prompt):
@@ -1518,6 +1546,11 @@ class PlannerService:
                     )
                     fallback_error.runtime_diagnostics = diagnostics  # type: ignore[attr-defined]
                 raise
+            finally:
+                if fallback_bound and hasattr(
+                    fallback_runtime, "release_runtime_workspace_binding"
+                ):
+                    fallback_runtime.release_runtime_workspace_binding()
 
             fallback_result = dict(fallback_result or {})
             diagnostics = fallback_result.get("diagnostics")
@@ -1536,17 +1569,21 @@ class PlannerService:
                 lock_diagnostics_out.update(lock_diagnostics)
             try:
                 if repair_runtime is not None:
-                    result = await repair_runtime.invoke_prompt(
-                        repair_prompt,
-                        timeout_seconds=repair_timeout,
-                        source_brain="local",
-                        session_prefix="planning-repair",
-                        isolate_workspace_context=False,
-                        no_output_timeout_seconds=PlannerService._effective_planning_repair_no_output_timeout(
-                            repair_timeout
-                        ),
-                        invocation_options=invocation_options,
-                    )
+                    try:
+                        result = await repair_runtime.invoke_prompt(
+                            repair_prompt,
+                            timeout_seconds=repair_timeout,
+                            source_brain="local",
+                            session_prefix="planning-repair",
+                            isolate_workspace_context=False,
+                            no_output_timeout_seconds=PlannerService._effective_planning_repair_no_output_timeout(
+                                repair_timeout
+                            ),
+                            invocation_options=invocation_options,
+                        )
+                    finally:
+                        if hasattr(repair_runtime, "release_runtime_workspace_binding"):
+                            repair_runtime.release_runtime_workspace_binding()
                 else:
                     # A few A0 unit seams provide only the pre-Stage-A runtime
                     # interface. Keep those seams abstract and provider-free;
@@ -1690,6 +1727,65 @@ class PlannerService:
     def _get_runtime_diagnostics(exc: Exception) -> Dict[str, Any]:
         diagnostics = getattr(exc, "runtime_diagnostics", None)
         return diagnostics if isinstance(diagnostics, dict) else {}
+
+    @staticmethod
+    def _repair_invocation_diagnostics(
+        runtime_service: Any, repair_prompt: str, timeout_seconds: float
+    ) -> Dict[str, Any]:
+        """Return bounded provider metadata safe to retain with timeout evidence."""
+
+        metadata: Dict[str, Any] = {}
+        get_backend_metadata = getattr(runtime_service, "get_backend_metadata", None)
+        if callable(get_backend_metadata):
+            try:
+                metadata = get_backend_metadata() or {}
+            except Exception:
+                metadata = {}
+        backend = str(metadata.get("backend") or "").strip() or None
+        model = str(metadata.get("model_family") or "").strip() or None
+        endpoint = None
+        if backend == "local_openclaw":
+            endpoint = str(getattr(settings, "OPENCLAW_GATEWAY_URL", "") or "")
+        elif backend == "openai_chat_completions":
+            endpoint = str(
+                getattr(settings, "PLANNING_REPAIR_BASE_URL", "")
+                or getattr(settings, "OPENAI_CHAT_COMPLETIONS_BASE_URL", "")
+                or getattr(settings, "OPENAI_BASE_URL", "")
+                or ""
+            ).rstrip("/")
+            if endpoint and not endpoint.endswith("/chat/completions"):
+                endpoint = f"{endpoint}/chat/completions"
+        elif backend == "direct_ollama":
+            endpoint = str(
+                getattr(settings, "PLANNING_REPAIR_BASE_URL", "")
+                or getattr(settings, "OLLAMA_BASE_URL", "")
+                or ""
+            )
+        runtime_configuration = metadata.get("runtime_configuration")
+        if isinstance(runtime_configuration, dict):
+            endpoint = str(
+                runtime_configuration.get("endpoint")
+                or runtime_configuration.get("base_url")
+                or endpoint
+                or ""
+            )
+        prompt_estimate = max(0, (len(repair_prompt or "") + 3) // 4)
+        capabilities = metadata.get("capabilities")
+        context_window = (
+            capabilities.get("max_context_tokens")
+            if isinstance(capabilities, dict)
+            else None
+        )
+        return {
+            "provider_backend": backend,
+            "provider_model": model,
+            "provider_endpoint": endpoint or None,
+            "repair_prompt_chars": len(repair_prompt or ""),
+            "repair_prompt_estimated_tokens": prompt_estimate,
+            "repair_context_estimated_tokens": prompt_estimate,
+            "provider_context_window_tokens": context_window,
+            "repair_timeout_seconds": float(timeout_seconds),
+        }
 
     @classmethod
     def _is_no_output_repair_timeout(cls, exc: Exception) -> bool:
@@ -2609,20 +2705,59 @@ class PlannerService:
                     },
                 )
                 raise timeout_exc from exc
-            if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+            provider_failure_classification = getattr(
+                exc, "provider_failure_classification", None
+            )
+            initial_diagnostics = cls._get_runtime_diagnostics(exc)
+            provider_failure_classification = (
+                provider_failure_classification
+                or initial_diagnostics.get("provider_failure_classification")
+            )
+            if (
+                isinstance(exc, (TimeoutError, asyncio.TimeoutError))
+                or provider_failure_classification == "provider_timeout"
+            ):
                 diagnostics = cls._get_runtime_diagnostics(exc)
                 if diagnostics:
                     repair_lock_diagnostics.update(diagnostics)
-                timeout_exc = TimeoutError(
+                timeout_owner = (
+                    "provider_timeout"
+                    if provider_failure_classification == "provider_timeout"
+                    else "planner_wait_for"
+                )
+                inner_timeout_boundary = diagnostics.get("timeout_boundary")
+                diagnostics = {
+                    **cls._repair_invocation_diagnostics(
+                        runtime_service, repair_prompt, repair_timeout
+                    ),
+                    **diagnostics,
+                    "timeout_owner": timeout_owner,
+                    "inner_timeout_boundary": inner_timeout_boundary,
+                    "timeout_boundary": (
+                        inner_timeout_boundary
+                        if timeout_owner == "provider_timeout"
+                        else "planner_wait_for"
+                    ),
+                    "provider_failure_classification": provider_failure_classification,
+                    "failure_category": (
+                        provider_failure_classification or "planning_repair_timeout"
+                    ),
+                    "late_response_discarded": timeout_owner == "planner_wait_for",
+                    "duration_seconds": round(repair_duration_seconds, 3),
+                    "openclaw_request_seconds": round(openclaw_request_seconds, 3),
+                }
+                timeout_exc = PlanningRepairTimeout(
                     f"Planning repair timed out after {repair_timeout:g}s "
-                    f"(duration={repair_duration_seconds:.2f}s)"
+                    f"(owner={timeout_owner} duration={repair_duration_seconds:.2f}s)",
+                    diagnostics,
                 )
                 logger.warning(
                     "[ORCHESTRATION] Planning repair prompt timed out after %.2fs; "
                     "stopping instead of retrying repair "
                     "(repair_prompt_chars=%s malformed_output_chars=%s reason=%s "
                     "repair_prompt_build_seconds=%.3f openclaw_request_seconds=%.3f "
-                    "repair_attempts=1 timeout_seconds=%s)",
+                    "repair_attempts=1 timeout_seconds=%s timeout_owner=%s "
+                    "provider=%s model=%s endpoint=%s late_response_discarded=%s)",
                     repair_duration_seconds,
                     len(repair_prompt),
                     compact_malformed_output_chars,
@@ -2630,6 +2765,11 @@ class PlannerService:
                     repair_prompt_build_seconds,
                     openclaw_request_seconds,
                     repair_timeout,
+                    timeout_owner,
+                    diagnostics.get("provider_backend"),
+                    diagnostics.get("provider_model"),
+                    diagnostics.get("provider_endpoint"),
+                    diagnostics.get("late_response_discarded"),
                 )
                 emit_live(
                     "ERROR",
@@ -2647,7 +2787,25 @@ class PlannerService:
                         "malformed_output_chars": compact_malformed_output_chars,
                         "repair_reason": reason[:240],
                         "repair_attempts": _repair_attempt_number,
-                        "timeout_boundary": "planner_wait_for",
+                        "timeout_owner": timeout_owner,
+                        "timeout_boundary": diagnostics.get("timeout_boundary"),
+                        "provider_failure_classification": provider_failure_classification,
+                        "failure_category": diagnostics.get("failure_category"),
+                        "provider_backend": diagnostics.get("provider_backend"),
+                        "provider_model": diagnostics.get("provider_model"),
+                        "provider_endpoint": diagnostics.get("provider_endpoint"),
+                        "late_response_discarded": diagnostics.get(
+                            "late_response_discarded"
+                        ),
+                        "repair_prompt_estimated_tokens": diagnostics.get(
+                            "repair_prompt_estimated_tokens"
+                        ),
+                        "repair_context_estimated_tokens": diagnostics.get(
+                            "repair_context_estimated_tokens"
+                        ),
+                        "provider_context_window_tokens": diagnostics.get(
+                            "provider_context_window_tokens"
+                        ),
                         "planning_lock_wait_seconds": repair_lock_diagnostics.get(
                             "planning_lock_wait_seconds"
                         ),

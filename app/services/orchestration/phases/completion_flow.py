@@ -506,6 +506,15 @@ def _attempt_completion_repair(
                 _cr_fast_runtime, "execution_cwd_override"
             ):
                 _cr_fast_runtime.execution_cwd_override = _parent_cwd_override
+            _parent_context = getattr(
+                getattr(ctx, "runtime_service", None),
+                "runtime_executor_context",
+                None,
+            )
+            if _parent_context is not None and hasattr(
+                _cr_fast_runtime, "bind_runtime_workspace"
+            ):
+                _cr_fast_runtime.bind_runtime_workspace(_parent_context)
             _cr_fast_profile = _cr_configured_backend
         except Exception as _cr_fast_err:
             logger.warning(
@@ -565,6 +574,11 @@ def _attempt_completion_repair(
             },
         )
         raise
+    finally:
+        if _cr_fast_runtime is not None and hasattr(
+            _cr_fast_runtime, "release_runtime_workspace_binding"
+        ):
+            _cr_fast_runtime.release_runtime_workspace_binding()
 
     repair_output = _extract_completion_repair_json_text(
         repair_plan_result.get("output", "{}")

@@ -381,10 +381,11 @@ def execute_orchestration_task(
                 session_id=session_id,
                 task_execution_id=task_execution_id,
             )
-        if runtime_service is not None and hasattr(
-            runtime_service, "release_runtime_workspace_binding"
-        ):
-            runtime_service.release_runtime_workspace_binding()
+        for _bound_runtime_service in (runtime_service, planning_runtime_service):
+            if _bound_runtime_service is not None and hasattr(
+                _bound_runtime_service, "release_runtime_workspace_binding"
+            ):
+                _bound_runtime_service.release_runtime_workspace_binding()
         if _runtime_sandbox is not None:
             _dispose_runtime_workspace_safely(
                 _runtime_sandbox,
@@ -1323,6 +1324,13 @@ def execute_orchestration_task(
             )
             if hasattr(planning_runtime_service, "task_execution_id"):
                 planning_runtime_service.task_execution_id = task_execution_id
+            # Planning is a separate role-owned runtime and must receive the
+            # same immutable Runtime Executor Context as execution. Without
+            # this binding, execute_task_with_streaming re-derived the
+            # canonical Project root for the first planning call.
+            _maybe_bind_runtime_cwd_override(planning_runtime_service, _runtime_context)
+            if hasattr(planning_runtime_service, "bind_runtime_workspace"):
+                planning_runtime_service.bind_runtime_workspace(_runtime_context)
             if hasattr(planning_runtime_service, "__dict__"):
                 planning_runtime_service._disable_direct_planning = True
             planning_runtime_metadata = (
@@ -2353,6 +2361,40 @@ def execute_orchestration_task(
                 level="WARN",
             )
             failure_reason = str(step_loop_result.get("reason") or "task_failed")
+            failure_category = step_loop_result.get(
+                "failure_category"
+            ) or classify_failure(
+                failure_reason,
+                _resolved_execution_backend,
+                {
+                    "failure_phase": (
+                        "planning"
+                        if "planning" in failure_reason.lower()
+                        else "execution"
+                    ),
+                    "failure_category": step_loop_result.get("failure_category"),
+                },
+            )
+            if task_execution_id is not None:
+                update_execution_failure_metadata(
+                    db,
+                    task_execution_id,
+                    failure_category=failure_category,
+                    backend_id=_resolved_execution_backend,
+                )
+            try:
+                emit_live(
+                    "ERROR",
+                    "[ORCHESTRATION] Task terminal failure classified",
+                    metadata={
+                        "phase": "failure",
+                        "failure_category": failure_category,
+                        "terminal_cause": failure_category,
+                        "operator_pause_requested": False,
+                    },
+                )
+            except Exception:
+                pass
             if failure_reason == TerminalReason.VERIFICATION_FAILED:
                 mark_session_failed(
                     session,
@@ -2380,7 +2422,24 @@ def execute_orchestration_task(
         if isinstance(exc, _CeleryRetry):
             raise
         try:
-            _fail_cat = classify_failure(str(exc), _resolved_execution_backend, {})
+            _fail_cat = classify_failure(
+                str(exc),
+                _resolved_execution_backend,
+                {
+                    **(
+                        getattr(exc, "runtime_diagnostics", None)
+                        if isinstance(getattr(exc, "runtime_diagnostics", None), dict)
+                        else {}
+                    ),
+                    "failure_phase": (
+                        "planning" if "planning" in str(exc).lower() else "execution"
+                    ),
+                    "failure_category": getattr(exc, "failure_category", None),
+                    "provider_failure_classification": getattr(
+                        exc, "provider_failure_classification", None
+                    ),
+                },
+            )
             if task_execution_id is not None:
                 update_execution_failure_metadata(
                     db,
@@ -2573,13 +2632,15 @@ def execute_orchestration_task(
                     task_execution_id,
                     _rel_exc,
                 )
-        if runtime_service is not None and hasattr(
-            runtime_service, "release_runtime_workspace_binding"
-        ):
+        for _bound_runtime_service in (runtime_service, planning_runtime_service):
+            if _bound_runtime_service is None or not hasattr(
+                _bound_runtime_service, "release_runtime_workspace_binding"
+            ):
+                continue
             # Phase 23D: discard the ephemeral executor workspace binding (if
             # any was established) on every terminal path, mirroring the
             # sandbox disposal below. Never raises.
-            runtime_service.release_runtime_workspace_binding()
+            _bound_runtime_service.release_runtime_workspace_binding()
         if _runtime_sandbox is not None:
             # Phase 23C (Goal 5): dispose the Task Execution Sandbox on every
             # terminal path -- success, failure, cancellation, timeout, or

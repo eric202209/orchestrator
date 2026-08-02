@@ -9,7 +9,7 @@ import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
-from app.models import Session as SessionModel, SessionState, TaskCheckpoint
+from app.models import LogEntry, Session as SessionModel, SessionState, TaskCheckpoint
 from app.services.orchestration.state import mark_session_paused, mark_session_resumed
 
 logger = logging.getLogger(__name__)
@@ -150,6 +150,21 @@ class ResumeSessionService:
                 # This would be called by the service during execution
                 pass
 
+            self.db.add(
+                LogEntry(
+                    session_id=self.session_id,
+                    level="INFO",
+                    message=f"Session paused: {self.session_model.name}",
+                    log_metadata=json.dumps(
+                        {
+                            "event_type": "session_paused",
+                            "failure_cause": "operator_requested_pause",
+                            "session_id": self.session_id,
+                            "reason": reason,
+                        }
+                    ),
+                )
+            )
             self.db.commit()
 
             logger.info(

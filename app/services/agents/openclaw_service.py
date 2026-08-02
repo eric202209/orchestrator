@@ -76,6 +76,7 @@ from app.services.orchestration.execution.executor_workspace_binding import (
 from app.services.orchestration.validation.runtime_pollution_guard import (
     detect_runtime_pollution,
     existing_known_scaffold_entries,
+    snapshot_workspace_entry_evidence,
     snapshot_top_level_entries,
 )
 from app.services.orchestration.validation.workspace_guard import (
@@ -202,6 +203,14 @@ class OpenClawAgentSelectionError(OpenClawSessionError):
     workspace and Orchestrator refuses to fall back to OpenClaw's default
     agent/workspace (Phase 22C-0 fail-closed containment)."""
 
+    failure_category = "runtime_workspace_binding_mismatch"
+
+
+class OpenClawWorkspaceBindingError(OpenClawSessionError):
+    """Raised before dispatch when a sandbox binding cannot be proven."""
+
+    failure_category = "runtime_workspace_binding_mismatch"
+
 
 class OpenClawProviderControlError(OpenClawSessionError):
     """Raised when strict Protocol v2 controls cannot be proven/applied."""
@@ -284,6 +293,7 @@ class OpenClawSessionService:
         # never the operator's real ~/.openclaw/openclaw.json.
         self._openclaw_config_path_override: Optional[Path] = None
         self._workspace_binding: Optional[ExecutorWorkspaceBinding] = None
+        self._runtime_executor_context: Optional[Any] = None
         self._strict_planning_config_dir: tempfile.TemporaryDirectory | None = None
         self.runtime_configuration = runtime_configuration
         self.backend_role: Optional[str] = (
@@ -584,8 +594,16 @@ class OpenClawSessionService:
                 context, real_config_path=real_config_path
             )
         except ExecutorWorkspaceBindingError as exc:
-            raise OpenClawAgentSelectionError(str(exc)) from exc
+            error = OpenClawAgentSelectionError(str(exc))
+            error.runtime_diagnostics = {
+                "failure_category": "runtime_workspace_binding_mismatch",
+                "project_workspace": str(getattr(context, "project_workspace", "")),
+                "runtime_workspace": str(getattr(context, "runtime_workspace", "")),
+                "binding_config_path": str(real_config_path),
+            }
+            raise error from exc
         self._openclaw_config_path_override = self._workspace_binding.config_path
+        self._runtime_executor_context = context
 
     def _configured_strict_planning_agent_id(self) -> Optional[str]:
         configured = os.environ.get(
@@ -639,6 +657,8 @@ class OpenClawSessionService:
         config_dir = tempfile.TemporaryDirectory(prefix="protocol-v2-planning-")
         self._strict_planning_config_dir = config_dir
         config_path = Path(config_dir.name) / "openclaw.json"
+        state_dir = Path(config_dir.name) / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
         selected["workspace"] = str(runtime_workspace)
         selected["agentDir"] = str(Path(config_dir.name) / "agent")
         defaults = (config.setdefault("agents", {})).setdefault("defaults", {})
@@ -672,6 +692,87 @@ class OpenClawSessionService:
         self._workspace_binding.release()
         self._workspace_binding = None
         self._openclaw_config_path_override = None
+        self._runtime_executor_context = None
+
+    @property
+    def runtime_executor_context(self) -> Optional[Any]:
+        """Return the invocation context used for role-runtime propagation."""
+
+        return self._runtime_executor_context
+
+    def _validate_runtime_invocation_boundary(self, cwd: Optional[str]) -> None:
+        """Prove a sandboxed invocation cannot silently fall back to canonical."""
+
+        if not self.execution_cwd_override:
+            return
+        expected = Path(self.execution_cwd_override).expanduser().resolve()
+        actual = Path(cwd).expanduser().resolve() if cwd else None
+        if actual != expected:
+            error = OpenClawWorkspaceBindingError(
+                "OpenClaw invocation cwd does not match the declared Runtime "
+                f"Workspace: expected {expected}, got {actual}"
+            )
+            error.runtime_diagnostics = {
+                "failure_category": "runtime_workspace_binding_mismatch",
+                "expected_runtime_workspace": str(expected),
+                "effective_cwd": str(actual) if actual is not None else None,
+                "canonical_workspace": str(
+                    self._resolve_project_root_for_workspace_guard() or ""
+                ),
+            }
+            raise error
+        if (
+            self._workspace_binding is None
+            and getattr(self, "_strict_planning_config_dir", None) is None
+        ) or not self._openclaw_config_path_override:
+            error = OpenClawWorkspaceBindingError(
+                "Sandboxed OpenClaw invocation has no ephemeral workspace binding"
+            )
+            error.runtime_diagnostics = {
+                "failure_category": "runtime_workspace_binding_mismatch",
+                "expected_runtime_workspace": str(expected),
+                "effective_cwd": str(actual) if actual is not None else None,
+                "binding_present": False,
+            }
+            raise error
+
+        try:
+            config = json.loads(
+                self._openclaw_config_path_override.read_text(encoding="utf-8")
+            )
+            agent = next(
+                item
+                for item in (config.get("agents") or {}).get("list") or []
+                if isinstance(item, dict)
+                and str(item.get("id") or "").strip()
+                == str(self._last_selected_openclaw_agent_id or "").strip()
+            )
+        except (OSError, StopIteration, TypeError, ValueError) as exc:
+            error = OpenClawWorkspaceBindingError(
+                "Unable to prove the selected OpenClaw agent is bound to the "
+                "declared Runtime Workspace"
+            )
+            error.runtime_diagnostics = {
+                "failure_category": "runtime_workspace_binding_mismatch",
+                "expected_runtime_workspace": str(expected),
+                "effective_cwd": str(actual) if actual is not None else None,
+                "binding_config_path": str(self._openclaw_config_path_override),
+                "binding_validation_error": str(exc),
+            }
+            raise error
+        if not self._paths_same(str(agent.get("workspace") or ""), str(expected)):
+            error = OpenClawWorkspaceBindingError(
+                "Selected OpenClaw agent workspace does not match the declared "
+                "Runtime Workspace"
+            )
+            error.runtime_diagnostics = {
+                "failure_category": "runtime_workspace_binding_mismatch",
+                "expected_runtime_workspace": str(expected),
+                "effective_cwd": str(actual) if actual is not None else None,
+                "selected_agent": self._last_selected_openclaw_agent_id,
+                "selected_agent_workspace": agent.get("workspace"),
+            }
+            raise error
 
     def _configure_strict_provider_controls(self, agent_id: str) -> Dict[str, Any]:
         """Apply Protocol v2 controls to the ephemeral OpenClaw config.
@@ -820,6 +921,16 @@ class OpenClawSessionService:
                 if self._openclaw_config_path_override
                 else None
             ),
+            "openclaw_state_dir": (
+                self._workspace_binding.environment.get("OPENCLAW_STATE_DIR")
+                if self._workspace_binding is not None
+                else None
+            ),
+            "workspace_binding_category": (
+                "runtime_workspace_bound"
+                if self._workspace_binding is not None
+                else "canonical_or_unbound"
+            ),
         }
 
     def _apply_workspace_binding_env(self, env: Dict[str, str]) -> Dict[str, str]:
@@ -832,9 +943,23 @@ class OpenClawSessionService:
         id passed with ``--agent`` maps to the Runtime Workspace there too,
         not the real, persistent config.
         """
-        config_path_override = getattr(self, "_openclaw_config_path_override", None)
-        if config_path_override:
-            env["OPENCLAW_CONFIG_PATH"] = str(config_path_override)
+        binding = getattr(self, "_workspace_binding", None)
+        if binding is not None:
+            env.update(binding.environment)
+        elif self._openclaw_config_path_override and getattr(
+            self, "_strict_planning_config_dir", None
+        ):
+            # Dedicated Protocol v2 planning uses the same ephemeral config
+            # contract but predates ExecutorWorkspaceBinding. Keep its state
+            # directory invocation-local and explicit as well.
+            env.update(
+                {
+                    "OPENCLAW_CONFIG_PATH": str(self._openclaw_config_path_override),
+                    "OPENCLAW_STATE_DIR": str(
+                        Path(self._strict_planning_config_dir.name) / "state"
+                    ),
+                }
+            )
         return env
 
     @staticmethod
@@ -934,7 +1059,11 @@ class OpenClawSessionService:
         result: Dict[str, Any],
         *,
         expected_project_root: Optional[str],
-        pre_execution_top_level: set,
+        pre_execution_top_level: set | Dict[str, Dict[str, Any]],
+        runtime_workspace: Optional[str] = None,
+        runtime_pre_execution_top_level: Optional[
+            set | Dict[str, Dict[str, Any]]
+        ] = None,
     ) -> None:
         """Attach runtime-pollution diagnostics to ``result`` (mutates in place).
 
@@ -951,10 +1080,52 @@ class OpenClawSessionService:
             return
         try:
             root = Path(expected_project_root)
-            post_top_level = snapshot_top_level_entries(root)
-            pollution = detect_runtime_pollution(
-                before=pre_execution_top_level, after=post_top_level
+            runtime_root = (
+                Path(runtime_workspace).expanduser().resolve()
+                if runtime_workspace
+                else root
             )
+            canonical_after = snapshot_workspace_entry_evidence(root)
+            canonical_pollution = detect_runtime_pollution(
+                before=pre_execution_top_level,
+                after=canonical_after,
+                canonical_root=root,
+                runtime_workspace=runtime_root,
+            )
+            runtime_pollution = None
+            if runtime_pre_execution_top_level is not None and runtime_root != root:
+                runtime_after = snapshot_workspace_entry_evidence(runtime_root)
+                runtime_pollution = detect_runtime_pollution(
+                    before=runtime_pre_execution_top_level,
+                    after=runtime_after,
+                    canonical_root=root,
+                    runtime_workspace=runtime_root,
+                )
+            pollution = dict(runtime_pollution or {})
+            pollution["entries"] = list(
+                canonical_pollution.get("entries") or []
+            ) + list(pollution.get("entries") or [])
+            pollution["new_top_level_entries"] = list(
+                canonical_pollution.get("new_top_level_entries") or []
+            ) + list(pollution.get("new_top_level_entries") or [])
+            pollution["known_scaffold_matches"] = list(
+                canonical_pollution.get("known_scaffold_matches") or []
+            ) + list(pollution.get("known_scaffold_matches") or [])
+            pollution["unclassified_new_entries"] = list(
+                canonical_pollution.get("unclassified_new_entries") or []
+            ) + list(pollution.get("unclassified_new_entries") or [])
+            pollution["pollution_detected"] = bool(pollution["entries"])
+            pollution["execution_must_stop"] = bool(
+                canonical_pollution.get("execution_must_stop")
+                or pollution.get("execution_must_stop")
+            )
+            pollution["category"] = (
+                canonical_pollution.get("category")
+                if canonical_pollution.get("execution_must_stop")
+                else pollution.get("category")
+            )
+            pollution["canonical_pollution"] = canonical_pollution
+            pollution["runtime_pollution"] = runtime_pollution
             pollution["existing_known_scaffold_entries"] = (
                 existing_known_scaffold_entries(root)
             )
@@ -962,13 +1133,45 @@ class OpenClawSessionService:
             return
 
         result["runtime_pollution"] = pollution
-        if pollution.get("known_scaffold_matches"):
+        if pollution.get("execution_must_stop"):
+            result["status"] = "failed"
+            result["failure_category"] = "runtime_safety_stop"
+            result["error"] = (
+                "Provider initialization escaped the declared Runtime Workspace: "
+                f"{pollution.get('category') or 'canonical_workspace_pollution_detected'}"
+            )
+        canonical_entries = list(
+            (pollution.get("canonical_pollution") or {}).get("entries") or []
+        )
+        canonical_scaffolds = [
+            entry.get("relative_path")
+            for entry in canonical_entries
+            if entry.get("creator_boundary") == "canonical_project_root"
+            and entry.get("relative_path")
+            in (pollution.get("known_scaffold_matches") or [])
+        ]
+        runtime_scaffolds = [
+            entry.get("relative_path")
+            for entry in (pollution.get("entries") or [])
+            if entry.get("creator_boundary") == "runtime_workspace"
+            and entry.get("relative_path")
+            in (pollution.get("known_scaffold_matches") or [])
+        ]
+        if canonical_scaffolds:
             self._log_entry(
                 "WARN",
                 "[OPENCLAW][RUNTIME_POLLUTION] New OpenClaw runtime scaffold "
                 f"files appeared in the project root this run: "
-                f"{pollution['known_scaffold_matches']}. Phase 22C-0 detects "
+                f"{canonical_scaffolds}. Phase 22C-0 detects "
                 "and reports this; it does not delete anything.",
+                commit=True,
+            )
+        elif runtime_scaffolds:
+            self._log_entry(
+                "INFO",
+                "[OPENCLAW][RUNTIME_POLLUTION] Provider scaffold remained inside "
+                f"the disposable Runtime Workspace: {runtime_scaffolds}; "
+                "sandbox disposal owns cleanup.",
                 commit=True,
             )
         elif pollution.get("unclassified_new_entries"):
@@ -1226,6 +1429,7 @@ class OpenClawSessionService:
             raise OpenClawSessionError(
                 "Refusing to run OpenClaw without a resolved project workspace cwd"
             )
+        self._validate_runtime_invocation_boundary(cwd)
 
         started_at = time.monotonic()
         effective_no_output_timeout_seconds = (
@@ -1732,8 +1936,10 @@ class OpenClawSessionService:
             )
             return None
 
-    def _resolve_project_root_for_workspace_guard(self) -> Optional[str]:
-        if self.execution_cwd_override:
+    def _resolve_project_root_for_workspace_guard(
+        self, *, include_runtime_override: bool = True
+    ) -> Optional[str]:
+        if include_runtime_override and self.execution_cwd_override:
             # Phase 23C: when execution is redirected into a Task Execution
             # Sandbox, the containment guard (Phase 22C-0) must validate
             # OpenClaw's reported workspaceDir against the Runtime Workspace
@@ -2273,20 +2479,37 @@ class OpenClawSessionService:
             full_cmd = self._build_openclaw_agent_command(
                 openclaw_command, cwd=execution_cwd
             )
+            self._validate_runtime_invocation_boundary(execution_cwd)
 
             # Phase 22C-0 containment setup: resolve the identity this run is
             # accountable to, snapshot the project root for pollution
             # detection, and install the git-mutation-blocking PATH shim.
             # All best-effort / non-fatal -- a containment-setup problem must
             # not itself block a task that would otherwise dispatch fine.
+            runtime_workspace_for_pollution = execution_cwd
+            runtime_root = self._resolve_project_root_for_workspace_guard()
+            canonical_project_root = self._resolve_project_root_for_workspace_guard(
+                include_runtime_override=False
+            )
+            expected_project_root = runtime_root or execution_cwd
+            canonical_project_root = canonical_project_root or expected_project_root
+            if canonical_project_root == runtime_workspace_for_pollution:
+                runtime_workspace_for_pollution = None
+            pre_execution_canonical_top_level: set | Dict[str, Dict[str, Any]] = {}
+            pre_execution_runtime_top_level: set | Dict[str, Dict[str, Any]] | None = (
+                None
+            )
+            if canonical_project_root:
+                pre_execution_canonical_top_level = snapshot_workspace_entry_evidence(
+                    Path(canonical_project_root)
+                )
+            if runtime_workspace_for_pollution:
+                pre_execution_runtime_top_level = snapshot_workspace_entry_evidence(
+                    Path(runtime_workspace_for_pollution)
+                )
             expected_project_root = (
                 self._resolve_project_root_for_workspace_guard() or execution_cwd
             )
-            pre_execution_top_level: set = set()
-            if expected_project_root:
-                pre_execution_top_level = snapshot_top_level_entries(
-                    Path(expected_project_root)
-                )
             execution_started_at_epoch = time.time()
             subprocess_env, git_guard_shim_dir = build_git_containment_env()
             subprocess_env = self._apply_workspace_binding_env(subprocess_env)
@@ -2636,8 +2859,10 @@ class OpenClawSessionService:
             }
             self._record_runtime_pollution(
                 result,
-                expected_project_root=expected_project_root,
-                pre_execution_top_level=pre_execution_top_level,
+                expected_project_root=canonical_project_root,
+                pre_execution_top_level=pre_execution_canonical_top_level,
+                runtime_workspace=runtime_workspace_for_pollution,
+                runtime_pre_execution_top_level=pre_execution_runtime_top_level,
             )
             return self._apply_reported_workspace_guard(
                 result,

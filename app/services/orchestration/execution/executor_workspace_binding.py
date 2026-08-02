@@ -60,6 +60,7 @@ class ExecutorWorkspaceBinding:
     agent_id: str
     config_path: Path
     _tmp_dir: Path
+    environment: Dict[str, str]
 
     def release(self) -> None:
         """Best-effort cleanup of the ephemeral config copy. Never raises."""
@@ -137,13 +138,27 @@ def bind_openclaw_workspace(
         )
 
     bound_config = json.loads(json.dumps(real_config))  # cheap deep copy
+    tmp_dir = Path(tempfile.mkdtemp(prefix="orchestrator-openclaw-binding-"))
+    state_dir = tmp_dir / "state"
+    agent_dir = tmp_dir / "agent"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    agent_dir.mkdir(parents=True, exist_ok=True)
     for agent in (bound_config.get("agents") or {}).get("list") or []:
         if isinstance(agent, dict) and str(agent.get("id") or "").strip() == agent_id:
             agent["workspace"] = str(context.runtime_workspace)
+            agent["agentDir"] = str(agent_dir)
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="orchestrator-openclaw-binding-"))
+    defaults = (bound_config.setdefault("agents", {})).setdefault("defaults", {})
+    defaults["workspace"] = str(context.runtime_workspace)
+    session = bound_config.setdefault("session", {})
+    session["store"] = str(state_dir / "sessions.json")
+
     config_path = tmp_dir / "openclaw.json"
     config_path.write_text(json.dumps(bound_config, indent=2), encoding="utf-8")
+    environment = {
+        "OPENCLAW_CONFIG_PATH": str(config_path),
+        "OPENCLAW_STATE_DIR": str(state_dir),
+    }
 
     logger.info(
         "[EXECUTOR_WORKSPACE_BINDING] Bound OpenClaw agent %s workspace "
@@ -157,5 +172,8 @@ def bind_openclaw_workspace(
         real_config_path,
     )
     return ExecutorWorkspaceBinding(
-        agent_id=agent_id, config_path=config_path, _tmp_dir=tmp_dir
+        agent_id=agent_id,
+        config_path=config_path,
+        _tmp_dir=tmp_dir,
+        environment=environment,
     )

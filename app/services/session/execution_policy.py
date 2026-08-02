@@ -24,6 +24,43 @@ def is_retry_exempt_category(failure_category: str) -> bool:
 def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
     """Map backend/provider outcome strings to a stable failure_category value."""
     reason = (exit_reason or "").lower()
+    context = context or {}
+    provider_classification = str(
+        context.get("provider_failure_classification") or ""
+    ).lower()
+    failure_category = str(context.get("failure_category") or "").lower()
+    if failure_category == "runtime_safety_stop" or any(
+        marker in reason
+        for marker in (
+            "runtime pollution",
+            "canonical workspace pollution",
+            "provider initialization escaped",
+            "workspace binding mismatch",
+        )
+    ):
+        return "runtime_safety_stop"
+    if provider_classification == "provider_timeout":
+        return "provider_timeout"
+    if context.get("failure_phase") == "planning" and (
+        "repair" in reason and "timeout" in reason
+    ):
+        return "planning_repair_timeout"
+    if "planning repair" in reason and any(
+        marker in reason for marker in ("timeout", "timed out")
+    ):
+        return "planning_repair_timeout"
+    if context.get("failure_phase") == "planning" and any(
+        marker in reason
+        for marker in (
+            "planning validation",
+            "plan validation",
+            "planning json",
+            "malformed planning",
+        )
+    ):
+        return "planning_validation_failed"
+    if "infrastructure" in reason or "worker lost" in reason:
+        return "infrastructure_failure"
     if any(k in reason for k in ("context window too small", "blocked model")):
         # Deterministic backend capability rejection: the same request fails
         # identically until the deployment configuration changes, so a new
