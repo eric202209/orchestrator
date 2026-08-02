@@ -452,24 +452,6 @@ def _queue_task_retry(
         retry_request.create_new_session
         or str(retry_request.execution_scope or "").lower() == "new_session"
     )
-    blocking_tasks = TaskService(db).get_blocking_prior_tasks(task)
-    # A task without plan_id belongs to the legacy project-wide queue. An
-    # explicitly isolated retry is the supported boundary for running one
-    # such historical task without inheriting unrelated backlog. Plan-scoped
-    # tasks retain strict predecessor ordering even in a new session.
-    if blocking_tasks and (not explicit_new_session or task.plan_id is not None):
-        blocking_summary = ", ".join(
-            f"#{item.plan_position} {item.title} ({item.status.value})"
-            for item in blocking_tasks[:3]
-        )
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Earlier ordered tasks must finish before retrying this one. "
-                f"Blocked by: {blocking_summary}"
-            ),
-        )
-
     prompt = (prompt_override or task.description or task.title or "").strip()
     if not prompt:
         raise HTTPException(
@@ -573,6 +555,24 @@ def _queue_task_retry(
         selected_session.instance_id = str(uuid.uuid4())
 
     db.flush()
+
+    blocking_tasks = TaskService(db).get_queue_blocking_tasks(
+        task,
+        session=selected_session,
+        isolated_retry=explicit_new_session,
+    )
+    if blocking_tasks:
+        blocking_summary = ", ".join(
+            f"#{item.plan_position} {item.title} ({item.status.value})"
+            for item in blocking_tasks[:3]
+        )
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Earlier ordered tasks must finish before retrying this one. "
+                f"Blocked by: {blocking_summary}"
+            ),
+        )
 
     session_task = (
         db.query(SessionTask)

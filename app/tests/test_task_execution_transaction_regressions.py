@@ -710,6 +710,309 @@ def test_admitted_dogfood_session_keeps_plan_scoped_ordering(
     assert db_session.query(TaskExecution).count() == 0
 
 
+def test_compatibility_execute_uses_admitted_session_queue_isolation(
+    authenticated_client, db_session, monkeypatch
+):
+    """The R6 compatibility launch must honor the persisted session authority."""
+    project = Project(name="R6 Compatibility Queue Isolation Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    historical_pending = Task(
+        project_id=project.id,
+        title="Historical pending task",
+        description="Preserve pending history.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+    )
+    historical_failed = Task(
+        project_id=project.id,
+        title="Historical failed task",
+        description="Preserve failed history.",
+        status=TaskStatus.FAILED,
+        plan_position=2,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        title="R6 compatibility task",
+        description="Run through the compatibility endpoint.",
+        status=TaskStatus.PENDING,
+        plan_position=3,
+        plan_id=None,
+    )
+    admitted_session = SessionModel(
+        project_id=project.id,
+        name="R6 admitted session",
+        status="pending",
+        execution_mode="manual",
+        instance_id="r6-admitted-session-instance",
+        dogfood_admitted=True,
+    )
+    db_session.add_all(
+        [historical_pending, historical_failed, selected_task, admitted_session]
+    )
+    db_session.commit()
+    db_session.refresh(selected_task)
+    db_session.refresh(admitted_session)
+    db_session.expire_all()
+    assert db_session.get(SessionModel, admitted_session.id).dogfood_admitted is True
+
+    captured_kwargs = {}
+    _stub_retry_dispatch(monkeypatch, captured_kwargs)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{selected_task.id}/execute",
+        json={"session_id": admitted_session.id},
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["session_id"] == admitted_session.id
+    assert payload["task_id"] == selected_task.id
+    assert db_session.get(Task, historical_pending.id).status == TaskStatus.PENDING
+    assert db_session.get(Task, historical_failed.id).status == TaskStatus.FAILED
+    assert db_session.query(SessionTask).count() == 1
+    assert db_session.query(TaskExecution).count() == 1
+    assert (
+        db_session.query(LogEntry)
+        .filter(LogEntry.task_execution_id == payload["task_execution_id"])
+        .count()
+        == 3
+    )
+    assert captured_kwargs["session_id"] == admitted_session.id
+    assert captured_kwargs["task_id"] == selected_task.id
+    assert captured_kwargs["task_execution_id"] == payload["task_execution_id"]
+
+
+def test_compatibility_execute_keeps_ordinary_legacy_ordering(
+    authenticated_client, db_session, monkeypatch
+):
+    project = Project(name="Ordinary Compatibility Queue Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    historical_pending = Task(
+        project_id=project.id,
+        title="Historical pending task",
+        description="Preserve pending history.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+    )
+    historical_failed = Task(
+        project_id=project.id,
+        title="Historical failed task",
+        description="Preserve failed history.",
+        status=TaskStatus.FAILED,
+        plan_position=2,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        title="Ordinary compatibility task",
+        description="Remain project-ordered.",
+        status=TaskStatus.PENDING,
+        plan_position=3,
+    )
+    ordinary_session = SessionModel(
+        project_id=project.id,
+        name="Ordinary session",
+        status="pending",
+        execution_mode="manual",
+        instance_id="ordinary-session-instance",
+        dogfood_admitted=False,
+    )
+    db_session.add_all(
+        [historical_pending, historical_failed, selected_task, ordinary_session]
+    )
+    db_session.commit()
+    db_session.refresh(selected_task)
+    db_session.refresh(ordinary_session)
+
+    _stub_retry_dispatch(monkeypatch)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{selected_task.id}/execute",
+        json={"session_id": ordinary_session.id},
+    )
+
+    assert response.status_code == 409
+    assert "Earlier ordered tasks must finish" in response.json()["detail"]
+    assert db_session.query(SessionTask).count() == 0
+    assert db_session.query(TaskExecution).count() == 0
+
+
+def test_compatibility_execute_keeps_admitted_plan_predecessor_ordering(
+    authenticated_client, db_session, monkeypatch
+):
+    project = Project(name="Admitted Compatibility Plan Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    plan = Plan(
+        project_id=project.id,
+        title="Compatibility plan",
+        source_brain="local",
+        requirement="Preserve Plan ordering.",
+        markdown="1. predecessor\n2. selected task",
+        status="committed",
+    )
+    db_session.add(plan)
+    db_session.flush()
+    predecessor = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Plan predecessor",
+        description="Must remain first.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Plan compatibility task",
+        description="Must remain ordered.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    admitted_session = SessionModel(
+        project_id=project.id,
+        name="Admitted compatibility session",
+        status="pending",
+        execution_mode="manual",
+        instance_id="admitted-compatibility-plan-session",
+        dogfood_admitted=True,
+    )
+    db_session.add_all([predecessor, selected_task, admitted_session])
+    db_session.commit()
+    db_session.refresh(selected_task)
+    db_session.refresh(admitted_session)
+
+    _stub_retry_dispatch(monkeypatch)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{selected_task.id}/execute",
+        json={"session_id": admitted_session.id},
+    )
+
+    assert response.status_code == 409
+    assert "Earlier ordered tasks must finish" in response.json()["detail"]
+    assert db_session.query(SessionTask).count() == 0
+    assert db_session.query(TaskExecution).count() == 0
+
+
+def test_compatibility_execute_keeps_admitted_session_owned_ordering(
+    authenticated_client, db_session, monkeypatch
+):
+    project = Project(name="Admitted Session-Owned Queue Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    predecessor = Task(
+        project_id=project.id,
+        title="Session predecessor",
+        description="Must finish in the current session first.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+    )
+    selected_task = Task(
+        project_id=project.id,
+        title="Session-owned compatibility task",
+        description="Must remain ordered within the admitted session.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+    )
+    admitted_session = SessionModel(
+        project_id=project.id,
+        name="Admitted session-owned session",
+        status="pending",
+        execution_mode="manual",
+        instance_id="admitted-session-owned-instance",
+        dogfood_admitted=True,
+    )
+    db_session.add_all([predecessor, selected_task, admitted_session])
+    db_session.commit()
+    db_session.refresh(selected_task)
+    db_session.refresh(admitted_session)
+    db_session.add(
+        SessionTask(
+            session_id=admitted_session.id,
+            task_id=predecessor.id,
+            status=TaskStatus.PENDING,
+        )
+    )
+    db_session.commit()
+
+    _stub_retry_dispatch(monkeypatch)
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{selected_task.id}/execute",
+        json={"session_id": admitted_session.id},
+    )
+
+    assert response.status_code == 409
+    assert "Earlier ordered tasks must finish" in response.json()["detail"]
+    assert db_session.query(SessionTask).count() == 1
+    assert db_session.query(TaskExecution).count() == 0
+
+
+def test_compatibility_execute_does_not_duplicate_active_task_execution(
+    authenticated_client, db_session
+):
+    project = Project(name="Active Compatibility Task Project")
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    task = Task(
+        project_id=project.id,
+        title="Already running compatibility task",
+        description="Must not be duplicated.",
+        status=TaskStatus.RUNNING,
+        plan_position=1,
+    )
+    session = SessionModel(
+        project_id=project.id,
+        name="Active compatibility session",
+        status="running",
+        is_active=True,
+        instance_id="active-compatibility-session-instance",
+        dogfood_admitted=True,
+    )
+    db_session.add_all([task, session])
+    db_session.commit()
+    db_session.refresh(task)
+    db_session.refresh(session)
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=task.id,
+            status=TaskStatus.RUNNING,
+        )
+    )
+    db_session.add(
+        TaskExecution(
+            session_id=session.id,
+            task_id=task.id,
+            attempt_number=1,
+            status=TaskStatus.RUNNING,
+        )
+    )
+    db_session.commit()
+
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/execute",
+        json={"session_id": session.id},
+    )
+
+    assert response.status_code == 409
+    assert "already has an active canonical execution" in response.json()["detail"]
+    assert db_session.query(SessionTask).count() == 1
+    assert db_session.query(TaskExecution).count() == 1
+
+
 def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(
     authenticated_client, db_session, monkeypatch
 ):

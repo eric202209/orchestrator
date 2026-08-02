@@ -11,7 +11,14 @@ from typing import Any, Optional
 from sqlalchemy import and_, func, or_
 from sqlalchemy.orm import Session
 
-from app.models import LogEntry, Project, Task, TaskExecutionChangeSet, TaskStatus
+from app.models import (
+    LogEntry,
+    Project,
+    SessionTask,
+    Task,
+    TaskExecutionChangeSet,
+    TaskStatus,
+)
 from app.services.orchestration.review_policy import build_operator_override_metadata
 from app.services.workspace.canonical_mutation_service import CanonicalMutationService
 from app.services.workspace.baseline_promotion_service import BaselinePromotionService
@@ -1582,6 +1589,40 @@ class TaskService:
             )
             .all()
         )
+
+    def get_queue_blocking_tasks(
+        self,
+        task: Task,
+        *,
+        session=None,
+        isolated_retry: bool = False,
+    ):
+        """Apply the persisted execution-session scope to ordered blockers.
+
+        Project-wide ordering remains the default. An admitted session may
+        isolate unrelated legacy blockers only for an unplanned task; any
+        blocker already owned by that session remains blocking. The explicit
+        isolated-retry path retains its existing behavior separately.
+        """
+        blocking_tasks = self.get_blocking_prior_tasks(task)
+        if not blocking_tasks or task.plan_id is not None:
+            return blocking_tasks
+
+        admitted_session = bool(
+            session is not None and getattr(session, "dogfood_admitted", False)
+        )
+        if not admitted_session and not isolated_retry:
+            return blocking_tasks
+        if not admitted_session:
+            return []
+
+        owned_task_ids = {
+            task_id
+            for (task_id,) in self.db.query(SessionTask.task_id)
+            .filter(SessionTask.session_id == session.id)
+            .all()
+        }
+        return [item for item in blocking_tasks if item.id in owned_task_ids]
 
     def mark_step_complete(self, task_id: int, step_num: int):
         """Mark a step as complete and update current_step"""

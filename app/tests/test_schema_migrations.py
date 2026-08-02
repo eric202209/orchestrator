@@ -93,6 +93,11 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
     project_columns = {column["name"] for column in inspector.get_columns("projects")}
     task_columns = {column["name"] for column in inspector.get_columns("tasks")}
     session_columns = {column["name"] for column in inspector.get_columns("sessions")}
+    dogfood_admitted_column = next(
+        column
+        for column in inspector.get_columns("sessions")
+        if column["name"] == "dogfood_admitted"
+    )
     log_columns = {column["name"] for column in inspector.get_columns("log_entries")}
     session_indexes = {index["name"] for index in inspector.get_indexes("sessions")}
     planning_tables = set(inspector.get_table_names())
@@ -125,6 +130,10 @@ def test_schema_migrations_add_required_columns_and_indexes(tmp_path):
         "model_lane_label",
         "model_lane_metadata",
     } <= session_columns
+    assert str(dogfood_admitted_column["default"]).strip("() '").lower() in {
+        "0",
+        "false",
+    }
     assert {"log_metadata", "session_instance_id"} <= log_columns
     assert "ix_sessions_project_name_active" in session_indexes
     assert {
