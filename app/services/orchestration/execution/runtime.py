@@ -372,11 +372,24 @@ def dispose_runtime_workspace_safely(
         return False
     log = logger_obj or logging.getLogger(__name__)
     try:
-        dispose_task_sandbox(sandbox, project_root=project_root)
+        disposal = dispose_task_sandbox(sandbox, project_root=project_root)
     except Exception as exc:  # noqa: BLE001 - finally-block cleanup must not raise
         log.warning(
             "[ORCHESTRATION] Failed to dispose Runtime Workspace %s: %s",
             sandbox.path,
             exc,
+        )
+        return True
+    # Phase 22B-1X1: report the exact cleanup state. A removed worktree whose
+    # managed branch survived is not a fully disposed sandbox, and saying so
+    # is what makes retry re-allocation failures visible at the source.
+    if disposal is not None and not getattr(disposal, "cleanup_complete", True):
+        log.warning(
+            "[ORCHESTRATION] Runtime Workspace %s cleanup incomplete: status=%s "
+            "branch=%s branch_reason=%s",
+            sandbox.path,
+            disposal.workspace_status,
+            disposal.branch,
+            disposal.branch_reason,
         )
     return True

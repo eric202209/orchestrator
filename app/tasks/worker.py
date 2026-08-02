@@ -242,10 +242,43 @@ def on_worker_ready(sender, **kwargs):
                 )
             else:
                 logger.info("Worker boot reconciliation: no stale executions found.")
+
+            # Phase 22B-1X1: a force-terminated worker cannot run its slot
+            # release, so boot is the first canonical boundary where its
+            # abandoned backend slots can be proven stale and reclaimed.
+            reconcile_backend_slots_on_boot(db)
         finally:
             db.close()
     except Exception as exc:
         logger.error("Worker boot recovery scan failed: %s", exc)
+
+
+def reconcile_backend_slots_on_boot(db) -> Optional[Dict[str, Any]]:
+    """Reclaim backend slots abandoned by a previous worker process."""
+
+    try:
+        from app.services.agents.backend_concurrency import make_redis_client
+        from app.services.agents.backend_slot_reconciliation import (
+            reconcile_all_backend_slots,
+        )
+
+        result = reconcile_all_backend_slots(db, make_redis_client())
+    except Exception as exc:  # noqa: BLE001 - boot must not fail on Redis
+        logger.warning("Worker boot backend-slot reconciliation failed: %s", exc)
+        return None
+    if result["released_stale"] or result["ambiguous"]:
+        logger.warning(
+            "Worker boot backend-slot reconciliation: released=%d ambiguous=%d of %d",
+            result["released_stale"],
+            result["ambiguous"],
+            result["evaluated"],
+        )
+    else:
+        logger.info(
+            "Worker boot backend-slot reconciliation: no stale slots (%d evaluated)",
+            result["evaluated"],
+        )
+    return result
 
 
 @celery_app.task(
@@ -1088,16 +1121,33 @@ def execute_orchestration_task(
             try:
                 from app.services.agents.backend_concurrency import (
                     acquire_backend_slot,
+                    build_owner_evidence,
                     make_redis_client,
                 )
 
                 _backend_slot_redis = make_redis_client()
                 _backend_slot_backend_id = _bd.name
+                (
+                    _slot_worker_instance_id,
+                    _slot_worker_hostname,
+                    _slot_process_start_identity,
+                    _slot_worker_pid,
+                ) = _runtime_worker_identity()
                 _backend_slot_acquired = acquire_backend_slot(
                     _backend_slot_redis,
                     _bd.name,
                     session_id,
                     max_slots=settings.LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS,
+                    # Phase 22B-1X1: record who owns this slot so a slot left
+                    # behind by a force-terminated worker can be proven stale
+                    # instead of blocking capacity until the key TTL.
+                    owner_evidence=build_owner_evidence(
+                        session_id=session_id,
+                        task_execution_id=task_execution_id,
+                        worker_hostname=_slot_worker_hostname,
+                        worker_pid=_slot_worker_pid,
+                        worker_process_start_identity=_slot_process_start_identity,
+                    ),
                 )
             except Exception as _redis_exc:
                 logger.warning(

@@ -170,6 +170,35 @@ def main() -> int:
                 str(descriptor.get("status") or "not registered"),
             )
 
+        # Phase 22B-1X1: a reachable provider is not usable capacity. Admission
+        # observes reconciled slot ownership for the execution role and fails
+        # closed on ambiguity, so a deployment can never pass while every
+        # execution slot is held by a lease whose owner is gone.
+        capacity = _request_json(f"{args.base_url}/api/v1/ops/backends/capacity", token)
+        execution_capacity = (capacity.get("roles") or {}).get("execution") or {}
+        check(
+            capacity.get("redis_available") is True,
+            "slot reconciliation reachable",
+            str(capacity.get("status_code") or capacity.get("error")),
+        )
+        check(
+            bool(execution_capacity),
+            "execution capacity evidence present",
+            str(capacity.get("execution_backend") or "no execution role configured"),
+        )
+        check(
+            execution_capacity.get("capacity_available") is True,
+            "execution backend capacity",
+            "backend={} status={} max={} valid={} stale_reconciled={} available={}".format(
+                execution_capacity.get("backend_id"),
+                execution_capacity.get("status_code"),
+                execution_capacity.get("max_slots"),
+                execution_capacity.get("active_valid_count"),
+                execution_capacity.get("stale_reconciled_count"),
+                execution_capacity.get("available_count"),
+            ),
+        )
+
         processes = _runtime_processes()
         check(len(processes["backend"]) == 1, "backend singleton")
         check(bool(processes["worker"]), "worker process presence")

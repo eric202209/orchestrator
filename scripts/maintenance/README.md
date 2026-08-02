@@ -39,6 +39,12 @@ harness layout remains stable.
   `docs/roadmap/done/workflow/` for their reports).
 - `workspace_collision_audit.py` - Phase 23B read-only Project workspace
   collision audit; imported by `app/tests/`.
+- `sandbox_branch_cleanup.py` - Phase 22B-1X1 managed sandbox branch
+  inventory and supported cleanup. Read-only by default (`--inventory-only`
+  or no `--apply`); `--apply` deletes only `orchestrator/task-<execution_id>`
+  branches through the same ownership validation as sandbox disposal and
+  prints a before/after ledger. See
+  `docs/roadmap/done/phase22/phase22b1x1-dispatch-capacity-and-sandbox-retry-20260802.md`.
 - `phase31_launch_precondition_f10_workspace_uniqueness.py` - Phase 31
   launch check (Phase 30F finding F10, closed operationally in Phase 30L):
   wraps `workspace_collision_audit.run_audit` and gates on a declared set

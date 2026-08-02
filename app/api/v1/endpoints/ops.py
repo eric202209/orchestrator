@@ -447,6 +447,97 @@ def ops_backends_concurrency(
     }
 
 
+def _capacity_payload(db: Session, *, reconcile: bool) -> Dict[str, Any]:
+    """Usable execution capacity per configured role (Phase 22B-1X1 §7)."""
+    from app.services.agents.agent_backends import get_backend_descriptor
+    from app.services.agents.backend_capacity_admission import (
+        CAPACITY_RECONCILIATION_FAILED,
+        evaluate_backend_capacity,
+    )
+    from app.services.agents.backend_concurrency import make_redis_client
+
+    roles_by_backend = _configured_backend_roles()
+    role_backends = {
+        role: backend_id
+        for backend_id, roles in roles_by_backend.items()
+        for role in roles
+    }
+
+    try:
+        redis_client = make_redis_client()
+        redis_client.ping()
+    except Exception as exc:
+        return {
+            "computed_at": datetime.now(UTC).isoformat(),
+            "redis_available": False,
+            "capacity_available": False,
+            "status_code": CAPACITY_RECONCILIATION_FAILED,
+            "error": str(exc)[:300],
+            "roles": {},
+        }
+
+    roles: Dict[str, Any] = {}
+    for role, backend_id in sorted(role_backends.items()):
+        try:
+            max_slots = get_backend_descriptor(
+                backend_id
+            ).capabilities.max_parallel_sessions
+        except Exception as exc:
+            roles[role] = {
+                "backend_id": backend_id,
+                "capacity_available": False,
+                "status_code": CAPACITY_RECONCILIATION_FAILED,
+                "error": str(exc)[:300],
+            }
+            continue
+        roles[role] = evaluate_backend_capacity(
+            db, redis_client, backend_id, max_slots, reconcile=reconcile
+        )
+
+    execution = roles.get("execution") or {}
+    return {
+        "computed_at": datetime.now(UTC).isoformat(),
+        "redis_available": True,
+        "reconciled": reconcile,
+        "capacity_available": bool(execution.get("capacity_available")),
+        "status_code": execution.get("status_code"),
+        "execution_backend": execution.get("backend_id"),
+        "roles": roles,
+    }
+
+
+@router.get("/backends/capacity")
+def ops_backends_capacity(
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    reconcile: bool = True,
+) -> Dict[str, Any]:
+    """Usable execution capacity after canonical slot reconciliation."""
+    return _capacity_payload(db, reconcile=reconcile)
+
+
+@router.post("/backends/slots/reconcile")
+def ops_reconcile_backend_slots(
+    current_user=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Operator action: run the canonical backend-slot reconciliation once."""
+    from app.services.agents.backend_concurrency import make_redis_client
+    from app.services.agents.backend_slot_reconciliation import (
+        reconcile_all_backend_slots,
+    )
+
+    try:
+        redis_client = make_redis_client()
+        redis_client.ping()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"Redis unavailable for reconciliation: {exc}"
+        )
+    return reconcile_all_backend_slots(db, redis_client, dry_run=dry_run)
+
+
 @router.get("/queue-latency")
 def ops_queue_latency(
     current_user=Depends(get_current_admin_user),

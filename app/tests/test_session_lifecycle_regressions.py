@@ -1262,10 +1262,14 @@ def test_stop_waits_for_backend_lease_release_before_terminal_state_and_next_dis
             self.release_calls += 1
             self.members.discard(str(member))
 
-        def eval(self, _script, _key_count, _key, member, max_slots, _lease):
-            if len(self.members) >= int(max_slots) and str(member) not in self.members:
+        def hdel(self, _key, _field):
+            return 1
+
+        def eval(self, _script, key_count, *args):
+            member, max_slots = str(args[key_count]), int(args[key_count + 1])
+            if len(self.members) >= max_slots and member not in self.members:
                 return 0
-            self.members.add(str(member))
+            self.members.add(member)
             return 1
 
     redis = _LeaseRedis()

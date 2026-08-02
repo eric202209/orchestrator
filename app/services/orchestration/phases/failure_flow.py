@@ -205,10 +205,22 @@ def _prepare_retry_workspace(
         )
         return False, None, False
 
+    # Phase 22B-1X1 §8: "un-restored" conflated Project Workspace file state
+    # with disposable Runtime Workspace cleanup. When the dispatch ran in a
+    # Task Execution Sandbox the canonical workspace was never mutated, so
+    # report that exact state instead of implying a dirty project tree.
+    runtime_workspace_used = bool(getattr(ctx, "runtime_workspace_used", False))
+    workspace_status = (
+        "canonical_workspace_unchanged_sandbox_dispatch"
+        if runtime_workspace_used
+        else "project_workspace_not_restored"
+    )
     dirty_details = {
         **retry_details,
         "restore_result": restore_result,
         "retry_mode": "checkpoint_resume_required",
+        "workspace_status": workspace_status,
+        "runtime_workspace_used": runtime_workspace_used,
     }
     if orchestration_state is not None:
         try:
@@ -226,7 +238,14 @@ def _prepare_retry_workspace(
         session_id,
         task_id,
         "WARN",
-        "[ORCHESTRATION] Retryable failure left workspace un-restored; retry will resume from autosave_error checkpoint",
+        (
+            "[ORCHESTRATION] Retryable failure: canonical Project Workspace was not "
+            "mutated by this sandbox dispatch; retry will resume from autosave_error "
+            "checkpoint"
+            if runtime_workspace_used
+            else "[ORCHESTRATION] Retryable failure left the Project Workspace "
+            "un-restored; retry will resume from autosave_error checkpoint"
+        ),
         session_instance_id=session.instance_id if session else None,
         metadata=dirty_details,
     )

@@ -490,10 +490,18 @@ class FakeRedis:
 
     def __init__(self):
         self._sets: dict[str, set[str]] = {}
+        self._hashes: dict[str, dict[str, str]] = {}
         self._expirations: dict[str, int] = {}
 
     def smembers(self, key: str) -> set[bytes]:
         return {v.encode() for v in self._sets.get(key, set())}
+
+    def hgetall(self, key: str) -> dict[str, str]:
+        return dict(self._hashes.get(key, {}))
+
+    def hdel(self, key: str, *fields: str) -> int:
+        stored = self._hashes.get(key, {})
+        return sum(1 for field in fields if stored.pop(str(field), None) is not None)
 
     def sadd(self, key: str, *values: str) -> int:
         self._sets.setdefault(key, set()).update(str(v) for v in values)
@@ -508,13 +516,37 @@ class FakeRedis:
     def expire(self, key: str, ttl: int) -> None:
         self._expirations[key] = ttl
 
-    def eval(self, _script, key_count, key, session_id, max_slots, lease_seconds):
-        assert key_count == 1
-        members = self._sets.setdefault(key, set())
-        if str(session_id) not in members and len(members) >= int(max_slots):
+    def eval(self, script, key_count, *args):
+        keys = [str(value) for value in args[:key_count]]
+        argv = [str(value) for value in args[key_count:]]
+        if "SISMEMBER" in script:
+            slot_key, owner_key = keys[0], keys[1]
+            session_id, max_slots, lease_seconds, evidence = (
+                argv[0],
+                int(argv[1]),
+                int(argv[2]),
+                argv[3] if len(argv) > 3 else "",
+            )
+            members = self._sets.setdefault(slot_key, set())
+            if session_id not in members and len(members) >= max_slots:
+                return 0
+            members.add(session_id)
+            self.expire(slot_key, lease_seconds)
+            if evidence:
+                self._hashes.setdefault(owner_key, {})[session_id] = evidence
+                self.expire(owner_key, lease_seconds)
+            return 1
+        # Fenced release: drop the member only while owner evidence matches.
+        slot_key, owner_key = keys[0], keys[1]
+        session_id, expected = argv[0], argv[1]
+        current = self._hashes.get(owner_key, {}).get(session_id)
+        if expected == "":
+            if current is not None:
+                return 0
+        elif current != expected:
             return 0
-        members.add(str(session_id))
-        self.expire(key, int(lease_seconds))
+        self._sets.get(slot_key, set()).discard(session_id)
+        self._hashes.get(owner_key, {}).pop(session_id, None)
         return 1
 
     def pipeline(self):
@@ -567,12 +599,8 @@ class TestBackendConcurrency:
             def __init__(self):
                 self.calls = []
 
-            def eval(
-                self, script, key_count, key, session_id, max_slots, lease_seconds
-            ):
-                self.calls.append(
-                    (script, key_count, key, session_id, max_slots, lease_seconds)
-                )
+            def eval(self, script, key_count, *args):
+                self.calls.append((script, key_count, *args))
                 return 1
 
         redis = AtomicRedis()
@@ -587,12 +615,16 @@ class TestBackendConcurrency:
             )
             is True
         )
+        # Phase 22B-1X1: the claim also carries the owner-evidence key, and
+        # stays one atomic step.
         assert redis.calls[0][1:] == (
-            1,
+            2,
             "orchestrator:backend_slots:local_openclaw",
+            "orchestrator:backend_slot_owners:local_openclaw",
             "7",
             1,
             3600,
+            "",
         )
 
     def test_atomic_claim_returns_false_at_capacity(self):

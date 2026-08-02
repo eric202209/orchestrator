@@ -40,10 +40,14 @@ from .system_settings import (
     set_setting_value,
 )
 from .task_sandbox_allocator import (
+    SandboxDisposal,
     TaskSandbox,
     TaskSandboxError,
     allocate_task_sandbox,
+    delete_managed_sandbox_branch,
     dispose_task_sandbox,
+    managed_sandbox_branch,
+    managed_sandbox_branch_execution_id,
     runtime_task_dir,
 )
 from .workspace_paths import (
@@ -100,9 +104,13 @@ __all__ = [
     "get_setting_value",
     "get_setting_value_runtime",
     "set_setting_value",
+    "SandboxDisposal",
     "TaskSandbox",
     "TaskSandboxError",
     "allocate_task_sandbox",
+    "delete_managed_sandbox_branch",
     "dispose_task_sandbox",
+    "managed_sandbox_branch",
+    "managed_sandbox_branch_execution_id",
     "runtime_task_dir",
 ]

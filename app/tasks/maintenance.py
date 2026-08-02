@@ -109,6 +109,27 @@ def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: st
             db.close()
 
 
+def _reconcile_backend_slots_for_sweep(db) -> Dict[str, Any]:
+    """Run canonical backend-slot reconciliation without failing the sweep."""
+
+    try:
+        from app.services.agents.backend_concurrency import make_redis_client
+        from app.services.agents.backend_slot_reconciliation import (
+            reconcile_all_backend_slots,
+        )
+
+        result = reconcile_all_backend_slots(db, make_redis_client())
+    except Exception as exc:  # noqa: BLE001 - reported, never raised
+        logger.warning("Backend slot reconciliation failed during sweep: %s", exc)
+        return {"status": "failed", "error": str(exc)[:300]}
+    return {
+        "status": "completed",
+        "evaluated": result["evaluated"],
+        "released_stale": result["released_stale"],
+        "ambiguous": result["ambiguous"],
+    }
+
+
 @celery_app.task(bind=True)
 def sweep_orphaned_running_sessions(
     self, stale_after_seconds: int = 2100
@@ -154,6 +175,10 @@ def sweep_orphaned_running_sessions(
             decision_records, recovered_count=len(recovered)
         )
         status = "completed_with_errors" if counts["error_count"] else "completed"
+        # Phase 22B-1X1: the same sweep boundary reclaims backend slots whose
+        # runtime owner is provably gone, so capacity cannot stay blocked
+        # between worker restarts.
+        slot_reconciliation = _reconcile_backend_slots_for_sweep(db)
         _record(
             MAINTENANCE_COMPLETED,
             counts=counts,
@@ -164,6 +189,7 @@ def sweep_orphaned_running_sessions(
             "status": status,
             **counts,
             "recovered_sessions": recovered,
+            "backend_slot_reconciliation": slot_reconciliation,
         }
     except Exception as exc:
         _record(
