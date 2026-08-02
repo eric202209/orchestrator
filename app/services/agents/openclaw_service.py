@@ -946,7 +946,7 @@ class OpenClawSessionService:
         binding = getattr(self, "_workspace_binding", None)
         if binding is not None:
             env.update(binding.environment)
-        elif self._openclaw_config_path_override and getattr(
+        elif getattr(self, "_openclaw_config_path_override", None) and getattr(
             self, "_strict_planning_config_dir", None
         ):
             # Dedicated Protocol v2 planning uses the same ephemeral config
