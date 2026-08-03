@@ -32,6 +32,7 @@ from app.services.orchestration.planning.planner_contract_registry import (
     planner_grounding_evidence,
 )
 from app.services.orchestration.planning.source_materialization import (
+    materialize_planner_source_context,
     repair_removed_source_materialization as _repair_removed_source_materialization,
 )
 from app.services.orchestration.planning.normalization import (
@@ -219,6 +220,35 @@ def execute_planning_phase(
             pass
     ctx.workflow_phases = get_workflow_phases(ctx.workflow_profile)
     ctx.workspace_has_existing_files = bool(workspace_review.get("has_existing_files"))
+    ctx.planner_source_materialization = materialize_planner_source_context(
+        Path(ctx.orchestration_state.project_dir),
+        task_description=ctx.prompt,
+        planner_contract=ctx.planner_contract,
+    )
+    if not ctx.planner_source_materialization.available:
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = (
+            "Planning source materialization unavailable: "
+            + ", ".join(ctx.planner_source_materialization.unavailable_reasons[:8])
+        )
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message=(
+                "[ORCHESTRATION] Planning source materialization unavailable; "
+                "failing closed before provider invocation"
+            ),
+            details={
+                "reason": "planning_source_materialization_unavailable",
+                "source_materialization": ctx.planner_source_materialization.to_metadata(),
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": "planning_source_materialization_unavailable",
+        }
     if len(ctx.orchestration_state.project_context or "") > 3500:
         compressed_context = _compress_project_context_for_planning(
             ctx.orchestration_state
@@ -302,6 +332,7 @@ def execute_planning_phase(
                 },
                 planner_prompt=planning_prompt,
             ),
+            "source_materialization": ctx.planner_source_materialization.to_metadata(),
             "model_capability_label": model_capability_label,
             "context_budget_status": (
                 "dense" if planning_prompt_tokens > 8000 else "normal"
@@ -1299,6 +1330,7 @@ def execute_planning_phase(
             immediate_repair_issues = PlannerService.find_immediate_repair_step_issues(
                 ctx.orchestration_state.plan,
                 project_dir=ctx.orchestration_state.project_dir,
+                source_materialization=ctx.planner_source_materialization,
             )
             if retry_state.repair_prompt_used:
                 arbitration_control = arbitrate_planning_repair_candidate(
@@ -1324,6 +1356,7 @@ def execute_planning_phase(
                         PlannerService.find_immediate_repair_step_issues(
                             ctx.orchestration_state.plan,
                             project_dir=ctx.orchestration_state.project_dir,
+                            source_materialization=ctx.planner_source_materialization,
                         )
                     )
             blocking_repair_issues = {

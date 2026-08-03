@@ -87,7 +87,19 @@ def collect_repair_guidance_block(ctx: Any) -> str:
     faithfulness = build_faithfulness_prompt_block(
         str(getattr(ctx, "prompt", "") or "")
     )
-    blocks = [b for b in (faithfulness, guidance) if b and b.strip()]
+    source_materialization = getattr(ctx, "planner_source_materialization", None)
+    source_block = (
+        source_materialization.to_prompt_block()
+        if source_materialization is not None
+        else ""
+    )
+    if not isinstance(source_block, str):
+        source_block = ""
+    blocks = [
+        block
+        for block in (faithfulness, source_block, guidance)
+        if block and block.strip()
+    ]
     return "\n\n".join(blocks)
 
 

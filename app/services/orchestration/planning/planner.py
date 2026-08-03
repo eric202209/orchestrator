@@ -54,6 +54,9 @@ from app.services.orchestration.planning.planner_contract_registry import (
     planner_grounding_evidence,
     render_planner_repair_contract_context,
 )
+from app.services.orchestration.planning.source_materialization import (
+    materialized_source_content,
+)
 from app.services.orchestration.planning.repair_evidence import (
     record_pending_planning_repair_triplet,
 )
@@ -742,6 +745,7 @@ class PlannerService:
     def find_immediate_repair_step_issues(
         plan: Optional[List[Dict[str, Any]]],
         project_dir: Optional[Path] = None,
+        source_materialization: Any = None,
     ) -> Dict[str, List[int]]:
         from app.services.orchestration.validation.validator import ValidatorService
 
@@ -804,7 +808,9 @@ class PlannerService:
             ):
                 issues["prefer_typed_ops_steps"].append(step_number)
             if project_dir and PlannerService._step_has_stale_replace_ops(
-                step, Path(project_dir)
+                step,
+                Path(project_dir),
+                source_materialization=source_materialization,
             ):
                 issues["stale_replace_ops_steps"].append(step_number)
             if PlannerService._step_has_empty_replace_old_text_ops(step):
@@ -839,7 +845,12 @@ class PlannerService:
         return False
 
     @staticmethod
-    def _step_has_stale_replace_ops(step: Dict[str, Any], project_dir: Path) -> bool:
+    def _step_has_stale_replace_ops(
+        step: Dict[str, Any],
+        project_dir: Path,
+        *,
+        source_materialization: Any = None,
+    ) -> bool:
         ops = step.get("ops") or []
         if not isinstance(ops, list):
             return False
@@ -850,7 +861,16 @@ class PlannerService:
                 continue
             rel_path = str(operation.get("path") or "").strip().lstrip("./")
             old_text = operation.get("old")
+            if old_text is None:
+                old_text = operation.get("old_text")
             if not rel_path or not isinstance(old_text, str) or not old_text:
+                continue
+            if source_materialization is not None:
+                content = materialized_source_content(
+                    source_materialization, rel_path, project_dir
+                )
+                if content is None or old_text not in content:
+                    return True
                 continue
             path = (project_dir / rel_path).resolve()
             try:
@@ -1177,8 +1197,9 @@ class PlannerService:
         project_context: Optional[str] = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
+        source_materialization: Any = None,
     ) -> str:
-        return _build_minimal_planning_prompt(
+        prompt = _build_minimal_planning_prompt(
             task_description,
             project_dir,
             prompt_profile=prompt_profile,
@@ -1193,6 +1214,9 @@ class PlannerService:
             planner_contract=planner_contract,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
+        if source_materialization is not None:
+            prompt += "\n\n" + source_materialization.to_prompt_block()
+        return prompt
 
     @staticmethod
     def build_ultra_minimal_planning_prompt(
@@ -1206,8 +1230,9 @@ class PlannerService:
         project_context: Optional[str] = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
+        source_materialization: Any = None,
     ) -> str:
-        return _build_ultra_minimal_planning_prompt(
+        prompt = _build_ultra_minimal_planning_prompt(
             task_description,
             project_dir,
             prompt_profile=prompt_profile,
@@ -1220,6 +1245,9 @@ class PlannerService:
             planner_contract=planner_contract,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
+        if source_materialization is not None:
+            prompt += "\n\n" + source_materialization.to_prompt_block()
+        return prompt
 
     @staticmethod
     def _looks_like_timeout_error(exc: Exception) -> bool:
@@ -1913,6 +1941,7 @@ class PlannerService:
         project_context: Optional[str] = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
+        source_materialization: Any = None,
     ) -> Dict[str, Any]:
         can_store_retry_guard = hasattr(runtime_service, "__dict__")
         if can_store_retry_guard:
@@ -1957,6 +1986,7 @@ class PlannerService:
             project_context=project_context,
             workspace_identity=workspace_identity,
             planner_contract=planner_contract,
+            source_materialization=source_materialization,
         )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)
@@ -2082,6 +2112,7 @@ class PlannerService:
                 project_context=project_context,
                 workspace_identity=workspace_identity,
                 planner_contract=planner_contract,
+                source_materialization=source_materialization,
             )
             logger.warning(
                 "[ORCHESTRATION] Minimal planning prompt timed out; retrying with ultra-minimal prompt"
@@ -2177,6 +2208,7 @@ class PlannerService:
         guidance_block: str = "",
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
+        source_materialization: Any = None,
     ) -> Dict[str, Any]:
         repair_build_started_at = time.monotonic()
         logger.warning(
@@ -2187,6 +2219,15 @@ class PlannerService:
         repair_timeout = cls._effective_planning_repair_timeout_for_reason(
             timeout_seconds, reason
         )
+        if source_materialization is not None:
+            source_block = source_materialization.to_prompt_block()
+            if (
+                source_block
+                and "## CURRENT SOURCE MATERIALIZATION" not in guidance_block
+            ):
+                guidance_block = "\n\n".join(
+                    block for block in (guidance_block, source_block) if block
+                )
         if _compact_no_output_retry:
             repair_prompt = cls.build_compact_planning_repair_prompt(
                 malformed_output,

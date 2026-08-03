@@ -36,6 +36,9 @@ def _maybe_emit_provenance(
             workspace_review=workspace_review or {},
             knowledge_context=knowledge_context,
             planning_prompt=planning_prompt,
+            planner_source_materialization=getattr(
+                ctx, "planner_source_materialization", None
+            ),
         )
         append_orchestration_event(
             project_dir=getattr(state, "project_dir", None),
@@ -56,6 +59,7 @@ def collect_planning_context_provenance(
     workspace_review: Dict[str, Any],
     knowledge_context: Optional[KnowledgeContext],
     planning_prompt: Optional[str],
+    planner_source_materialization: Any = None,
 ) -> Dict[str, Any]:
     """Return a read-only snapshot of what context entered the planning prompt."""
     task_desc = task_description or ""
@@ -111,4 +115,9 @@ def collect_planning_context_provenance(
             knowledge_context and knowledge_context.matched_failure_memory
         ),
         "omitted_sources": omitted,
+        "planner_source_materialization": (
+            planner_source_materialization.to_metadata()
+            if planner_source_materialization is not None
+            else None
+        ),
     }

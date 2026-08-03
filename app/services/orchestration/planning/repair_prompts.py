@@ -26,6 +26,8 @@ from app.services.orchestration.planning.source_api_contract import (
     build_source_api_contract_capsule,
 )
 from app.services.orchestration.planning.source_materialization import (
+    materialize_planner_source_context,
+    plan_target_paths,
     plan_source_materialization_paths,
 )
 from app.services.project.source_imports import (
@@ -266,6 +268,24 @@ def build_planning_repair_prompt_with_metadata(
         full_block=source_api_contract_block,
         compact_block=source_api_contract_compact_block,
     )
+    planner_source_materialization = materialize_planner_source_context(
+        project_dir,
+        task_description=task_description,
+        expected_paths=plan_target_paths(malformed_output),
+    )
+    source_api_metadata["planner_source_materialization"] = (
+        planner_source_materialization.to_metadata()
+    )
+    materialization_block = planner_source_materialization.to_prompt_block()
+    effective_guidance_block = guidance_block
+    if (
+        materialization_block
+        and "## CURRENT SOURCE MATERIALIZATION" not in guidance_block
+    ):
+        effective_guidance_block = _join_optional_blocks(
+            guidance_block, materialization_block
+        )
+    guidance_block = effective_guidance_block
     structure_capsule = (
         project_structure_capsule
         if project_structure_capsule is not None
@@ -293,7 +313,7 @@ def build_planning_repair_prompt_with_metadata(
             knowledge_block=knowledge_block,
             guidance_block=_join_optional_blocks(
                 render_planner_workspace_identity(workspace_identity),
-                guidance_block,
+                effective_guidance_block,
             ),
         )
         selected_source_api_contract_block = next(
@@ -2068,6 +2088,7 @@ def build_compact_stale_replace_repair_prompt(
         current_source_context_block: str,
         current_structure_capsule: str,
         current_knowledge_block: str,
+        current_guidance_block: str,
     ) -> str:
         broken_output = compact_invalid_output_excerpt(malformed_output)[:output_chars]
         reason_lines = "\n".join(
@@ -2086,7 +2107,7 @@ No prose. No markdown fences. No plan.json. No explanation.
 Stale replace repair mode.
 Task: {task}
 
-{guidance_block + chr(10) if guidance_block else ""}Validation errors:
+{current_guidance_block + chr(10) if current_guidance_block else ""}Validation errors:
 {reason_lines or "- replace_in_file old text was not found in the current workspace"}
 
 Invalid plan excerpt:
@@ -2150,45 +2171,57 @@ Stale replace second-pass target preservation:
         _truncate_text(knowledge_block, 240),
         "",
     ]
+    guidance_candidates = [
+        guidance_block,
+        _truncate_text(guidance_block, 1200),
+        _truncate_text(guidance_block, 600),
+        _truncate_text(guidance_block, 320),
+        "",
+    ]
     compact_attempts = []
     for current_knowledge_block in knowledge_candidates:
-        for candidate in source_api_contract_candidates:
+        for current_guidance_block in guidance_candidates:
+            for candidate in source_api_contract_candidates:
+                for (
+                    current_source_context_block,
+                    current_structure_capsule,
+                ) in context_candidates:
+                    compact_attempts.append(
+                        (
+                            candidate,
+                            current_source_context_block,
+                            current_structure_capsule,
+                            current_knowledge_block,
+                            current_guidance_block,
+                        )
+                    )
             for (
                 current_source_context_block,
                 current_structure_capsule,
             ) in context_candidates:
                 compact_attempts.append(
                     (
-                        candidate,
+                        "",
                         current_source_context_block,
                         current_structure_capsule,
                         current_knowledge_block,
+                        current_guidance_block,
                     )
                 )
-        for (
-            current_source_context_block,
-            current_structure_capsule,
-        ) in context_candidates:
-            compact_attempts.append(
-                (
-                    "",
-                    current_source_context_block,
-                    current_structure_capsule,
-                    current_knowledge_block,
-                )
-            )
-    seen_attempts: set[tuple[str, str]] = set()
+    seen_attempts: set[tuple[str, str, str, str, str]] = set()
     for (
         current_source_api_contract_block,
         current_source_context_block,
         current_structure_capsule,
         current_knowledge_block,
+        current_guidance_block,
     ) in compact_attempts:
         attempt_key = (
             current_source_api_contract_block,
             current_source_context_block,
             current_structure_capsule,
             current_knowledge_block,
+            current_guidance_block,
         )
         if attempt_key in seen_attempts:
             continue
@@ -2214,6 +2247,7 @@ Stale replace second-pass target preservation:
                     current_source_context_block=current_source_context_block,
                     current_structure_capsule=current_structure_capsule,
                     current_knowledge_block=current_knowledge_block,
+                    current_guidance_block=current_guidance_block,
                 ),
                 prompt_profile,
                 apply_prompt_profile,

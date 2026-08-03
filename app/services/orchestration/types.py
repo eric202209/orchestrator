@@ -252,6 +252,7 @@ class OrchestrationRunContext:
     guidance_model_family: str = "all"
     runtime_workspace_used: bool = False
     planner_contract: Optional[Dict[str, Any]] = None
+    planner_source_materialization: Any = None
 
     @property
     def policy_profile(self) -> PolicyProfile:

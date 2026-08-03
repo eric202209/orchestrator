@@ -101,6 +101,7 @@ def _retry_with_minimal_prompt(
         project_context=ctx.orchestration_state.project_context,
         workspace_identity=_planner_workspace_identity(ctx),
         planner_contract=ctx.planner_contract,
+        source_materialization=getattr(ctx, "planner_source_materialization", None),
     )
 
 
@@ -143,6 +144,7 @@ def _repair_planning_output(
         guidance_block=_collect_repair_guidance(ctx),
         workspace_identity=_planner_workspace_identity(ctx),
         planner_contract=ctx.planner_contract,
+        source_materialization=getattr(ctx, "planner_source_materialization", None),
     )
 
 
@@ -215,6 +217,7 @@ def _validate_planning_plan(
         is_first_ordered_task=_is_first_ordered_task(ctx.task),
         workspace_identity=_planner_workspace_identity(ctx),
         planner_contract=ctx.planner_contract,
+        source_materialization=getattr(ctx, "planner_source_materialization", None),
     )
 
 

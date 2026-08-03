@@ -58,6 +58,16 @@ from app.services.orchestration.planning.planner_contract_registry import (
     planner_contract_source_paths,
     planner_contract_test_paths,
 )
+from app.services.orchestration.planning.repair_faithfulness import (
+    extract_required_file_paths,
+)
+from app.services.orchestration.planning.source_materialization import (
+    SOURCE_STATUS_EXISTING,
+    SOURCE_STATUS_NEW,
+    materialize_planner_source_context,
+    materialized_source_content,
+    materialized_source_file,
+)
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
 )
@@ -143,6 +153,233 @@ from .rules.core_paths import (
 )
 
 MAX_INITIAL_PLAN_STEPS = 4
+
+
+def _plan_target_paths(plan: List[Dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    for step in plan or []:
+        for value in step.get("expected_files") or []:
+            normalized = str(value or "").strip().replace("\\", "/").lstrip("./")
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                paths.append(normalized)
+        for operation in step.get("ops") or []:
+            if not isinstance(operation, dict):
+                continue
+            normalized = (
+                str(operation.get("path") or "").strip().replace("\\", "/").lstrip("./")
+            )
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                paths.append(normalized)
+    return paths
+
+
+def _explicit_task_scope_paths(*values: Any) -> set[str]:
+    text = "\n".join(str(value or "") for value in values)
+    scope_paths: set[str] = set()
+    for match in re.finditer(
+        r"\b(?:only|hard\s+scope\s*:)\b(?P<body>.{0,320})",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    ):
+        body = re.split(
+            r"\b(?:may\s+change|may\s+modify|do\s+not)\b",
+            match.group("body"),
+            maxsplit=1,
+            flags=re.IGNORECASE,
+        )[0]
+        scope_paths.update(extract_required_file_paths(body))
+    return {path.replace("\\", "/").lstrip("./") for path in scope_paths}
+
+
+def _existing_write_authorized(
+    task_text: str, relative_path: str, operation_description: str = ""
+) -> bool:
+    authorization_words = (
+        r"\b(preserve|replace|rewrite|overwrite|rebuild|entire\s+file|full\s+file)\b"
+    )
+    if re.search(authorization_words, str(operation_description or ""), re.IGNORECASE):
+        return True
+    lowered = "\n".join(
+        [str(task_text or ""), str(operation_description or "")]
+    ).lower()
+    target = relative_path.lower()
+    start = 0
+    while True:
+        index = lowered.find(target, start)
+        if index < 0:
+            return False
+        window = lowered[max(0, index - 180) : index + len(target) + 180]
+        if re.search(authorization_words, window):
+            return True
+        start = index + len(target)
+
+
+def _plan_creation_authorized_paths(
+    plan: List[Dict[str, Any]],
+) -> set[str]:
+    paths: set[str] = set()
+    target_paths = set(_plan_target_paths(plan))
+    for step in plan or []:
+        for operation in step.get("ops") or []:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "").strip() in {
+                "write_file",
+                "create_file",
+                "append_file",
+            }:
+                path = (
+                    str(operation.get("path") or "")
+                    .strip()
+                    .replace("\\", "/")
+                    .lstrip("./")
+                )
+                if path:
+                    paths.add(path)
+        for command in step.get("commands") or []:
+            rendered = str(command or "")
+            if ">" not in rendered and not re.search(r"\b(?:touch|tee)\b", rendered):
+                continue
+            paths.update(path for path in target_paths if path in rendered)
+            paths.update(
+                path
+                for path in extract_required_file_paths(rendered)
+                if path in target_paths
+            )
+    return paths
+
+
+def _source_operation_contract_issues(
+    plan: List[Dict[str, Any]],
+    *,
+    task_text: str,
+    project_dir: Path,
+    source_materialization: Any,
+) -> Dict[str, Any]:
+    details: Dict[str, Any] = {
+        "stale_replace_materialization": [],
+        "missing_source_materialization": [],
+        "existing_file_write_without_authorization": [],
+        "new_file_write_without_creation_authorization": [],
+        "source_materialization_unavailable": [],
+    }
+    unavailable = list(getattr(source_materialization, "unavailable_reasons", ()) or ())
+    if unavailable:
+        details["source_materialization_unavailable"] = unavailable[:20]
+
+    current_content: dict[str, str] = {}
+    for item in getattr(source_materialization, "files", ()) or ():
+        if getattr(item, "status", None) == SOURCE_STATUS_EXISTING:
+            content = materialized_source_content(
+                source_materialization,
+                getattr(item, "relative_path", ""),
+                project_dir,
+            )
+            if content is not None:
+                current_content[str(item.relative_path)] = content
+
+    for index, step in enumerate(plan or [], start=1):
+        for operation_index, operation in enumerate(step.get("ops") or [], start=1):
+            if not isinstance(operation, dict):
+                continue
+            op_name = str(operation.get("op") or "").strip()
+            if op_name not in {"write_file", "append_file", "replace_in_file"}:
+                continue
+            relative_path = (
+                str(operation.get("path") or "").strip().replace("\\", "/").lstrip("./")
+            )
+            if not relative_path:
+                continue
+            record = materialized_source_file(source_materialization, relative_path)
+            label = f"step {index} op {operation_index} ({relative_path})"
+            if op_name == "write_file":
+                if record is None:
+                    content = operation.get("content")
+                    expected_in_step = relative_path in {
+                        str(value or "").strip().replace("\\", "/").lstrip("./")
+                        for value in step.get("expected_files") or []
+                    }
+                    if (
+                        expected_in_step
+                        and isinstance(content, str)
+                        and not (project_dir / relative_path).exists()
+                    ):
+                        current_content[relative_path] = content
+                        continue
+                    if (
+                        (project_dir / relative_path).is_file()
+                        and isinstance(content, str)
+                        and _existing_write_authorized(
+                            task_text,
+                            relative_path,
+                            step.get("description", ""),
+                        )
+                    ):
+                        current_content[relative_path] = content
+                        continue
+                    details["new_file_write_without_creation_authorization"].append(
+                        label
+                    )
+                    continue
+                if record.status == SOURCE_STATUS_EXISTING:
+                    if not _existing_write_authorized(
+                        task_text,
+                        relative_path,
+                        step.get("description", ""),
+                    ):
+                        details["existing_file_write_without_authorization"].append(
+                            label
+                        )
+                        continue
+                elif record.status != SOURCE_STATUS_NEW:
+                    details["new_file_write_without_creation_authorization"].append(
+                        label
+                    )
+                    continue
+                content = operation.get("content")
+                if isinstance(content, str):
+                    current_content[relative_path] = content
+                continue
+
+            if op_name == "append_file":
+                content = operation.get("content")
+                if relative_path not in current_content:
+                    if record is None or record.status not in {
+                        SOURCE_STATUS_EXISTING,
+                        SOURCE_STATUS_NEW,
+                    }:
+                        details["missing_source_materialization"].append(label)
+                        continue
+                    if record.status == SOURCE_STATUS_NEW:
+                        current_content[relative_path] = ""
+                if isinstance(content, str):
+                    current_content[relative_path] = (
+                        current_content.get(relative_path, "") + content
+                    )
+                continue
+
+            old_text = operation.get("old")
+            if old_text is None:
+                old_text = operation.get("old_text")
+            if not isinstance(old_text, str) or not old_text:
+                continue
+            content = current_content.get(relative_path)
+            if content is None:
+                details["missing_source_materialization"].append(label)
+            elif old_text not in content:
+                details["stale_replace_materialization"].append(label)
+            else:
+                new_text = operation.get("new")
+                if isinstance(new_text, str):
+                    current_content[relative_path] = content.replace(
+                        old_text, new_text, 1
+                    )
+    return details
+
+
 MAX_PLANNING_COMMAND_CHARS = 900
 READ_ONLY_WORKFLOW_STAGES = {
     "diagnose",
@@ -882,6 +1119,7 @@ class ValidatorService:
         is_first_ordered_task: bool = False,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Mapping[str, Any] | None = None,
+        source_materialization: Any = None,
     ) -> PlanOutcome:
         plan = copy.deepcopy(plan)
         profile = cls.infer_validation_profile(
@@ -896,6 +1134,19 @@ class ValidatorService:
         repairable: List[str] = []
         rejected: List[str] = []
         details: Dict[str, Any] = {"plan_length": len(plan)}
+        if source_materialization is None and project_dir is not None:
+            source_materialization = materialize_planner_source_context(
+                Path(project_dir),
+                task_description=task_prompt,
+                expected_paths=_plan_target_paths(plan),
+                creation_authorized_paths=_plan_creation_authorized_paths(plan),
+            )
+        if source_materialization is not None:
+            details["source_materialization"] = (
+                source_materialization.to_metadata()
+                if hasattr(source_materialization, "to_metadata")
+                else {}
+            )
         schema_validation = cls.validate_plan_schema(plan)
         details["plan_schema"] = schema_validation
         if not schema_validation["valid"]:
@@ -1065,6 +1316,69 @@ class ValidatorService:
             details["unmaterialized_expected_files"] = unmaterialized_expected_files[
                 :20
             ]
+
+        if project_dir is not None and source_materialization is not None:
+            source_contract_issues = _source_operation_contract_issues(
+                plan,
+                task_text="\n".join(
+                    [str(task_prompt or ""), str(title or ""), str(description or "")]
+                ),
+                project_dir=Path(project_dir),
+                source_materialization=source_materialization,
+            )
+            if source_contract_issues["source_materialization_unavailable"]:
+                repairable.append(
+                    "planning_source_materialization_unavailable: expected source "
+                    "could not be grounded within the bounded source contract"
+                )
+                details["planning_source_materialization_unavailable"] = (
+                    source_contract_issues["source_materialization_unavailable"]
+                )
+            if source_contract_issues["stale_replace_materialization"]:
+                repairable.append(
+                    "stale_replace: replace_in_file.old_text is absent from the "
+                    "materialized current source/version"
+                )
+                details["stale_replace_materialization"] = source_contract_issues[
+                    "stale_replace_materialization"
+                ]
+            if source_contract_issues["missing_source_materialization"]:
+                repairable.append(
+                    "missing_source_materialization: exact file content was not "
+                    "materialized for a source-dependent operation"
+                )
+                details["missing_source_materialization"] = source_contract_issues[
+                    "missing_source_materialization"
+                ]
+            if source_contract_issues["existing_file_write_without_authorization"]:
+                repairable.append(
+                    "existing_file_write_requires_explicit_replace_authorization"
+                )
+                details["existing_file_write_without_authorization"] = (
+                    source_contract_issues["existing_file_write_without_authorization"]
+                )
+            if source_contract_issues["new_file_write_without_creation_authorization"]:
+                repairable.append(
+                    "new_file_creation_not_authorized: write_file may create only "
+                    "a classified new expected file"
+                )
+                details["new_file_write_without_creation_authorization"] = (
+                    source_contract_issues[
+                        "new_file_write_without_creation_authorization"
+                    ]
+                )
+
+        scope_paths = _explicit_task_scope_paths(task_prompt, title, description)
+        if scope_paths:
+            out_of_scope = sorted(
+                path for path in _plan_target_paths(plan) if path not in scope_paths
+            )
+            if out_of_scope:
+                repairable.append(
+                    "task scope violation: plan targets files outside the explicit "
+                    f"scope ({out_of_scope[:8]})"
+                )
+                details["task_scope_violation_paths"] = out_of_scope[:20]
 
         command_budget = cls._plan_command_budget_diagnostics(plan, output_text)
         details["step_count"] = command_budget["step_count"]

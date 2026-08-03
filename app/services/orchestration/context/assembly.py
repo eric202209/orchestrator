@@ -32,6 +32,9 @@ from app.services.workspace.path_display import render_workspace_path_for_prompt
 from app.services.orchestration.planning.workspace_identity import (
     planner_workspace_identity_for_context,
 )
+from app.services.orchestration.planning.source_materialization import (
+    materialize_planner_source_context,
+)
 from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 logger = logging.getLogger(__name__)
@@ -835,6 +838,20 @@ def assemble_planning_prompt(
         ctx.orchestration_state.project_dir, db=ctx.db
     )
     planner_workspace_identity = planner_workspace_identity_for_context(ctx)
+    planner_source_materialization = getattr(
+        ctx, "planner_source_materialization", None
+    )
+    if planner_source_materialization is None:
+        planner_source_materialization = materialize_planner_source_context(
+            Path(ctx.orchestration_state.project_dir),
+            task_description=ctx.prompt,
+            planner_contract=getattr(ctx, "planner_contract", None),
+            workspace_identity=planner_workspace_identity,
+        )
+        try:
+            ctx.planner_source_materialization = planner_source_materialization
+        except Exception:
+            pass
     workspace_summary = build_workspace_inventory_summary(
         Path(ctx.orchestration_state.project_dir),
         workspace_review=workspace_review,
@@ -884,6 +901,9 @@ def assemble_planning_prompt(
     )
     if source_stub_context:
         raw_prompt = raw_prompt + "\n\n" + source_stub_context
+    source_materialization_context = planner_source_materialization.to_prompt_block()
+    if source_materialization_context:
+        raw_prompt = raw_prompt + "\n\n" + source_materialization_context
     knowledge_block = _render_knowledge_block(knowledge_context)
     if knowledge_block:
         raw_prompt = knowledge_block + "\n" + raw_prompt
@@ -900,6 +920,7 @@ def assemble_planning_prompt(
             "Project Directory": prompt_project_dir,
             "Execution Profile": ctx.execution_profile,
             "Workflow Profile": getattr(ctx, "workflow_profile", "default"),
+            "Planner Source Materialization": planner_source_materialization.to_prompt_metadata(),
         },
         expected_output="JSON array of orchestration step objects.",
         adaptation_profile=getattr(ctx, "planning_adaptation_profile", None),
