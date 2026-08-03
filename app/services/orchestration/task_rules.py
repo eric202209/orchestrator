@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from app.models import Project, Task, TaskStatus
 from app.services.orchestration.workflow_profiles import (
@@ -20,23 +21,142 @@ from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
 from app.services.tasks.service import TaskService
 
 
+_IMPLEMENTATION_TITLE_INTENT_RE = re.compile(
+    r"\b(?:add|build|change|create|delete|fix|implement|improve|introduce|"
+    r"migrate(?:s|d|ing)?|modify(?:s|ied|ing)?|refactor|remove|replace|"
+    r"set\s+up|setup|update(?:s|d|ing)?|"
+    r"wire|write|extend)\b",
+    re.IGNORECASE,
+)
+_NEGATED_IMPLEMENTATION_TITLE_INTENT_RE = re.compile(
+    r"\b(?:without|do\s+not|don't|never)\s+(?:\w+\s+){0,2}"
+    r"(?:add|build|change|create|delete|fix|implement|improve|introduce|"
+    r"migrate(?:s|d|ing)?|modify(?:s|ied|ing)?|refactor|remove|replace|"
+    r"set\s+up|setup|update(?:s|d|ing)?|"
+    r"wire|write|extend)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_VERIFICATION_TITLE_INTENT_RE = re.compile(
+    r"\b(?:audit|certif\w*|inspect\w*|qa|review\w*|test\w*|" r"validat\w*|verif\w*)\b",
+    re.IGNORECASE,
+)
+_INTEGRATION_VERIFICATION_TITLE_INTENT_RE = re.compile(
+    r"\bintegration\s+(?:audit\w*|inspect\w*|review\w*|test\w*|"
+    r"validat\w*|verif\w*)\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class TaskIntentClassification:
+    """The single admission-intent decision and its human-readable authority."""
+
+    classification: str
+    reason: str
+    authority: str
+
+    @property
+    def is_verification_style(self) -> bool:
+        return self.classification == "verification_style"
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "classification": self.classification,
+            "classification_reason": self.reason,
+            "classification_authority": self.authority,
+        }
+
+
+class VirtualMergeGateFailure(str):
+    """String-compatible gate failure carrying its admission diagnostics."""
+
+    admission_metadata: dict[str, Any]
+
+    def __new__(
+        cls,
+        message: str,
+        *,
+        classification: TaskIntentClassification,
+        blocking_scope: str,
+        blocking_task_ids: Sequence[int],
+    ):
+        metadata = {
+            **classification.as_dict(),
+            "blocking_scope": blocking_scope,
+            "blocking_task_ids": list(blocking_task_ids),
+        }
+        task_ids = metadata["blocking_task_ids"]
+        rendered_ids = ", ".join(str(task_id) for task_id in task_ids) or "none"
+        decorated_message = (
+            f"{message} [classification={metadata['classification']}; "
+            f"classification_reason={metadata['classification_reason']}; "
+            f"classification_authority={metadata['classification_authority']}; "
+            f"blocking_scope={blocking_scope}; blocking_task_ids={rendered_ids}]"
+        )
+        instance = super().__new__(cls, decorated_message)
+        instance.admission_metadata = metadata
+        return instance
+
+
+def _title_has_negated_implementation_intent(title: str) -> bool:
+    return bool(_NEGATED_IMPLEMENTATION_TITLE_INTENT_RE.search(title))
+
+
+def classify_task_intent(
+    execution_profile: Optional[str],
+    title: Optional[str],
+    description: Optional[str],
+) -> TaskIntentClassification:
+    """Classify admission intent from structured profile or explicit title intent.
+
+    Description text is deliberately not an authority: paths, commands,
+    filenames, and acceptance criteria commonly mention tests while the task
+    still delivers implementation work.
+    """
+
+    normalized_profile = str(execution_profile or "").strip().lower()
+    if normalized_profile in {"test_only", "review_only"}:
+        return TaskIntentClassification(
+            classification="verification_style",
+            reason="explicit_execution_profile",
+            authority="execution_profile",
+        )
+
+    normalized_title = str(title or "").strip().lower()
+    has_implementation_intent = bool(
+        _IMPLEMENTATION_TITLE_INTENT_RE.search(normalized_title)
+    ) and not _title_has_negated_implementation_intent(normalized_title)
+    if has_implementation_intent:
+        return TaskIntentClassification(
+            classification="implementation_style",
+            reason="implementation_intent_in_title",
+            authority="task_title",
+        )
+
+    if _EXPLICIT_VERIFICATION_TITLE_INTENT_RE.search(
+        normalized_title
+    ) or _INTEGRATION_VERIFICATION_TITLE_INTENT_RE.search(normalized_title):
+        return TaskIntentClassification(
+            classification="verification_style",
+            reason="explicit_verification_intent_in_title",
+            authority="task_title",
+        )
+
+    return TaskIntentClassification(
+        classification="implementation_style",
+        reason="no_explicit_verification_intent",
+        authority="task_title_and_execution_profile",
+    )
+
+
 def is_verification_style_task(
     execution_profile: str, title: Optional[str], description: Optional[str]
 ) -> bool:
-    combined = f"{execution_profile} {title or ''} {description or ''}".lower()
-    markers = (
-        "verify",
-        "verification",
-        "refine",
-        "review",
-        "qa",
-        "audit",
-        "integration",
-        "test",
-    )
-    return execution_profile in {"test_only", "review_only"} or any(
-        marker in combined for marker in markers
-    )
+    """Backward-compatible boolean view of :func:`classify_task_intent`."""
+
+    return classify_task_intent(
+        execution_profile, title, description
+    ).is_verification_style
 
 
 def should_execute_in_canonical_project_root(
@@ -239,12 +359,33 @@ def run_virtual_merge_gate(
 ) -> Optional[str]:
     if not project or not current_task:
         return None
-    if not is_verification_style_task(
+    classification = classify_task_intent(
         execution_profile, current_task.title, current_task.description
-    ):
+    )
+    # Free-standing implementation work is not ordered behind unrelated
+    # historical project tasks. Explicit Plan membership remains governed by
+    # the predecessor checks below.
+    if not classification.is_verification_style and current_task.plan_id is None:
         return None
     if current_task.plan_position is None:
         return None
+
+    blocking_scope = (
+        "explicit_plan_predecessors"
+        if current_task.plan_id is not None
+        else "ordered_project_history"
+    )
+
+    def gate_failure(
+        message: str,
+        blocking_task_ids: Sequence[int] = (),
+    ) -> VirtualMergeGateFailure:
+        return VirtualMergeGateFailure(
+            message,
+            classification=classification,
+            blocking_scope=blocking_scope,
+            blocking_task_ids=blocking_task_ids,
+        )
 
     task_service = TaskService(db)
     project_root = resolve_project_workspace_path(project.workspace_path, project.name)
@@ -265,9 +406,13 @@ def run_virtual_merge_gate(
             f"#{task.plan_position} {task.title} ({task.status.value})"
             for task in incomplete[:3]
         )
-        return f"Virtual merge gate failed: earlier ordered tasks are incomplete: {summary}"
+        return gate_failure(
+            f"Virtual merge gate failed: earlier ordered tasks are incomplete: {summary}",
+            [task.id for task in incomplete],
+        )
 
     missing_reports = []
+    missing_report_task_ids = []
     for task in prior_tasks:
         report_path = get_task_report_path(project_root, task)
         legacy_report_path = get_legacy_task_report_path(project_root, task)
@@ -279,10 +424,12 @@ def run_virtual_merge_gate(
             missing_reports.append(
                 f"#{task.plan_position} {task.title} (missing {report_path.name})"
             )
+            missing_report_task_ids.append(task.id)
     if missing_reports:
-        return (
+        return gate_failure(
             "Virtual merge gate failed: missing structured task reports for prior work: "
-            + ", ".join(missing_reports[:3])
+            + ", ".join(missing_reports[:3]),
+            missing_report_task_ids,
         )
 
     state_path = get_state_manager_path_fn(project_root)
@@ -295,19 +442,24 @@ def run_virtual_merge_gate(
                 prior_tasks,
             )
             if unsynced_summary:
-                return (
+                return gate_failure(
                     "Virtual merge gate failed: project state manager is UNSYNCED. "
                     "Resolve earlier task inconsistencies before verify/refine "
-                    f"({unsynced_summary})."
+                    f"({unsynced_summary}).",
+                    [task.id for task in prior_tasks],
                 )
         except Exception:
-            return "Virtual merge gate failed: state manager file is unreadable"
+            return gate_failure(
+                "Virtual merge gate failed: state manager file is unreadable",
+                [task.id for task in prior_tasks],
+            )
 
     baseline_validation = task_service.validate_project_baseline(project, current_task)
     if prior_tasks and baseline_validation["baseline_file_count"] == 0:
-        return (
+        return gate_failure(
             "Virtual merge gate failed: canonical merged project state is empty even "
-            "though earlier ordered tasks are completed."
+            "though earlier ordered tasks are completed.",
+            [task.id for task in prior_tasks],
         )
 
     missing_expected_files = baseline_validation["missing_expected_files"]
@@ -316,9 +468,10 @@ def run_virtual_merge_gate(
             f"#{entry['plan_position']} {entry['title']} -> {entry['path']}"
             for entry in missing_expected_files[:5]
         )
-        return (
+        return gate_failure(
             "Virtual merge gate failed: canonical merged project state is missing "
-            f"files declared by prior completed tasks: {summary}"
+            f"files declared by prior completed tasks: {summary}",
+            [task.id for task in prior_tasks],
         )
 
     return None

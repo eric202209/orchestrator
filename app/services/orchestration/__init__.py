@@ -103,6 +103,7 @@ from .reporting.policy_simulation import (
     simulate_policy_from_replay,
 )
 from .task_rules import (
+    classify_task_intent,
     get_workflow_profile,
     get_task_report_path,
     is_verification_style_task,
@@ -244,6 +245,7 @@ __all__ = [
     "should_restore_workspace_on_failure",
     "get_task_report_path",
     "get_workflow_profile",
+    "classify_task_intent",
     "is_verification_style_task",
     "run_virtual_merge_gate",
     "should_execute_in_canonical_project_root",

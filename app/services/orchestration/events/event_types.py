@@ -29,6 +29,7 @@ class EventType:
     TASK_CLAIMED = "task_claimed"
     TASK_QUEUE_STALE = "task_queue_stale"
     TASK_DISPATCH_REJECTED = "task_dispatch_rejected"
+    TASK_ADMISSION_HELD = "task_admission_held"
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
 

@@ -1,9 +1,11 @@
 import json
 
-from app.models import Project, Task, TaskStatus
+from app.models import Plan, Project, Task, TaskStatus
 from app.services.orchestration.task_rules import (
+    classify_task_intent,
     get_task_report_path,
     get_workflow_profile,
+    is_verification_style_task,
     run_virtual_merge_gate,
     should_force_review_execution_profile,
 )
@@ -395,3 +397,224 @@ def test_virtual_merge_gate_accepts_legacy_root_task_report(db_session, tmp_path
         )
         is None
     )
+
+
+_E2_IMPLEMENTATION_TITLE = (
+    "Add utc_now() helper and migrate one naive datetime consumer"
+)
+_E2_IMPLEMENTATION_DESCRIPTION = (
+    "Add app/time_utils.py with utc_now() returning an aware UTC datetime. "
+    "Migrate app/services/workspace/context_service.py and add the regression "
+    "coverage in app/tests/test_utc_now_helper.py. Run pytest for the acceptance "
+    "tests and preserve the existing exported_at behavior."
+)
+
+
+def test_e2_implementation_task_with_test_contract_is_not_verification_style():
+    assert (
+        is_verification_style_task(
+            "full_lifecycle",
+            _E2_IMPLEMENTATION_TITLE,
+            _E2_IMPLEMENTATION_DESCRIPTION,
+        )
+        is False
+    )
+
+
+def test_e2_implementation_task_is_not_blocked_by_incomplete_prior_tasks(
+    db_session, tmp_path
+):
+    project = Project(name="E2 Admission", workspace_path=str(tmp_path))
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    prior_task = Task(
+        project_id=project.id,
+        title="Historical incomplete task",
+        description="The prior work is still pending.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+        task_subfolder="task-prior",
+    )
+    current_task = Task(
+        project_id=project.id,
+        title=_E2_IMPLEMENTATION_TITLE,
+        description=_E2_IMPLEMENTATION_DESCRIPTION,
+        status=TaskStatus.PENDING,
+        plan_position=2,
+        task_subfolder="task-e2",
+    )
+    db_session.add_all([prior_task, current_task])
+    db_session.commit()
+    db_session.refresh(current_task)
+
+    assert (
+        run_virtual_merge_gate(
+            db_session,
+            project,
+            current_task,
+            "full_lifecycle",
+            lambda root: root / ".agent" / "state_manager.json",
+        )
+        is None
+    )
+
+
+def test_explicit_verification_intent_remains_verification_style():
+    verification_titles = (
+        "Verify the recovery lifecycle without modifying source",
+        "Audit the deployment identity contract",
+        "Review the generated migration and report inconsistencies",
+        "Run integration validation and produce evidence only",
+    )
+
+    for title in verification_titles:
+        assert is_verification_style_task("full_lifecycle", title, "") is True
+
+
+def test_explicit_verification_profiles_remain_verification_style():
+    assert is_verification_style_task("test_only", "Run the checks", "") is True
+    assert is_verification_style_task("review_only", "Inspect the result", "") is True
+
+
+def test_e2_classification_exposes_title_authority_and_reason():
+    classification = classify_task_intent(
+        "full_lifecycle",
+        _E2_IMPLEMENTATION_TITLE,
+        _E2_IMPLEMENTATION_DESCRIPTION,
+    )
+
+    assert classification.as_dict() == {
+        "classification": "implementation_style",
+        "classification_reason": "implementation_intent_in_title",
+        "classification_authority": "task_title",
+    }
+
+
+def test_genuine_verification_hold_exposes_classification_and_blocking_scope(
+    db_session, tmp_path
+):
+    project = Project(
+        name="Verification Hold Diagnostics", workspace_path=str(tmp_path)
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    prior_task = Task(
+        project_id=project.id,
+        title="Implementation predecessor",
+        description="The implementation is pending.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+        task_subfolder="task-prior",
+    )
+    current_task = Task(
+        project_id=project.id,
+        title="Verify the recovery lifecycle without modifying source",
+        description="Produce evidence only.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+        task_subfolder="task-verification",
+    )
+    db_session.add_all([prior_task, current_task])
+    db_session.commit()
+    db_session.refresh(current_task)
+
+    reason = run_virtual_merge_gate(
+        db_session,
+        project,
+        current_task,
+        "full_lifecycle",
+        lambda root: root / ".agent" / "state_manager.json",
+    )
+
+    assert reason is not None
+    assert reason.admission_metadata == {
+        "classification": "verification_style",
+        "classification_reason": "explicit_verification_intent_in_title",
+        "classification_authority": "task_title",
+        "blocking_scope": "ordered_project_history",
+        "blocking_task_ids": [prior_task.id],
+    }
+    assert "classification_reason=explicit_verification_intent_in_title" in reason
+    assert "classification_authority=task_title" in reason
+    assert f"blocking_task_ids={prior_task.id}" in reason
+
+
+def test_explicit_plan_predecessor_still_blocks_implementation_task(
+    db_session, tmp_path
+):
+    project = Project(name="Explicit Plan Ordering", workspace_path=str(tmp_path))
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    plan = Plan(
+        project_id=project.id,
+        title="Implementation plan",
+        source_brain="local",
+        requirement="Keep explicit predecessor ordering.",
+        markdown="1. predecessor\n2. implementation",
+        status="committed",
+    )
+    db_session.add(plan)
+    db_session.flush()
+    predecessor = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Plan predecessor",
+        description="Must finish first.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+        task_subfolder="task-plan-prior",
+    )
+    current_task = Task(
+        project_id=project.id,
+        plan_id=plan.id,
+        title="Add the implementation",
+        description="Add the feature and include regression coverage.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+        task_subfolder="task-plan-current",
+    )
+    db_session.add_all([predecessor, current_task])
+    db_session.commit()
+    db_session.refresh(current_task)
+
+    reason = run_virtual_merge_gate(
+        db_session,
+        project,
+        current_task,
+        "full_lifecycle",
+        lambda root: root / ".agent" / "state_manager.json",
+    )
+
+    assert reason is not None
+    assert "earlier ordered tasks are incomplete" in reason
+    assert reason.admission_metadata["blocking_scope"] == "explicit_plan_predecessors"
+    assert reason.admission_metadata["blocking_task_ids"] == [predecessor.id]
+
+
+def test_implementation_intent_wins_over_test_contract_language():
+    implementation_tasks = (
+        ("Add utc_now() and add tests", "Use pytest for regression coverage."),
+        ("Fix the endpoint and run pytest", "The acceptance tests must pass."),
+        ("Update app/tests/test_example.py", "Keep the existing behavior."),
+        (
+            "Implement validation with regression coverage",
+            "Add the required test cases and run them.",
+        ),
+        (
+            "Update app/services/integration_test.py",
+            "The path is part of the implementation contract.",
+        ),
+        (
+            "Add quadratic interpolation support",
+            "The unrelated word must not be treated as a QA task.",
+        ),
+    )
+
+    for title, description in implementation_tasks:
+        assert is_verification_style_task("full_lifecycle", title, description) is False

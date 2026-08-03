@@ -1861,6 +1861,7 @@ def execute_orchestration_task(
             get_state_manager_path_fn=_get_state_manager_path,
         )
         if gate_error:
+            admission_metadata = getattr(gate_error, "admission_metadata", {})
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = gate_error
             task_execution = get_task_execution(db, task_execution_id)
@@ -1878,6 +1879,32 @@ def execute_orchestration_task(
                     failure_category="governance_hold",
                     backend_id=_resolved_execution_backend,
                 )
+            if admission_metadata:
+                emit_live(
+                    "ERROR",
+                    "[ORCHESTRATION] Task admission held before planning",
+                    metadata={
+                        "phase": "admission",
+                        "failure_category": "governance_hold",
+                        **admission_metadata,
+                    },
+                )
+                try:
+                    _append_orchestration_event(
+                        project_dir=orchestration_state.project_dir,
+                        session_id=session_id,
+                        task_id=task_id,
+                        event_type=EventType.TASK_ADMISSION_HELD,
+                        details={
+                            "failure_category": "governance_hold",
+                            **admission_metadata,
+                        },
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "[ORCHESTRATION] Failed to record task admission hold: %s",
+                        exc,
+                    )
             mark_session_paused(
                 session,
                 alert_level="error",
