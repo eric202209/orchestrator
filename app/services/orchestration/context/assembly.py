@@ -33,6 +33,7 @@ from app.services.orchestration.planning.workspace_identity import (
     planner_workspace_identity_for_context,
 )
 from app.services.orchestration.planning.source_materialization import (
+    PlannerSourceMaterialization,
     materialize_planner_source_context,
 )
 from app.services.workspace.system_settings import get_effective_adaptation_profile
@@ -841,7 +842,7 @@ def assemble_planning_prompt(
     planner_source_materialization = getattr(
         ctx, "planner_source_materialization", None
     )
-    if planner_source_materialization is None:
+    if not isinstance(planner_source_materialization, PlannerSourceMaterialization):
         planner_source_materialization = materialize_planner_source_context(
             Path(ctx.orchestration_state.project_dir),
             task_description=ctx.prompt,

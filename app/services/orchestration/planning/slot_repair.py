@@ -229,11 +229,16 @@ def compile_slots_to_typed_plan(slots: PlanSlots) -> list[dict[str, Any]]:
     verification_commands = tuple(
         dict.fromkeys([*slots.commands, slots.verification_command])
     )
+    source_description = (
+        f"Rewrite the existing source file {target_file}"
+        if str(slots.source_op.get("op") or "") == "write_file"
+        else f"Apply source materialization for {target_file}"
+    )
 
     return [
         {
             "step_number": 1,
-            "description": f"Apply source materialization for {target_file}",
+            "description": source_description,
             "commands": [],
             "verification": slots.verification_command,
             "rollback": None,

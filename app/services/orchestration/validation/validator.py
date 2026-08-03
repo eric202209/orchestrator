@@ -1326,7 +1326,10 @@ class ValidatorService:
                 project_dir=Path(project_dir),
                 source_materialization=source_materialization,
             )
-            if source_contract_issues["source_materialization_unavailable"]:
+            if (
+                source_contract_issues["source_materialization_unavailable"]
+                and workflow_stage not in READ_ONLY_WORKFLOW_STAGES
+            ):
                 repairable.append(
                     "planning_source_materialization_unavailable: expected source "
                     "could not be grounded within the bounded source contract"

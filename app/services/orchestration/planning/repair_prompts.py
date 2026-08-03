@@ -26,6 +26,7 @@ from app.services.orchestration.planning.source_api_contract import (
     build_source_api_contract_capsule,
 )
 from app.services.orchestration.planning.source_materialization import (
+    SOURCE_MATERIALIZATION_REPAIR_MARKERS,
     materialize_planner_source_context,
     plan_target_paths,
     plan_source_materialization_paths,
@@ -276,7 +277,30 @@ def build_planning_repair_prompt_with_metadata(
     source_api_metadata["planner_source_materialization"] = (
         planner_source_materialization.to_metadata()
     )
-    materialization_block = planner_source_materialization.to_prompt_block()
+    repair_text = "\n".join(
+        [
+            str(malformed_output or ""),
+            *(str(reason or "") for reason in (rejection_reasons or [])),
+        ]
+    ).lower()
+    parsed_malformed_output: Any = malformed_output
+    if isinstance(malformed_output, str):
+        try:
+            parsed_malformed_output = json.loads(malformed_output)
+        except (TypeError, ValueError):
+            parsed_malformed_output = malformed_output
+    source_materialization_required = bool(
+        plan_source_materialization_paths(parsed_malformed_output)
+        or "stale_replace" in repair_text
+        or any(
+            marker in repair_text for marker in SOURCE_MATERIALIZATION_REPAIR_MARKERS
+        )
+    )
+    materialization_block = (
+        planner_source_materialization.to_prompt_block()
+        if source_materialization_required
+        else ""
+    )
     effective_guidance_block = guidance_block
     if (
         materialization_block
