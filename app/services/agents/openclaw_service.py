@@ -294,6 +294,7 @@ class OpenClawSessionService:
         self._openclaw_config_path_override: Optional[Path] = None
         self._workspace_binding: Optional[ExecutorWorkspaceBinding] = None
         self._runtime_executor_context: Optional[Any] = None
+        self._runtime_workspace_previous_cwd_override: Optional[str] = None
         self._strict_planning_config_dir: tempfile.TemporaryDirectory | None = None
         self.runtime_configuration = runtime_configuration
         self.backend_role: Optional[str] = (
@@ -602,8 +603,14 @@ class OpenClawSessionService:
                 "binding_config_path": str(real_config_path),
             }
             raise error from exc
+        self._runtime_workspace_previous_cwd_override = self.execution_cwd_override
         self._openclaw_config_path_override = self._workspace_binding.config_path
         self._runtime_executor_context = context
+        # The binding owns both provider configuration/state and the
+        # subprocess cwd. Keeping these on the same service prevents a fresh
+        # nested repair runtime from resolving its cwd back to the canonical
+        # Project Workspace.
+        self.execution_cwd_override = str(context.runtime_workspace)
 
     def _configured_strict_planning_agent_id(self) -> Optional[str]:
         configured = os.environ.get(
@@ -693,6 +700,8 @@ class OpenClawSessionService:
         self._workspace_binding = None
         self._openclaw_config_path_override = None
         self._runtime_executor_context = None
+        self.execution_cwd_override = self._runtime_workspace_previous_cwd_override
+        self._runtime_workspace_previous_cwd_override = None
 
     @property
     def runtime_executor_context(self) -> Optional[Any]:
@@ -703,23 +712,85 @@ class OpenClawSessionService:
     def _validate_runtime_invocation_boundary(self, cwd: Optional[str]) -> None:
         """Prove a sandboxed invocation cannot silently fall back to canonical."""
 
+        runtime_context = getattr(self, "_runtime_executor_context", None)
+        if (
+            runtime_context is not None
+            and getattr(runtime_context, "is_sandboxed", False)
+            and not self.execution_cwd_override
+        ):
+            expected = Path(runtime_context.runtime_workspace).expanduser().resolve()
+            actual = Path(cwd).expanduser().resolve() if cwd else None
+            error = OpenClawWorkspaceBindingError(
+                "Sandboxed OpenClaw invocation has no Runtime Workspace cwd binding"
+            )
+            error.runtime_diagnostics = {
+                "failure_category": "runtime_workspace_binding_mismatch",
+                "runtime_role": self.backend_role,
+                "invocation_stage": "provider_initialization",
+                "expected_workspace": str(expected),
+                "effective_workspace": str(actual) if actual is not None else None,
+                "config_path": (
+                    str(self._openclaw_config_path_override)
+                    if self._openclaw_config_path_override
+                    else None
+                ),
+                "state_directory": (
+                    (self._workspace_binding.environment or {}).get(
+                        "OPENCLAW_STATE_DIR"
+                    )
+                    if self._workspace_binding is not None
+                    else None
+                ),
+                "binding_lifecycle_state": (
+                    "config_bound_cwd_missing"
+                    if self._workspace_binding is not None
+                    else "context_present_binding_missing"
+                ),
+            }
+            raise error
+
         if not self.execution_cwd_override:
             return
         expected = Path(self.execution_cwd_override).expanduser().resolve()
         actual = Path(cwd).expanduser().resolve() if cwd else None
+
+        def _diagnostics(**extra: Any) -> Dict[str, Any]:
+            binding = getattr(self, "_workspace_binding", None)
+            details: Dict[str, Any] = {
+                "failure_category": "runtime_workspace_binding_mismatch",
+                "runtime_role": self.backend_role,
+                "invocation_stage": "provider_initialization",
+                "expected_workspace": str(expected),
+                "effective_workspace": str(actual) if actual is not None else None,
+                "config_path": (
+                    str(self._openclaw_config_path_override)
+                    if self._openclaw_config_path_override
+                    else None
+                ),
+                "state_directory": (
+                    (binding.environment or {}).get("OPENCLAW_STATE_DIR")
+                    if binding is not None
+                    else None
+                ),
+                "binding_lifecycle_state": (
+                    "bound" if binding is not None else "released_or_missing"
+                ),
+            }
+            details.update(extra)
+            return details
+
         if actual != expected:
             error = OpenClawWorkspaceBindingError(
                 "OpenClaw invocation cwd does not match the declared Runtime "
                 f"Workspace: expected {expected}, got {actual}"
             )
-            error.runtime_diagnostics = {
-                "failure_category": "runtime_workspace_binding_mismatch",
-                "expected_runtime_workspace": str(expected),
-                "effective_cwd": str(actual) if actual is not None else None,
-                "canonical_workspace": str(
+            error.runtime_diagnostics = _diagnostics(
+                expected_runtime_workspace=str(expected),
+                effective_cwd=str(actual) if actual is not None else None,
+                canonical_workspace=str(
                     self._resolve_project_root_for_workspace_guard() or ""
                 ),
-            }
+            )
             raise error
         if (
             self._workspace_binding is None
@@ -728,12 +799,11 @@ class OpenClawSessionService:
             error = OpenClawWorkspaceBindingError(
                 "Sandboxed OpenClaw invocation has no ephemeral workspace binding"
             )
-            error.runtime_diagnostics = {
-                "failure_category": "runtime_workspace_binding_mismatch",
-                "expected_runtime_workspace": str(expected),
-                "effective_cwd": str(actual) if actual is not None else None,
-                "binding_present": False,
-            }
+            error.runtime_diagnostics = _diagnostics(
+                expected_runtime_workspace=str(expected),
+                effective_cwd=str(actual) if actual is not None else None,
+                binding_present=False,
+            )
             raise error
 
         try:
@@ -752,26 +822,24 @@ class OpenClawSessionService:
                 "Unable to prove the selected OpenClaw agent is bound to the "
                 "declared Runtime Workspace"
             )
-            error.runtime_diagnostics = {
-                "failure_category": "runtime_workspace_binding_mismatch",
-                "expected_runtime_workspace": str(expected),
-                "effective_cwd": str(actual) if actual is not None else None,
-                "binding_config_path": str(self._openclaw_config_path_override),
-                "binding_validation_error": str(exc),
-            }
+            error.runtime_diagnostics = _diagnostics(
+                expected_runtime_workspace=str(expected),
+                effective_cwd=str(actual) if actual is not None else None,
+                binding_config_path=str(self._openclaw_config_path_override),
+                binding_validation_error=str(exc),
+            )
             raise error
         if not self._paths_same(str(agent.get("workspace") or ""), str(expected)):
             error = OpenClawWorkspaceBindingError(
                 "Selected OpenClaw agent workspace does not match the declared "
                 "Runtime Workspace"
             )
-            error.runtime_diagnostics = {
-                "failure_category": "runtime_workspace_binding_mismatch",
-                "expected_runtime_workspace": str(expected),
-                "effective_cwd": str(actual) if actual is not None else None,
-                "selected_agent": self._last_selected_openclaw_agent_id,
-                "selected_agent_workspace": agent.get("workspace"),
-            }
+            error.runtime_diagnostics = _diagnostics(
+                expected_runtime_workspace=str(expected),
+                effective_cwd=str(actual) if actual is not None else None,
+                selected_agent=self._last_selected_openclaw_agent_id,
+                selected_agent_workspace=agent.get("workspace"),
+            )
             raise error
 
     def _configure_strict_provider_controls(self, agent_id: str) -> Dict[str, Any]:

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
+
+import pytest
 
 from app.models import (
     LogEntry,
@@ -11,6 +14,11 @@ from app.models import (
     Task,
     TaskExecution,
     TaskStatus,
+)
+from app.config import settings
+from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
+from app.services.orchestration.execution.step_support import (
+    repair_step_commands_with_self_correction,
 )
 from app.services.orchestration.execution.executor_workspace_binding import (
     bind_openclaw_workspace,
@@ -25,11 +33,16 @@ from app.services.orchestration.validation.runtime_pollution_guard import (
     snapshot_top_level_entries,
 )
 from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.agents.openclaw_service import OpenClawWorkspaceBindingError
 from app.services.session.execution_policy import classify_failure
 from app.services.session.session_inspection_service import (
     _extract_stop_reasons,
     derive_orchestration_state_block,
     get_session_timeline_payload,
+)
+from app.services.workspace.task_sandbox_allocator import (
+    TaskSandbox,
+    dispose_task_sandbox,
 )
 
 
@@ -145,6 +158,201 @@ def test_canonical_scaffold_fails_closed_while_runtime_scaffold_is_contained(
     boundaries = {entry["creator_boundary"]: entry for entry in pollution["entries"]}
     assert boundaries["canonical_project_root"]["cleanup_safe"] is False
     assert boundaries["runtime_workspace"]["cleanup_safe"] is True
+
+
+def test_nested_step_debug_repair_keeps_runtime_binding_until_provider_returns(
+    db_session, tmp_path, monkeypatch
+):
+    """Reproduce E3 through the role-runtime construction seam.
+
+    The primary execution runtime returns malformed provider prose, causing
+    the existing step-repair fallback to construct a fresh debug runtime.
+    That runtime must use the exact parent RuntimeExecutorContext for cwd and
+    ephemeral OpenClaw state for the whole nested provider invocation.
+    """
+
+    canonical = tmp_path / "canonical"
+    runtime = tmp_path / "runtime"
+    canonical.mkdir()
+    runtime.mkdir()
+    (canonical / "tracked-source.py").write_text("sentinel\n", encoding="utf-8")
+    config_path = tmp_path / "openclaw.json"
+    _write_config(config_path, canonical)
+
+    project = Project(
+        name="W1 nested repair project",
+        workspace_path=str(canonical),
+    )
+    db_session.add(project)
+    db_session.flush()
+    session = SessionModel(name="W1 nested repair session", project_id=project.id)
+    task = Task(project_id=project.id, title="W1 nested repair task")
+    db_session.add_all([session, task])
+    db_session.commit()
+    db_session.refresh(session)
+    db_session.refresh(task)
+
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_BACKEND", "local_openclaw")
+    monkeypatch.setattr(
+        OpenClawSessionService,
+        "_openclaw_config_path",
+        lambda self: config_path,
+    )
+    primary = create_agent_runtime(
+        db_session,
+        session.id,
+        task.id,
+        role=BackendRole.EXECUTION,
+        backend_override="local_openclaw",
+    )
+    primary.project_id = project.id
+    primary.task_execution_id = 249
+    context = RuntimeExecutorContext(
+        executor="openclaw",
+        runtime_workspace=runtime,
+        project_workspace=canonical,
+        project_id=project.id,
+        task_execution_id=249,
+        runtime_root=tmp_path,
+        sandbox=object(),
+    )
+    primary.execution_cwd_override = str(runtime)
+    primary.bind_runtime_workspace(context)
+
+    canonical_before = snapshot_workspace_entry_evidence(canonical)
+    observed = {}
+
+    async def primary_response(prompt, timeout_seconds=120):
+        del prompt, timeout_seconds
+        return {"output": "provider prose, not JSON", "error": "non_json_response"}
+
+    async def debug_response(self, prompt, timeout_seconds=120):
+        del prompt, timeout_seconds
+        observed.update(
+            {
+                "runtime": self,
+                "context": self.runtime_executor_context,
+                "task_execution_id": self.task_execution_id,
+                "cwd": self._resolve_execution_cwd(),
+                "binding": self._workspace_binding,
+                "config_path": self._openclaw_config_path_override,
+                "config_exists_during": self._openclaw_config_path_override.exists(),
+                "environment": dict(self._workspace_binding.environment),
+            }
+        )
+        selected = json.loads(observed["config_path"].read_text(encoding="utf-8"))
+        observed["selected_agent_workspace"] = selected["agents"]["list"][0][
+            "workspace"
+        ]
+        observed["selected_agent_dir"] = selected["agents"]["list"][0]["agentDir"]
+        observed["session_store"] = selected["session"]["store"]
+        self._last_selected_openclaw_agent_id = selected["agents"]["list"][0]["id"]
+        self._validate_runtime_invocation_boundary(observed["cwd"])
+        (runtime / "provider-scaffold").mkdir()
+        (runtime / "provider-scaffold" / "state.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        return {
+            "output": json.dumps(
+                {
+                    "description": "repair the malformed step",
+                    "commands": ["python -m pytest -q"],
+                    "verification": "python -m pytest -q",
+                }
+            )
+        }
+
+    primary.execute_task = primary_response
+    monkeypatch.setattr(OpenClawSessionService, "execute_task", debug_response)
+    monkeypatch.setattr(
+        "app.services.orchestration.execution.step_support.render_adapted_runtime_prompt",
+        lambda *args, **kwargs: kwargs.get("prompt_body") or args[0],
+    )
+
+    repaired = repair_step_commands_with_self_correction(
+        runtime_service=primary,
+        db=db_session,
+        session_id=session.id,
+        task_id=task.id,
+        session_instance_id=session.instance_id,
+        task_prompt="repair the malformed execution step",
+        step={"description": "execute", "commands": []},
+        step_index=1,
+        project_dir=runtime,
+        prior_results_summary="step 1 succeeded",
+        project_context="",
+        logger_obj=logging.getLogger("phase22b1w1-nested-repair-test"),
+        extract_structured_text=lambda value: str(value or ""),
+        normalize_step=lambda data, *_args: data,
+        record_live_log=lambda *args, **kwargs: None,
+    )
+
+    assert repaired["commands"] == ["python -m pytest -q"]
+    assert isinstance(observed["runtime"], OpenClawSessionService)
+    assert observed["runtime"] is not primary
+    assert observed["context"] is context
+    assert observed["task_execution_id"] == 249
+    assert observed["cwd"] == str(runtime)
+    assert observed["selected_agent_workspace"] == str(runtime)
+    assert observed["selected_agent_dir"] != str(canonical)
+    assert observed["session_store"].startswith(
+        observed["environment"]["OPENCLAW_STATE_DIR"]
+    )
+    assert observed["binding"] is not None
+    assert observed["config_exists_during"] is True
+    assert observed["environment"]["OPENCLAW_CONFIG_PATH"] == str(
+        observed["config_path"]
+    )
+    assert observed["environment"]["OPENCLAW_STATE_DIR"] != str(canonical)
+    assert snapshot_workspace_entry_evidence(canonical) == canonical_before
+    assert (runtime / "provider-scaffold" / "state.json").exists()
+    assert observed["runtime"]._workspace_binding is None
+    assert observed["runtime"]._openclaw_config_path_override is None
+    assert observed["runtime"].runtime_executor_context is None
+    assert not observed["config_path"].exists()
+    disposal = dispose_task_sandbox(
+        TaskSandbox(
+            path=runtime,
+            project_id=project.id,
+            task_execution_id=249,
+            executor="openclaw",
+            is_git=False,
+        )
+    )
+    assert disposal.cleanup_complete is True
+    assert not runtime.exists()
+
+
+def test_sandboxed_context_without_cwd_binding_fails_before_provider_init(tmp_path):
+    canonical = tmp_path / "canonical"
+    runtime = tmp_path / "runtime"
+    canonical.mkdir()
+    runtime.mkdir()
+    context = RuntimeExecutorContext(
+        executor="openclaw",
+        runtime_workspace=runtime,
+        project_workspace=canonical,
+        project_id=12,
+        task_execution_id=249,
+        sandbox=object(),
+    )
+    service = object.__new__(OpenClawSessionService)
+    service.execution_cwd_override = None
+    service._runtime_executor_context = context
+    service._workspace_binding = None
+    service._openclaw_config_path_override = None
+    service.backend_role = "debug_repair"
+
+    with pytest.raises(OpenClawWorkspaceBindingError) as raised:
+        service._validate_runtime_invocation_boundary(str(canonical))
+
+    diagnostics = raised.value.runtime_diagnostics
+    assert diagnostics["failure_category"] == "runtime_workspace_binding_mismatch"
+    assert diagnostics["runtime_role"] == "debug_repair"
+    assert diagnostics["invocation_stage"] == "provider_initialization"
+    assert diagnostics["expected_workspace"] == str(runtime.resolve())
+    assert diagnostics["effective_workspace"] == str(canonical.resolve())
+    assert diagnostics["binding_lifecycle_state"] == "context_present_binding_missing"
 
 
 def test_planning_repair_timeout_gets_typed_terminal_cause():

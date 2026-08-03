@@ -299,6 +299,15 @@ def repair_step_commands_with_self_correction(
                 create_agent_runtime,
             )
 
+            runtime_context = getattr(runtime_service, "runtime_executor_context", None)
+            if getattr(runtime_service, "execution_cwd_override", None) and (
+                runtime_context is None
+            ):
+                raise RuntimeError(
+                    "Sandboxed step repair cannot construct a provider runtime "
+                    "without the parent RuntimeExecutorContext"
+                )
+
             if getattr(runtime_service, "runtime_configuration", None) is not None:
                 fallback_runtime = create_agent_runtime(
                     db, session_id, task_id, role=BackendRole.DEBUG_REPAIR
@@ -313,9 +322,6 @@ def repair_step_commands_with_self_correction(
                                 attribute,
                                 getattr(runtime_service, attribute),
                             )
-                    runtime_context = getattr(
-                        runtime_service, "runtime_executor_context", None
-                    )
                     if runtime_context is not None and hasattr(
                         fallback_runtime, "bind_runtime_workspace"
                     ):
