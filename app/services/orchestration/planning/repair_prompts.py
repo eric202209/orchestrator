@@ -2219,6 +2219,8 @@ Stale replace second-pass target preservation:
                             current_guidance_block,
                         )
                     )
+    for current_knowledge_block in knowledge_candidates:
+        for current_guidance_block in guidance_candidates:
             for (
                 current_source_context_block,
                 current_structure_capsule,
