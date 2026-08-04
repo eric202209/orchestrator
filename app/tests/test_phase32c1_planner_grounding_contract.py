@@ -828,3 +828,182 @@ def test_repair_prompt_receives_the_same_target_region(tmp_path):
     assert "target_hint: datetime.utcnow()" in prompt
     assert "target_included: true" in prompt
     assert "Never reconstruct a whole file from a partial excerpt." in prompt
+
+
+# Phase 32D-2R1 — compact model-visible source-provenance rendering.
+#
+# Internal provenance keeps the complete D-2 evidence set; the model-visible
+# prompt projection carries only what is needed to use the source safely.
+
+_PROMPT_OMITTED_METADATA_LABELS = (
+    "source_length:",
+    "included_prompt_length:",
+    "visible_bytes:",
+    "target_hint_type:",
+    "target_hint_authority:",
+    "target_hint_status:",
+    "target_match_count:",
+    "target_match_start:",
+    "target_match_end:",
+    "truncated_before:",
+    "truncated_after:",
+    "priority:",
+)
+
+_INTERNAL_PROVENANCE_FIELDS = (
+    "priority",
+    "selection_strategy",
+    "full_source_bytes",
+    "included_source_bytes",
+    "start_byte",
+    "end_byte",
+    "start_line",
+    "end_line",
+    "truncated_before",
+    "truncated_after",
+    "target_hint",
+    "target_hint_type",
+    "target_hint_authority",
+    "target_hint_status",
+    "target_match_count",
+    "target_match_start",
+    "target_match_end",
+    "target_included",
+    "content_hash",
+    "version_identity",
+    "status",
+    "creation_authorized",
+)
+
+
+def test_internal_provenance_retains_every_target_aware_field():
+    materialization = _attempt5_materialization()
+    record = materialization.file_map()["app/services/workspace/context_service.py"]
+
+    provenance = record.to_dict()
+    for name in _INTERNAL_PROVENANCE_FIELDS:
+        assert name in provenance, f"internal provenance lost {name}"
+
+    assert provenance["selection_strategy"] == SELECTION_TARGET_EXACT
+    assert provenance["target_hint"] == "datetime.utcnow()"
+    assert provenance["target_hint_status"] == TARGET_HINT_MATCHED
+    assert provenance["target_match_count"] >= 1
+    assert provenance["target_match_start"] is not None
+    assert provenance["start_byte"] is not None and provenance["end_byte"] is not None
+    assert provenance["target_included"] is True
+
+
+def test_target_aware_selection_metadata_survives_to_metadata_evidence():
+    metadata = _attempt5_materialization().to_metadata()
+    entry = next(
+        item
+        for item in metadata["files"]
+        if item["relative_path"] == "app/services/workspace/context_service.py"
+    )
+
+    assert metadata["target_materialized_file_count"] == 1
+    for name in _INTERNAL_PROVENANCE_FIELDS:
+        assert name in entry, f"evidence metadata lost {name}"
+    assert "content" not in entry
+
+
+def test_compact_prompt_rendering_omits_nonessential_metadata():
+    block = _attempt5_materialization().to_prompt_block()
+
+    for label in _PROMPT_OMITTED_METADATA_LABELS:
+        assert label not in block, f"prompt still renders {label}"
+
+
+def test_compact_prompt_rendering_retains_required_source_evidence():
+    materialization = _attempt5_materialization()
+    record = materialization.file_map()["app/services/workspace/context_service.py"]
+    block = materialization.to_prompt_block()
+
+    # P0 — the target-containing excerpt itself.
+    assert "datetime.utcnow()" in block
+    assert _visible_body(record) in block
+    # P1 — path and stable source identity.
+    assert "### app/services/workspace/context_service.py" in block
+    assert f"version_identity: {record.version_identity}" in block
+    assert f"content_hash: {record.content_hash}" in block
+    # P2 — target hint and visible line range.
+    assert "target_hint: datetime.utcnow()" in block
+    assert f"visible_lines: {record.start_line}-{record.end_line}" in block
+    assert "target_included: true" in block
+    # P4/P5 — truncation state and selection strategy.
+    assert "truncated: true" in block
+    assert f"selection_strategy: {SELECTION_TARGET_EXACT}" in block
+
+
+def test_compact_prompt_rendering_keeps_new_file_creation_authorization():
+    block = _attempt5_materialization().to_prompt_block()
+
+    assert "### app/time_utils.py" in block
+    assert "### app/tests/test_utc_now_helper.py" in block
+    assert block.count(f"status: {SOURCE_STATUS_NEW}") == 2
+    assert block.count("creation_authorized: true") == 2
+
+
+def test_first_pass_and_repair_prompts_share_one_compact_renderer(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    filler = "".join(f"# filler line {index}\n" for index in range(300))
+    (package / "deep.py").write_text(
+        filler + "    stamp = datetime.utcnow().isoformat()\n" + filler,
+        encoding="utf-8",
+    )
+    task = (
+        "Replace the deprecated datetime.utcnow() call in pkg/deep.py with "
+        "the shared utc_now() helper."
+    )
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        task_description=task,
+        expected_paths=["pkg/deep.py"],
+        supporting_paths=[],
+    )
+    first_pass_block = materialization.to_prompt_block()
+
+    repair_prompt = build_planning_repair_prompt(
+        task_description=task,
+        malformed_output=json.dumps(
+            _plan(operation="replace_in_file", path="pkg/deep.py", commands=[])
+        ),
+        project_dir=tmp_path,
+        rejection_reasons=["stale_replace"],
+    )
+
+    # The repair prompt embeds the identical rendering, not a divergent one.
+    assert first_pass_block in repair_prompt
+    for label in _PROMPT_OMITTED_METADATA_LABELS:
+        assert label not in repair_prompt
+
+
+def test_grounding_invariants_are_stated_once_not_repeated_per_file():
+    block = _attempt5_materialization().to_prompt_block()
+
+    invariants = (
+        "A future read_file command is not planning-time evidence.",
+        "Never reconstruct a whole file from a partial excerpt.",
+        "Omitted or truncated source does not authorize fabricated exact replacement.",
+        "Each visible region was deliberately selected around the task target; use the visible text.",
+    )
+    for invariant in invariants:
+        assert block.count(invariant) == 1, f"duplicated invariant: {invariant}"
+
+
+def test_compact_rendering_spends_its_budget_on_source_not_metadata():
+    materialization = _attempt5_materialization()
+    block = materialization.to_prompt_block()
+    excerpt_chars = sum(len(item.content or "") for item in materialization.files)
+
+    # P0 excerpt evidence must never be crowded out by supplementary metadata.
+    assert excerpt_chars > 0
+    assert len(block) - excerpt_chars < 2000
+    assert materialization.materialized_source_bytes <= 5000
+    assert (
+        materialization.file_map()[
+            "app/services/workspace/context_service.py"
+        ].included_source_bytes
+        <= 2000
+    )
