@@ -670,7 +670,9 @@ Rules:
         )
     active_source_context_block = source_context_block
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and source_context_block:
-        active_source_context_block = _truncate_text(source_context_block, 560)
+        active_source_context_block = _compact_python_test_source_context_block(
+            source_context_block, max_chars=560
+        )
         prompt = _compose_prompt(
             "",
             active_source_context_block,
@@ -897,6 +899,32 @@ def build_python_test_source_context_block(
         if total_chars >= PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS:
             break
     return "\n".join(lines).strip()[:PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS]
+
+
+def _compact_python_test_source_context_block(
+    source_context_block: str, *, max_chars: int
+) -> str:
+    """Keep imported source evidence when a repair prompt must shed context.
+
+    The normal block begins with preservation guidance, so a generic head trim
+    can remove every imported-source excerpt—the only exact implementation
+    evidence needed to safely repair an existing Python test.
+    """
+
+    marker = "source excerpt imported by tests: "
+    excerpt_index = source_context_block.find(marker)
+    if excerpt_index < 0:
+        return _truncate_text(source_context_block, max_chars)
+
+    compact_prefix = (
+        "## PYTHON TEST SOURCE CONTEXT\n"
+        "Preserve the existing source API imported by tests.\n"
+    )
+    available_excerpt_chars = max_chars - len(compact_prefix)
+    if available_excerpt_chars <= 0:
+        return _truncate_text(compact_prefix, max_chars)
+    excerpt = source_context_block[excerpt_index:].strip()
+    return compact_prefix + _truncate_text(excerpt, available_excerpt_chars)
 
 
 def build_source_api_contract_context_block(
@@ -1958,21 +1986,21 @@ Schema per step:
 step_number, description, commands, verification, rollback, expected_files, optional ops.
 
 Rules:
-- commands must be short shell strings under 900 characters each.
+- commands: shell strings <=900 chars.
 - {ops_contract}
 - {operation_choice_contract}
 - shell fallback limits: {shell_fallback_limits}
 - {verification_contract}
 - {test_scaffold_contract}
 - {json_content_contract}
-- verification must be one real command using `python -c`, `python -m`, `node -e`, `npm run build`, or a project test command.
+- verification: one real command using `python -c`, `python -m`, `node -e`, `npm run build`, or a project test command.
 - expected_files must be relative paths only.
-- expected_files steps must write real content; no touch-only, pass, empty function stubs, or placeholder-only implementation; write_file content must be behaviorally complete.
+- expected_files steps must write real content; no touch-only, pass, stubs, or placeholder-only implementation; write_file content must be behaviorally complete.
 - no heredocs, multiline shell file bodies, or nested python -c one-liners for file writes; use ops.write_file or ops.replace_in_file instead; prefer python3 -m pytest -q for verification.
 - do not remove, comment out, or weaken existing test assertions; test-modifying ops must preserve all original assertions.
 - no nested project folder; run directly in the task workspace and do not `cd` into a new app/backend/frontend root.
 - no duplicated path roots like frontend/src/frontend/src or backend/src/backend/src.
-- no background processes, dev servers, absolute paths, prose, markdown, or extra keys beyond optional ops.
+- no background processes, dev servers, absolute paths, prose, markdown, or extra keys.
 - each step is a separate complete JSON object in the array; never merge content from multiple steps into one step.
 """
 

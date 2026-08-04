@@ -1104,8 +1104,6 @@ def render_planner_source_materialization(
                 f"creation_authorized: {str(item.creation_authorized).lower()}",
                 f"version_identity: {item.version_identity or '(none)'}",
                 f"content_hash: {item.content_hash or '(none)'}",
-                f"source_length: {item.source_length if item.source_length is not None else '(none)'}",
-                f"included_prompt_length: {item.included_prompt_length}",
                 f"selection_strategy: {item.selection_strategy or '(none)'}",
                 (
                     "visible_lines: "
@@ -1115,21 +1113,9 @@ def render_planner_source_materialization(
                         else "(none)"
                     )
                 ),
-                (
-                    "visible_bytes: "
-                    + (
-                        f"{item.start_byte}-{item.end_byte}"
-                        if item.start_byte is not None
-                        else "(none)"
-                    )
-                ),
                 f"target_hint: {item.target_hint or '(none)'}",
-                f"target_hint_status: {item.target_hint_status}",
-                f"target_match_count: {item.target_match_count}",
                 f"target_included: {str(item.target_included).lower()}",
                 f"truncated: {str(item.truncated).lower()}",
-                f"truncated_before: {str(item.truncated_before).lower()}",
-                f"truncated_after: {str(item.truncated_after).lower()}",
                 f"omission_reason: {item.omission_reason or '(none)'}",
             ]
         )
