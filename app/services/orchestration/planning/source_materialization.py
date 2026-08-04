@@ -26,14 +26,20 @@ MAX_SOURCE_CONTENT_TOTAL_CHARS = 5000
 _SOURCE_TRUNCATED_MARKER = "... [truncated]"
 
 
-def _read_bounded_source_contents(
-    project_dir: Path, rel_paths: list[str]
-) -> dict[str, str]:
-    from app.services.orchestration.phases.completion_repair_capsule import (
-        _read_bounded_source_contents as read_bounded_source_contents,
-    )
+def _read_source_text(
+    path: Path, relative_path: str, cache: dict[str, str]
+) -> str | None:
+    """Read one already workspace-validated file with the reader's decoding rules."""
 
-    return read_bounded_source_contents(project_dir, rel_paths)
+    cached = cache.get(relative_path)
+    if cached is not None:
+        return cached
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    cache[relative_path] = text
+    return text
 
 
 SOURCE_MATERIALIZATION_EXTENSIONS = ".py .js .jsx .ts .tsx .css .html .md".split()
@@ -60,6 +66,35 @@ SOURCE_STATUS_MISSING = "missing_expected_file"
 SOURCE_STATUS_UNREADABLE = "unreadable_or_binary_file"
 SOURCE_STATUS_OMITTED = "source_omitted_by_explicit_bound"
 
+SELECTION_FULL_FILE = "full_file"
+SELECTION_TARGET_EXACT = "target_centered_exact_match"
+SELECTION_TARGET_SYMBOL = "target_centered_symbol_match"
+SELECTION_HEAD_FALLBACK = "head_fallback_no_target"
+SELECTION_OMITTED_TOTAL_BUDGET = "omitted_total_budget"
+SELECTION_NEW_FILE = "new_file_no_source"
+
+TARGET_HINT_MATCHED = "target_hint_matched"
+TARGET_HINT_NOT_FOUND = "target_hint_not_found"
+TARGET_HINT_ABSENT = "no_target_hint"
+
+HINT_TYPE_EXACT_CALL = "exact_call"
+HINT_TYPE_QUOTED_SNIPPET = "quoted_snippet"
+HINT_TYPE_SYMBOL = "symbol"
+
+_EXACT_HINT_TYPES = (HINT_TYPE_EXACT_CALL, HINT_TYPE_QUOTED_SNIPPET)
+
+# Deterministic hint-type ranking used when several hints match one file.
+_HINT_TYPE_RANK = {
+    HINT_TYPE_EXACT_CALL: 0,
+    HINT_TYPE_QUOTED_SNIPPET: 1,
+    HINT_TYPE_SYMBOL: 2,
+}
+
+_PRIORITY_RANK = {"P0": 0, "P1": 1, "P2": 2, "P3": 3, "P4": 4}
+
+_TRUNCATED_PREFIX_MARKER = _SOURCE_TRUNCATED_MARKER + "\n"
+_TRUNCATED_SUFFIX_MARKER = "\n" + _SOURCE_TRUNCATED_MARKER
+
 _CREATION_WORD_RE = re.compile(
     r"\b(add|author|create|generate|introduce|new|scaffold|write)\b",
     re.IGNORECASE,
@@ -83,6 +118,24 @@ class MaterializedSourceFile:
     expected: bool = False
     creation_authorized: bool = False
     omission_reason: str | None = None
+    priority: str = "P3"
+    selection_strategy: str | None = None
+    full_source_bytes: int | None = None
+    included_source_bytes: int = 0
+    start_byte: int | None = None
+    end_byte: int | None = None
+    start_line: int | None = None
+    end_line: int | None = None
+    truncated_before: bool = False
+    truncated_after: bool = False
+    target_hint: str | None = None
+    target_hint_type: str | None = None
+    target_hint_authority: str | None = None
+    target_hint_status: str = TARGET_HINT_ABSENT
+    target_match_count: int = 0
+    target_match_start: int | None = None
+    target_match_end: int | None = None
+    target_included: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,6 +171,9 @@ class PlannerSourceMaterialization:
             "expected_file_count": sum(1 for item in self.files if item.expected),
             "materialized_file_count": sum(
                 1 for item in self.files if item.status == SOURCE_STATUS_EXISTING
+            ),
+            "target_materialized_file_count": sum(
+                1 for item in self.files if item.target_included
             ),
             "unavailable_reasons": list(self.unavailable_reasons),
             "files": [
@@ -209,19 +265,406 @@ def _binary_or_unreadable(path: Path) -> str | None:
     return None
 
 
-def _bounded_utf8_content(content: str, maximum_bytes: int) -> tuple[str | None, bool]:
-    """Fit reader output to a UTF-8 byte bound without splitting a code point."""
+@dataclass(frozen=True)
+class SourceTargetHint:
+    """One bounded, authority-bearing target hint extracted from task input."""
 
-    encoded = content.encode("utf-8")
-    if len(encoded) <= maximum_bytes:
-        return content, False
-    marker_bytes = _SOURCE_TRUNCATED_MARKER.encode("utf-8")
-    if maximum_bytes <= len(marker_bytes):
-        return None, False
-    prefix = encoded[: maximum_bytes - len(marker_bytes)].decode(
-        "utf-8", errors="ignore"
+    text: str
+    hint_type: str
+    authority: str
+    target_path: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+_HINT_PATH_RE = re.compile(
+    r"\b([a-zA-Z_][a-zA-Z0-9_]*/[a-zA-Z_][a-zA-Z0-9_./]*\.[a-zA-Z0-9_]+)\b"
+)
+_HINT_BACKTICK_RE = re.compile(r"`([^`\n]{2,120})`")
+_HINT_QUOTED_RE = re.compile(r"\"([^\"\n]{2,120})\"|'([^'\n]{2,120})'")
+_HINT_CALL_RE = re.compile(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\(\s*\))")
+_HINT_DEFINITION_RE = re.compile(r"\b(?:def|class|function|method)\s+([A-Za-z_]\w*)")
+_HINT_PATH_LIKE_RE = re.compile(r"[/\\]|\.(py|js|jsx|ts|tsx|css|html|md)$")
+_CLAUSE_SEPARATORS = (",", ";", "\n")
+_HINT_MINIMUM_LENGTH = 3
+_HINT_PATH_ASSOCIATION_WINDOW = 200
+_MAXIMUM_TARGET_HINTS = 12
+
+
+def _hint_is_usable(text: str) -> bool:
+    candidate = text.strip()
+    if len(candidate) < _HINT_MINIMUM_LENGTH:
+        return False
+    if _HINT_PATH_LIKE_RE.search(candidate):
+        return False
+    # Reject prose: a usable hint must look like code.
+    return bool(re.search(r"[(_.\[\]=]", candidate)) and bool(
+        re.match(r"^[A-Za-z_]", candidate)
     )
-    return prefix + _SOURCE_TRUNCATED_MARKER, True
+
+
+def _clause_span(text: str, position: int) -> tuple[int, int]:
+    """Return the clause boundaries containing ``position``.
+
+    A path named in the same clause as a hint is the authoritative association;
+    clause separators never appear inside a file path.
+    """
+
+    start = max(
+        (text.rfind(separator, 0, position) + 1 for separator in _CLAUSE_SEPARATORS),
+        default=0,
+    )
+    ends = [
+        index
+        for index in (
+            text.find(separator, position) for separator in _CLAUSE_SEPARATORS
+        )
+        if index >= 0
+    ]
+    return max(start, 0), min(ends) if ends else len(text)
+
+
+def _associated_hint_path(
+    path_spans: list[tuple[int, int, str]], position: int, text: str
+) -> str | None:
+    clause_start, clause_end = _clause_span(text, position)
+    in_clause = [
+        (start, end, path)
+        for start, end, path in path_spans
+        if clause_start <= start and end <= clause_end
+    ]
+    best: tuple[int, str] | None = None
+    for start, end, path in in_clause or path_spans:
+        if start <= position < end:
+            distance = 0
+        elif position < start:
+            distance = start - position
+        else:
+            distance = position - end
+        if distance > _HINT_PATH_ASSOCIATION_WINDOW:
+            continue
+        if best is None or distance < best[0]:
+            best = (distance, path)
+    return best[1] if best else None
+
+
+def extract_source_target_hints(
+    task_description: str,
+    *,
+    planner_contract: Mapping[str, Any] | None = None,
+) -> tuple[SourceTargetHint, ...]:
+    """Extract bounded, high-confidence target hints from authoritative task input.
+
+    Only code-shaped literals are retained: exact calls, quoted or backticked
+    snippets, and explicitly declared definition names.  Ordinary prose words are
+    never treated as search terms.
+    """
+
+    text = str(task_description or "")
+    contract_text = ""
+    if isinstance(planner_contract, Mapping):
+        for key in ("task_description", "description", "summary", "objective"):
+            value = planner_contract.get(key)
+            if isinstance(value, str) and value.strip():
+                contract_text = value
+                break
+
+    hints: list[SourceTargetHint] = []
+    seen: set[tuple[str, str]] = set()
+
+    for authority, body in (
+        ("task_description", text),
+        ("planner_contract", contract_text),
+    ):
+        if not body:
+            continue
+        path_spans = [
+            (match.start(1), match.end(1), match.group(1))
+            for match in _HINT_PATH_RE.finditer(body)
+        ]
+        candidates: list[tuple[int, str, str]] = []
+        for match in _HINT_BACKTICK_RE.finditer(body):
+            candidate = match.group(1).strip()
+            hint_type = (
+                HINT_TYPE_EXACT_CALL if "(" in candidate else HINT_TYPE_QUOTED_SNIPPET
+            )
+            candidates.append((match.start(1), candidate, hint_type))
+        for match in _HINT_QUOTED_RE.finditer(body):
+            candidate = (match.group(1) or match.group(2) or "").strip()
+            hint_type = (
+                HINT_TYPE_EXACT_CALL if "(" in candidate else HINT_TYPE_QUOTED_SNIPPET
+            )
+            candidates.append((match.start(), candidate, hint_type))
+        for match in _HINT_CALL_RE.finditer(body):
+            candidates.append(
+                (match.start(1), match.group(1).strip(), HINT_TYPE_EXACT_CALL)
+            )
+        for match in _HINT_DEFINITION_RE.finditer(body):
+            candidates.append(
+                (match.start(1), match.group(1).strip(), HINT_TYPE_SYMBOL)
+            )
+
+        for position, candidate, hint_type in sorted(candidates, key=lambda x: x[0]):
+            if not _hint_is_usable(candidate):
+                continue
+            key = (candidate, hint_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            hints.append(
+                SourceTargetHint(
+                    text=candidate,
+                    hint_type=hint_type,
+                    authority=authority,
+                    target_path=_associated_hint_path(path_spans, position, body),
+                )
+            )
+            if len(hints) >= _MAXIMUM_TARGET_HINTS:
+                return tuple(hints)
+    return tuple(hints)
+
+
+def _line_spans(encoded: bytes) -> list[tuple[int, int]]:
+    """Return (start, end) byte spans for each line, newline included."""
+
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for index, byte in enumerate(encoded):
+        if byte == 0x0A:
+            spans.append((start, index + 1))
+            start = index + 1
+    if start < len(encoded) or not spans:
+        spans.append((start, len(encoded)))
+    return spans
+
+
+def _line_index_for_byte(spans: list[tuple[int, int]], position: int) -> int:
+    for index, (start, end) in enumerate(spans):
+        if start <= position < end:
+            return index
+    return len(spans) - 1
+
+
+def _align_forward(encoded: bytes, position: int) -> int:
+    """Move a byte offset forward to the next UTF-8 code-point boundary."""
+
+    while 0 < position < len(encoded) and (encoded[position] & 0xC0) == 0x80:
+        position += 1
+    return position
+
+
+def _align_backward(encoded: bytes, position: int) -> int:
+    """Move a byte offset backward to a UTF-8 code-point boundary."""
+
+    while 0 < position < len(encoded) and (encoded[position] & 0xC0) == 0x80:
+        position -= 1
+    return position
+
+
+@dataclass(frozen=True)
+class _SelectedRegion:
+    start_byte: int
+    end_byte: int
+    start_line: int
+    end_line: int
+    truncated_before: bool
+    truncated_after: bool
+    content: str
+
+
+def _render_region(
+    encoded: bytes,
+    spans: list[tuple[int, int]],
+    start_byte: int,
+    end_byte: int,
+) -> _SelectedRegion:
+    truncated_before = start_byte > 0
+    truncated_after = end_byte < len(encoded)
+    body = encoded[start_byte:end_byte].decode("utf-8", errors="ignore")
+    content = "".join(
+        [
+            _TRUNCATED_PREFIX_MARKER if truncated_before else "",
+            body,
+            _TRUNCATED_SUFFIX_MARKER if truncated_after else "",
+        ]
+    )
+    return _SelectedRegion(
+        start_byte=start_byte,
+        end_byte=end_byte,
+        start_line=_line_index_for_byte(spans, start_byte) + 1,
+        end_line=_line_index_for_byte(spans, max(start_byte, end_byte - 1)) + 1,
+        truncated_before=truncated_before,
+        truncated_after=truncated_after,
+        content=content,
+    )
+
+
+def _select_source_region(
+    text: str,
+    *,
+    budget_bytes: int,
+    match_span: tuple[int, int] | None,
+) -> _SelectedRegion | None:
+    """Select a bounded, line-aligned region of ``text`` within ``budget_bytes``.
+
+    When ``match_span`` is supplied the region is centered on that occurrence and
+    the occurrence is never cut; otherwise the bounded head of the file is used.
+    """
+
+    encoded = text.encode("utf-8")
+    spans = _line_spans(encoded)
+    if len(encoded) <= budget_bytes:
+        return _render_region(encoded, spans, 0, len(encoded))
+
+    marker_reserve = len(_TRUNCATED_PREFIX_MARKER.encode("utf-8")) + len(
+        _TRUNCATED_SUFFIX_MARKER.encode("utf-8")
+    )
+    available = budget_bytes - marker_reserve
+    if available <= 0:
+        return None
+
+    if match_span is None:
+        first_line = last_line = 0
+        match_start, match_end = 0, 0
+    else:
+        match_start, match_end = match_span
+        first_line = _line_index_for_byte(spans, match_start)
+        last_line = _line_index_for_byte(spans, max(match_start, match_end - 1))
+
+    start_byte = spans[first_line][0]
+    end_byte = spans[last_line][1]
+    if end_byte - start_byte > available:
+        # A single anchoring line exceeds the budget: slice on code-point
+        # boundaries around the match itself without cutting it.
+        if match_span is None:
+            end_byte = _align_backward(encoded, start_byte + available)
+            return _render_region(encoded, spans, start_byte, end_byte)
+        if match_end - match_start > available:
+            return None
+        slack = available - (match_end - match_start)
+        start_byte = _align_forward(encoded, max(0, match_start - slack // 2))
+        end_byte = _align_backward(encoded, min(len(encoded), start_byte + available))
+        if end_byte < match_end:
+            end_byte = _align_forward(encoded, match_end)
+            start_byte = _align_forward(encoded, max(0, end_byte - available))
+        return _render_region(encoded, spans, start_byte, end_byte)
+
+    before = first_line - 1
+    after = last_line + 1
+    while before >= 0 or after < len(spans):
+        grew = False
+        if after < len(spans):
+            candidate = spans[after][1]
+            if candidate - start_byte <= available:
+                end_byte = candidate
+                after += 1
+                grew = True
+        if before >= 0:
+            candidate = spans[before][0]
+            if end_byte - candidate <= available:
+                start_byte = candidate
+                before -= 1
+                grew = True
+        if not grew:
+            break
+    return _render_region(encoded, spans, start_byte, end_byte)
+
+
+def _select_hint_for_source(
+    hints: tuple[SourceTargetHint, ...], relative_path: str, text: str
+) -> tuple[SourceTargetHint, int, int, int] | None:
+    """Return the best (hint, match_start, match_end, match_count) for a file."""
+
+    encoded = text.encode("utf-8")
+    ranked: list[tuple[tuple[int, int, int, int], SourceTargetHint, int, int]] = []
+    for index, hint in enumerate(hints):
+        needle = hint.text.encode("utf-8")
+        if not needle:
+            continue
+        count = encoded.count(needle)
+        if count == 0:
+            continue
+        if hint.target_path == relative_path:
+            path_rank = 0
+        elif not hint.target_path:
+            path_rank = 1
+        else:
+            path_rank = 2
+        ranked.append(
+            (
+                (
+                    path_rank,
+                    _HINT_TYPE_RANK.get(hint.hint_type, 3),
+                    count,
+                    index,
+                ),
+                hint,
+                encoded.find(needle),
+                count,
+            )
+        )
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0])
+    _, hint, start, count = ranked[0]
+    return hint, start, start + len(hint.text.encode("utf-8")), count
+
+
+def _is_test_path(relative_path: str) -> bool:
+    path = Path(relative_path)
+    if path.parts and path.parts[0] in {"test", "tests"}:
+        return True
+    if "tests" in path.parts or "test" in path.parts:
+        return True
+    name = path.name
+    return name.startswith("test_") or name.endswith("_test.py")
+
+
+def _prioritized_source_paths(
+    root: Path,
+    candidates: list[str],
+    *,
+    expected_set: set[str],
+    supporting_set: set[str],
+    target_hints: tuple[SourceTargetHint, ...],
+    source_cache: dict[str, str],
+    maximum_files: int,
+) -> dict[str, str]:
+    """Order candidate paths by deterministic source priority (P0 first).
+
+    P0 expected editable files, P1 expected read-only/test files, P2 non-expected
+    files containing a task target hint, P3 context-selected support files, and
+    P4 anything else.  Ties keep the original candidate order.
+    """
+
+    ranked: list[tuple[tuple[int, int], str, str]] = []
+    prescans = 0
+    for index, relative_path in enumerate(candidates):
+        if relative_path in expected_set:
+            priority = "P1" if _is_test_path(relative_path) else "P0"
+        else:
+            priority = "P3" if relative_path in supporting_set else "P4"
+            if target_hints and prescans < maximum_files:
+                path = (root / relative_path).resolve()
+                try:
+                    path.relative_to(root)
+                except ValueError:
+                    path = None
+                if (
+                    path is not None
+                    and path.is_file()
+                    and not _binary_or_unreadable(path)
+                ):
+                    prescans += 1
+                    text = _read_source_text(path, relative_path, source_cache)
+                    if text is not None and _select_hint_for_source(
+                        target_hints, relative_path, text
+                    ):
+                        priority = "P2"
+        ranked.append(((_PRIORITY_RANK[priority], index), relative_path, priority))
+    ranked.sort(key=lambda item: item[0])
+    return {relative_path: priority for _, relative_path, priority in ranked}
 
 
 def _creation_authorized_for_path(task_description: str, relative_path: str) -> bool:
@@ -323,14 +766,30 @@ def materialize_planner_source_context(
             )
         except Exception:
             selected_supporting = []
-    selected = _ordered_unique_paths([*expected, *selected_supporting])
+    supporting_set = set(_ordered_unique_paths(selected_supporting))
+    candidates = _ordered_unique_paths([*expected, *selected_supporting])
     task_text = str(task_description or "")
+    target_hints = extract_source_target_hints(
+        task_text, planner_contract=planner_contract
+    )
+    source_cache: dict[str, str] = {}
+    priorities = _prioritized_source_paths(
+        root,
+        candidates,
+        expected_set=expected_set,
+        supporting_set=supporting_set,
+        target_hints=target_hints,
+        source_cache=source_cache,
+        maximum_files=maximum_files,
+    )
+    selected = list(priorities)
     records: list[MaterializedSourceFile] = []
     unavailable: list[str] = []
     total_bytes = 0
 
     for index, relative_path in enumerate(selected):
         is_expected = relative_path in expected_set
+        priority = priorities[relative_path]
         creation_authorized = is_expected and (
             relative_path in creation_authorized_set
             or _creation_authorized_for_path(task_text, relative_path)
@@ -353,6 +812,8 @@ def materialize_planner_source_context(
                     expected=is_expected,
                     creation_authorized=creation_authorized,
                     omission_reason=reason,
+                    priority=priority,
+                    selection_strategy=SELECTION_OMITTED_TOTAL_BUDGET,
                 )
             )
             if is_expected:
@@ -385,6 +846,7 @@ def materialize_planner_source_context(
                     expected=is_expected,
                     creation_authorized=False,
                     omission_reason=reason,
+                    priority=priority,
                 )
             )
             if is_expected:
@@ -409,6 +871,10 @@ def materialize_planner_source_context(
                     expected=is_expected,
                     creation_authorized=creation_authorized,
                     omission_reason=reason,
+                    priority=priority,
+                    selection_strategy=(
+                        SELECTION_NEW_FILE if creation_authorized else None
+                    ),
                 )
             )
             if is_expected and reason:
@@ -432,44 +898,92 @@ def materialize_planner_source_context(
                     expected=is_expected,
                     creation_authorized=False,
                     omission_reason=binary_reason,
+                    priority=priority,
                 )
             )
             if is_expected:
                 unavailable.append(f"{relative_path}:{binary_reason}")
             continue
 
+        text = _read_source_text(path, relative_path, source_cache)
+        full_bytes = len(text.encode("utf-8")) if text is not None else None
+        region: _SelectedRegion | None = None
+        selected_hint: SourceTargetHint | None = None
+        match_span: tuple[int, int] | None = None
+        match_count = 0
+        strategy: str | None = None
+        hint_status = TARGET_HINT_ABSENT
+
         if total_bytes >= maximum_total_source_bytes:
             content = None
             status = SOURCE_STATUS_OMITTED
             omission_reason = "maximum_total_source_bytes"
+            strategy = SELECTION_OMITTED_TOTAL_BUDGET
+        elif text is None:
+            content = None
+            status = SOURCE_STATUS_OMITTED
+            omission_reason = "source_reader_omitted"
         else:
-            bounded = _read_bounded_source_contents(root, [relative_path])
-            content = bounded.get(relative_path)
-            if content is None:
+            selection = _select_hint_for_source(target_hints, relative_path, text)
+            if selection is not None:
+                selected_hint, match_start, match_end, match_count = selection
+                match_span = (match_start, match_end)
+                hint_status = TARGET_HINT_MATCHED
+            elif target_hints:
+                hint_status = TARGET_HINT_NOT_FOUND
+            remaining = maximum_total_source_bytes - total_bytes
+            cap = min(maximum_bytes_per_file, remaining)
+            region = _select_source_region(
+                text, budget_bytes=cap, match_span=match_span
+            )
+            if region is None and match_span is not None:
+                # The target could not be fitted; fall back to the bounded head
+                # without claiming target grounding.
+                match_span = None
+                selected_hint = None
+                match_count = 0
+                hint_status = TARGET_HINT_NOT_FOUND
+                region = _select_source_region(text, budget_bytes=cap, match_span=None)
+            if region is None:
+                content = None
                 status = SOURCE_STATUS_OMITTED
-                omission_reason = "source_reader_omitted"
+                omission_reason = "maximum_total_source_bytes"
+                strategy = SELECTION_OMITTED_TOTAL_BUDGET
             else:
-                remaining = maximum_total_source_bytes - total_bytes
-                cap = min(maximum_bytes_per_file, remaining)
-                content, _ = _bounded_utf8_content(content, cap)
-                if content is None:
-                    status = SOURCE_STATUS_OMITTED
-                    omission_reason = "maximum_total_source_bytes"
+                content = region.content
+                status = SOURCE_STATUS_EXISTING
+                omission_reason = None
+                if not region.truncated_before and not region.truncated_after:
+                    strategy = SELECTION_FULL_FILE
+                elif match_span is None:
+                    strategy = SELECTION_HEAD_FALLBACK
+                elif (
+                    selected_hint is not None
+                    and selected_hint.hint_type in _EXACT_HINT_TYPES
+                ):
+                    strategy = SELECTION_TARGET_EXACT
                 else:
-                    status = SOURCE_STATUS_EXISTING
-                    omission_reason = None
+                    strategy = SELECTION_TARGET_SYMBOL
+
+        target_included = bool(
+            region is not None
+            and match_span is not None
+            and region.start_byte <= match_span[0]
+            and match_span[1] <= region.end_byte
+        )
 
         if content is None:
             included_length = 0
             content_hash = None
             truncated = False
-            source_chars = None
         else:
             included_length = len(content)
             total_bytes += len(content.encode("utf-8"))
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            truncated = content.endswith(_SOURCE_TRUNCATED_MARKER)
-            source_chars = None if truncated else len(content)
+            truncated = bool(
+                region is not None
+                and (region.truncated_before or region.truncated_after)
+            )
 
         if status == SOURCE_STATUS_OMITTED and is_expected:
             unavailable.append(f"{relative_path}:{omission_reason or 'source_omitted'}")
@@ -483,11 +997,33 @@ def materialize_planner_source_context(
                 status=status,
                 truncated=truncated,
                 source_length=path.stat().st_size,
-                source_length_chars=source_chars,
+                source_length_chars=len(text) if text is not None else None,
                 included_prompt_length=included_length,
                 expected=is_expected,
                 creation_authorized=False,
                 omission_reason=omission_reason,
+                priority=priority,
+                selection_strategy=strategy,
+                full_source_bytes=full_bytes,
+                included_source_bytes=(
+                    len(content.encode("utf-8")) if content is not None else 0
+                ),
+                start_byte=region.start_byte if region else None,
+                end_byte=region.end_byte if region else None,
+                start_line=region.start_line if region else None,
+                end_line=region.end_line if region else None,
+                truncated_before=bool(region and region.truncated_before),
+                truncated_after=bool(region and region.truncated_after),
+                target_hint=selected_hint.text if selected_hint else None,
+                target_hint_type=selected_hint.hint_type if selected_hint else None,
+                target_hint_authority=(
+                    selected_hint.authority if selected_hint else None
+                ),
+                target_hint_status=hint_status,
+                target_match_count=match_count,
+                target_match_start=match_span[0] if match_span else None,
+                target_match_end=match_span[1] if match_span else None,
+                target_included=target_included,
             )
         )
 
@@ -549,6 +1085,8 @@ def render_planner_source_materialization(
         "replace_in_file.old_text must occur in the materialized version for the exact path and version.",
         "New files may use write_file only when their status is new_file_authorized_for_creation.",
         "Omitted or truncated source does not authorize fabricated exact replacement.",
+        "Each visible region was deliberately selected around the task target; use the visible text.",
+        "Never reconstruct a whole file from a partial excerpt.",
         (
             "Bounds: "
             f"maximum files={materialization.maximum_files}, "
@@ -568,7 +1106,30 @@ def render_planner_source_materialization(
                 f"content_hash: {item.content_hash or '(none)'}",
                 f"source_length: {item.source_length if item.source_length is not None else '(none)'}",
                 f"included_prompt_length: {item.included_prompt_length}",
+                f"selection_strategy: {item.selection_strategy or '(none)'}",
+                (
+                    "visible_lines: "
+                    + (
+                        f"{item.start_line}-{item.end_line}"
+                        if item.start_line is not None
+                        else "(none)"
+                    )
+                ),
+                (
+                    "visible_bytes: "
+                    + (
+                        f"{item.start_byte}-{item.end_byte}"
+                        if item.start_byte is not None
+                        else "(none)"
+                    )
+                ),
+                f"target_hint: {item.target_hint or '(none)'}",
+                f"target_hint_status: {item.target_hint_status}",
+                f"target_match_count: {item.target_match_count}",
+                f"target_included: {str(item.target_included).lower()}",
                 f"truncated: {str(item.truncated).lower()}",
+                f"truncated_before: {str(item.truncated_before).lower()}",
+                f"truncated_after: {str(item.truncated_after).lower()}",
                 f"omission_reason: {item.omission_reason or '(none)'}",
             ]
         )

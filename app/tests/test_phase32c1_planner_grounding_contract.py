@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.planning.repair_arbitration import (
@@ -11,11 +12,17 @@ from app.services.orchestration.planning.repair_prompts import (
     build_planning_repair_prompt,
 )
 from app.services.orchestration.planning.source_materialization import (
+    SELECTION_HEAD_FALLBACK,
+    SELECTION_NEW_FILE,
+    SELECTION_TARGET_EXACT,
     SOURCE_STATUS_EXISTING,
     SOURCE_STATUS_MISSING,
     SOURCE_STATUS_NEW,
     SOURCE_STATUS_OMITTED,
     SOURCE_STATUS_UNREADABLE,
+    TARGET_HINT_MATCHED,
+    TARGET_HINT_NOT_FOUND,
+    current_source_version_identity,
     materialize_planner_source_context,
 )
 from app.services.orchestration.validation.validator import ValidatorService
@@ -477,3 +484,347 @@ def test_retained_contract_b_distinguishes_existing_and_authorized_new_targets()
         for item in materialization.files
         if item.status == SOURCE_STATUS_NEW
     )
+
+
+# --- Phase 32D-2 target-aware source region selection ---------------------
+
+
+ATTEMPT5_TASK = (
+    "Add a shared timezone-aware utc_now() helper in app/time_utils.py, "
+    "replace the deprecated datetime.utcnow() call in "
+    "app/services/workspace/context_service.py with utc_now(), and add focused "
+    "regression coverage in app/tests/test_utc_now_helper.py."
+)
+ATTEMPT5_EXPECTED = [
+    "app/services/workspace/context_service.py",
+    "app/time_utils.py",
+    "app/tests/test_utc_now_helper.py",
+]
+
+
+def _visible_body(record):
+    body = record.content
+    if record.truncated_before:
+        body = body.split("\n", 1)[1]
+    if record.truncated_after:
+        body = body.rsplit("\n", 1)[0]
+    return body
+
+
+def _attempt5_materialization(**overrides):
+    kwargs = {
+        "task_description": ATTEMPT5_TASK,
+        "expected_paths": ATTEMPT5_EXPECTED,
+        "supporting_paths": [],
+    }
+    kwargs.update(overrides)
+    return materialize_planner_source_context(".", **kwargs)
+
+
+def test_attempt5_head_only_selection_misses_the_target_location():
+    source = Path("app/services/workspace/context_service.py").read_text(
+        encoding="utf-8"
+    )
+    head = source.encode("utf-8")[:2000].decode("utf-8", errors="ignore")
+
+    assert "datetime.utcnow()" in source
+    assert "datetime.utcnow()" not in head, "head excerpt must not contain the target"
+
+
+def test_attempt5_target_region_is_materialized_within_bounds():
+    materialization = _attempt5_materialization()
+    record = materialization.file_map()["app/services/workspace/context_service.py"]
+    source = Path("app/services/workspace/context_service.py").read_text(
+        encoding="utf-8"
+    )
+    target_line = source[: source.index("datetime.utcnow()")].count("\n") + 1
+
+    assert record.expected is True
+    assert record.priority == "P0"
+    assert record.status == SOURCE_STATUS_EXISTING
+    assert record.selection_strategy == SELECTION_TARGET_EXACT
+    assert record.target_hint == "datetime.utcnow()"
+    assert record.target_hint_status == TARGET_HINT_MATCHED
+    assert record.target_included is True
+    assert "datetime.utcnow()" in record.content
+    assert record.start_line <= target_line <= record.end_line
+    assert record.included_source_bytes <= 2000
+    assert materialization.materialized_source_bytes <= 5000
+    assert _visible_body(record) in source
+    assert record.full_source_bytes == len(source.encode("utf-8"))
+    assert record.version_identity == current_source_version_identity(
+        Path("app/services/workspace/context_service.py").resolve()
+    )
+
+
+def test_attempt5_visible_range_matches_the_reported_lines():
+    record = _attempt5_materialization().file_map()[
+        "app/services/workspace/context_service.py"
+    ]
+    source = Path("app/services/workspace/context_service.py").read_text(
+        encoding="utf-8"
+    )
+    encoded = source.encode("utf-8")
+    lines = source.splitlines(keepends=True)
+
+    assert encoded[record.start_byte : record.end_byte].decode(
+        "utf-8"
+    ) == _visible_body(record)
+    assert _visible_body(record) == "".join(
+        lines[record.start_line - 1 : record.end_line]
+    )
+    assert record.truncated_before is True
+    assert record.truncated_after is True
+
+
+def test_attempt5_expected_target_is_prioritized_over_support_files():
+    materialization = _attempt5_materialization(
+        supporting_paths=["app/api/v1/router.py", "app/config.py"]
+    )
+    order = [item.relative_path for item in materialization.files]
+    record = materialization.file_map()["app/services/workspace/context_service.py"]
+
+    assert order.index("app/services/workspace/context_service.py") < order.index(
+        "app/api/v1/router.py"
+    )
+    assert order.index("app/services/workspace/context_service.py") < order.index(
+        "app/config.py"
+    )
+    assert record.target_included is True
+    assert materialization.materialized_source_bytes <= 5000
+    assert all(
+        item.content is None or len(item.content.encode("utf-8")) <= 2000
+        for item in materialization.files
+    )
+
+
+def test_attempt5_new_files_consume_no_source_bytes():
+    materialization = _attempt5_materialization()
+    files = materialization.file_map()
+
+    for path in ("app/time_utils.py", "app/tests/test_utc_now_helper.py"):
+        record = files[path]
+        assert record.status == SOURCE_STATUS_NEW
+        assert record.selection_strategy == SELECTION_NEW_FILE
+        assert record.included_source_bytes == 0
+        assert record.content is None
+        assert record.target_included is False
+    assert materialization.available
+
+
+def test_attempt1_target_region_contains_the_legacy_pagination_branch():
+    task = (
+        "Remove the legacy pagination branch that calls "
+        "`query.offset(skip).limit(limit)` in app/api/v1/endpoints/projects.py "
+        "and update app/tests/test_pagination_infrastructure.py only."
+    )
+    materialization = materialize_planner_source_context(
+        ".",
+        task_description=task,
+        expected_paths=[
+            "app/api/v1/endpoints/projects.py",
+            "app/tests/test_pagination_infrastructure.py",
+        ],
+        supporting_paths=[],
+    )
+    record = materialization.file_map()["app/api/v1/endpoints/projects.py"]
+    source = Path("app/api/v1/endpoints/projects.py").read_text(encoding="utf-8")
+    head = source.encode("utf-8")[:2000].decode("utf-8", errors="ignore")
+
+    assert "query.offset(skip).limit(limit)" not in head
+    assert record.selection_strategy == SELECTION_TARGET_EXACT
+    assert record.target_hint == "query.offset(skip).limit(limit)"
+    assert record.target_included is True
+    assert "query.offset(skip).limit(limit)" in record.content
+    assert "if page is None:" in record.content
+    assert record.included_source_bytes <= 2000
+    assert materialization.materialized_source_bytes <= 5000
+
+
+def test_multiple_target_matches_are_deterministic_and_counted(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    filler = "".join(f"# filler line {index}\n" for index in range(200))
+    source = (
+        filler + "value = legacy_call()\n" + filler + "other = legacy_call()\n" + filler
+    )
+    (package / "deep.py").write_text(source, encoding="utf-8")
+    task = "Replace `legacy_call()` in pkg/deep.py with the new helper."
+
+    first = materialize_planner_source_context(
+        tmp_path,
+        task_description=task,
+        expected_paths=["pkg/deep.py"],
+        supporting_paths=[],
+    )
+    second = materialize_planner_source_context(
+        tmp_path,
+        task_description=task,
+        expected_paths=["pkg/deep.py"],
+        supporting_paths=[],
+    )
+    record = first.file_map()["pkg/deep.py"]
+
+    assert record.target_match_count == 2
+    assert record.target_included is True
+    assert record.target_match_start == len(
+        source[: source.index("legacy_call()")].encode("utf-8")
+    )
+    assert first.to_metadata() == second.to_metadata()
+
+
+def test_missing_target_hint_falls_back_without_claiming_grounding(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    source = "".join(f"# filler line {index}\n" for index in range(400))
+    (package / "deep.py").write_text(source, encoding="utf-8")
+    task = "Replace `absent_symbol()` in pkg/deep.py with the new helper."
+
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        task_description=task,
+        expected_paths=["pkg/deep.py"],
+        supporting_paths=[],
+    )
+    record = materialization.file_map()["pkg/deep.py"]
+
+    assert record.selection_strategy == SELECTION_HEAD_FALLBACK
+    assert record.target_hint_status == TARGET_HINT_NOT_FOUND
+    assert record.target_hint is None
+    assert record.target_included is False
+    assert record.start_line == 1
+    assert record.truncated_after is True
+    assert record.included_source_bytes <= 2000
+
+
+def test_total_budget_serves_expected_files_before_unrelated_support(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    filler = "".join(f"# filler line {index}\n" for index in range(300))
+    (package / "expected.py").write_text(
+        filler + "value = target_call()\n" + filler, encoding="utf-8"
+    )
+    for name in ("support_a.py", "support_b.py", "support_c.py"):
+        (package / name).write_text(filler, encoding="utf-8")
+    task = "Replace `target_call()` in pkg/expected.py with the new helper."
+
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        task_description=task,
+        expected_paths=["pkg/expected.py"],
+        supporting_paths=["pkg/support_a.py", "pkg/support_b.py", "pkg/support_c.py"],
+    )
+    order = [item.relative_path for item in materialization.files]
+    record = materialization.file_map()["pkg/expected.py"]
+
+    assert order[0] == "pkg/expected.py"
+    assert record.target_included is True
+    assert record.included_source_bytes <= 2000
+    assert materialization.materialized_source_bytes <= 5000
+    assert materialization.available
+
+
+def test_target_centered_slicing_does_not_split_multibyte_characters(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    filler = "".join(f"# héllo wörld filler {index}\n" for index in range(200))
+    source = filler + "value = target_call()  # ünïcodé\n" + filler
+    (package / "deep.py").write_text(source, encoding="utf-8")
+    task = "Replace `target_call()` in pkg/deep.py with the new helper."
+
+    record = materialize_planner_source_context(
+        tmp_path,
+        task_description=task,
+        expected_paths=["pkg/deep.py"],
+        supporting_paths=[],
+    ).file_map()["pkg/deep.py"]
+
+    assert "�" not in record.content
+    assert _visible_body(record) in source
+    assert "target_call()" in record.content
+    assert record.included_source_bytes <= 2000
+
+
+def test_target_region_grounds_exact_replacement_and_rejects_stale_text(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    filler = "".join(f"# filler line {index}\n" for index in range(300))
+    source = filler + "    stamp = datetime.utcnow().isoformat()\n" + filler
+    (package / "deep.py").write_text(source, encoding="utf-8")
+    task = (
+        "Replace the deprecated datetime.utcnow() call in pkg/deep.py with "
+        "the shared utc_now() helper."
+    )
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        task_description=task,
+        expected_paths=["pkg/deep.py"],
+        supporting_paths=[],
+    )
+
+    grounded = [
+        {
+            "step_number": 1,
+            "description": "Apply the grounded target replacement",
+            "commands": [],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "pkg/deep.py",
+                    "old": "    stamp = datetime.utcnow().isoformat()\n",
+                    "new": "    stamp = utc_now().isoformat()\n",
+                }
+            ],
+            "verification": "python3 -m py_compile pkg/deep.py",
+            "rollback": None,
+            "expected_files": ["pkg/deep.py"],
+        }
+    ]
+    stale = json.loads(json.dumps(grounded))
+    stale[0]["ops"][0]["old"] = "    stamp = datetime.now().isoformat()\n"
+
+    grounded_issues = PlannerService.find_immediate_repair_step_issues(
+        grounded, tmp_path, source_materialization=materialization
+    )
+    stale_issues = PlannerService.find_immediate_repair_step_issues(
+        stale, tmp_path, source_materialization=materialization
+    )
+
+    assert grounded_issues.get("stale_replace_ops_steps", []) == []
+    assert stale_issues["stale_replace_ops_steps"] == [1]
+
+
+def test_repair_prompt_receives_the_same_target_region(tmp_path):
+    package = tmp_path / "pkg"
+    package.mkdir()
+    filler = "".join(f"# filler line {index}\n" for index in range(300))
+    source = filler + "    stamp = datetime.utcnow().isoformat()\n" + filler
+    (package / "deep.py").write_text(source, encoding="utf-8")
+    task = (
+        "Replace the deprecated datetime.utcnow() call in pkg/deep.py with "
+        "the shared utc_now() helper."
+    )
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        task_description=task,
+        expected_paths=["pkg/deep.py"],
+        supporting_paths=[],
+    )
+    record = materialization.file_map()["pkg/deep.py"]
+    malformed = json.dumps(
+        _plan(operation="replace_in_file", path="pkg/deep.py", commands=[])
+    )
+
+    prompt = build_planning_repair_prompt(
+        task_description=task,
+        malformed_output=malformed,
+        project_dir=tmp_path,
+        rejection_reasons=["stale_replace"],
+    )
+
+    assert "datetime.utcnow()" in prompt
+    assert f"visible_lines: {record.start_line}-{record.end_line}" in prompt
+    assert "selection_strategy: target_centered_exact_match" in prompt
+    assert "target_hint: datetime.utcnow()" in prompt
+    assert "target_included: true" in prompt
+    assert "Never reconstruct a whole file from a partial excerpt." in prompt
