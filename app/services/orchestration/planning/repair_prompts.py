@@ -671,7 +671,11 @@ Rules:
     active_source_context_block = source_context_block
     if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and source_context_block:
         active_source_context_block = _compact_python_test_source_context_block(
-            source_context_block, max_chars=560
+            source_context_block,
+            max_chars=560,
+            preserve_package_root_guard=_is_no_materialization_repair_case(
+                rejection_reasons
+            ),
         )
         prompt = _compose_prompt(
             "",
@@ -902,7 +906,10 @@ def build_python_test_source_context_block(
 
 
 def _compact_python_test_source_context_block(
-    source_context_block: str, *, max_chars: int
+    source_context_block: str,
+    *,
+    max_chars: int,
+    preserve_package_root_guard: bool = False,
 ) -> str:
     """Keep imported source evidence when a repair prompt must shed context.
 
@@ -920,6 +927,11 @@ def _compact_python_test_source_context_block(
         "## PYTHON TEST SOURCE CONTEXT\n"
         "Preserve the existing source API imported by tests.\n"
     )
+    if preserve_package_root_guard:
+        compact_prefix += (
+            "Do not create a replacement src/<new_package> root when tests already "
+            "import an existing package.\n"
+        )
     available_excerpt_chars = max_chars - len(compact_prefix)
     if available_excerpt_chars <= 0:
         return _truncate_text(compact_prefix, max_chars)
