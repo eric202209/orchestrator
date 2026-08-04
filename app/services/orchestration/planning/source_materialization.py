@@ -1162,7 +1162,11 @@ def render_repair_source_materialization(
         if compaction_level >= 3 and priority == "R5":
             omitted += 1
             continue
+        # R2 test/read-only evidence is useful only when an already-recorded
+        # structured target can anchor it.  A head excerpt is not grounding.
         metadata_only = compaction_level >= 1 and priority in {"R4", "R5"}
+        if compaction_level >= 2 and priority == "R2" and not item.target_hint:
+            metadata_only = True
         content = item.content
         reduced = False
         if compaction_level >= 2 and priority in {"R2", "R4"} and content:
@@ -1180,7 +1184,11 @@ def render_repair_source_materialization(
             lines.extend(
                 [
                     "repair_projection: metadata_only",
-                    f"omission_reason: lower_priority_support_{priority}",
+                    (
+                        "omission_reason: metadata_only_no_repair_evidence"
+                        if priority == "R2" and not item.target_hint
+                        else f"omission_reason: lower_priority_support_{priority}"
+                    ),
                 ]
             )
             continue
@@ -1197,9 +1205,13 @@ def render_repair_source_materialization(
                 f"selection_strategy: {item.selection_strategy or '(none)'}",
                 f"truncated: {str(item.truncated).lower()}",
                 (
-                    "repair_projection: reduced_excerpt"
-                    if reduced
-                    else "repair_projection: full_excerpt"
+                    "repair_projection: repair_evidence_centered"
+                    if reduced and priority == "R2"
+                    else (
+                        "repair_projection: reduced_excerpt"
+                        if reduced
+                        else "repair_projection: full_excerpt"
+                    )
                 ),
             ]
         )
@@ -1214,7 +1226,9 @@ def render_repair_source_materialization(
 def _repair_projection_priority(
     item: MaterializedSourceFile, rejected_paths: set[str]
 ) -> str:
-    if item.relative_path in rejected_paths and item.target_included:
+    # A rejected mutating operation is runtime authority.  It must outrank
+    # task-derived hint materialization, including when no target was found.
+    if item.relative_path in rejected_paths:
         return "R0"
     if item.expected and item.priority == "P0":
         return "R1"
@@ -1225,6 +1239,22 @@ def _repair_projection_priority(
     if not item.expected and item.target_included:
         return "R4"
     return "R5"
+
+
+def repair_projection_required_records(
+    materialization: PlannerSourceMaterialization | None,
+    rejected_paths: Collection[str] = (),
+) -> list[tuple[MaterializedSourceFile, str]]:
+    """Return deterministic R0/R1 records required by a repair projection."""
+
+    if materialization is None:
+        return []
+    rejected = set(_ordered_unique_paths(rejected_paths))
+    return [
+        (item, priority)
+        for item in materialization.files
+        if (priority := _repair_projection_priority(item, rejected)) in {"R0", "R1"}
+    ]
 
 
 def _repair_projection_excerpt(
@@ -1238,7 +1268,10 @@ def _repair_projection_excerpt(
     hint_bytes = (hint or "").encode("utf-8")
     match = encoded.find(hint_bytes) if hint_bytes else -1
     if match < 0:
-        return _truncate_utf8_bytes(encoded, maximum_bytes)
+        # Callers must turn no-evidence R2 records into metadata-only.  Keep
+        # this defensive branch honest for R4 callers too: no generic head
+        # excerpt may be represented as repair evidence.
+        return ""
     start = max(0, match - maximum_bytes // 2)
     end = min(len(encoded), start + maximum_bytes)
     start = _utf8_start(encoded, start)

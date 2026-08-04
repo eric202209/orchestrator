@@ -30,6 +30,7 @@ from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
     plan_target_paths,
     plan_source_materialization_paths,
+    repair_projection_required_records,
     render_repair_source_materialization,
 )
 from app.services.project.source_imports import (
@@ -108,6 +109,13 @@ PLANNING_REPAIR_STRIP_FIELD_NAMES = {
 class PlanningRepairPromptBuildResult:
     prompt: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class RequiredRepairSourceEvidenceExceeded:
+    """Structured Level-4 stop: required repair source cannot fit safely."""
+
+    diagnostics: dict[str, Any]
 
 
 def render_repair_knowledge_block(knowledge_context: Any) -> str:
@@ -347,6 +355,15 @@ def build_planning_repair_prompt_with_metadata(
                 else None
             ),
         )
+        if isinstance(stale_prompt, RequiredRepairSourceEvidenceExceeded):
+            return PlanningRepairPromptBuildResult(
+                prompt="",
+                metadata={
+                    **source_api_metadata,
+                    "repair_prompt_strategy": "fail_closed_repair_projection",
+                    "repair_prompt_failure": stale_prompt.diagnostics,
+                },
+            )
         selected_source_api_contract_block = next(
             (
                 block
@@ -2125,7 +2142,7 @@ def build_compact_stale_replace_repair_prompt(
     knowledge_block: str = "",
     guidance_block: str = "",
     source_materialization: Any = None,
-) -> str:
+) -> str | RequiredRepairSourceEvidenceExceeded:
     """Build a bounded repair prompt for stale replace_in_file plans.
 
     This prompt intentionally omits validation-repair knowledge context. Stale
@@ -2137,11 +2154,14 @@ def build_compact_stale_replace_repair_prompt(
         malformed_output=malformed_output,
         rejection_reasons=rejection_reasons,
     )
+    rejected_operation_paths = _rejected_mutating_operation_paths(
+        malformed_output, rejection_reasons
+    )
     source_materialization_blocks = (
         [
             render_repair_source_materialization(
                 source_materialization,
-                rejected_paths=[target_path] if target_path else (),
+                rejected_paths=rejected_operation_paths,
                 compaction_level=level,
             )
             for level in range(4)
@@ -2357,6 +2377,43 @@ Stale replace second-pass target preservation:
             )
             if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
                 return prompt
+
+    if (
+        source_materialization is not None
+        and PLANNING_REPAIR_PROMPT_MAX_CHARS >= REPAIR_PROMPT_MAX_CHARS
+    ):
+        required_records = repair_projection_required_records(
+            source_materialization, rejected_operation_paths
+        )
+        required_block = render_repair_source_materialization(
+            source_materialization,
+            rejected_paths=rejected_operation_paths,
+            compaction_level=3,
+        )
+        return RequiredRepairSourceEvidenceExceeded(
+            diagnostics={
+                "reason": "required_repair_source_evidence_exceeds_prompt_bound",
+                "failure_owner": "repair_prompt_projection",
+                "prompt_limit": PLANNING_REPAIR_PROMPT_MAX_CHARS,
+                "minimum_required_chars": len(required_block),
+                "required_record_paths": [
+                    item.relative_path for item, _ in required_records
+                ],
+                "required_record_priorities": [
+                    priority for _, priority in required_records
+                ],
+                "required_excerpt_chars": sum(
+                    len(item.content or "") for item, _ in required_records
+                ),
+                "required_metadata_chars": max(
+                    0,
+                    len(required_block)
+                    - sum(len(item.content or "") for item, _ in required_records),
+                ),
+                "compaction_levels_attempted": [0, 1, 2, 3, 4],
+                "lowest_optional_records_removed": True,
+            }
+        )
 
     target_line = target_path or "target path from invalid plan"
     prompt = f"""Return ONLY a valid JSON array.
@@ -2625,6 +2682,43 @@ def _extract_stale_replace_target_path(
     if match:
         return match.group(1).strip().lstrip("./")
     return ""
+
+
+def _rejected_mutating_operation_paths(
+    malformed_output: str, rejection_reasons: Optional[list[str]]
+) -> tuple[str, ...]:
+    """Use rejected operation paths as repair authority, not task hints."""
+
+    try:
+        parsed = json.loads(str(malformed_output or ""))
+    except (TypeError, ValueError):
+        parsed = None
+    paths: list[str] = []
+    if isinstance(parsed, list):
+        for step in parsed:
+            if not isinstance(step, dict):
+                continue
+            for operation in step.get("ops") or []:
+                if not isinstance(operation, dict):
+                    continue
+                if str(operation.get("op") or "") not in {
+                    "replace_in_file",
+                    "write_file",
+                    "append_file",
+                }:
+                    continue
+                path = str(operation.get("path") or "").strip().replace("\\", "/")
+                candidate = Path(path)
+                if path and not candidate.is_absolute() and ".." not in candidate.parts:
+                    normalized = candidate.as_posix().lstrip("./")
+                    if normalized and normalized not in paths:
+                        paths.append(normalized)
+    if paths:
+        return tuple(paths)
+    target = _extract_stale_replace_target_path(
+        malformed_output=malformed_output, rejection_reasons=rejection_reasons
+    )
+    return (target,) if target else ()
 
 
 def _extract_current_file_excerpt(

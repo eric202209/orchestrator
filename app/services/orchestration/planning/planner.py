@@ -2261,6 +2261,21 @@ class PlannerService:
             )
             repair_prompt = repair_prompt_result.prompt
             repair_prompt_metadata = dict(repair_prompt_result.metadata)
+        repair_projection_failure = repair_prompt_metadata.get("repair_prompt_failure")
+        if isinstance(repair_projection_failure, dict):
+            emit_live(
+                "ERROR",
+                "[ORCHESTRATION] Required repair source evidence exceeds prompt bound; skipping repair",
+                metadata={
+                    "phase": "planning",
+                    "reason": "required_repair_source_evidence_exceeds_prompt_bound",
+                    "repair_attempts": 0,
+                    **repair_projection_failure,
+                },
+            )
+            raise PlanningRepairBudgetExceeded(
+                "required_repair_source_evidence_exceeds_prompt_bound"
+            )
         validation_error_chars = sum(
             len(str(reason_text or "")[:180])
             for reason_text in (rejection_reasons or [])[:5]

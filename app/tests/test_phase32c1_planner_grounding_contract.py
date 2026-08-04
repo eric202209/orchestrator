@@ -9,6 +9,7 @@ from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
 )
 from app.services.orchestration.planning.repair_prompts import (
+    RequiredRepairSourceEvidenceExceeded,
     build_compact_stale_replace_repair_prompt,
     build_planning_repair_prompt,
 )
@@ -1083,3 +1084,68 @@ def test_attempt1_repair_projection_fits_without_dropping_target_branch():
     assert "version_identity:" in prompt
     assert "visible_lines:" in prompt
     assert "target_included: true" in prompt
+
+
+def test_rejected_operation_is_r0_without_a_task_hint(tmp_path):
+    (tmp_path / "existing.py").write_text(
+        "def existing():\n    return 'visible evidence'\n", encoding="utf-8"
+    )
+    materialization = materialize_planner_source_context(
+        tmp_path, task_description="Make a safe change.", expected_paths=["existing.py"]
+    )
+
+    projected = render_repair_source_materialization(
+        materialization, rejected_paths=["existing.py"], compaction_level=1
+    )
+
+    assert "### existing.py" in projected
+    assert "repair_projection: full_excerpt" in projected
+    assert materialization.file_map()["existing.py"].target_included is False
+
+
+def test_r2_without_structured_evidence_is_metadata_only_not_head_excerpt(tmp_path):
+    (tmp_path / "test_example.py").write_text(
+        "# generic heading\n" + "assert useful_symbol()\n" * 120,
+        encoding="utf-8",
+    )
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        task_description="Update behavior.",
+        expected_paths=["test_example.py"],
+    )
+
+    projected = render_repair_source_materialization(
+        materialization, compaction_level=2
+    )
+
+    assert "repair_projection: metadata_only" in projected
+    assert "metadata_only_no_repair_evidence" in projected
+    assert "# generic heading" not in projected
+
+
+def test_required_repair_source_overflow_fails_closed_with_diagnostics(tmp_path):
+    (tmp_path / "existing.py").write_text(
+        "def existing():\n    return 'visible evidence'\n", encoding="utf-8"
+    )
+    materialization = materialize_planner_source_context(
+        tmp_path, task_description="Safe change.", expected_paths=["existing.py"]
+    )
+    malformed = json.dumps(_plan(operation="replace_in_file", path="existing.py"))
+
+    result = build_compact_stale_replace_repair_prompt(
+        task_description="Safe change.",
+        malformed_output=malformed,
+        project_dir=tmp_path,
+        rejection_reasons=["stale_replace_ops_steps: [1]"],
+        source_materialization=materialization,
+        apply_prompt_profile=lambda prompt, _profile: prompt + ("x" * 8000),
+    )
+
+    assert isinstance(result, RequiredRepairSourceEvidenceExceeded)
+    assert (
+        result.diagnostics["reason"]
+        == "required_repair_source_evidence_exceeds_prompt_bound"
+    )
+    assert result.diagnostics["failure_owner"] == "repair_prompt_projection"
+    assert result.diagnostics["required_record_paths"] == ["existing.py"]
+    assert result.diagnostics["required_record_priorities"] == ["R0"]
