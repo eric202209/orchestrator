@@ -2,9 +2,15 @@
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 
-from app.services.orchestration.planning.planner import PlannerService
+import pytest
+
+from app.services.orchestration.planning.planner import (
+    PlanningRepairBudgetExceeded,
+    PlannerService,
+)
 from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
 )
@@ -26,6 +32,7 @@ from app.services.orchestration.planning.source_materialization import (
     TARGET_HINT_NOT_FOUND,
     current_source_version_identity,
     materialize_planner_source_context,
+    repair_projection_required_records,
     render_repair_source_materialization,
 )
 from app.services.orchestration.validation.validator import ValidatorService
@@ -1149,3 +1156,155 @@ def test_required_repair_source_overflow_fails_closed_with_diagnostics(tmp_path)
     assert result.diagnostics["failure_owner"] == "repair_prompt_projection"
     assert result.diagnostics["required_record_paths"] == ["existing.py"]
     assert result.diagnostics["required_record_priorities"] == ["R0"]
+
+
+def test_rejected_write_paths_are_r0_in_operation_order_without_hints(tmp_path):
+    for name in ("first.py", "second.py", "support.py"):
+        (tmp_path / name).write_text(
+            "# UTF-8: caf\u00e9\n" + ("value = 1\n" * 300), encoding="utf-8"
+        )
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        task_description="Make a safe change with no source target hint.",
+        expected_paths=["first.py", "second.py", "support.py"],
+    )
+    required = repair_projection_required_records(
+        materialization, ["second.py", "first.py"]
+    )
+
+    assert [(item.relative_path, priority) for item, priority in required[:2]] == [
+        ("first.py", "R0"),
+        ("second.py", "R0"),
+    ]
+    assert all(item.target_included is False for item, _ in required[:2])
+    projected = render_repair_source_materialization(
+        materialization,
+        rejected_paths=["second.py", "first.py"],
+        compaction_level=3,
+    )
+    assert projected.index("### first.py") < projected.index("### second.py")
+    assert "caf\u00e9" in projected
+
+
+def test_fail_closed_diagnostics_preserve_every_required_dimension(tmp_path):
+    (tmp_path / "existing.py").write_text(
+        "def existing():\n    return 'visible evidence'\n", encoding="utf-8"
+    )
+    materialization = materialize_planner_source_context(
+        tmp_path, task_description="Safe change.", expected_paths=["existing.py"]
+    )
+    malformed = json.dumps(_plan(operation="write_file", path="existing.py"))
+
+    result = build_compact_stale_replace_repair_prompt(
+        task_description="Safe change.",
+        malformed_output=malformed,
+        project_dir=tmp_path,
+        rejection_reasons=["stale_replace_ops_steps: [1]"],
+        source_materialization=materialization,
+        apply_prompt_profile=lambda prompt, _profile: prompt + ("x" * 8000),
+    )
+
+    assert isinstance(result, RequiredRepairSourceEvidenceExceeded)
+    diagnostics = result.diagnostics
+    assert (
+        diagnostics["reason"] == "required_repair_source_evidence_exceeds_prompt_bound"
+    )
+    assert diagnostics["failure_owner"] == "repair_prompt_projection"
+    assert diagnostics["prompt_limit"] == 8000
+    assert diagnostics["minimum_required_chars"] > 0
+    assert diagnostics["required_record_paths"] == ["existing.py"]
+    assert diagnostics["required_record_priorities"] == ["R0"]
+    assert diagnostics["required_excerpt_chars"] > 0
+    assert diagnostics["required_metadata_chars"] > 0
+    assert diagnostics["compaction_levels_attempted"] == [0, 1, 2, 3, 4]
+    assert diagnostics["lowest_optional_records_removed"] is True
+
+
+def test_fail_closed_reaches_real_planner_boundary_without_provider_call(
+    tmp_path, monkeypatch
+):
+    from app.services.orchestration.planning import planner as planner_module
+    from app.services.orchestration.planning import repair_prompts
+
+    (tmp_path / "existing.py").write_text(
+        "def existing():\n    return 'visible evidence'\n", encoding="utf-8"
+    )
+    provider_calls = []
+    events = []
+    runtime = type(
+        "Runtime",
+        (),
+        {"execute_task": lambda *args, **kwargs: provider_calls.append((args, kwargs))},
+    )()
+    original_profile = PlannerService.apply_prompt_profile
+    monkeypatch.setattr(
+        PlannerService,
+        "apply_prompt_profile",
+        staticmethod(
+            lambda prompt, profile: original_profile(prompt, profile) + ("x" * 8000)
+        ),
+    )
+
+    with pytest.raises(PlanningRepairBudgetExceeded) as exc_info:
+        PlannerService.repair_output(
+            runtime_service=runtime,
+            task_description="Update existing.py.",
+            malformed_output=json.dumps(
+                _plan(operation="write_file", path="existing.py")
+            ),
+            project_dir=tmp_path,
+            timeout_seconds=300,
+            logger=logging.getLogger("test"),
+            emit_live=lambda *args, **kwargs: events.append((args, kwargs)),
+            reason="stale_replace",
+            rejection_reasons=["stale_replace_ops_steps: [1]"],
+        )
+
+    assert str(exc_info.value) == "required_repair_source_evidence_exceeds_prompt_bound"
+    assert provider_calls == []
+    assert any(
+        kwargs.get("metadata", {}).get("failure_owner") == "repair_prompt_projection"
+        for _args, kwargs in events
+    )
+    assert not any("provider_timeout" in str(event) for event in events)
+    assert not any("malformed" in str(event).lower() for event in events)
+
+
+def test_r2_structured_evidence_is_centered_and_no_evidence_is_metadata_only(tmp_path):
+    content = (
+        "# generic head must not be used as evidence\n"
+        + ("value = 'caf\u00e9'\n" * 240)
+        + "def test_contract():\n    assert useful_symbol()\n"
+    )
+    (tmp_path / "test_example.py").write_text(content, encoding="utf-8")
+
+    centred = materialize_planner_source_context(
+        tmp_path,
+        task_description="Update assert useful_symbol() in test_example.py.",
+        expected_paths=["test_example.py"],
+    )
+    centred_projection = render_repair_source_materialization(
+        centred, compaction_level=2
+    )
+    assert "repair_projection: repair_evidence_centered" in centred_projection
+    assert "assert useful_symbol()" in centred_projection
+    assert centred_projection.encode("utf-8").decode("utf-8") == centred_projection
+
+    no_evidence = materialize_planner_source_context(
+        tmp_path,
+        task_description="Update test_contract in test_example.py.",
+        expected_paths=["test_example.py"],
+    )
+    first = render_repair_source_materialization(no_evidence, compaction_level=2)
+    second = render_repair_source_materialization(no_evidence, compaction_level=2)
+    assert first == second
+    assert "repair_projection: metadata_only" in first
+    assert "metadata_only_no_repair_evidence" in first
+    assert "# generic head must not be used as evidence" not in first
+    for field in (
+        "### test_example.py",
+        "status:",
+        "version_identity:",
+        "content_hash:",
+    ):
+        assert field in first
