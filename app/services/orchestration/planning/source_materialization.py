@@ -1159,6 +1159,11 @@ def render_repair_source_materialization(
     ]
     for item in materialization.files:
         priority = _repair_projection_priority(item, rejected)
+        # Level 4 is the required-only fail-closed boundary.  R0/R1 retain
+        # their complete evidence; every support class is omitted rather than
+        # being misreported as part of the minimum required projection.
+        if compaction_level >= 4 and priority not in {"R0", "R1"}:
+            continue
         if compaction_level >= 3 and priority == "R5":
             omitted += 1
             continue
@@ -1216,7 +1221,7 @@ def render_repair_source_materialization(
             ]
         )
         lines.extend(["content:", content or "(not supplied)"])
-    if omitted:
+    if omitted and compaction_level < 4:
         lines.append(
             f"{omitted} lower-priority supporting source records omitted to preserve bounded target evidence."
         )

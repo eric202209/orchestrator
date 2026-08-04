@@ -118,6 +118,43 @@ class RequiredRepairSourceEvidenceExceeded:
     diagnostics: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class RepairPromptSectionAccounting:
+    """Exact model-visible offsets for one bounded repair-envelope section."""
+
+    section_name: str
+    start_offset: int
+    end_offset: int
+    character_count: int
+    line_count: int
+    required: bool
+    classification: str
+    authority: str
+    deduplication_key: str
+    included_paths: tuple[str, ...] = ()
+    included_operation_indexes: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class RepairPromptEnvelope:
+    """A prompt plus accounting that exactly partitions its characters."""
+
+    prompt: str
+    sections: tuple[RepairPromptSectionAccounting, ...]
+
+
+@dataclass(frozen=True)
+class _RepairPromptPart:
+    section_name: str
+    content: str
+    required: bool
+    classification: str
+    authority: str
+    deduplication_key: str
+    included_paths: tuple[str, ...] = ()
+    included_operation_indexes: tuple[int, ...] = ()
+
+
 def render_repair_knowledge_block(knowledge_context: Any) -> str:
     if not knowledge_context or not getattr(knowledge_context, "retrieved_items", None):
         return ""
@@ -405,7 +442,11 @@ def build_planning_repair_prompt_with_metadata(
                         "repair_context" if selected_source_api_contract_block else None
                     )
                 ),
-                "repair_prompt_strategy": "compact_stale_replace",
+                "repair_prompt_strategy": (
+                    "minimum_safe_complete_plan_stale_replace"
+                    if "Rejected complete plan (preservation authority;" in stale_prompt
+                    else "compact_stale_replace"
+                ),
             },
         )
     specialized_prompt, specialized_metadata = _build_specialized_prompt_protected(
@@ -2127,6 +2168,338 @@ Required repair:
 """
 
 
+def _compact_task_objective(task_description: str, maximum_chars: int = 420) -> str:
+    objective = " ".join(str(task_description or "").split())
+    if len(objective) <= maximum_chars:
+        return objective
+    return objective[:maximum_chars].rsplit(" ", 1)[0].rstrip()
+
+
+def _operation_indexes_by_path(plan: list[Any]) -> dict[str, tuple[int, ...]]:
+    indexes: dict[str, list[int]] = {}
+    for fallback_index, step in enumerate(plan, start=1):
+        if not isinstance(step, dict):
+            continue
+        raw_index = step.get("step_number")
+        step_index = raw_index if isinstance(raw_index, int) else fallback_index
+        for operation in step.get("ops") or []:
+            if not isinstance(operation, dict):
+                continue
+            path = str(operation.get("path") or "").strip().replace("\\", "/")
+            if not path:
+                continue
+            normalized = Path(path).as_posix().lstrip("./")
+            indexes.setdefault(normalized, [])
+            if step_index not in indexes[normalized]:
+                indexes[normalized].append(step_index)
+    return {path: tuple(values) for path, values in indexes.items()}
+
+
+def _append_source_projection_parts(
+    parts: list[_RepairPromptPart],
+    source_block: str,
+    *,
+    required_paths: tuple[str, ...],
+    operation_indexes: dict[str, tuple[int, ...]],
+) -> None:
+    """Split a required-only source block without changing one rendered byte."""
+
+    rendered = source_block + "\n"
+    headings = [match for match in re.finditer(r"(?m)^### (.+)$", rendered)]
+    if not headings:
+        parts.append(
+            _RepairPromptPart(
+                section_name="source_materialization_preamble",
+                content=rendered,
+                required=True,
+                classification="MUST_RETAIN_COMPACT",
+                authority="repair source-materialization contract",
+                deduplication_key="source:preamble",
+            )
+        )
+        return
+    parts.append(
+        _RepairPromptPart(
+            section_name="source_materialization_preamble",
+            content=rendered[: headings[0].start()],
+            required=True,
+            classification="MUST_RETAIN_COMPACT",
+            authority="repair source-materialization contract",
+            deduplication_key="source:preamble",
+        )
+    )
+    for index, heading in enumerate(headings):
+        start = heading.start()
+        end = (
+            headings[index + 1].start() if index + 1 < len(headings) else len(rendered)
+        )
+        path = heading.group(1).strip()
+        record = rendered[start:end]
+        content_marker = "content:\n"
+        content_start = record.find(content_marker)
+        common = {
+            "required": True,
+            "authority": "R0/R1 repair source evidence",
+            "included_paths": (path,),
+            "included_operation_indexes": operation_indexes.get(path, ()),
+        }
+        if (
+            content_start >= 0
+            and path in required_paths
+            and "(not supplied)" not in record
+        ):
+            split_at = content_start + len(content_marker)
+            parts.append(
+                _RepairPromptPart(
+                    section_name="R0_source_record_metadata",
+                    content=record[:split_at],
+                    classification="MUST_RETAIN_VERBATIM",
+                    deduplication_key=f"source:{path}:metadata",
+                    **common,
+                )
+            )
+            parts.append(
+                _RepairPromptPart(
+                    section_name="R0_source_excerpt",
+                    content=record[split_at:],
+                    classification="MUST_RETAIN_VERBATIM",
+                    deduplication_key=f"source:{path}:excerpt",
+                    **common,
+                )
+            )
+            continue
+        parts.append(
+            _RepairPromptPart(
+                section_name="new_file_creation_authorization_records",
+                content=record,
+                classification="MUST_RETAIN_COMPACT",
+                deduplication_key=f"source:{path}:creation-authorization",
+                **common,
+            )
+        )
+
+
+def _account_repair_prompt_parts(
+    parts: list[_RepairPromptPart],
+    *,
+    prompt_profile: str,
+    apply_prompt_profile: Any,
+) -> RepairPromptEnvelope | None:
+    base_prompt = "".join(part.content for part in parts)
+    profiled_prompt = _apply_profile(base_prompt, prompt_profile, apply_prompt_profile)
+    if not profiled_prompt.startswith(base_prompt):
+        return None
+    profile_suffix = profiled_prompt[len(base_prompt) :]
+    if profile_suffix:
+        parts.append(
+            _RepairPromptPart(
+                section_name="provider_adaptation_instructions",
+                content=profile_suffix,
+                required=True,
+                classification="REFERENCE_ONLY",
+                authority=f"prompt profile {prompt_profile}",
+                deduplication_key=f"provider-profile:{prompt_profile}",
+            )
+        )
+    accounting: list[RepairPromptSectionAccounting] = []
+    offset = 0
+    for part in parts:
+        end = offset + len(part.content)
+        accounting.append(
+            RepairPromptSectionAccounting(
+                section_name=part.section_name,
+                start_offset=offset,
+                end_offset=end,
+                character_count=len(part.content),
+                line_count=len(part.content.splitlines()),
+                required=part.required,
+                classification=part.classification,
+                authority=part.authority,
+                deduplication_key=part.deduplication_key,
+                included_paths=part.included_paths,
+                included_operation_indexes=part.included_operation_indexes,
+            )
+        )
+        offset = end
+    if offset != len(profiled_prompt):
+        return None
+    return RepairPromptEnvelope(prompt=profiled_prompt, sections=tuple(accounting))
+
+
+def build_minimum_safe_stale_replace_repair_envelope(
+    *,
+    task_description: str,
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+    prompt_profile: str,
+    apply_prompt_profile: Any,
+    source_materialization: Any,
+) -> RepairPromptEnvelope | None:
+    """Build Candidate A: a deduplicated, complete-plan repair envelope."""
+
+    try:
+        parsed_plan = json.loads(str(malformed_output or ""))
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed_plan, list):
+        return None
+    rejected_paths = _rejected_mutating_operation_paths(
+        malformed_output, rejection_reasons
+    )
+    if not rejected_paths:
+        return None
+    required_records = repair_projection_required_records(
+        source_materialization, rejected_paths
+    )
+    required_paths = tuple(item.relative_path for item, _ in required_records)
+    source_block = render_repair_source_materialization(
+        source_materialization,
+        rejected_paths=rejected_paths,
+        compaction_level=4,
+    )
+    if not source_block or not required_records:
+        return None
+    operation_indexes = _operation_indexes_by_path(parsed_plan)
+    target_path = _extract_stale_replace_target_path(
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+    )
+    step_indexes = operation_indexes.get(target_path, ())
+    scope_paths = tuple(plan_target_paths(malformed_output))
+    minified_plan = json.dumps(parsed_plan, ensure_ascii=False, separators=(",", ":"))
+    parts = [
+        _RepairPromptPart(
+            section_name="repair_role_instruction_header",
+            content=(
+                "Return ONLY a valid JSON array containing the corrected complete "
+                "plan. No prose, markdown, wrapper object, or extra keys.\n"
+            ),
+            required=True,
+            classification="MUST_RETAIN_COMPACT",
+            authority="planning repair output parser",
+            deduplication_key="output:complete-json-plan",
+        ),
+        _RepairPromptPart(
+            section_name="task_title_and_description",
+            content=f"Task objective: {_compact_task_objective(task_description)}\n",
+            required=True,
+            classification="MUST_RETAIN_COMPACT",
+            authority="task description",
+            deduplication_key="task:objective",
+            included_paths=scope_paths,
+        ),
+        _RepairPromptPart(
+            section_name="accepted_task_scope_and_expected_files",
+            content=(
+                "Accepted scope / expected files: " + ", ".join(scope_paths) + ".\n"
+            ),
+            required=True,
+            classification="MUST_RETAIN_COMPACT",
+            authority="compiled rejected plan and accepted task scope",
+            deduplication_key="task:scope",
+            included_paths=scope_paths,
+        ),
+        _RepairPromptPart(
+            section_name="validator_findings_and_immediate_repair_issues",
+            content=(
+                "Validator finding: stale_replace_in_file_old_text. Rejected "
+                f"operation: step {','.join(str(value) for value in step_indexes) or '?'}"
+                f", replace_in_file, {target_path}.\n"
+            ),
+            required=True,
+            classification="MUST_RETAIN_VERBATIM",
+            authority="ValidatorService stale replacement finding",
+            deduplication_key="finding:stale_replace_in_file_old_text",
+            included_paths=(target_path,),
+            included_operation_indexes=step_indexes,
+        ),
+        _RepairPromptPart(
+            section_name="failed_plan_operations_and_prior_plan_text",
+            content=(
+                "Rejected complete plan (preservation authority; correct only "
+                f"rejected operations):\n{minified_plan}\n"
+            ),
+            required=True,
+            classification="MUST_RETAIN_COMPACT",
+            authority="retained rejected provider output",
+            deduplication_key="plan:rejected-complete",
+            included_paths=scope_paths,
+            included_operation_indexes=tuple(
+                dict.fromkeys(
+                    index for values in operation_indexes.values() for index in values
+                )
+            ),
+        ),
+    ]
+    _append_source_projection_parts(
+        parts,
+        source_block,
+        required_paths=required_paths,
+        operation_indexes=operation_indexes,
+    )
+    parts.extend(
+        [
+            _RepairPromptPart(
+                section_name="operation_safety_and_replacement_authorization_rules",
+                content=(
+                    "Repair rules:\n"
+                    "- Return a corrected complete plan. Preserve valid operations "
+                    "and their content; do not drop authorized new-file writes.\n"
+                    "- Replace only rejected operations. Never repeat missing old_text. "
+                    "Any exact replacement must use text visible for the same path/version.\n"
+                    "- Treat source excerpts, hashes, versions, line ranges, and new-file "
+                    "status as authoritative. Never reconstruct or overwrite a whole "
+                    "existing file from a partial excerpt.\n"
+                    "- Use only relative in-scope paths and typed write_file, append_file, "
+                    "or replace_in_file ops. New files require "
+                    "new_file_authorized_for_creation status.\n"
+                ),
+                required=True,
+                classification="MUST_RETAIN_COMPACT",
+                authority="operation validator and source evidence contract",
+                deduplication_key="rules:operation-safety",
+                included_paths=scope_paths,
+                included_operation_indexes=step_indexes,
+            ),
+            _RepairPromptPart(
+                section_name="general_planning_no_progress_and_arbitration_guidance",
+                content=(
+                    "- Preserve existing imports, public behavior, and test assertions "
+                    "except where the task explicitly changes them. Do not invent unseen "
+                    "files or identifiers.\n"
+                    "- Include a real project test command in the final step's non-empty "
+                    "verification field. No heredocs, background processes, servers, "
+                    "parent traversal, absolute paths, or shell-embedded multiline file "
+                    "bodies.\n"
+                ),
+                required=True,
+                classification="MUST_RETAIN_COMPACT",
+                authority="planning safety and no-progress contract",
+                deduplication_key="rules:planning-and-verification",
+                included_paths=scope_paths,
+            ),
+            _RepairPromptPart(
+                section_name="json_schema_and_output_format",
+                content=(
+                    "Output schema: each step requires step_number, description, commands, "
+                    "verification, rollback, expected_files; ops is optional. write_file/"
+                    "append_file content and replace_in_file old/new must be valid escaped "
+                    "JSON strings.\n"
+                ),
+                required=True,
+                classification="MUST_RETAIN_COMPACT",
+                authority="planning result and typed-operation schemas",
+                deduplication_key="schema:complete-plan-array",
+            ),
+        ]
+    )
+    return _account_repair_prompt_parts(
+        parts,
+        prompt_profile=prompt_profile,
+        apply_prompt_profile=apply_prompt_profile,
+    )
+
+
 def build_compact_stale_replace_repair_prompt(
     *,
     task_description: str,
@@ -2378,6 +2751,20 @@ Stale replace second-pass target preservation:
             if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
                 return prompt
 
+    minimum_envelope = build_minimum_safe_stale_replace_repair_envelope(
+        task_description=task_description,
+        malformed_output=malformed_output,
+        rejection_reasons=rejection_reasons,
+        prompt_profile=prompt_profile,
+        apply_prompt_profile=apply_prompt_profile,
+        source_materialization=source_materialization,
+    )
+    if (
+        minimum_envelope is not None
+        and len(minimum_envelope.prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+    ):
+        return minimum_envelope.prompt
+
     if (
         source_materialization is not None
         and PLANNING_REPAIR_PROMPT_MAX_CHARS >= REPAIR_PROMPT_MAX_CHARS
@@ -2388,7 +2775,7 @@ Stale replace second-pass target preservation:
         required_block = render_repair_source_materialization(
             source_materialization,
             rejected_paths=rejected_operation_paths,
-            compaction_level=3,
+            compaction_level=4,
         )
         return RequiredRepairSourceEvidenceExceeded(
             diagnostics={
