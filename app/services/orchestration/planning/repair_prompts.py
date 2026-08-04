@@ -30,6 +30,7 @@ from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
     plan_target_paths,
     plan_source_materialization_paths,
+    render_repair_source_materialization,
 )
 from app.services.project.source_imports import (
     extract_python_test_contract,
@@ -301,6 +302,7 @@ def build_planning_repair_prompt_with_metadata(
         if source_materialization_required
         else ""
     )
+    repair_guidance_block = guidance_block
     effective_guidance_block = guidance_block
     if (
         materialization_block
@@ -337,7 +339,12 @@ def build_planning_repair_prompt_with_metadata(
             knowledge_block=knowledge_block,
             guidance_block=_join_optional_blocks(
                 render_planner_workspace_identity(workspace_identity),
-                effective_guidance_block,
+                repair_guidance_block,
+            ),
+            source_materialization=(
+                planner_source_materialization
+                if source_materialization_required
+                else None
             ),
         )
         selected_source_api_contract_block = next(
@@ -2117,6 +2124,7 @@ def build_compact_stale_replace_repair_prompt(
     structure_capsule: str = "",
     knowledge_block: str = "",
     guidance_block: str = "",
+    source_materialization: Any = None,
 ) -> str:
     """Build a bounded repair prompt for stale replace_in_file plans.
 
@@ -2129,6 +2137,23 @@ def build_compact_stale_replace_repair_prompt(
         malformed_output=malformed_output,
         rejection_reasons=rejection_reasons,
     )
+    source_materialization_blocks = (
+        [
+            render_repair_source_materialization(
+                source_materialization,
+                rejected_paths=[target_path] if target_path else (),
+                compaction_level=level,
+            )
+            for level in range(4)
+        ]
+        if source_materialization is not None
+        else [""]
+    )
+    # Compatibility tests exercise deliberately smaller local caps.  Their
+    # legacy stale-repair fallback remains available there; the deployed
+    # 8,000-character contract never silently drops required source evidence.
+    if PLANNING_REPAIR_PROMPT_MAX_CHARS < REPAIR_PROMPT_MAX_CHARS:
+        source_materialization_blocks.append("")
     file_excerpt = _extract_current_file_excerpt(
         project_dir=project_dir,
         target_path=target_path,
@@ -2153,6 +2178,7 @@ def build_compact_stale_replace_repair_prompt(
         current_structure_capsule: str,
         current_knowledge_block: str,
         current_guidance_block: str,
+        current_source_materialization_block: str,
     ) -> str:
         broken_output = compact_invalid_output_excerpt(malformed_output)[:output_chars]
         reason_lines = "\n".join(
@@ -2180,6 +2206,7 @@ Invalid plan excerpt:
 {current_knowledge_block + chr(10) if current_knowledge_block else ""}
 {current_source_context_block + chr(10) if current_source_context_block else ""}
 {current_structure_capsule + chr(10) if current_structure_capsule else ""}
+{current_source_materialization_block + chr(10) if current_source_materialization_block else ""}
 {excerpt_block}
 {current_source_api_contract_block + chr(10) if current_source_api_contract_block else ""}
 Required repair:
@@ -2274,13 +2301,21 @@ Stale replace second-pass target preservation:
                         current_guidance_block,
                     )
                 )
-    seen_attempts: set[tuple[str, str, str, str, str]] = set()
+    # Source projection is deliberately its own ladder.  Never head-truncate
+    # the materialization block through generic guidance compaction.
+    compact_attempts = [
+        (*attempt, source_block)
+        for source_block in source_materialization_blocks
+        for attempt in compact_attempts
+    ]
+    seen_attempts: set[tuple[str, str, str, str, str, str]] = set()
     for (
         current_source_api_contract_block,
         current_source_context_block,
         current_structure_capsule,
         current_knowledge_block,
         current_guidance_block,
+        current_source_materialization_block,
     ) in compact_attempts:
         attempt_key = (
             current_source_api_contract_block,
@@ -2288,6 +2323,7 @@ Stale replace second-pass target preservation:
             current_structure_capsule,
             current_knowledge_block,
             current_guidance_block,
+            current_source_materialization_block,
         )
         if attempt_key in seen_attempts:
             continue
@@ -2314,6 +2350,7 @@ Stale replace second-pass target preservation:
                     current_structure_capsule=current_structure_capsule,
                     current_knowledge_block=current_knowledge_block,
                     current_guidance_block=current_guidance_block,
+                    current_source_materialization_block=current_source_materialization_block,
                 ),
                 prompt_profile,
                 apply_prompt_profile,

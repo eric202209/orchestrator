@@ -1131,6 +1131,145 @@ def render_planner_source_materialization(
     return "\n".join(lines)
 
 
+def render_repair_source_materialization(
+    materialization: PlannerSourceMaterialization | None,
+    *,
+    rejected_paths: Collection[str] = (),
+    compaction_level: int = 0,
+) -> str:
+    """Render a repair-only bounded projection of existing source evidence.
+
+    First-pass planning always uses ``render_planner_source_materialization``.
+    Repair may shed lower-priority support only after its complete prompt has
+    exceeded the fixed bound; internal materialization and provenance remain
+    untouched.
+    """
+
+    if materialization is None or not materialization.files:
+        return ""
+    if compaction_level == 0:
+        return render_planner_source_materialization(materialization)
+    rejected = set(_ordered_unique_paths(rejected_paths))
+    omitted = 0
+    lines = [
+        "## CURRENT SOURCE MATERIALIZATION",
+        "Current workspace source below is authoritative evidence.",
+        "Exact edits may rely only on supplied source for its exact path and version.",
+        "New files may use write_file only when status is new_file_authorized_for_creation.",
+    ]
+    for item in materialization.files:
+        priority = _repair_projection_priority(item, rejected)
+        if compaction_level >= 3 and priority == "R5":
+            omitted += 1
+            continue
+        metadata_only = compaction_level >= 1 and priority in {"R4", "R5"}
+        content = item.content
+        reduced = False
+        if compaction_level >= 2 and priority in {"R2", "R4"} and content:
+            content = _repair_projection_excerpt(content, item.target_hint, 560)
+            reduced = content != item.content
+        lines.extend(
+            [
+                f"### {item.relative_path}",
+                f"status: {item.status}",
+                f"version_identity: {item.version_identity or '(none)'}",
+                f"content_hash: {item.content_hash or '(none)'}",
+            ]
+        )
+        if metadata_only:
+            lines.extend(
+                [
+                    "repair_projection: metadata_only",
+                    f"omission_reason: lower_priority_support_{priority}",
+                ]
+            )
+            continue
+        lines.extend(
+            [
+                "visible_lines: "
+                + (
+                    f"{item.start_line}-{item.end_line}"
+                    if item.start_line is not None
+                    else "(none)"
+                ),
+                f"target_hint: {item.target_hint or '(none)'}",
+                f"target_included: {str(item.target_included).lower()}",
+                f"selection_strategy: {item.selection_strategy or '(none)'}",
+                f"truncated: {str(item.truncated).lower()}",
+                (
+                    "repair_projection: reduced_excerpt"
+                    if reduced
+                    else "repair_projection: full_excerpt"
+                ),
+            ]
+        )
+        lines.extend(["content:", content or "(not supplied)"])
+    if omitted:
+        lines.append(
+            f"{omitted} lower-priority supporting source records omitted to preserve bounded target evidence."
+        )
+    return "\n".join(lines)
+
+
+def _repair_projection_priority(
+    item: MaterializedSourceFile, rejected_paths: set[str]
+) -> str:
+    if item.relative_path in rejected_paths and item.target_included:
+        return "R0"
+    if item.expected and item.priority == "P0":
+        return "R1"
+    if item.expected and item.status != SOURCE_STATUS_NEW:
+        return "R2"
+    if item.status == SOURCE_STATUS_NEW and item.creation_authorized:
+        return "R3"
+    if not item.expected and item.target_included:
+        return "R4"
+    return "R5"
+
+
+def _repair_projection_excerpt(
+    content: str, hint: str | None, maximum_bytes: int
+) -> str:
+    """Shorten support evidence on UTF-8 boundaries, centred on its target hint."""
+
+    encoded = content.encode("utf-8")
+    if len(encoded) <= maximum_bytes:
+        return content
+    hint_bytes = (hint or "").encode("utf-8")
+    match = encoded.find(hint_bytes) if hint_bytes else -1
+    if match < 0:
+        return _truncate_utf8_bytes(encoded, maximum_bytes)
+    start = max(0, match - maximum_bytes // 2)
+    end = min(len(encoded), start + maximum_bytes)
+    start = _utf8_start(encoded, start)
+    end = _utf8_end(encoded, end)
+    body = encoded[start:end].decode("utf-8")
+    return (
+        ("... [truncated]\n" if start else "")
+        + body
+        + ("\n... [truncated]" if end < len(encoded) else "")
+    )
+
+
+def _truncate_utf8_bytes(encoded: bytes, maximum_bytes: int) -> str:
+    end = _utf8_end(encoded, maximum_bytes)
+    suffix = "\n... [truncated]" if end < len(encoded) else ""
+    return encoded[:end].decode("utf-8") + suffix
+
+
+def _utf8_start(encoded: bytes, position: int) -> int:
+    while position < len(encoded) and position > 0 and encoded[position] & 0xC0 == 0x80:
+        position += 1
+    return position
+
+
+def _utf8_end(encoded: bytes, position: int) -> int:
+    position = min(position, len(encoded))
+    while position > 0 and position < len(encoded) and encoded[position] & 0xC0 == 0x80:
+        position -= 1
+    return position
+
+
 def plan_source_materialization_paths(plan: Any) -> set[str]:
     """Return concrete source-like file write targets from a plan."""
 

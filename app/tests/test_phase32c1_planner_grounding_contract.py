@@ -9,6 +9,7 @@ from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
 )
 from app.services.orchestration.planning.repair_prompts import (
+    build_compact_stale_replace_repair_prompt,
     build_planning_repair_prompt,
 )
 from app.services.orchestration.planning.source_materialization import (
@@ -24,6 +25,7 @@ from app.services.orchestration.planning.source_materialization import (
     TARGET_HINT_NOT_FOUND,
     current_source_version_identity,
     materialize_planner_source_context,
+    render_repair_source_materialization,
 )
 from app.services.orchestration.validation.validator import ValidatorService
 
@@ -1007,3 +1009,77 @@ def test_compact_rendering_spends_its_budget_on_source_not_metadata():
         ].included_source_bytes
         <= 2000
     )
+
+
+def test_repair_projection_compacts_support_before_target_evidence():
+    task = (
+        "Remove legacy pagination `query.offset(skip).limit(limit)` in "
+        "app/api/v1/endpoints/projects.py."
+    )
+    materialization = materialize_planner_source_context(
+        ".",
+        task_description=task,
+        expected_paths=[
+            "app/api/v1/endpoints/projects.py",
+            "app/tests/test_pagination_infrastructure.py",
+        ],
+        supporting_paths=["app/api/v1/router.py", "app/config.py"],
+    )
+    provenance_before = materialization.to_metadata()
+    full = render_repair_source_materialization(
+        materialization,
+        rejected_paths=["app/api/v1/endpoints/projects.py"],
+    )
+    compact = render_repair_source_materialization(
+        materialization,
+        rejected_paths=["app/api/v1/endpoints/projects.py"],
+        compaction_level=1,
+    )
+
+    assert full == materialization.to_prompt_block()
+    assert "query.offset(skip).limit(limit)" in compact
+    assert "if page is None:" in compact
+    assert "repair_projection: metadata_only" in compact
+    assert "version_identity:" in compact
+    assert "omission_reason: lower_priority_support_R5" in compact
+    assert materialization.to_metadata() == provenance_before
+
+
+def test_attempt1_repair_projection_fits_without_dropping_target_branch():
+    task = (
+        "Remove legacy pagination `query.offset(skip).limit(limit)` in "
+        "app/api/v1/endpoints/projects.py."
+    )
+    expected = [
+        "app/api/v1/endpoints/projects.py",
+        "app/tests/test_pagination_infrastructure.py",
+    ]
+    materialization = materialize_planner_source_context(
+        ".",
+        task_description=task,
+        expected_paths=expected,
+        supporting_paths=["app/api/v1/router.py", "app/config.py"],
+    )
+    malformed = json.dumps(
+        _plan(
+            operation="replace_in_file",
+            path="app/api/v1/endpoints/projects.py",
+            expected_files=expected,
+            commands=[],
+        )
+    )
+
+    prompt = build_compact_stale_replace_repair_prompt(
+        task_description=task,
+        malformed_output=malformed,
+        project_dir=Path("."),
+        rejection_reasons=["stale_replace_ops_steps: [1]"],
+        source_materialization=materialization,
+    )
+
+    assert len(prompt) <= 8000
+    assert "query.offset(skip).limit(limit)" in prompt
+    assert "if page is None:" in prompt
+    assert "version_identity:" in prompt
+    assert "visible_lines:" in prompt
+    assert "target_included: true" in prompt
