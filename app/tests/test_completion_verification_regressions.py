@@ -28,6 +28,9 @@ from app.services.orchestration.phases.completion_flow import (
     _scope_workspace_consistency_to_task_changes,
     finalize_successful_task,
 )
+from app.services.orchestration.phases.completion_workspace import (
+    _stack_set_for_paths,
+)
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.orchestration.execution.execution_flow import (
     execute_verification_command,
@@ -120,6 +123,57 @@ def test_completion_mixed_stack_check_keeps_task_level_mixed_stack():
     )
 
     assert scoped["mixed_stack"] is True
+
+
+@pytest.mark.parametrize(
+    ("paths", "expected"),
+    [
+        (["app/main.py"], {"python"}),
+        (["frontend/index.js"], {"node"}),
+        (["frontend/src/App.tsx"], {"node"}),
+        (["frontend/package.json"], {"node"}),
+        (["package.json"], {"node"}),
+        (["frontend/package-lock.json"], set()),
+        (["frontend/pnpm-lock.yaml"], set()),
+        (["frontend/vite.config.ts"], {"node"}),
+        ([".github/workflows/ci.yml"], set()),
+        (["config/settings.json"], set()),
+        (["docs/example.js"], {"node"}),
+    ],
+)
+def test_stack_set_for_paths_classifies_sources_and_explicit_project_markers(
+    paths, expected
+):
+    assert _stack_set_for_paths(paths) == expected
+
+
+def test_completion_mixed_stack_manifest_candidate_compatibility():
+    preexisting = _scope_workspace_consistency_to_task_changes(
+        {"mixed_stack": True, "node_markers": ["frontend/package.json"]},
+        plan=[{"expected_files": ["app/helper.py"], "ops": []}],
+        reported_changed_files=["app/helper.py"],
+    )
+    spanning = _scope_workspace_consistency_to_task_changes(
+        {"mixed_stack": True},
+        plan=[
+            {
+                "expected_files": ["app/helper.py", "frontend/package.json"],
+                "ops": [],
+            }
+        ],
+        reported_changed_files=["app/helper.py", "frontend/package.json"],
+    )
+    node_only = _scope_workspace_consistency_to_task_changes(
+        {"mixed_stack": True},
+        plan=[{"expected_files": ["frontend/package.json"], "ops": []}],
+        reported_changed_files=["frontend/package.json"],
+    )
+
+    assert preexisting["mixed_stack"] is False
+    assert preexisting["task_scoped_stack"] == "python"
+    assert spanning["mixed_stack"] is True
+    assert node_only["mixed_stack"] is False
+    assert node_only["task_scoped_stack"] == "node"
 
 
 def test_review_report_artifact_materialization_is_accepted(tmp_path):
@@ -994,6 +1048,65 @@ def test_workspace_consistency_ignores_virtualenv_vendor_javascript(tmp_path):
     assert consistency["mixed_stack"] is False
     assert consistency["node_source_count"] == 0
     assert consistency["node_files"] == []
+
+
+def test_project_baseline_prior_expected_file_authority_filters_task_statuses(
+    tmp_path, monkeypatch
+):
+    baseline = tmp_path / "baseline"
+    baseline.mkdir()
+    (baseline / "present.py").write_text("present = True\n", encoding="utf-8")
+
+    def task(task_id, status, path, position):
+        return SimpleNamespace(
+            id=task_id,
+            title=path,
+            status=status,
+            plan_position=position,
+            steps=[{"expected_files": [path]}],
+        )
+
+    tasks = [
+        task(1, TaskStatus.DONE, "present.py", 1),
+        task(2, TaskStatus.DONE, "missing.py", 2),
+        task(3, TaskStatus.FAILED, "failed-only.py", 3),
+        task(4, TaskStatus.PENDING, "pending-only.py", 4),
+    ]
+    service = TaskService(None)
+    monkeypatch.setattr(service, "get_project_baseline_dir", lambda _project: baseline)
+    monkeypatch.setattr(
+        service,
+        "get_project_baseline_overview",
+        lambda _project: {"exists": True, "path": str(baseline), "file_count": 1},
+    )
+    monkeypatch.setattr(service, "get_project_tasks", lambda _project_id: tasks)
+
+    result = service.validate_project_baseline(SimpleNamespace(id=99))
+
+    assert result["prior_expected_files"] == [
+        {
+            "task_id": 1,
+            "title": "present.py",
+            "plan_position": 1,
+            "path": "present.py",
+            "baseline_present": True,
+        },
+        {
+            "task_id": 2,
+            "title": "missing.py",
+            "plan_position": 2,
+            "path": "missing.py",
+            "baseline_present": False,
+        },
+    ]
+    assert result["missing_expected_files"] == [
+        {
+            "task_id": 2,
+            "title": "missing.py",
+            "plan_position": 2,
+            "path": "missing.py",
+        }
+    ]
 
 
 def test_completion_validation_rejects_reported_files_that_never_materialized(tmp_path):
@@ -2633,6 +2746,32 @@ def test_baseline_publish_preexisting_mixed_stack_with_python_candidate_warns(tm
     assert attribution["projected_stacks"] == ["node", "python"]
 
 
+def test_baseline_publish_preexisting_package_manifest_stack_warns(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "frontend/package.json"],
+        {"added_files": ["app/helper.py"]},
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert verdict.status == "warning"
+    assert verdict.accepted is True
+    assert MIXED_STACK_ISSUE in verdict.reasons
+    attribution = _mixed_attribution(verdict)
+    assert attribution == {
+        "baseline_present": True,
+        "projected_present": True,
+        "candidate_introduced": False,
+        "candidate_worsened": False,
+        "candidate_improved": False,
+        "authority": "baseline_publish_candidate_projection",
+        "severity": "warning",
+        "baseline_stacks": ["node", "python"],
+        "candidate_stacks": ["python"],
+        "projected_stacks": ["node", "python"],
+    }
+
+
 def test_baseline_publish_candidate_introducing_second_stack_blocks(tmp_path):
     verdict = _baseline_publish_verdict(
         tmp_path,
@@ -2650,6 +2789,27 @@ def test_baseline_publish_candidate_introducing_second_stack_blocks(tmp_path):
     assert attribution["candidate_introduced"] is True
 
 
+def test_baseline_publish_candidate_introducing_package_manifest_stack_blocks(
+    tmp_path,
+):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        {"added_files": ["frontend/package.json"]},
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert verdict.status == "repair_required"
+    assert MIXED_STACK_ISSUE in verdict.reasons
+    attribution = _mixed_attribution(verdict)
+    assert attribution["baseline_stacks"] == ["python"]
+    assert attribution["candidate_stacks"] == ["node"]
+    assert attribution["projected_stacks"] == ["node", "python"]
+    assert attribution["candidate_introduced"] is True
+    assert attribution["candidate_worsened"] is False
+    assert attribution["candidate_improved"] is False
+
+
 def test_baseline_publish_candidate_removing_second_stack_clears_reason(tmp_path):
     verdict = _baseline_publish_verdict(
         tmp_path,
@@ -2662,6 +2822,28 @@ def test_baseline_publish_candidate_removing_second_stack_clears_reason(tmp_path
     attribution = _mixed_attribution(verdict)
     assert attribution["severity"] == "resolved"
     assert attribution["projected_present"] is False
+    assert attribution["candidate_improved"] is True
+
+
+def test_baseline_publish_candidate_removing_package_manifest_stack_clears_reason(
+    tmp_path,
+):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "frontend/package.json"],
+        {"deleted_files": ["frontend/package.json"]},
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert MIXED_STACK_ISSUE not in verdict.reasons
+    attribution = _mixed_attribution(verdict)
+    assert attribution["baseline_stacks"] == ["node", "python"]
+    assert attribution["candidate_stacks"] == []
+    assert attribution["projected_stacks"] == ["python"]
+    assert attribution["baseline_present"] is True
+    assert attribution["projected_present"] is False
+    assert attribution["candidate_introduced"] is False
+    assert attribution["candidate_worsened"] is False
     assert attribution["candidate_improved"] is True
 
 
@@ -2694,6 +2876,26 @@ def test_baseline_publish_candidate_spanning_both_stacks_blocks(tmp_path):
     assert attribution["candidate_introduced"] is False
     assert attribution["candidate_worsened"] is True
     assert attribution["candidate_stacks"] == ["node", "python"]
+
+
+def test_baseline_publish_candidate_spanning_python_and_package_manifest_blocks(
+    tmp_path,
+):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["README.md"],
+        {"added_files": ["app/helper.py", "frontend/package.json"]},
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert verdict.status == "repair_required"
+    assert MIXED_STACK_ISSUE in verdict.reasons
+    attribution = _mixed_attribution(verdict)
+    assert attribution["baseline_stacks"] == []
+    assert attribution["candidate_stacks"] == ["node", "python"]
+    assert attribution["projected_stacks"] == ["node", "python"]
+    assert attribution["candidate_introduced"] is True
+    assert attribution["candidate_worsened"] is True
 
 
 def test_baseline_publish_non_stack_consistency_issue_still_blocks(tmp_path):

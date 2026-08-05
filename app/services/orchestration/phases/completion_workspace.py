@@ -8,15 +8,17 @@ from typing import Any
 
 _PYTHON_SUFFIXES = {".py"}
 _NODE_SUFFIXES = {".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs"}
+_NODE_PROJECT_MARKERS = {"package.json"}
 
 
 def _stack_set_for_paths(paths: list[str]) -> set[str]:
     stacks: set[str] = set()
     for raw_path in paths or []:
-        suffix = Path(str(raw_path or "").strip()).suffix.lower()
+        path = Path(str(raw_path or "").strip())
+        suffix = path.suffix.lower()
         if suffix in _PYTHON_SUFFIXES:
             stacks.add("python")
-        elif suffix in _NODE_SUFFIXES:
+        elif suffix in _NODE_SUFFIXES or path.name.lower() in _NODE_PROJECT_MARKERS:
             stacks.add("node")
     return stacks
 
