@@ -426,6 +426,61 @@ def test_rejected_baseline_publish_never_materializes_captured_runtime_candidate
     ctx.task_service.promote_change_set_into_baseline.assert_not_called()
 
 
+def test_baseline_publish_preflight_exception_never_materializes_candidate(
+    tmp_path, monkeypatch
+):
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    (canonical / "existing.py").write_text("before = 1\n", encoding="utf-8")
+    ctx = _make_ctx(canonical)
+    ctx.task_execution_id = 255
+    ctx.runs_in_canonical_baseline = True
+    ctx.runtime_workspace_used = True
+    ctx.planner_contract = _completion_registered_contract()
+    ctx.task_service.persist_task_execution_change_set.return_value = {
+        "task_execution_id": 255,
+        "added_files": ["candidate.py"],
+        "modified_files": [],
+        "deleted_files": [],
+        "changed_count": 1,
+        "warning_flags": [],
+    }
+    ctx.task_service.change_set_review_decision.side_effect = decide_change_set_review
+    ctx.task_service.validate_task_baseline_materialization.return_value = {
+        "baseline_path": str(canonical),
+        "baseline_file_count": 1,
+        "missing_expected_files": [],
+        "consistency_issues": [],
+        "consistency": {},
+    }
+    ctx.task_service.validate_project_baseline.return_value = {
+        "missing_expected_files": []
+    }
+    _patch_coordinator_delegates(
+        monkeypatch, validation_verdict=_make_validation_verdict()
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.coordinators.completion_coordinator.ValidatorService.validate_baseline_publish",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("preflight exploded")),
+    )
+
+    with patch(
+        "app.services.human_guidance.post_write_checker.run_post_write_check_if_enabled",
+        _NOOP_FN,
+    ):
+        result = CompletionCoordinator().complete_task(
+            ctx=ctx,
+            write_project_state_snapshot_fn=_NOOP_FN,
+            save_orchestration_checkpoint_fn=_NOOP_FN,
+        )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "baseline_publish_validation_failed"
+    assert (canonical / "existing.py").read_text(encoding="utf-8") == "before = 1\n"
+    assert not (canonical / "candidate.py").exists()
+    ctx.task_service.promote_change_set_into_baseline.assert_not_called()
+
+
 def test_completion_does_not_publish_when_registered_publication_is_not_required(
     tmp_path, monkeypatch
 ):

@@ -2551,6 +2551,7 @@ class ValidatorService:
         consistency_details: Optional[Dict[str, Any]] = None,
         relaxed_mode: bool = False,
         validation_severity: str = "standard",
+        candidate_change_set: Optional[Dict[str, Any]] = None,
     ) -> ValidationVerdict:
         warnings: List[str] = []
         repairable: List[str] = []
@@ -2560,8 +2561,19 @@ class ValidatorService:
             "baseline_file_count": baseline_file_count,
         }
 
-        if baseline_file_count <= 0:
+        candidate_paths = sorted(
+            set((candidate_change_set or {}).get("added_files") or [])
+            | set((candidate_change_set or {}).get("modified_files") or [])
+        )
+        projected_candidate_file_count = len(candidate_paths)
+        if baseline_file_count <= 0 and not projected_candidate_file_count:
             repairable.append("Canonical baseline is empty after publish")
+        elif baseline_file_count <= 0:
+            details["preflight_candidate_projection"] = {
+                "mode": "candidate_aware",
+                "added_or_modified_paths": candidate_paths[:20],
+                "projected_file_count_lower_bound": projected_candidate_file_count,
+            }
 
         if missing_task_expected_files:
             repairable.append(

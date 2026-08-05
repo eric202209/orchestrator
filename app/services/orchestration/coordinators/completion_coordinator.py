@@ -1342,31 +1342,46 @@ class CompletionCoordinator:
                 preflight_overview = task_service.validate_project_baseline(
                     project, current_task=task
                 )
-                baseline_publish_preflight = _checkpointed(
-                    "baseline_publish_preflight",
-                    lambda: ValidatorService.validate_baseline_publish(
-                        validation_profile=validation_profile,
-                        baseline_path=preflight_materialization.get("baseline_path")
-                        or "",
-                        baseline_file_count=preflight_materialization.get(
-                            "baseline_file_count", 0
+                try:
+                    baseline_publish_preflight = _checkpointed(
+                        "baseline_publish_preflight",
+                        lambda: ValidatorService.validate_baseline_publish(
+                            validation_profile=validation_profile,
+                            baseline_path=preflight_materialization.get("baseline_path")
+                            or "",
+                            baseline_file_count=preflight_materialization.get(
+                                "baseline_file_count", 0
+                            ),
+                            missing_task_expected_files=preflight_materialization.get(
+                                "missing_expected_files", []
+                            ),
+                            missing_prior_expected_files=preflight_overview.get(
+                                "missing_expected_files", []
+                            ),
+                            consistency_issues=preflight_materialization.get(
+                                "consistency_issues", []
+                            ),
+                            consistency_details=preflight_materialization.get(
+                                "consistency"
+                            ),
+                            relaxed_mode=orchestration_state.relaxed_mode,
+                            validation_severity=ctx.validation_severity,
+                            candidate_change_set=(
+                                task_change_set if publish_captured_change_set else None
+                            ),
                         ),
-                        missing_task_expected_files=preflight_materialization.get(
-                            "missing_expected_files", []
-                        ),
-                        missing_prior_expected_files=preflight_overview.get(
-                            "missing_expected_files", []
-                        ),
-                        consistency_issues=preflight_materialization.get(
-                            "consistency_issues", []
-                        ),
-                        consistency_details=preflight_materialization.get(
-                            "consistency"
-                        ),
-                        relaxed_mode=orchestration_state.relaxed_mode,
-                        validation_severity=ctx.validation_severity,
-                    ),
-                )
+                    )
+                except Exception as preflight_error:
+                    baseline_publish_preflight = ValidationVerdict(
+                        stage="baseline_publish",
+                        status="rejected",
+                        profile=validation_profile,
+                        reasons=[
+                            "Baseline publish preflight raised: "
+                            + bounded_exception_message(preflight_error)
+                        ],
+                        details={"preflight_exception": type(preflight_error).__name__},
+                    )
                 record_validation_verdict(
                     db,
                     session_id,
