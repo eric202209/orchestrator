@@ -2301,6 +2301,8 @@ def test_baseline_publish_preflight_projects_deleted_candidate_paths(tmp_path):
     assert verdict.details["preflight_candidate_projection"] == {
         "mode": "candidate_aware",
         "canonical_paths": ["removable.py"],
+        "canonical_raw_paths": ["removable.py"],
+        "orchestration_internal_paths": [],
         "added_paths": [],
         "modified_paths": [],
         "deleted_paths": ["removable.py"],
@@ -2360,3 +2362,204 @@ def test_baseline_publish_preflight_projects_valid_candidate_path_sets(
     assert projection["projected_file_count"] == len(expected_paths)
     for relative_path in canonical_files:
         assert (tmp_path / relative_path).read_text(encoding="utf-8") == "baseline\n"
+
+
+def _write_baseline_tree(root, relative_paths):
+    for relative_path in relative_paths:
+        path = root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("baseline\n", encoding="utf-8")
+
+
+def _preflight_projection(root, candidate_change_set, baseline_file_count=0):
+    verdict = ValidatorService.validate_baseline_publish(
+        validation_profile="implementation",
+        baseline_path=str(root),
+        baseline_file_count=baseline_file_count,
+        missing_task_expected_files=[],
+        missing_prior_expected_files=[],
+        candidate_change_set=candidate_change_set,
+    )
+    return verdict, verdict.details["preflight_candidate_projection"]
+
+
+def test_baseline_publish_preflight_ignores_internal_artifacts_on_empty_baseline(
+    tmp_path,
+):
+    """Phase 32J-1R3 Case A: `.agent` metadata must not satisfy the baseline."""
+
+    _write_baseline_tree(
+        tmp_path,
+        [".agent/change-sets/1/manifest.json", ".agent/internal-state.json"],
+    )
+
+    verdict, projection = _preflight_projection(tmp_path, {})
+
+    assert projection["projected_paths"] == []
+    assert projection["projected_file_count"] == 0
+    assert projection["canonical_raw_paths"] == [
+        ".agent/change-sets/1/manifest.json",
+        ".agent/internal-state.json",
+    ]
+    assert projection["orchestration_internal_paths"] == [
+        ".agent/change-sets/1/manifest.json",
+        ".agent/internal-state.json",
+    ]
+    assert verdict.status == "repair_required"
+    assert "Canonical baseline is empty after publish" in verdict.reasons
+
+
+def test_baseline_publish_preflight_rejects_final_product_deletion_with_internal_artifacts(
+    tmp_path,
+):
+    """Phase 32J-1R3 Case B: last product file deleted -> reject before promotion."""
+
+    _write_baseline_tree(
+        tmp_path, ["removable.py", ".agent/change-sets/1/manifest.json"]
+    )
+
+    verdict, projection = _preflight_projection(
+        tmp_path, {"deleted_files": ["removable.py"]}, baseline_file_count=1
+    )
+
+    assert projection["canonical_paths"] == ["removable.py"]
+    assert projection["orchestration_internal_paths"] == [
+        ".agent/change-sets/1/manifest.json"
+    ]
+    assert projection["projected_paths"] == []
+    assert verdict.status == "repair_required"
+    assert "Canonical baseline is empty after publish" in verdict.reasons
+    assert (tmp_path / "removable.py").exists()
+
+
+def test_baseline_publish_preflight_accepts_real_addition_over_internal_artifacts(
+    tmp_path,
+):
+    """Phase 32J-1R3 Case C."""
+
+    _write_baseline_tree(tmp_path, [".agent/internal.json"])
+
+    verdict, projection = _preflight_projection(
+        tmp_path, {"added_files": ["README.md"]}
+    )
+
+    assert projection["projected_paths"] == ["README.md"]
+    assert verdict.status == "accepted"
+
+
+def test_baseline_publish_preflight_keeps_legitimate_repository_dotfiles(tmp_path):
+    """Phase 32J-1R3 Case D: ownership-based exclusion, not a hidden-file rule."""
+
+    product_dotfiles = [".flake8", ".github/workflows/ci.yml", ".env.example"]
+    _write_baseline_tree(
+        tmp_path,
+        product_dotfiles + [".agent/change-sets/1/manifest.json", ".gitignore"],
+    )
+
+    verdict, projection = _preflight_projection(
+        tmp_path, {}, baseline_file_count=len(product_dotfiles)
+    )
+
+    assert projection["projected_paths"] == sorted(product_dotfiles)
+    # `.gitignore` is orchestrator scaffolding under the deployed
+    # HYDRATION_EXCLUDED_NAMES authority, so preflight matches the canonical
+    # baseline file count instead of inventing new semantics for it.
+    assert ".gitignore" in projection["orchestration_internal_paths"]
+    assert verdict.status == "accepted"
+
+
+def test_baseline_publish_preflight_keeps_backend_and_frontend_product_files(tmp_path):
+    """Phase 32J-1R3 Case E."""
+
+    _write_baseline_tree(
+        tmp_path,
+        ["app/main.py", "frontend/package.json", ".agent/change-sets/1/manifest.json"],
+    )
+
+    verdict, projection = _preflight_projection(tmp_path, {}, baseline_file_count=2)
+
+    assert projection["projected_paths"] == ["app/main.py", "frontend/package.json"]
+    assert verdict.status == "accepted"
+
+
+def test_baseline_publish_preflight_preserves_partial_deletion_with_internal_artifacts(
+    tmp_path,
+):
+    """Phase 32J-1R3 Case F."""
+
+    _write_baseline_tree(
+        tmp_path, ["keep.py", "remove.py", ".agent/change-sets/1/manifest.json"]
+    )
+
+    verdict, projection = _preflight_projection(
+        tmp_path, {"deleted_files": ["remove.py"]}, baseline_file_count=2
+    )
+
+    assert projection["projected_paths"] == ["keep.py"]
+    assert verdict.status == "accepted"
+
+
+def test_baseline_publish_preflight_internal_candidate_paths_do_not_shift_projection(
+    tmp_path,
+):
+    """Phase 32J-1R3 Case G: internal candidate ops neither satisfy nor invalidate."""
+
+    _write_baseline_tree(tmp_path, ["keep.py", ".agent/change-sets/1/manifest.json"])
+
+    _, projection = _preflight_projection(
+        tmp_path,
+        {
+            "added_files": [".agent/change-sets/1/manifest.json"],
+            "modified_files": [".agent/internal-state.json"],
+            "deleted_files": [".agent/change-sets/1/manifest.json"],
+        },
+        baseline_file_count=1,
+    )
+
+    assert projection["added_paths"] == []
+    assert projection["modified_paths"] == []
+    assert projection["deleted_paths"] == []
+    assert projection["projected_paths"] == ["keep.py"]
+
+    _, empty_projection = _preflight_projection(
+        tmp_path,
+        {"added_files": [".agent/new-internal.json"], "deleted_files": ["keep.py"]},
+        baseline_file_count=1,
+    )
+    assert empty_projection["projected_paths"] == []
+
+
+@pytest.mark.parametrize(
+    "canonical_files",
+    [
+        [".agent/change-sets/1/manifest.json"],
+        ["keep.py", ".agent/change-sets/1/manifest.json"],
+        ["app/main.py", "frontend/package.json", ".agent/internal.json", ".gitignore"],
+        [".flake8", ".github/workflows/ci.yml", ".agent/internal.json"],
+    ],
+)
+def test_baseline_publish_preflight_matches_canonical_file_count_semantics(
+    tmp_path, canonical_files
+):
+    """Phase 32J-1R3 Case H: preflight and post-promotion inventories agree.
+
+    ``count_baseline_files`` (which produces the ``baseline_file_count`` used by
+    post-promotion validation) filters canonical entries through
+    ``HYDRATION_EXCLUDED_NAMES``; the preflight projection must reach the same
+    product-file count for the same tree.
+    """
+
+    from app.services.workspace.workspace_paths import HYDRATION_EXCLUDED_NAMES
+
+    _write_baseline_tree(tmp_path, canonical_files)
+    post_promotion_count = sum(
+        1
+        for relative_path in canonical_files
+        if relative_path.split("/")[0] not in HYDRATION_EXCLUDED_NAMES
+    )
+
+    _, projection = _preflight_projection(
+        tmp_path, {}, baseline_file_count=post_promotion_count
+    )
+
+    assert projection["projected_file_count"] == post_promotion_count

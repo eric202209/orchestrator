@@ -76,6 +76,7 @@ from app.services.orchestration.planning.source_operation_verification import (
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
 )
+from app.services.workspace.workspace_paths import is_hydration_excluded_path
 from .rules.contract_placeholders import (
     _plan_contains_placeholder_intent,
     _plan_fake_verification_artifact_steps,
@@ -158,6 +159,29 @@ from .rules.core_paths import (
 )
 
 MAX_INITIAL_PLAN_STEPS = 4
+
+
+def is_orchestration_internal_path(relative_path: str) -> bool:
+    """True when a canonical-relative path is an Orchestrator-owned artifact.
+
+    Phase 32J-1R3: change-set capture writes `.agent/change-sets/<id>/…` into
+    the canonical root *before* publication preflight runs, so a recursive
+    regular-file walk counted internal metadata as product baseline content and
+    an empty (or emptied) product baseline passed preflight.  Ownership is
+    decided by the same `HYDRATION_EXCLUDED_NAMES` authority that change-set
+    capture (`ChangeSetService._path_is_safe_relative`) and canonical baseline
+    counting (`count_baseline_files`) already use, so preflight and
+    post-promotion validation agree on what a product file is.  This is
+    ownership-based, not a hidden-file or ignore rule: `.github/**`,
+    `.flake8`, `.env.example` and other legitimate repository dotfiles are not
+    orchestration-owned and still count.
+    """
+
+    return is_hydration_excluded_path(Path(relative_path))
+
+
+def _product_baseline_paths(paths: set[str]) -> set[str]:
+    return {path for path in paths if not is_orchestration_internal_path(path)}
 
 
 def _plan_target_paths(plan: List[Dict[str, Any]]) -> list[str]:
@@ -2562,25 +2586,32 @@ class ValidatorService:
         }
 
         baseline_dir = Path(baseline_path).resolve()
-        canonical_paths = {
+        raw_canonical_paths = {
             normalize_path_reference(
                 path.relative_to(baseline_dir).as_posix(), baseline_dir
             )
             for path in baseline_dir.rglob("*")
             if path.is_file()
         }
-        added_paths = {
-            normalize_path_reference(str(path), baseline_dir)
-            for path in (candidate_change_set or {}).get("added_files") or []
-        }
-        modified_paths = {
-            normalize_path_reference(str(path), baseline_dir)
-            for path in (candidate_change_set or {}).get("modified_files") or []
-        }
-        deleted_paths = {
-            normalize_path_reference(str(path), baseline_dir)
-            for path in (candidate_change_set or {}).get("deleted_files") or []
-        }
+        canonical_paths = _product_baseline_paths(raw_canonical_paths)
+        added_paths = _product_baseline_paths(
+            {
+                normalize_path_reference(str(path), baseline_dir)
+                for path in (candidate_change_set or {}).get("added_files") or []
+            }
+        )
+        modified_paths = _product_baseline_paths(
+            {
+                normalize_path_reference(str(path), baseline_dir)
+                for path in (candidate_change_set or {}).get("modified_files") or []
+            }
+        )
+        deleted_paths = _product_baseline_paths(
+            {
+                normalize_path_reference(str(path), baseline_dir)
+                for path in (candidate_change_set or {}).get("deleted_files") or []
+            }
+        )
         projected_paths = canonical_paths | added_paths | modified_paths
         projected_paths.difference_update(deleted_paths)
         projected_file_count = len(projected_paths)
@@ -2588,6 +2619,10 @@ class ValidatorService:
             details["preflight_candidate_projection"] = {
                 "mode": "candidate_aware",
                 "canonical_paths": sorted(canonical_paths)[:20],
+                "canonical_raw_paths": sorted(raw_canonical_paths)[:20],
+                "orchestration_internal_paths": sorted(
+                    raw_canonical_paths - canonical_paths
+                )[:20],
                 "added_paths": sorted(added_paths)[:20],
                 "modified_paths": sorted(modified_paths)[:20],
                 "deleted_paths": sorted(deleted_paths)[:20],
