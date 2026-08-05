@@ -184,6 +184,57 @@ def _product_baseline_paths(paths: set[str]) -> set[str]:
     return {path for path in paths if not is_orchestration_internal_path(path)}
 
 
+MIXED_LANGUAGE_WORKSPACE_ISSUE = (
+    "Workspace contains both Python and Node/JS implementation artifacts"
+)
+
+
+def _mixed_language_attribution(
+    *,
+    canonical_paths: set[str],
+    added_paths: set[str],
+    modified_paths: set[str],
+    projected_paths: set[str],
+) -> Dict[str, Any]:
+    """Attribute a mixed-stack workspace to the baseline or to the candidate.
+
+    Pre-existing mixed state that the candidate neither introduces nor worsens
+    is baseline debt, not a candidate defect.  Deleted paths only ever shrink
+    the projected set; they never contribute a candidate stack.
+    """
+
+    # Deferred: `phases` imports the execution flow, which imports this module.
+    from app.services.orchestration.phases.completion_workspace import (
+        _stack_set_for_paths,
+    )
+
+    baseline_stacks = _stack_set_for_paths(sorted(canonical_paths))
+    candidate_stacks = _stack_set_for_paths(sorted(added_paths | modified_paths))
+    projected_stacks = _stack_set_for_paths(sorted(projected_paths))
+    baseline_present = len(baseline_stacks) > 1
+    projected_present = len(projected_stacks) > 1
+    candidate_introduced = projected_present and not baseline_present
+    candidate_worsened = projected_present and len(candidate_stacks) > 1
+    if not projected_present:
+        severity = "resolved"
+    elif candidate_introduced or candidate_worsened:
+        severity = "repair_required"
+    else:
+        severity = "warning"
+    return {
+        "baseline_present": baseline_present,
+        "projected_present": projected_present,
+        "candidate_introduced": candidate_introduced,
+        "candidate_worsened": candidate_worsened,
+        "candidate_improved": baseline_present and not projected_present,
+        "authority": "baseline_publish_candidate_projection",
+        "severity": severity,
+        "baseline_stacks": sorted(baseline_stacks),
+        "candidate_stacks": sorted(candidate_stacks),
+        "projected_stacks": sorted(projected_stacks),
+    }
+
+
 def _plan_target_paths(plan: List[Dict[str, Any]]) -> list[str]:
     paths: list[str] = []
     seen: set[str] = set()
@@ -2648,9 +2699,25 @@ class ValidatorService:
             )
             details["missing_prior_expected_files"] = missing_prior_expected_files[:20]
         if consistency_issues:
+            mixed_attribution = _mixed_language_attribution(
+                canonical_paths=canonical_paths,
+                added_paths=added_paths,
+                modified_paths=modified_paths,
+                projected_paths=projected_paths,
+            )
             target = warnings if relaxed_mode else repairable
-            target.extend(consistency_issues[:4])
+            for issue in consistency_issues[:4]:
+                if issue != MIXED_LANGUAGE_WORKSPACE_ISSUE:
+                    target.append(issue)
+                elif mixed_attribution["severity"] == "repair_required":
+                    target.append(issue)
+                elif mixed_attribution["severity"] == "warning":
+                    warnings.append(issue)
             details["consistency_issues"] = consistency_issues[:10]
+            if MIXED_LANGUAGE_WORKSPACE_ISSUE in consistency_issues:
+                details.setdefault("baseline_condition_attribution", {})[
+                    "mixed_language_workspace"
+                ] = mixed_attribution
         if consistency_details:
             details["consistency"] = consistency_details
 

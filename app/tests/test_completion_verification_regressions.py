@@ -2563,3 +2563,225 @@ def test_baseline_publish_preflight_matches_canonical_file_count_semantics(
     )
 
     assert projection["projected_file_count"] == post_promotion_count
+
+
+MIXED_STACK_ISSUE = (
+    "Workspace contains both Python and Node/JS implementation artifacts"
+)
+NESTED_DUPLICATE_ISSUE = "Workspace contains a nested duplicate task directory: api/api"
+
+
+def _baseline_publish_verdict(
+    root,
+    canonical_files,
+    candidate_change_set,
+    *,
+    consistency_issues=None,
+    missing_prior_expected_files=None,
+):
+    _write_baseline_tree(root, canonical_files)
+    return ValidatorService.validate_baseline_publish(
+        validation_profile="implementation",
+        baseline_path=str(root),
+        baseline_file_count=len(canonical_files),
+        missing_task_expected_files=[],
+        missing_prior_expected_files=missing_prior_expected_files or [],
+        consistency_issues=consistency_issues or [],
+        candidate_change_set=candidate_change_set,
+    )
+
+
+def _mixed_attribution(verdict):
+    return verdict.details["baseline_condition_attribution"]["mixed_language_workspace"]
+
+
+def test_baseline_publish_single_language_baseline_is_accepted(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        {"added_files": ["app/helper.py"]},
+    )
+
+    assert verdict.status == "accepted"
+    assert verdict.reasons == []
+
+
+def test_baseline_publish_preexisting_mixed_stack_with_python_candidate_warns(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "web/index.js"],
+        {"added_files": ["app/time_utils.py"], "modified_files": ["app/main.py"]},
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert verdict.status == "warning"
+    assert verdict.accepted is True
+    assert MIXED_STACK_ISSUE in verdict.reasons
+    attribution = _mixed_attribution(verdict)
+    assert attribution["severity"] == "warning"
+    assert attribution["baseline_present"] is True
+    assert attribution["projected_present"] is True
+    assert attribution["candidate_introduced"] is False
+    assert attribution["candidate_worsened"] is False
+    assert attribution["candidate_improved"] is False
+    assert attribution["baseline_stacks"] == ["node", "python"]
+    assert attribution["candidate_stacks"] == ["python"]
+    assert attribution["projected_stacks"] == ["node", "python"]
+
+
+def test_baseline_publish_candidate_introducing_second_stack_blocks(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        {"added_files": ["web/index.js"]},
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert verdict.status == "repair_required"
+    assert MIXED_STACK_ISSUE in verdict.reasons
+    attribution = _mixed_attribution(verdict)
+    assert attribution["severity"] == "repair_required"
+    assert attribution["baseline_present"] is False
+    assert attribution["projected_present"] is True
+    assert attribution["candidate_introduced"] is True
+
+
+def test_baseline_publish_candidate_removing_second_stack_clears_reason(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "web/index.js"],
+        {"deleted_files": ["web/index.js"]},
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert MIXED_STACK_ISSUE not in verdict.reasons
+    attribution = _mixed_attribution(verdict)
+    assert attribution["severity"] == "resolved"
+    assert attribution["projected_present"] is False
+    assert attribution["candidate_improved"] is True
+
+
+def test_baseline_publish_partial_second_stack_removal_stays_warning(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "web/index.js", "web/app.js"],
+        {"deleted_files": ["web/app.js"]},
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert verdict.status == "warning"
+    assert MIXED_STACK_ISSUE in verdict.reasons
+    attribution = _mixed_attribution(verdict)
+    assert attribution["candidate_improved"] is False
+    assert attribution["severity"] == "warning"
+
+
+def test_baseline_publish_candidate_spanning_both_stacks_blocks(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "web/index.js"],
+        {"added_files": ["app/extra.py", "web/extra.js"]},
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert verdict.status == "repair_required"
+    assert MIXED_STACK_ISSUE in verdict.reasons
+    attribution = _mixed_attribution(verdict)
+    assert attribution["candidate_introduced"] is False
+    assert attribution["candidate_worsened"] is True
+    assert attribution["candidate_stacks"] == ["node", "python"]
+
+
+def test_baseline_publish_non_stack_consistency_issue_still_blocks(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "web/index.js"],
+        {"added_files": ["app/time_utils.py"]},
+        consistency_issues=[MIXED_STACK_ISSUE, NESTED_DUPLICATE_ISSUE],
+    )
+
+    assert verdict.status == "repair_required"
+    assert NESTED_DUPLICATE_ISSUE in verdict.reasons
+    assert MIXED_STACK_ISSUE in verdict.reasons
+    assert _mixed_attribution(verdict)["severity"] == "warning"
+
+
+def test_baseline_publish_post_promotion_mixed_state_is_not_attributed(tmp_path):
+    """Post-promotion validation passes no candidate; baseline == projected."""
+
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "web/index.js"],
+        None,
+        consistency_issues=[MIXED_STACK_ISSUE],
+    )
+
+    assert verdict.status == "warning"
+    attribution = _mixed_attribution(verdict)
+    assert attribution["candidate_stacks"] == []
+    assert attribution["severity"] == "warning"
+
+
+def test_baseline_publish_relaxed_mode_keeps_consistency_issues_as_warnings(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        {"added_files": ["web/index.js"]},
+        consistency_issues=[MIXED_STACK_ISSUE, NESTED_DUPLICATE_ISSUE],
+    )
+    assert verdict.status == "repair_required"
+
+    relaxed = ValidatorService.validate_baseline_publish(
+        validation_profile="implementation",
+        baseline_path=str(tmp_path),
+        baseline_file_count=1,
+        missing_task_expected_files=[],
+        missing_prior_expected_files=[],
+        consistency_issues=[MIXED_STACK_ISSUE, NESTED_DUPLICATE_ISSUE],
+        relaxed_mode=True,
+        candidate_change_set={"added_files": ["web/index.js"]},
+    )
+    assert relaxed.status == "warning"
+
+
+def test_baseline_publish_missing_prior_expected_files_remains_blocking(tmp_path):
+    """Characterization: Rule 1 is not delta-aware yet (Phase 32J-3 stop)."""
+
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        {"added_files": ["app/time_utils.py"]},
+        missing_prior_expected_files=[
+            {
+                "task_id": 1,
+                "title": "probe-e",
+                "plan_position": 5,
+                "path": "probe_e.py",
+            }
+        ],
+    )
+
+    assert verdict.status == "repair_required"
+    assert (
+        "Canonical baseline is missing previously completed task files"
+        in verdict.reasons
+    )
+
+
+def test_baseline_publish_missing_current_task_files_characterization(tmp_path):
+    """Section 7 observation: current-task rule is untouched by Phase 32J-3."""
+
+    _write_baseline_tree(tmp_path, ["app/main.py"])
+    verdict = ValidatorService.validate_baseline_publish(
+        validation_profile="implementation",
+        baseline_path=str(tmp_path),
+        baseline_file_count=1,
+        missing_task_expected_files=["app/time_utils.py"],
+        missing_prior_expected_files=[],
+        candidate_change_set={"added_files": ["app/time_utils.py"]},
+    )
+
+    assert verdict.status == "repair_required"
+    assert verdict.reasons == [
+        "Published baseline is missing current task files: app/time_utils.py"
+    ]
