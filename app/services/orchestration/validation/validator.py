@@ -2561,19 +2561,44 @@ class ValidatorService:
             "baseline_file_count": baseline_file_count,
         }
 
-        candidate_paths = sorted(
-            set((candidate_change_set or {}).get("added_files") or [])
-            | set((candidate_change_set or {}).get("modified_files") or [])
-        )
-        projected_candidate_file_count = len(candidate_paths)
-        if baseline_file_count <= 0 and not projected_candidate_file_count:
-            repairable.append("Canonical baseline is empty after publish")
-        elif baseline_file_count <= 0:
+        baseline_dir = Path(baseline_path).resolve()
+        canonical_paths = {
+            normalize_path_reference(
+                path.relative_to(baseline_dir).as_posix(), baseline_dir
+            )
+            for path in baseline_dir.rglob("*")
+            if path.is_file()
+        }
+        added_paths = {
+            normalize_path_reference(str(path), baseline_dir)
+            for path in (candidate_change_set or {}).get("added_files") or []
+        }
+        modified_paths = {
+            normalize_path_reference(str(path), baseline_dir)
+            for path in (candidate_change_set or {}).get("modified_files") or []
+        }
+        deleted_paths = {
+            normalize_path_reference(str(path), baseline_dir)
+            for path in (candidate_change_set or {}).get("deleted_files") or []
+        }
+        projected_paths = canonical_paths | added_paths | modified_paths
+        projected_paths.difference_update(deleted_paths)
+        projected_file_count = len(projected_paths)
+        if candidate_change_set is not None:
             details["preflight_candidate_projection"] = {
                 "mode": "candidate_aware",
-                "added_or_modified_paths": candidate_paths[:20],
-                "projected_file_count_lower_bound": projected_candidate_file_count,
+                "canonical_paths": sorted(canonical_paths)[:20],
+                "added_paths": sorted(added_paths)[:20],
+                "modified_paths": sorted(modified_paths)[:20],
+                "deleted_paths": sorted(deleted_paths)[:20],
+                "projected_paths": sorted(projected_paths)[:20],
+                "projected_file_count": projected_file_count,
             }
+
+        if (candidate_change_set is not None and not projected_file_count) or (
+            candidate_change_set is None and baseline_file_count <= 0
+        ):
+            repairable.append("Canonical baseline is empty after publish")
 
         if missing_task_expected_files:
             repairable.append(

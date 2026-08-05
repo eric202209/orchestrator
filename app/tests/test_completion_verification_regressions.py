@@ -2282,3 +2282,81 @@ def test_completion_verification_repair_has_separate_budget_from_execution_debug
     assert ctx.task.status == TaskStatus.DONE
     assert ctx.task.current_step == 4
     assert len(ctx.orchestration_state.execution_results) == 4
+
+
+def test_baseline_publish_preflight_projects_deleted_candidate_paths(tmp_path):
+    (tmp_path / "removable.py").write_text("print('remove')\n", encoding="utf-8")
+
+    verdict = ValidatorService.validate_baseline_publish(
+        validation_profile="implementation",
+        baseline_path=str(tmp_path),
+        baseline_file_count=1,
+        missing_task_expected_files=[],
+        missing_prior_expected_files=[],
+        candidate_change_set={"deleted_files": ["removable.py"]},
+    )
+
+    assert verdict.status == "repair_required"
+    assert verdict.reasons == ["Canonical baseline is empty after publish"]
+    assert verdict.details["preflight_candidate_projection"] == {
+        "mode": "candidate_aware",
+        "canonical_paths": ["removable.py"],
+        "added_paths": [],
+        "modified_paths": [],
+        "deleted_paths": ["removable.py"],
+        "projected_paths": [],
+        "projected_file_count": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("canonical_files", "candidate_change_set", "expected_paths"),
+    [
+        (
+            ["keep.py", "remove.py"],
+            {"deleted_files": ["remove.py"]},
+            ["keep.py"],
+        ),
+        (
+            ["old.py"],
+            {"added_files": ["new.py"], "deleted_files": ["old.py"]},
+            ["new.py"],
+        ),
+        (
+            ["keep.py", "remove.py"],
+            {"modified_files": ["keep.py"], "deleted_files": ["remove.py"]},
+            ["keep.py"],
+        ),
+        (
+            ["keep.py"],
+            {"deleted_files": ["absent.py"]},
+            ["keep.py"],
+        ),
+        (
+            ["old_name.py"],
+            {"added_files": ["new_name.py"], "deleted_files": ["old_name.py"]},
+            ["new_name.py"],
+        ),
+    ],
+)
+def test_baseline_publish_preflight_projects_valid_candidate_path_sets(
+    tmp_path, canonical_files, candidate_change_set, expected_paths
+):
+    for relative_path in canonical_files:
+        (tmp_path / relative_path).write_text("baseline\n", encoding="utf-8")
+
+    verdict = ValidatorService.validate_baseline_publish(
+        validation_profile="implementation",
+        baseline_path=str(tmp_path),
+        baseline_file_count=len(canonical_files),
+        missing_task_expected_files=[],
+        missing_prior_expected_files=[],
+        candidate_change_set=candidate_change_set,
+    )
+
+    assert verdict.status == "accepted"
+    projection = verdict.details["preflight_candidate_projection"]
+    assert projection["projected_paths"] == expected_paths
+    assert projection["projected_file_count"] == len(expected_paths)
+    for relative_path in canonical_files:
+        assert (tmp_path / relative_path).read_text(encoding="utf-8") == "baseline\n"
