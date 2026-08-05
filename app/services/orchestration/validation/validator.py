@@ -65,8 +65,13 @@ from app.services.orchestration.planning.source_materialization import (
     SOURCE_STATUS_EXISTING,
     SOURCE_STATUS_NEW,
     materialize_planner_source_context,
-    materialized_source_content,
     materialized_source_file,
+)
+from app.services.orchestration.planning.source_operation_verification import (
+    FAILURE_STALE_OLD_TEXT,
+    ResolvedSource,
+    resolve_version_fenced_source,
+    verify_replace_operation,
 )
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
@@ -265,21 +270,27 @@ def _source_operation_contract_issues(
         "existing_file_write_without_authorization": [],
         "new_file_write_without_creation_authorization": [],
         "source_materialization_unavailable": [],
+        "source_operation_verdicts": [],
     }
     unavailable = list(getattr(source_materialization, "unavailable_reasons", ()) or ())
     if unavailable:
         details["source_materialization_unavailable"] = unavailable[:20]
 
+    # The in-plan buffer holds the complete current file whenever the captured
+    # version identity still holds, so a byte-perfect edit outside the visible
+    # span is verifiable without widening the model-visible prompt.
     current_content: dict[str, str] = {}
+    resolved_sources: dict[str, ResolvedSource] = {}
     for item in getattr(source_materialization, "files", ()) or ():
-        if getattr(item, "status", None) == SOURCE_STATUS_EXISTING:
-            content = materialized_source_content(
-                source_materialization,
-                getattr(item, "relative_path", ""),
-                project_dir,
-            )
-            if content is not None:
-                current_content[str(item.relative_path)] = content
+        if getattr(item, "status", None) != SOURCE_STATUS_EXISTING:
+            continue
+        relative = str(getattr(item, "relative_path", ""))
+        resolved = resolve_version_fenced_source(
+            source_materialization, relative, project_dir
+        )
+        resolved_sources[relative] = resolved
+        if resolved.failure_code is None and resolved.full_content is not None:
+            current_content[relative] = resolved.full_content
 
     for index, step in enumerate(plan or [], start=1):
         for operation_index, operation in enumerate(step.get("ops") or [], start=1):
@@ -367,11 +378,21 @@ def _source_operation_contract_issues(
             if not isinstance(old_text, str) or not old_text:
                 continue
             content = current_content.get(relative_path)
-            if content is None:
-                details["missing_source_materialization"].append(label)
-            elif old_text not in content:
+            verdict = verify_replace_operation(
+                resolved_sources.get(relative_path),
+                old_text,
+                relative_path=relative_path,
+                simulated_content=content,
+                step_index=index,
+                operation_index=operation_index,
+            )
+            if len(details["source_operation_verdicts"]) < 20:
+                details["source_operation_verdicts"].append(verdict.to_dict())
+            if verdict.failure_code == FAILURE_STALE_OLD_TEXT:
                 details["stale_replace_materialization"].append(label)
-            else:
+            elif verdict.failure_code is not None:
+                details["missing_source_materialization"].append(label)
+            elif content is not None:
                 new_text = operation.get("new")
                 if isinstance(new_text, str):
                     current_content[relative_path] = content.replace(

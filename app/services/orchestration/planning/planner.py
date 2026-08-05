@@ -54,8 +54,8 @@ from app.services.orchestration.planning.planner_contract_registry import (
     planner_grounding_evidence,
     render_planner_repair_contract_context,
 )
-from app.services.orchestration.planning.source_materialization import (
-    materialized_source_content,
+from app.services.orchestration.planning.source_operation_verification import (
+    verify_replace_in_file,
 )
 from app.services.orchestration.planning.repair_evidence import (
     record_pending_planning_repair_triplet,
@@ -866,10 +866,13 @@ class PlannerService:
             if not rel_path or not isinstance(old_text, str) or not old_text:
                 continue
             if source_materialization is not None:
-                content = materialized_source_content(
-                    source_materialization, rel_path, project_dir
+                verdict = verify_replace_in_file(
+                    source_materialization,
+                    rel_path,
+                    old_text,
+                    project_dir,
                 )
-                if content is None or old_text not in content:
+                if not verdict.verified:
                     return True
                 continue
             path = (project_dir / rel_path).resolve()

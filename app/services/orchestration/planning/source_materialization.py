@@ -72,6 +72,20 @@ SELECTION_TARGET_SYMBOL = "target_centered_symbol_match"
 SELECTION_HEAD_FALLBACK = "head_fallback_no_target"
 SELECTION_OMITTED_TOTAL_BUDGET = "omitted_total_budget"
 SELECTION_NEW_FILE = "new_file_no_source"
+SELECTION_TARGET_WITH_STRUCTURAL_HEAD = "target_centered_with_structural_head"
+
+SPAN_PRIMARY_TARGET = "primary_target_region"
+SPAN_STRUCTURAL_HEAD = "structural_head_region"
+
+# A second span never adds budget: it is carved out of the same per-file
+# allocation, and only enough of it to carry a module head/import region.
+_STRUCTURAL_HEAD_BUDGET_BYTES = 600
+_STRUCTURAL_HEAD_BUDGET_SHARE = 3
+_STRUCTURAL_EDIT_REQUIREMENT_RE = re.compile(
+    r"\bimports?\b|\bimported\b|\bimporting\b|\bmodule[-\s]level\b"
+    r"|\btop[-\s]level\s+(?:declaration|definition|import)\b",
+    re.IGNORECASE,
+)
 
 TARGET_HINT_MATCHED = "target_hint_matched"
 TARGET_HINT_NOT_FOUND = "target_hint_not_found"
@@ -102,8 +116,28 @@ _CREATION_WORD_RE = re.compile(
 
 
 @dataclass(frozen=True)
+class MaterializedSourceSpan:
+    """One bounded, prompt-visible byte range of a materialized file."""
+
+    kind: str
+    start_byte: int
+    end_byte: int
+    start_line: int
+    end_line: int
+    included_source_bytes: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class MaterializedSourceFile:
-    """One bounded, provenance-bearing file fact supplied to planning."""
+    """One bounded, provenance-bearing file fact supplied to planning.
+
+    ``start_byte``/``end_byte``/``start_line``/``end_line`` always describe the
+    primary target-centred span.  ``spans`` is the complete authority when a
+    structural head span is also visible.
+    """
 
     relative_path: str
     workspace_identity: str
@@ -136,6 +170,7 @@ class MaterializedSourceFile:
     target_match_start: int | None = None
     target_match_end: int | None = None
     target_included: bool = False
+    spans: tuple[MaterializedSourceSpan, ...] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -571,6 +606,95 @@ def _select_source_region(
     return _render_region(encoded, spans, start_byte, end_byte)
 
 
+def _structural_head_span_requested(
+    task_text: str, relative_path: str, *, is_expected: bool
+) -> bool:
+    """Return whether the task deterministically implies a file-head edit.
+
+    Only an expected editable Python file qualifies, and only when the task
+    itself states an import or top-level declaration requirement.  This is a
+    task-shape test, never a search term: no prose word is extracted as a hint.
+    """
+
+    if not is_expected or not relative_path.endswith(".py"):
+        return False
+    return bool(_STRUCTURAL_EDIT_REQUIREMENT_RE.search(task_text or ""))
+
+
+def _select_structural_head_regions(
+    text: str,
+    *,
+    budget_bytes: int,
+    primary: _SelectedRegion,
+    match_span: tuple[int, int] | None,
+) -> tuple[_SelectedRegion, _SelectedRegion] | None:
+    """Return a (head, primary) span pair within the same ``budget_bytes``.
+
+    The pair is returned only when both spans fit and stay disjoint; otherwise
+    the caller deterministically keeps its single full-budget primary span.
+    """
+
+    if not primary.truncated_before:
+        return None
+    head_budget = min(
+        _STRUCTURAL_HEAD_BUDGET_BYTES, budget_bytes // _STRUCTURAL_HEAD_BUDGET_SHARE
+    )
+    if head_budget <= 0:
+        return None
+    reduced_primary = _select_source_region(
+        text, budget_bytes=budget_bytes - head_budget, match_span=match_span
+    )
+    head = _select_source_region(text, budget_bytes=head_budget, match_span=None)
+    if reduced_primary is None or head is None:
+        return None
+    if head.end_byte >= reduced_primary.start_byte:
+        # The regions would overlap or abut; one contiguous span is correct.
+        return None
+    return head, reduced_primary
+
+
+def _compose_span_content(text: str, regions: tuple[_SelectedRegion, ...]) -> str:
+    """Render ordered, disjoint regions as one bounded excerpt with elisions."""
+
+    encoded = text.encode("utf-8")
+    parts: list[str] = []
+    if regions[0].start_byte > 0:
+        parts.append(_TRUNCATED_PREFIX_MARKER)
+    for index, region in enumerate(regions):
+        body = encoded[region.start_byte : region.end_byte].decode(
+            "utf-8", errors="ignore"
+        )
+        parts.append(body)
+        if index + 1 < len(regions):
+            if not body.endswith("\n"):
+                parts.append("\n")
+            parts.append(_TRUNCATED_PREFIX_MARKER)
+    if regions[-1].end_byte < len(encoded):
+        parts.append(_TRUNCATED_SUFFIX_MARKER)
+    return "".join(parts)
+
+
+def _source_spans(
+    regions: tuple[_SelectedRegion, ...]
+) -> tuple[MaterializedSourceSpan, ...]:
+    kinds = (
+        (SPAN_STRUCTURAL_HEAD, SPAN_PRIMARY_TARGET)
+        if len(regions) > 1
+        else (SPAN_PRIMARY_TARGET,)
+    )
+    return tuple(
+        MaterializedSourceSpan(
+            kind=kind,
+            start_byte=region.start_byte,
+            end_byte=region.end_byte,
+            start_line=region.start_line,
+            end_line=region.end_line,
+            included_source_bytes=region.end_byte - region.start_byte,
+        )
+        for kind, region in zip(kinds, regions)
+    )
+
+
 def _select_hint_for_source(
     hints: tuple[SourceTargetHint, ...], relative_path: str, text: str
 ) -> tuple[SourceTargetHint, int, int, int] | None:
@@ -908,6 +1032,7 @@ def materialize_planner_source_context(
         text = _read_source_text(path, relative_path, source_cache)
         full_bytes = len(text.encode("utf-8")) if text is not None else None
         region: _SelectedRegion | None = None
+        regions: tuple[_SelectedRegion, ...] = ()
         selected_hint: SourceTargetHint | None = None
         match_span: tuple[int, int] | None = None
         match_count = 0
@@ -950,10 +1075,31 @@ def materialize_planner_source_context(
                 omission_reason = "maximum_total_source_bytes"
                 strategy = SELECTION_OMITTED_TOTAL_BUDGET
             else:
-                content = region.content
+                head_pair = (
+                    _select_structural_head_regions(
+                        text,
+                        budget_bytes=cap,
+                        primary=region,
+                        match_span=match_span,
+                    )
+                    if match_span is not None
+                    and _structural_head_span_requested(
+                        task_text, relative_path, is_expected=is_expected
+                    )
+                    else None
+                )
+                if head_pair is not None:
+                    region = head_pair[1]
+                    regions = head_pair
+                    content = _compose_span_content(text, regions)
+                else:
+                    regions = (region,)
+                    content = region.content
                 status = SOURCE_STATUS_EXISTING
                 omission_reason = None
-                if not region.truncated_before and not region.truncated_after:
+                if head_pair is not None:
+                    strategy = SELECTION_TARGET_WITH_STRUCTURAL_HEAD
+                elif not region.truncated_before and not region.truncated_after:
                     strategy = SELECTION_FULL_FILE
                 elif match_span is None:
                     strategy = SELECTION_HEAD_FALLBACK
@@ -1024,6 +1170,7 @@ def materialize_planner_source_context(
                 target_match_start=match_span[0] if match_span else None,
                 target_match_end=match_span[1] if match_span else None,
                 target_included=target_included,
+                spans=_source_spans(regions) if regions else (),
             )
         )
 
@@ -1070,6 +1217,22 @@ def materialized_source_content(
     if current_source_version_identity(path) != record.version_identity:
         return None
     return record.content
+
+
+def _visible_span_lines(item: MaterializedSourceFile) -> list[str]:
+    """Identify every visible range when more than one span is supplied."""
+
+    if len(item.spans) < 2:
+        return []
+    return [
+        "visible_spans: "
+        + "; ".join(
+            f"{span.kind} lines {span.start_line}-{span.end_line}"
+            for span in item.spans
+        ),
+        "Each visible span is a separate exact region of the same file version;"
+        " the elision markers between them are not source text.",
+    ]
 
 
 def render_planner_source_materialization(
@@ -1119,6 +1282,7 @@ def render_planner_source_materialization(
                 f"omission_reason: {item.omission_reason or '(none)'}",
             ]
         )
+        lines.extend(_visible_span_lines(item))
         if item.content is not None:
             lines.extend(["content:", item.content])
         else:
@@ -1205,6 +1369,7 @@ def render_repair_source_materialization(
                     if item.start_line is not None
                     else "(none)"
                 ),
+                *_visible_span_lines(item),
                 f"target_hint: {item.target_hint or '(none)'}",
                 f"target_included: {str(item.target_included).lower()}",
                 f"selection_strategy: {item.selection_strategy or '(none)'}",
