@@ -1329,6 +1329,99 @@ class CompletionCoordinator:
                     },
                 )
             else:
+                # A rejected baseline publish must never be discovered only
+                # after the captured Runtime Workspace candidate has been
+                # copied into canonical.  The validator's repository-shape
+                # semantics remain unchanged; this is an ordering preflight
+                # against the untouched baseline.  The established
+                # post-promotion validation below is retained for accepted
+                # publication compatibility.
+                preflight_materialization = (
+                    task_service.validate_task_baseline_materialization(project, task)
+                )
+                preflight_overview = task_service.validate_project_baseline(
+                    project, current_task=task
+                )
+                baseline_publish_preflight = _checkpointed(
+                    "baseline_publish_preflight",
+                    lambda: ValidatorService.validate_baseline_publish(
+                        validation_profile=validation_profile,
+                        baseline_path=preflight_materialization.get("baseline_path")
+                        or "",
+                        baseline_file_count=preflight_materialization.get(
+                            "baseline_file_count", 0
+                        ),
+                        missing_task_expected_files=preflight_materialization.get(
+                            "missing_expected_files", []
+                        ),
+                        missing_prior_expected_files=preflight_overview.get(
+                            "missing_expected_files", []
+                        ),
+                        consistency_issues=preflight_materialization.get(
+                            "consistency_issues", []
+                        ),
+                        consistency_details=preflight_materialization.get(
+                            "consistency"
+                        ),
+                        relaxed_mode=orchestration_state.relaxed_mode,
+                        validation_severity=ctx.validation_severity,
+                    ),
+                )
+                record_validation_verdict(
+                    db,
+                    session_id,
+                    task_id,
+                    orchestration_state,
+                    baseline_publish_preflight,
+                )
+                db.commit()
+                if not baseline_publish_preflight.accepted:
+                    baseline_error = "Baseline publish validation failed: " + "; ".join(
+                        baseline_publish_preflight.reasons[:5]
+                    )
+                    orchestration_state.status = OrchestrationStatus.ABORTED
+                    orchestration_state.abort_reason = baseline_error
+                    task_execution = (
+                        db.query(TaskExecution)
+                        .filter(TaskExecution.id == ctx.task_execution_id)
+                        .first()
+                        if ctx.task_execution_id
+                        else None
+                    )
+                    mark_task_attempt_failed(
+                        task=task,
+                        session_task_link=session_task_link,
+                        task_execution=task_execution,
+                        error_message=baseline_error,
+                        completed_at=datetime.now(UTC),
+                        workspace_status="blocked",
+                    )
+                    task.current_step = len(orchestration_state.plan)
+                    if session:
+                        mark_session_paused(
+                            session,
+                            alert_level="error",
+                            alert_message=baseline_error[:2000],
+                        )
+                    db.commit()
+                    emit_live(
+                        "ERROR",
+                        "[ORCHESTRATION] Baseline publish preflight failed validation",
+                        metadata={
+                            "phase": "baseline_publish",
+                            "validation_status": baseline_publish_preflight.status,
+                            "reasons": baseline_publish_preflight.reasons[:10],
+                            "preflight": True,
+                        },
+                    )
+                    save_orchestration_checkpoint_fn(
+                        db, session_id, task_id, prompt, orchestration_state
+                    )
+                    write_project_state_snapshot_fn(db, project, task, session_id)
+                    return {
+                        "status": "failed",
+                        "reason": "baseline_publish_validation_failed",
+                    }
                 if publish_captured_change_set:
                     baseline_publish_result = _checkpointed(
                         "baseline_promotion",

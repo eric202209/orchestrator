@@ -347,6 +347,85 @@ def test_completion_propagates_registered_intent_and_publishes_when_eligible(
     ctx.task_service.auto_publish_task_into_baseline.assert_not_called()
 
 
+def test_rejected_baseline_publish_never_materializes_captured_runtime_candidate(
+    tmp_path, monkeypatch
+):
+    """Regression seam for Phase 32J-1's failed auto-promotion escape.
+
+    The provider-free lifecycle uses a disposable runtime candidate, captures
+    its authorized three-file change set, then forces baseline validation to
+    reject.  Canonical content must remain byte-identical; promotion is not a
+    pre-validation side effect.
+    """
+    canonical = tmp_path / "canonical"
+    runtime = tmp_path / "runtime"
+    canonical.mkdir()
+    runtime.mkdir()
+    (canonical / "existing.py").write_text("before = 1\n", encoding="utf-8")
+    (runtime / "existing.py").write_text("before = 2\n", encoding="utf-8")
+    (runtime / "added_one.py").write_text("one = 1\n", encoding="utf-8")
+    (runtime / "added_two.py").write_text("two = 2\n", encoding="utf-8")
+    canonical_before = {"existing.py": (canonical / "existing.py").read_bytes()}
+
+    ctx = _make_ctx(canonical)
+    ctx.task_execution_id = 254
+    ctx.runs_in_canonical_baseline = True
+    ctx.runtime_workspace_used = True
+    ctx.planner_contract = _completion_registered_contract()
+    ctx.task_service.persist_task_execution_change_set.return_value = {
+        "task_execution_id": 254,
+        "target_path": str(runtime),
+        "added_files": ["added_one.py", "added_two.py"],
+        "modified_files": ["existing.py"],
+        "deleted_files": [],
+        "changed_count": 3,
+        "warning_flags": [],
+    }
+    ctx.task_service.change_set_review_decision.side_effect = decide_change_set_review
+    ctx.task_service.validate_task_baseline_materialization.return_value = {
+        "baseline_path": str(canonical),
+        "baseline_file_count": 1,
+        "missing_expected_files": [],
+        "consistency_issues": [],
+        "consistency": {},
+    }
+    ctx.task_service.validate_project_baseline.return_value = {
+        "missing_expected_files": [{"path": "historical.py"}]
+    }
+    rejected = _make_validation_verdict(status="repair_required", accepted=False)
+    _patch_coordinator_delegates(
+        monkeypatch, validation_verdict=_make_validation_verdict()
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.coordinators.completion_coordinator.ValidatorService.validate_baseline_publish",
+        lambda **kwargs: rejected,
+    )
+
+    def materialize_candidate(*_args, **_kwargs):
+        for relative in ("existing.py", "added_one.py", "added_two.py"):
+            (canonical / relative).write_bytes((runtime / relative).read_bytes())
+        return {"files_copied": 3, "auto_publish_skipped": False}
+
+    ctx.task_service.promote_change_set_into_baseline.side_effect = (
+        materialize_candidate
+    )
+    with patch(
+        "app.services.human_guidance.post_write_checker.run_post_write_check_if_enabled",
+        _NOOP_FN,
+    ):
+        result = CompletionCoordinator().complete_task(
+            ctx=ctx,
+            write_project_state_snapshot_fn=_NOOP_FN,
+            save_orchestration_checkpoint_fn=_NOOP_FN,
+        )
+
+    assert result["reason"] == "baseline_publish_validation_failed"
+    assert (canonical / "existing.py").read_bytes() == canonical_before["existing.py"]
+    assert not (canonical / "added_one.py").exists()
+    assert not (canonical / "added_two.py").exists()
+    ctx.task_service.promote_change_set_into_baseline.assert_not_called()
+
+
 def test_completion_does_not_publish_when_registered_publication_is_not_required(
     tmp_path, monkeypatch
 ):
