@@ -1379,6 +1379,7 @@ class TaskService:
             candidate_tasks = [task for task in tasks if task.status == TaskStatus.DONE]
 
         missing_expected_files = []
+        prior_expected_files = []
         tasks_with_expected_files = []
         for task in candidate_tasks:
             expected_files = self.get_task_expected_files(
@@ -1399,6 +1400,28 @@ class TaskService:
                             "path": relative_path,
                         }
                     )
+            for relative_path in self.get_task_expected_files(task):
+                path_text = str(relative_path).replace("\\", "/")
+                path = Path(path_text)
+                if (
+                    path.is_absolute()
+                    or path_text.startswith("~")
+                    or ".." in path.parts
+                    or is_hydration_excluded_path(path)
+                ):
+                    continue
+                normalized_path = path.as_posix()
+                if normalized_path in ("", "."):
+                    continue
+                prior_expected_files.append(
+                    {
+                        "task_id": task.id,
+                        "title": task.title,
+                        "plan_position": task.plan_position,
+                        "path": normalized_path,
+                        "baseline_present": (baseline_dir / normalized_path).exists(),
+                    }
+                )
 
         return {
             "baseline_exists": baseline_overview["exists"],
@@ -1407,6 +1430,14 @@ class TaskService:
             "validated_task_count": len(candidate_tasks),
             "tasks_with_expected_files": tasks_with_expected_files,
             "missing_expected_files": missing_expected_files,
+            "prior_expected_files": sorted(
+                prior_expected_files,
+                key=lambda item: (
+                    item["plan_position"] if item["plan_position"] is not None else -1,
+                    item["task_id"],
+                    item["path"],
+                ),
+            ),
         }
 
     def update_task_status(

@@ -235,6 +235,63 @@ def _mixed_language_attribution(
     }
 
 
+def _expected_file_attribution(
+    *,
+    expected_files: List[Dict[str, Any]],
+    canonical_paths: set[str],
+    projected_paths: set[str],
+    added_paths: set[str],
+    modified_paths: set[str],
+    deleted_paths: set[str],
+    authority: str,
+) -> Dict[str, Any]:
+    """Project expected-file obligations without assigning severity to callers."""
+
+    obligations: Dict[str, List[Dict[str, Any]]] = {}
+    for expected_file in expected_files:
+        path = expected_file.get("path")
+        if not path:
+            continue
+        obligations.setdefault(path, []).append(expected_file)
+
+    paths = []
+    for path in sorted(obligations):
+        baseline_present = path in canonical_paths
+        projected_present = path in projected_paths
+        paths.append(
+            {
+                "path": path,
+                "baseline_present": baseline_present,
+                "projected_present": projected_present,
+                "candidate_added": path in added_paths,
+                "candidate_modified": path in modified_paths,
+                "candidate_deleted": path in deleted_paths,
+                "candidate_introduced": not baseline_present and projected_present,
+                "candidate_worsened": baseline_present and not projected_present,
+                "candidate_improved": not baseline_present and projected_present,
+                "candidate_owned_obligation": baseline_present
+                and not projected_present,
+                "owners": obligations[path],
+            }
+        )
+
+    missing_paths = [path for path in paths if not path["projected_present"]]
+    worsened_paths = [path for path in missing_paths if path["candidate_worsened"]]
+    improved_paths = [path for path in paths if path["candidate_improved"]]
+    return {
+        "baseline_present": all(path["baseline_present"] for path in paths),
+        "projected_present": all(path["projected_present"] for path in paths),
+        "candidate_introduced": any(path["candidate_introduced"] for path in paths),
+        "candidate_worsened": bool(worsened_paths),
+        "candidate_improved": bool(improved_paths),
+        "candidate_owned_obligation": bool(worsened_paths),
+        "authority": authority,
+        "paths": paths,
+        "owners": [owner for path in paths for owner in path["owners"]],
+        "missing_paths": [path["path"] for path in missing_paths],
+    }
+
+
 def _plan_target_paths(plan: List[Dict[str, Any]]) -> list[str]:
     paths: list[str] = []
     seen: set[str] = set()
@@ -2627,6 +2684,8 @@ class ValidatorService:
         relaxed_mode: bool = False,
         validation_severity: str = "standard",
         candidate_change_set: Optional[Dict[str, Any]] = None,
+        prior_expected_files: Optional[List[Dict[str, Any]]] = None,
+        current_expected_files: Optional[List[str]] = None,
     ) -> ValidationVerdict:
         warnings: List[str] = []
         repairable: List[str] = []
@@ -2686,18 +2745,63 @@ class ValidatorService:
         ):
             repairable.append("Canonical baseline is empty after publish")
 
-        if missing_task_expected_files:
+        current_expected_attribution = _expected_file_attribution(
+            expected_files=[
+                {"path": path}
+                for path in (current_expected_files or missing_task_expected_files)
+            ],
+            canonical_paths=canonical_paths,
+            projected_paths=projected_paths,
+            added_paths=added_paths,
+            modified_paths=modified_paths,
+            deleted_paths=deleted_paths,
+            authority="baseline_publish_candidate_projection",
+        )
+        if current_expected_attribution["missing_paths"]:
             repairable.append(
                 "Published baseline is missing current task files: "
-                + ", ".join(missing_task_expected_files[:6])
+                + ", ".join(current_expected_attribution["missing_paths"][:6])
             )
-            details["missing_task_expected_files"] = missing_task_expected_files[:20]
+            details["missing_task_expected_files"] = current_expected_attribution[
+                "missing_paths"
+            ][:20]
+        if current_expected_files or missing_task_expected_files:
+            current_expected_attribution["severity"] = (
+                "repair_required"
+                if current_expected_attribution["missing_paths"]
+                else "resolved"
+            )
+            details.setdefault("baseline_condition_attribution", {})[
+                "missing_current_task_expected_files"
+            ] = current_expected_attribution
 
-        if missing_prior_expected_files:
-            repairable.append(
-                "Canonical baseline is missing previously completed task files"
-            )
+        prior_expected_attribution = _expected_file_attribution(
+            expected_files=prior_expected_files or missing_prior_expected_files,
+            canonical_paths=canonical_paths,
+            projected_paths=projected_paths,
+            added_paths=added_paths,
+            modified_paths=modified_paths,
+            deleted_paths=deleted_paths,
+            authority="task_service_prior_expected_files",
+        )
+        if prior_expected_attribution["missing_paths"]:
+            if prior_expected_attribution["candidate_worsened"]:
+                repairable.append(
+                    "Canonical baseline is missing previously completed task files"
+                )
+                prior_expected_attribution["severity"] = "repair_required"
+            else:
+                warnings.append(
+                    "Canonical baseline is missing previously completed task files"
+                )
+                prior_expected_attribution["severity"] = "warning"
             details["missing_prior_expected_files"] = missing_prior_expected_files[:20]
+        elif prior_expected_files or missing_prior_expected_files:
+            prior_expected_attribution["severity"] = "resolved"
+        if prior_expected_files or missing_prior_expected_files:
+            details.setdefault("baseline_condition_attribution", {})[
+                "missing_prior_expected_files"
+            ] = prior_expected_attribution
         if consistency_issues:
             mixed_attribution = _mixed_language_attribution(
                 canonical_paths=canonical_paths,

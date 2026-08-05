@@ -2578,6 +2578,8 @@ def _baseline_publish_verdict(
     *,
     consistency_issues=None,
     missing_prior_expected_files=None,
+    prior_expected_files=None,
+    current_expected_files=None,
 ):
     _write_baseline_tree(root, canonical_files)
     return ValidatorService.validate_baseline_publish(
@@ -2586,6 +2588,8 @@ def _baseline_publish_verdict(
         baseline_file_count=len(canonical_files),
         missing_task_expected_files=[],
         missing_prior_expected_files=missing_prior_expected_files or [],
+        prior_expected_files=prior_expected_files,
+        current_expected_files=current_expected_files,
         consistency_issues=consistency_issues or [],
         candidate_change_set=candidate_change_set,
     )
@@ -2744,8 +2748,8 @@ def test_baseline_publish_relaxed_mode_keeps_consistency_issues_as_warnings(tmp_
     assert relaxed.status == "warning"
 
 
-def test_baseline_publish_missing_prior_expected_files_remains_blocking(tmp_path):
-    """Characterization: Rule 1 is not delta-aware yet (Phase 32J-3 stop)."""
+def test_baseline_publish_missing_prior_expected_files_is_baseline_debt(tmp_path):
+    """Rule A: unrelated candidates do not own pre-existing prior debt."""
 
     verdict = _baseline_publish_verdict(
         tmp_path,
@@ -2761,15 +2765,15 @@ def test_baseline_publish_missing_prior_expected_files_remains_blocking(tmp_path
         ],
     )
 
-    assert verdict.status == "repair_required"
+    assert verdict.status == "warning"
     assert (
         "Canonical baseline is missing previously completed task files"
         in verdict.reasons
     )
 
 
-def test_baseline_publish_missing_current_task_files_characterization(tmp_path):
-    """Section 7 observation: current-task rule is untouched by Phase 32J-3."""
+def test_baseline_publish_current_task_addition_is_projected_preflight(tmp_path):
+    """Rule C: a candidate addition satisfies a current expected file preflight."""
 
     _write_baseline_tree(tmp_path, ["app/main.py"])
     verdict = ValidatorService.validate_baseline_publish(
@@ -2781,7 +2785,147 @@ def test_baseline_publish_missing_current_task_files_characterization(tmp_path):
         candidate_change_set={"added_files": ["app/time_utils.py"]},
     )
 
+    assert verdict.status == "accepted"
+    assert verdict.reasons == []
+
+
+def test_baseline_publish_candidate_deletion_of_satisfied_prior_file_blocks(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "prior.py"],
+        {"deleted_files": ["prior.py"]},
+        prior_expected_files=[
+            {"task_id": 1, "path": "prior.py", "baseline_present": True}
+        ],
+    )
+
     assert verdict.status == "repair_required"
-    assert verdict.reasons == [
-        "Published baseline is missing current task files: app/time_utils.py"
+    attribution = verdict.details["baseline_condition_attribution"][
+        "missing_prior_expected_files"
     ]
+    assert attribution["candidate_worsened"] is True
+    assert attribution["candidate_owned_obligation"] is True
+
+
+def test_baseline_publish_unrelated_candidate_with_prior_debt_warns(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        {"added_files": ["app/helper.py"]},
+        prior_expected_files=[
+            {"task_id": 1, "path": "prior.py", "baseline_present": False}
+        ],
+    )
+
+    assert verdict.status == "warning"
+    attribution = verdict.details["baseline_condition_attribution"][
+        "missing_prior_expected_files"
+    ]
+    assert attribution["candidate_worsened"] is False
+    assert attribution["candidate_improved"] is False
+
+
+def test_baseline_publish_candidate_restoration_of_prior_debt_clears_reason(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        {"added_files": ["prior.py"]},
+        prior_expected_files=[
+            {"task_id": 1, "path": "prior.py", "baseline_present": False}
+        ],
+    )
+
+    assert (
+        "Canonical baseline is missing previously completed task files"
+        not in verdict.reasons
+    )
+    attribution = verdict.details["baseline_condition_attribution"][
+        "missing_prior_expected_files"
+    ]
+    assert attribution["candidate_improved"] is True
+
+
+def test_baseline_publish_duplicate_prior_owners_share_one_blocking_reason(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "prior.py"],
+        {"deleted_files": ["prior.py"]},
+        prior_expected_files=[
+            {"task_id": 1, "path": "prior.py", "baseline_present": True},
+            {"task_id": 2, "path": "prior.py", "baseline_present": True},
+        ],
+    )
+
+    assert (
+        verdict.reasons.count(
+            "Canonical baseline is missing previously completed task files"
+        )
+        == 1
+    )
+    attribution = verdict.details["baseline_condition_attribution"][
+        "missing_prior_expected_files"
+    ]
+    assert len(attribution["paths"]) == 1
+    assert [owner["task_id"] for owner in attribution["owners"]] == [1, 2]
+
+
+def test_baseline_publish_current_expected_addition_is_satisfied_by_projection(
+    tmp_path,
+):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        {"added_files": ["app/time_utils.py"]},
+        current_expected_files=["app/time_utils.py"],
+    )
+
+    assert (
+        "Published baseline is missing current task files: app/time_utils.py"
+        not in verdict.reasons
+    )
+    assert verdict.status == "accepted"
+
+
+def test_baseline_publish_missing_current_expected_file_blocks(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        {"added_files": ["app/helper.py"]},
+        current_expected_files=["app/time_utils.py"],
+    )
+
+    assert verdict.status == "repair_required"
+    assert (
+        "Published baseline is missing current task files: app/time_utils.py"
+        in verdict.reasons
+    )
+
+
+def test_baseline_publish_candidate_deletion_of_current_expected_file_blocks(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py", "app/time_utils.py"],
+        {"deleted_files": ["app/time_utils.py"]},
+        current_expected_files=["app/time_utils.py"],
+    )
+
+    assert verdict.status == "repair_required"
+    attribution = verdict.details["baseline_condition_attribution"][
+        "missing_current_task_expected_files"
+    ]
+    assert attribution["candidate_worsened"] is True
+
+
+def test_baseline_publish_post_promotion_uses_actual_current_files(tmp_path):
+    verdict = _baseline_publish_verdict(
+        tmp_path,
+        ["app/main.py"],
+        None,
+        current_expected_files=["app/time_utils.py"],
+    )
+
+    assert verdict.status == "repair_required"
+    assert (
+        "Published baseline is missing current task files: app/time_utils.py"
+        in verdict.reasons
+    )

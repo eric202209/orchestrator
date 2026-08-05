@@ -102,7 +102,10 @@ def _make_ctx(tmp_path):
         "consistency_issues": [],
         "consistency": {},
     }
-    task_service.validate_project_baseline.return_value = {"missing_expected_files": []}
+    task_service.validate_project_baseline.return_value = {
+        "missing_expected_files": [],
+        "prior_expected_files": [],
+    }
 
     runtime_service = MagicMock()
     runtime_service.get_backend_metadata.return_value = {
@@ -314,17 +317,27 @@ def test_completion_propagates_registered_intent_and_publishes_when_eligible(
     ctx.task_service.validate_task_baseline_materialization.return_value = {
         "baseline_path": str(tmp_path),
         "baseline_file_count": 2,
+        "expected_files": ["app/time_utils.py"],
         "missing_expected_files": [],
         "consistency_issues": [],
     }
     ctx.task_service.validate_project_baseline.return_value = {
-        "missing_expected_files": []
+        "missing_expected_files": [],
+        "prior_expected_files": [
+            {"task_id": 9, "path": "prior.py", "baseline_present": True}
+        ],
     }
     accepted_verdict = _make_validation_verdict(status="accepted", accepted=True)
     _patch_coordinator_delegates(monkeypatch, validation_verdict=accepted_verdict)
+    validator_calls = []
+
+    def validate_baseline_publish(**kwargs):
+        validator_calls.append(kwargs)
+        return accepted_verdict
+
     monkeypatch.setattr(
         "app.services.orchestration.coordinators.completion_coordinator.ValidatorService.validate_baseline_publish",
-        lambda **kwargs: accepted_verdict,
+        validate_baseline_publish,
     )
 
     with patch(
@@ -345,6 +358,13 @@ def test_completion_propagates_registered_intent_and_publishes_when_eligible(
     assert review_kwargs["template_review_policy"] is None
     assert ctx.task_service.promote_change_set_into_baseline.called
     ctx.task_service.auto_publish_task_into_baseline.assert_not_called()
+    assert len(validator_calls) == 2
+    assert validator_calls[0]["candidate_change_set"] is not None
+    assert "candidate_change_set" not in validator_calls[1]
+    assert validator_calls[0]["current_expected_files"] == ["app/time_utils.py"]
+    assert validator_calls[1]["current_expected_files"] == ["app/time_utils.py"]
+    assert validator_calls[0]["prior_expected_files"][0]["path"] == "prior.py"
+    assert validator_calls[1]["prior_expected_files"][0]["path"] == "prior.py"
 
 
 def test_rejected_baseline_publish_never_materializes_captured_runtime_candidate(

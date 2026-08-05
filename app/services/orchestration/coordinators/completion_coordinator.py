@@ -1355,8 +1355,14 @@ class CompletionCoordinator:
                             missing_task_expected_files=preflight_materialization.get(
                                 "missing_expected_files", []
                             ),
+                            current_expected_files=preflight_materialization.get(
+                                "expected_files", []
+                            ),
                             missing_prior_expected_files=preflight_overview.get(
                                 "missing_expected_files", []
+                            ),
+                            prior_expected_files=preflight_overview.get(
+                                "prior_expected_files", []
                             ),
                             consistency_issues=preflight_materialization.get(
                                 "consistency_issues", []
@@ -1486,8 +1492,14 @@ class CompletionCoordinator:
                         missing_task_expected_files=baseline_materialization.get(
                             "missing_expected_files", []
                         ),
+                        current_expected_files=baseline_materialization.get(
+                            "expected_files", []
+                        ),
                         missing_prior_expected_files=baseline_overview.get(
                             "missing_expected_files", []
+                        ),
+                        prior_expected_files=baseline_overview.get(
+                            "prior_expected_files", []
                         ),
                         consistency_issues=baseline_materialization.get(
                             "consistency_issues", []
