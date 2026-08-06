@@ -39,6 +39,7 @@ from app.services.orchestration.planning.planning_prompts import (
     build_minimal_planning_prompt as _build_minimal_planning_prompt,
     build_ultra_minimal_planning_prompt as _build_ultra_minimal_planning_prompt,
 )
+from app.services.orchestration.planning import repair_prompts
 from app.services.orchestration.planning.repair_prompts import (
     PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS,
     PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS,
@@ -48,6 +49,7 @@ from app.services.orchestration.planning.repair_prompts import (
     build_planning_repair_prompt as _build_planning_repair_prompt,
     build_planning_repair_prompt_with_metadata as _build_planning_repair_prompt_with_metadata,
     compact_invalid_output_excerpt as _compact_invalid_output_excerpt,
+    effective_repair_prompt_max_chars as _effective_repair_prompt_max_chars,
     render_repair_knowledge_block as _render_repair_knowledge_block,
 )
 from app.services.orchestration.planning.planner_contract_registry import (
@@ -114,6 +116,21 @@ PLANNING_STEP_REQUIRED_KEYS = (
     "rollback",
     "expected_files",
 )
+
+
+def _repair_prompt_budget() -> int:
+    """Planner-side repair budget, honouring a planner-level pinned cap.
+
+    Compatibility tests pin ``PLANNING_REPAIR_PROMPT_MAX_CHARS`` on this module
+    to exercise the oversized-prompt path, and that pin stays authoritative.
+    The comparison is against the unpinned floor owned by ``repair_prompts`` so
+    that pinning both planner aliases still resolves as a pin. Every other call
+    resolves the Phase 32N-1 context-derived budget.
+    """
+
+    if PLANNING_REPAIR_PROMPT_MAX_CHARS < repair_prompts.REPAIR_PROMPT_MAX_CHARS:
+        return PLANNING_REPAIR_PROMPT_MAX_CHARS
+    return _effective_repair_prompt_max_chars()
 
 
 def _estimate_prompt_tokens(prompt: str) -> int:
@@ -1317,7 +1334,7 @@ class PlannerService:
     ) -> str:
         return (
             "Planning repair prompt exceeded safe budget "
-            f"({repair_prompt_chars} > {PLANNING_REPAIR_PROMPT_MAX_CHARS} chars). "
+            f"({repair_prompt_chars} > {_repair_prompt_budget()} chars). "
             "Repair prompts may include only malformed output, validation error, "
             "schema guidance, and small knowledge references. "
             f"Components: malformed_output={malformed_output_chars}, "
@@ -2345,7 +2362,7 @@ class PlannerService:
                 else None
             ),
         )
-        if len(repair_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
+        if len(repair_prompt) > _repair_prompt_budget():
             budget_error = cls._build_repair_prompt_budget_error(
                 repair_prompt_chars=len(repair_prompt),
                 malformed_output_chars=compact_malformed_output_chars,
@@ -2358,7 +2375,7 @@ class PlannerService:
                 session_id,
                 task_id,
                 len(repair_prompt),
-                PLANNING_REPAIR_PROMPT_MAX_CHARS,
+                _repair_prompt_budget(),
             )
             emit_live(
                 "ERROR",
@@ -2367,6 +2384,7 @@ class PlannerService:
                     "phase": "planning",
                     "reason": "planning_repair_prompt_too_large",
                     "repair_prompt_chars": len(repair_prompt),
+                    "effective_repair_prompt_limit": _repair_prompt_budget(),
                     "malformed_output_chars": compact_malformed_output_chars,
                     "validation_error_chars": validation_error_chars,
                     "knowledge_context_chars": knowledge_context_chars,

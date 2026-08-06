@@ -221,21 +221,6 @@ class PlannerSourceMaterialization:
             ],
         }
 
-    def to_prompt_metadata(self) -> dict[str, Any]:
-        """Return provenance metadata safe for model-visible prompt envelopes."""
-
-        metadata = self.to_metadata()
-        display_identity = "current isolated task workspace"
-        metadata["workspace_identity"] = display_identity
-        metadata["files"] = [
-            {
-                **item,
-                "workspace_identity": display_identity,
-            }
-            for item in metadata["files"]
-        ]
-        return metadata
-
     def to_prompt_block(self) -> str:
         return render_planner_source_materialization(self)
 

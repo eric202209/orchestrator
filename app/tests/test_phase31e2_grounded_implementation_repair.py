@@ -5,6 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+from app.config import settings
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.planning.source_materialization import (
     plan_has_concrete_source_materialization,
@@ -17,6 +20,19 @@ from scripts.maintenance.phase31_certification_runner import (
     planner_contract_payload_for_scenario,
 )
 from scripts.maintenance.phase31_certification_scenarios import scenario_spec
+
+
+@pytest.fixture(autouse=True)
+def _pin_floor_repair_budget(monkeypatch):
+    """Phase 32N-1: pin this module to the floor repair-prompt budget.
+
+    The effective budget is now derived from ``PLANNING_REPAIR_CONTEXT_TOKENS``.
+    The bounded-limit contract below was written against the 8,000-character
+    floor and must keep exercising that bound regardless of what the local
+    deployment declares.
+    """
+
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", None)
 
 
 def _contract() -> dict:

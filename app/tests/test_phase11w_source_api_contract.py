@@ -1,3 +1,6 @@
+import pytest
+
+from app.config import settings
 from app.services.orchestration.planning.source_api_contract import (
     build_source_api_contract_capsule,
 )
@@ -10,6 +13,19 @@ from app.services.orchestration.planning.repair_prompts import (
     build_planning_repair_prompt_with_metadata,
 )
 from app.services.orchestration.planning.planner import PlannerService
+
+
+@pytest.fixture(autouse=True)
+def _pin_floor_repair_budget(monkeypatch):
+    """Phase 32N-1: pin this module to the floor repair-prompt budget.
+
+    The effective budget is now derived from ``PLANNING_REPAIR_CONTEXT_TOKENS``.
+    These budget-protection contracts were written against the 8,000-character
+    floor and must keep exercising that bound regardless of what the local
+    deployment declares.
+    """
+
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", None)
 
 
 def test_source_api_contract_capsule_collects_python_source_api(tmp_path):

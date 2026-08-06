@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from app.config import settings
 from app.services.orchestration.planning import repair_prompts
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.planning.repair_prompts import (
@@ -49,6 +50,19 @@ ATTEMPT6_CONTEXT_VERSION = "74:17444396:15720:1785867327907096722"
 ATTEMPT6_SHORTEST_PRE_FAILURE_SHA256 = (
     "0bfbe966f29a162fcf38552d89f52586cbef9033c404610b616fa05bd10af598"
 )
+
+
+@pytest.fixture(autouse=True)
+def _pin_floor_repair_budget(monkeypatch):
+    """Phase 32N-1: pin this module to the floor repair-prompt budget.
+
+    The effective budget is now derived from ``PLANNING_REPAIR_CONTEXT_TOKENS``.
+    Every contract in this module was written against the 8,000-character floor
+    and must keep exercising that bound regardless of what the local deployment
+    declares, so the assertions below stay exactly as strong as they were.
+    """
+
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", None)
 
 
 @pytest.fixture

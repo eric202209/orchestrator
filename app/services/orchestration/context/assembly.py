@@ -917,11 +917,18 @@ def assemble_planning_prompt(
             "Do not implement anything yet.",
             "Return a sequential JSON plan only.",
         ],
+        # Phase 32N-1: the structured materialization dictionary is deliberately
+        # absent here.  Every profile renderer serializes `context` into the
+        # model-visible prompt, so it duplicated — in JSON, without excerpts —
+        # the same records the readable source block above already carries
+        # (path, status, expected/creation authority, version identity, hash,
+        # visible line range, spans, target hint, excerpt).  Complete provenance
+        # is retained for telemetry, persistence and diagnostics via
+        # `to_metadata()` and per-file `to_dict()`.
         context={
             "Project Directory": prompt_project_dir,
             "Execution Profile": ctx.execution_profile,
             "Workflow Profile": getattr(ctx, "workflow_profile", "default"),
-            "Planner Source Materialization": planner_source_materialization.to_prompt_metadata(),
         },
         expected_output="JSON array of orchestration step objects.",
         adaptation_profile=getattr(ctx, "planning_adaptation_profile", None),

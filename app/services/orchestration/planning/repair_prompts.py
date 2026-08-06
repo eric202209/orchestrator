@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from app.config import settings
 from app.services.orchestration.planning.prompt_contracts import (
     render_operation_choice_contract,
     render_ops_first_contract,
@@ -69,12 +70,31 @@ PLANNING_REPAIR_MINIMAL_SOURCE_API_CONTRACT_CHARS = 760
 PLANNING_REPAIR_STRUCTURE_TRUNCATION_MARKER = (
     "\n- ... project structure capsule truncated to fit repair prompt budget"
 )
-# 8000 chars is ~2000 tokens — comfortably below the frozen provider-neutral
-# 16000-token repair-context minimum enforced since Phase 31C-R2 on every
-# deployment profile. The previous 6000-char cap forced intact rejected plans
-# out of the prompt and defeated single-pass repair convergence.
+# 8000 chars is ~2000 tokens.  Phase 32N-1: this is no longer the effective
+# repair budget, it is the fail-safe floor used when the deployment declares no
+# repair context.  The effective budget is derived from the admitted repair
+# context by `effective_repair_prompt_max_chars()` below.
 REPAIR_PROMPT_MAX_CHARS = 8000
 PLANNING_REPAIR_PROMPT_MAX_CHARS = REPAIR_PROMPT_MAX_CHARS
+# Phase 32N-1 budget authority.  `PLANNING_REPAIR_CONTEXT_TOKENS` (config.py) is
+# the effective context declared by the selected repair deployment, already
+# verified at dispatch against `MIN_REPAIR_CONTEXT_TOKENS = 16_000`
+# (agent_runtime.py).  Attempts 6, 7 and 9 made zero repair provider calls
+# because their complete-plan envelopes (10,609 and 8,822 chars) exceeded the
+# fixed 8,000 cap while the admitted deployment offered 16,000+ tokens.
+#
+# 4 chars/token is the planning stack's existing estimate (planning_flow token
+# accounting).  The 0.5 safety factor reserves half the admitted context for the
+# repair model's own output: complete-plan repair must re-emit the entire plan,
+# so output scales with plan size and cannot be treated as negligible.
+# The ceiling is what the 16,000-token admission floor yields at that factor, so
+# every admitted deployment resolves to the same budget regardless of how large
+# a context it declares.  That keeps the budget deterministic and bounds the
+# damage of an over-declared context: the deployed .env declares 200,000 tokens
+# while the provider reports max_model_len 131,072.
+PLANNING_REPAIR_PROMPT_CHARS_PER_TOKEN = 4
+PLANNING_REPAIR_PROMPT_CONTEXT_SAFETY_FACTOR = 0.5
+PLANNING_REPAIR_PROMPT_MAX_CHARS_CEILING = 32_000
 PLANNING_REPAIR_ALLOWED_KNOWLEDGE_TYPES = {
     "failure_memory",
     "debug_case",
@@ -103,6 +123,42 @@ PLANNING_REPAIR_STRIP_FIELD_NAMES = {
     "payloads",
     "executionLogs",
 }
+
+
+def effective_repair_prompt_max_chars() -> int:
+    """Return the repair prompt budget derived from the admitted repair context.
+
+    Deterministic and fail-safe:
+
+    * a caller-pinned ``PLANNING_REPAIR_PROMPT_MAX_CHARS`` below the floor is an
+      explicit local/test bound and is honoured verbatim, so the compatibility
+      tests that exercise deliberately smaller caps — and the genuine-overflow
+      fail-closed path they pin — keep their exact behaviour;
+    * an absent, blank or unparseable declared context falls back to the
+      ``REPAIR_PROMPT_MAX_CHARS`` floor;
+    * otherwise the budget is the declared context converted to characters,
+      halved for the repair model's own output, and clamped to the floor below
+      and ``PLANNING_REPAIR_PROMPT_MAX_CHARS_CEILING`` above.
+    """
+
+    floor = PLANNING_REPAIR_PROMPT_MAX_CHARS
+    if floor < REPAIR_PROMPT_MAX_CHARS:
+        return floor
+    declared = getattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", None)
+    if declared is None or not str(declared).strip():
+        return floor
+    try:
+        context_tokens = int(declared)
+    except (TypeError, ValueError):
+        return floor
+    if context_tokens <= 0:
+        return floor
+    derived = int(
+        context_tokens
+        * PLANNING_REPAIR_PROMPT_CHARS_PER_TOKEN
+        * PLANNING_REPAIR_PROMPT_CONTEXT_SAFETY_FACTOR
+    )
+    return min(max(floor, derived), PLANNING_REPAIR_PROMPT_MAX_CHARS_CEILING)
 
 
 @dataclass
@@ -462,7 +518,7 @@ def build_planning_repair_prompt_with_metadata(
         workspace_identity=workspace_identity,
     )
     if specialized_prompt is not None:
-        if len(specialized_prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
+        if len(specialized_prompt) > effective_repair_prompt_max_chars():
             hard_budget_malformed_output = (
                 len(str(malformed_output or ""))
                 > PLANNING_REPAIR_COMPACT_MALFORMED_OUTPUT_CHARS
@@ -498,7 +554,7 @@ def build_planning_repair_prompt_with_metadata(
                     guidance_block=guidance_block,
                     workspace_identity=workspace_identity,
                 )
-                if len(candidate_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS and (
+                if len(candidate_prompt) <= effective_repair_prompt_max_chars() and (
                     not candidate_block or candidate_block in candidate_prompt
                 ):
                     specialized_prompt = candidate_prompt
@@ -702,7 +758,7 @@ Rules:
         knowledge_block,
     )
     if (
-        len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS
+        len(prompt) > effective_repair_prompt_max_chars()
         and active_source_api_contract_block == source_api_contract_block
         and source_api_contract_compact_block
     ):
@@ -714,8 +770,8 @@ Rules:
             active_source_api_contract_block,
             knowledge_block,
         )
-    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and structure_capsule:
-        overflow = len(prompt) - PLANNING_REPAIR_PROMPT_MAX_CHARS
+    if len(prompt) > effective_repair_prompt_max_chars() and structure_capsule:
+        overflow = len(prompt) - effective_repair_prompt_max_chars()
         reduced_structure_capsule = _truncate_repair_structure_capsule(
             structure_capsule,
             max_chars=len(structure_capsule) - overflow - 80,
@@ -726,7 +782,7 @@ Rules:
             active_source_api_contract_block,
             knowledge_block,
         )
-    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and structure_capsule:
+    if len(prompt) > effective_repair_prompt_max_chars() and structure_capsule:
         prompt = _compose_prompt(
             "",
             source_context_block,
@@ -734,7 +790,7 @@ Rules:
             knowledge_block,
         )
     active_source_context_block = source_context_block
-    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and source_context_block:
+    if len(prompt) > effective_repair_prompt_max_chars() and source_context_block:
         active_source_context_block = _compact_python_test_source_context_block(
             source_context_block,
             max_chars=560,
@@ -748,7 +804,7 @@ Rules:
             active_source_api_contract_block,
             knowledge_block,
         )
-    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and knowledge_block:
+    if len(prompt) > effective_repair_prompt_max_chars() and knowledge_block:
         prompt = _compose_prompt(
             "",
             active_source_context_block,
@@ -756,7 +812,7 @@ Rules:
             "",
         )
     if (
-        len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS
+        len(prompt) > effective_repair_prompt_max_chars()
         and source_context_block
         and source_api_contract_minimal_block
         and source_api_contract_minimal_block != active_source_api_contract_block
@@ -769,7 +825,7 @@ Rules:
             active_source_api_contract_block,
             "",
         )
-    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS and source_context_block:
+    if len(prompt) > effective_repair_prompt_max_chars() and source_context_block:
         prompt = _compose_prompt(
             "",
             "",
@@ -796,7 +852,7 @@ Rules:
             compact_source_api_contract_block,
             knowledge_block,
         )
-        if len(compact_candidate) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+        if len(compact_candidate) <= effective_repair_prompt_max_chars():
             prompt = compact_candidate
             active_source_context_block = ""
             active_source_api_contract_block = compact_source_api_contract_block
@@ -804,7 +860,7 @@ Rules:
                 compact_source_api_contract_block
                 and compact_source_api_contract_block != source_api_contract_block
             )
-    if len(prompt) > PLANNING_REPAIR_PROMPT_MAX_CHARS:
+    if len(prompt) > effective_repair_prompt_max_chars():
         fallback_source_api_block = ""
         prompt = ""
         hard_budget_malformed_output = (
@@ -840,7 +896,7 @@ Rules:
                 guidance_block=guidance_block,
                 workspace_identity=workspace_identity,
             )
-            if len(candidate_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS and (
+            if len(candidate_prompt) <= effective_repair_prompt_max_chars() and (
                 not candidate_block or candidate_block in candidate_prompt
             ):
                 prompt = candidate_prompt
@@ -1329,7 +1385,7 @@ def _build_specialized_prompt_protected(
         if prompt is None:
             return None, metadata
         last_prompt = prompt
-        if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+        if len(prompt) <= effective_repair_prompt_max_chars():
             source_api_block = str(attempt["source_api"] or "")
             attempt_compacted = bool(attempt.get("compacted"))
             if (
@@ -1345,7 +1401,7 @@ def _build_specialized_prompt_protected(
                     source_api_contract_block=source_api_contract_block,
                 )
                 if (
-                    len(full_contract_candidate) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+                    len(full_contract_candidate) <= effective_repair_prompt_max_chars()
                     and source_api_contract_block in full_contract_candidate
                 ):
                     prompt = full_contract_candidate
@@ -2098,7 +2154,7 @@ Rules:
                 prompt_profile,
                 apply_prompt_profile,
             )
-            if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+            if len(prompt) <= effective_repair_prompt_max_chars():
                 return prompt
 
         if (
@@ -2116,7 +2172,7 @@ Rules:
                 apply_prompt_profile,
             )
             if (
-                len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+                len(prompt) <= effective_repair_prompt_max_chars()
                 and current_source_api_contract_block in prompt
             ):
                 return prompt
@@ -2748,7 +2804,7 @@ Stale replace second-pass target preservation:
                 prompt_profile,
                 apply_prompt_profile,
             )
-            if len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+            if len(prompt) <= effective_repair_prompt_max_chars():
                 return prompt
 
     minimum_envelope = build_minimum_safe_stale_replace_repair_envelope(
@@ -2761,7 +2817,7 @@ Stale replace second-pass target preservation:
     )
     if (
         minimum_envelope is not None
-        and len(minimum_envelope.prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
+        and len(minimum_envelope.prompt) <= effective_repair_prompt_max_chars()
     ):
         return minimum_envelope.prompt
 
@@ -2781,7 +2837,13 @@ Stale replace second-pass target preservation:
             diagnostics={
                 "reason": "required_repair_source_evidence_exceeds_prompt_bound",
                 "failure_owner": "repair_prompt_projection",
-                "prompt_limit": PLANNING_REPAIR_PROMPT_MAX_CHARS,
+                "prompt_limit": effective_repair_prompt_max_chars(),
+                "effective_repair_prompt_limit": effective_repair_prompt_max_chars(),
+                "repair_prompt_limit_floor": REPAIR_PROMPT_MAX_CHARS,
+                "repair_prompt_limit_ceiling": PLANNING_REPAIR_PROMPT_MAX_CHARS_CEILING,
+                "repair_context_tokens_declared": getattr(
+                    settings, "PLANNING_REPAIR_CONTEXT_TOKENS", None
+                ),
                 "minimum_required_chars": len(required_block),
                 "required_record_paths": [
                     item.relative_path for item, _ in required_records
@@ -2832,7 +2894,7 @@ def _apply_profile_or_compact_fallback(
     profiled_prompt = _apply_profile(
         prompt.rstrip(), prompt_profile, apply_prompt_profile
     )
-    if len(profiled_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+    if len(profiled_prompt) <= effective_repair_prompt_max_chars():
         return profiled_prompt
     return _build_over_budget_compact_repair_prompt(
         task_description=task_description,
@@ -2883,7 +2945,7 @@ def _apply_profile_or_compact_fallback_with_metadata(
     profiled_prompt = _apply_profile(
         prompt.rstrip(), prompt_profile, apply_prompt_profile
     )
-    if len(profiled_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS:
+    if len(profiled_prompt) <= effective_repair_prompt_max_chars():
         return profiled_prompt, {}
 
     fallback_prompt = ""
@@ -2904,7 +2966,7 @@ def _apply_profile_or_compact_fallback_with_metadata(
             guidance_block=guidance_block,
             workspace_identity=workspace_identity,
         )
-        if len(candidate_prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS and (
+        if len(candidate_prompt) <= effective_repair_prompt_max_chars() and (
             not candidate_block or candidate_block in candidate_prompt
         ):
             fallback_prompt = candidate_prompt
