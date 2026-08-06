@@ -1498,6 +1498,26 @@ class ValidatorService:
                 details["stale_replace_materialization"] = source_contract_issues[
                     "stale_replace_materialization"
                 ]
+            structured_operation_findings = [
+                {
+                    "step_number": verdict.get("step_index"),
+                    "operation_index": verdict.get("operation_index"),
+                    "relative_path": verdict.get("path"),
+                    "failure_code": verdict.get("failure_code"),
+                    "visibility": verdict.get("visibility"),
+                    "visible_text_verified": verdict.get(
+                        "present_in_visible_span", False
+                    ),
+                    "full_file_same_version_verified": verdict.get(
+                        "present_in_full_file_same_version", False
+                    ),
+                    "source_version_identity": verdict.get("recorded_version_identity"),
+                }
+                for verdict in source_contract_issues["source_operation_verdicts"]
+                if verdict.get("failure_code")
+            ]
+            if structured_operation_findings:
+                details["source_operation_findings"] = structured_operation_findings
             if source_contract_issues["missing_source_materialization"]:
                 repairable.append(
                     "missing_source_materialization: exact file content was not "

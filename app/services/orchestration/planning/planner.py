@@ -1476,6 +1476,7 @@ class PlannerService:
         repair_timeout: int,
         lock_diagnostics_out: Optional[Dict[str, Any]] = None,
         diagnostic_context: Optional[Dict[str, Any]] = None,
+        allow_registry_fallback: bool = True,
     ) -> Dict[str, Any]:
         from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
 
@@ -1670,13 +1671,14 @@ class PlannerService:
                 PlannerService._attach_planning_lock_exception_diagnostics(
                     exc, lock_diagnostics
                 )
-                if repair_runtime is None:
+                if repair_runtime is None or not allow_registry_fallback:
                     raise
                 result = await _invoke_registry_fallback(exc)
 
             result = dict(result or {})
             if (
-                repair_runtime is not None
+                allow_registry_fallback
+                and repair_runtime is not None
                 and not str(result.get("output") or "").strip()
             ):
                 result = await _invoke_registry_fallback()
@@ -1693,6 +1695,40 @@ class PlannerService:
             return PlannerService._attach_planning_lock_diagnostics(
                 result, lock_diagnostics
             )
+
+    @classmethod
+    def repair_operations(
+        cls,
+        *,
+        runtime_service: Any,
+        repair_prompt: str,
+        timeout_seconds: int,
+    ) -> Dict[str, Any]:
+        """Execute one operation-repair request with no retry or fallback call."""
+
+        repair_timeout = cls._effective_planning_repair_timeout(timeout_seconds)
+        started_at = time.monotonic()
+        result = _run_coroutine_from_sync(
+            asyncio.wait_for(
+                cls._invoke_repair_prompt(
+                    runtime_service,
+                    repair_prompt,
+                    repair_timeout,
+                    allow_registry_fallback=False,
+                ),
+                timeout=repair_timeout,
+            )
+        )
+        result = dict(result or {})
+        result["operation_repair_provider_call_count"] = 1
+        result["operation_repair_prompt_chars"] = len(repair_prompt)
+        result["operation_repair_prompt_estimated_tokens"] = max(
+            0, (len(repair_prompt) + 3) // 4
+        )
+        result["operation_repair_elapsed_seconds"] = round(
+            time.monotonic() - started_at, 3
+        )
+        return result
 
     @staticmethod
     def _effective_planning_repair_timeout(timeout_seconds: int) -> float:
