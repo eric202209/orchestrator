@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -41,15 +40,14 @@ from app.services.orchestration.planning.source_materialization import (
 )
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-EVIDENCE_ROOT = REPOSITORY_ROOT / "docs/roadmap/reports/evidence"
-ATTEMPT9_EVIDENCE = EVIDENCE_ROOT / "phase32k1-attempt9-utc-now-20260805"
-ATTEMPT7_EVIDENCE = EVIDENCE_ROOT / "phase32f1-attempt7-evidence-20260804"
+RETAINED_SHAPES_FIXTURE = (
+    REPOSITORY_ROOT / "app/tests/fixtures/phase32n1_retained_attempt_shapes.json"
+)
 
 # Retained runtime authority.
 ATTEMPT9_PLAN_SHA256 = (
     "c7c203efc8c54a8352b3098f1d25cea13bf804be1041849cb4dda286ff41d31c"
 )
-ATTEMPT7_MATERIALIZATION_LOG_ENTRY_ID = 12855
 REJECTION_REASONS = ["replace_in_file old text not found in workspace in steps [2]"]
 REQUIRED_PATHS = (
     "app/time_utils.py",
@@ -122,62 +120,27 @@ def build_retained_materialization(record: dict) -> PlannerSourceMaterialization
     )
 
 
-def _task_description(task_id: int) -> str:
-    connection = sqlite3.connect(
-        f"file:{REPOSITORY_ROOT / 'orchestrator.db'}?mode=ro", uri=True
-    )
-    try:
-        row = connection.execute(
-            "select description from tasks where id=?", (task_id,)
-        ).fetchone()
-    finally:
-        connection.close()
-    if row is None or not row[0]:
-        pytest.skip(f"task {task_id} description is not present in this database")
-    return row[0]
+def _retained_shape(name: str) -> dict:
+    fixture = json.loads(RETAINED_SHAPES_FIXTURE.read_text(encoding="utf-8"))[name]
+    return {
+        "materialization": build_retained_materialization(
+            fixture["source_materialization"]
+        ),
+        "plan": fixture["plan"],
+        "task_description": fixture["task_description"],
+    }
 
 
 @pytest.fixture(scope="module")
 def attempt9_shape() -> dict:
-    record = json.loads((ATTEMPT9_EVIDENCE / "source-materialization.json").read_text())
-    plan = json.loads((ATTEMPT9_EVIDENCE / "first-plan-raw.json").read_text())[
-        "raw_response"
-    ]
-    assert _sha256(plan) == ATTEMPT9_PLAN_SHA256
-    return {
-        "materialization": build_retained_materialization(record),
-        "plan": plan,
-        "task_description": _task_description(176),
-    }
+    shape = _retained_shape("attempt9")
+    assert _sha256(shape["plan"]) == ATTEMPT9_PLAN_SHA256
+    return shape
 
 
 @pytest.fixture(scope="module")
 def attempt7_shape() -> dict:
-    connection = sqlite3.connect(
-        f"file:{REPOSITORY_ROOT / 'orchestrator.db'}?mode=ro", uri=True
-    )
-    try:
-        row = connection.execute(
-            "select log_metadata from log_entries where id=?",
-            (ATTEMPT7_MATERIALIZATION_LOG_ENTRY_ID,),
-        ).fetchone()
-    finally:
-        connection.close()
-    if row is None:
-        pytest.skip("Attempt 7 materialization log entry is not present")
-    record = json.loads(row[0])["source_materialization"]
-    plan = json.dumps(
-        json.loads(
-            (
-                ATTEMPT7_EVIDENCE / "phase32f1-attempt7-raw-first-plan-20260804.json"
-            ).read_text()
-        )
-    )
-    return {
-        "materialization": build_retained_materialization(record),
-        "plan": plan,
-        "task_description": _task_description(174),
-    }
+    return _retained_shape("attempt7")
 
 
 def _envelope(shape: dict) -> str:
