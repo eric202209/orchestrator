@@ -10,6 +10,11 @@ from typing import Annotated, Any, Callable, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
 
+from app.services.orchestration.planning.operation_repair_anchors import (
+    MAX_ANCHORS_PER_OPERATION,
+    SourceAnchor,
+    derive_operation_anchors,
+)
 from app.services.orchestration.planning.source_materialization import (
     SOURCE_STATUS_EXISTING,
     SOURCE_STATUS_NEW,
@@ -28,6 +33,7 @@ MAX_OPERATION_REPAIR_TASK_CONSTRAINT_CHARS = 2_000
 
 RelativePath = Annotated[str, StringConstraints(min_length=1, max_length=500)]
 OperationText = Annotated[str, StringConstraints(max_length=8_000)]
+AnchorId = Annotated[str, StringConstraints(min_length=1, max_length=64)]
 
 
 class OperationRepairError(ValueError):
@@ -79,10 +85,25 @@ class OperationRepairEntry(_StrictModel):
     replacement_operation: ReplacementOperation
 
 
+class AnchoredRepairEntry(_StrictModel):
+    """A ``replace_in_file`` repair that cites an Orchestrator-owned anchor.
+
+    There is deliberately no ``old`` field anywhere in this model.  Combined
+    with ``extra="forbid"``, that makes provider-authored anchor text
+    unrepresentable rather than merely discouraged.
+    """
+
+    step_number: StrictInt = Field(ge=1)
+    operation_index: StrictInt = Field(ge=1)
+    anchor_id: AnchorId
+    new: OperationText
+
+
+RepairEntry = Union[AnchoredRepairEntry, OperationRepairEntry]
+
+
 class OperationRepairResponse(_StrictModel):
-    repairs: list[OperationRepairEntry] = Field(
-        min_length=1, max_length=MAX_REJECTED_OPERATIONS
-    )
+    repairs: list[RepairEntry] = Field(min_length=1, max_length=MAX_REJECTED_OPERATIONS)
 
 
 @dataclass(frozen=True)
@@ -196,6 +217,80 @@ def select_operation_repair_route(
     return OperationRepairRoute("operation_level", "all_findings_bounded", identities)
 
 
+@dataclass(frozen=True)
+class OperationAnchorRegistry:
+    """The complete set of anchors this repair request is allowed to cite."""
+
+    by_id: dict[str, SourceAnchor]
+    by_identity: dict[tuple[int, int], tuple[SourceAnchor, ...]]
+
+
+def build_operation_anchor_registry(
+    *,
+    original_plan: list[dict[str, Any]],
+    rejected_findings: list[Any],
+    source_materialization: Any,
+    project_dir: Path,
+) -> OperationAnchorRegistry:
+    """Derive every authorized anchor deterministically from the pinned source.
+
+    The same registry is rebuilt when the response is merged.  Derivation is a
+    pure function of the plan, the findings and the version-fenced file, so the
+    rebuild is byte-identical or the version fence has already failed closed.
+    """
+
+    steps = {
+        step.get("step_number"): step
+        for step in original_plan
+        if isinstance(step, dict)
+    }
+    by_id: dict[str, SourceAnchor] = {}
+    by_identity: dict[tuple[int, int], tuple[SourceAnchor, ...]] = {}
+    for raw_finding in rejected_findings:
+        finding = _coerce_finding(raw_finding)
+        identity = _finding_identity(finding)
+        step_number, operation_index = identity
+        step = steps.get(step_number)
+        operations = step.get("ops") if isinstance(step, dict) else None
+        if not isinstance(operations, list) or operation_index > len(operations):
+            raise OperationRepairError("rejected operation identity does not exist")
+        operation = operations[operation_index - 1]
+        if not isinstance(operation, dict):
+            raise OperationRepairError("rejected operation is not structured")
+        path = finding.get("relative_path")
+        if operation.get("path") != path:
+            raise OperationRepairError("finding path does not match rejected operation")
+        if operation.get("op") != "replace_in_file":
+            by_identity[identity] = ()
+            continue
+        resolved = resolve_version_fenced_source(
+            source_materialization, path, Path(project_dir)
+        )
+        if resolved.failure_code is not None:
+            raise OperationRepairError(
+                f"anchor source is not version fenced: {resolved.failure_code}"
+            )
+        if resolved.recorded_version_identity != finding.get("source_version_identity"):
+            raise OperationRepairError("anchor source version mismatch")
+        anchors = derive_operation_anchors(
+            step_number=step_number,
+            operation_index=operation_index,
+            relative_path=path,
+            version_identity=resolved.recorded_version_identity or "",
+            original_old=operation.get("old"),
+            original_new=operation.get("new"),
+            full_source=resolved.full_content,
+        )
+        if not anchors:
+            raise OperationRepairError(
+                "no exact source anchor is derivable for the rejected operation"
+            )
+        by_identity[identity] = anchors
+        for anchor in anchors:
+            by_id[anchor.anchor_id] = anchor
+    return OperationAnchorRegistry(by_id=by_id, by_identity=by_identity)
+
+
 def build_operation_repair_prompt(
     *,
     task_constraints: str,
@@ -214,6 +309,12 @@ def build_operation_repair_prompt(
     )
     if route.lane != "operation_level":
         raise OperationRepairError(f"operation repair is ineligible: {route.reason}")
+    registry = build_operation_anchor_registry(
+        original_plan=original_plan,
+        rejected_findings=rejected_findings,
+        source_materialization=source_materialization,
+        project_dir=project_dir,
+    )
     steps = {step.get("step_number"): step for step in original_plan}
     items: list[dict[str, Any]] = []
     for raw_finding in rejected_findings:
@@ -230,6 +331,10 @@ def build_operation_repair_prompt(
         if operation.get("path") != path:
             raise OperationRepairError("finding path does not match rejected operation")
         record = materialized_source_file(source_materialization, path)
+        anchors = registry.by_identity.get((step_number, operation_index), ())
+        # The rejected anchor is withheld: it is exactly the text the model
+        # copied verbatim in Phase 32N-3C.  Only the intended change is shown.
+        intent = {key: value for key, value in operation.items() if key != "old"}
         items.append(
             {
                 "identity": {
@@ -237,7 +342,11 @@ def build_operation_repair_prompt(
                     "operation_index": operation_index,
                     "relative_path": path,
                 },
-                "original_rejected_operation": operation,
+                "authorized_anchors": [
+                    {"anchor_id": anchor.anchor_id, "old": anchor.text}
+                    for anchor in anchors
+                ],
+                "original_rejected_operation": intent,
                 "validator_finding": finding,
                 "source_evidence": {
                     "relative_path": record.relative_path,
@@ -264,28 +373,38 @@ def build_operation_repair_prompt(
     schema_repairs = []
     for item in items:
         original = item["original_rejected_operation"]
+        identity_fields = {
+            "step_number": item["identity"]["step_number"],
+            "operation_index": item["identity"]["operation_index"],
+        }
+        if original["op"] == "replace_in_file":
+            anchor_ids = [entry["anchor_id"] for entry in item["authorized_anchors"]]
+            schema_repairs.append(
+                {
+                    **identity_fields,
+                    "anchor_id": anchor_ids[0],
+                    "new": "replacement text",
+                }
+            )
+            continue
         replacement_example = {
             "op": original["op"],
             "path": original["path"],
         }
-        if original["op"] == "replace_in_file":
-            replacement_example.update(
-                {"old": "exact current text", "new": "replacement text"}
-            )
-        elif original["op"] in {"write_file", "append_file"}:
+        if original["op"] in {"write_file", "append_file"}:
             replacement_example["content"] = "replacement content"
         schema_repairs.append(
-            {
-                "step_number": item["identity"]["step_number"],
-                "operation_index": item["identity"]["operation_index"],
-                "replacement_operation": replacement_example,
-            }
+            {**identity_fields, "replacement_operation": replacement_example}
         )
     schema = {"repairs": schema_repairs}
     envelope = {
         "instruction": (
             "Return only one bare JSON object with exactly the key repairs. "
-            "Return one replacement for every rejected identity and no others."
+            "Return one replacement for every rejected identity and no others. "
+            "Do not reconstruct, paraphrase, widen or normalize source anchors. "
+            "Select exactly one supplied anchor_id. "
+            "Return replacement text only. "
+            "Whitespace in the supplied source is authoritative."
         ),
         "task_constraints": (
             "Correct only the listed rejected operations. Preserve the intended "
@@ -317,6 +436,12 @@ def merge_operation_repairs(
     required = {_finding_identity(item): item for item in findings}
     if len(required) != len(findings):
         raise OperationRepairError("duplicate rejected operation identity")
+    registry = build_operation_anchor_registry(
+        original_plan=original_plan,
+        rejected_findings=rejected_operations,
+        source_materialization=source_materialization,
+        project_dir=project_dir,
+    )
     returned = {
         (entry.step_number, entry.operation_index): entry for entry in repairs.repairs
     }
@@ -352,9 +477,35 @@ def merge_operation_repairs(
         original_operation = operations[operation_index - 1]
         if not isinstance(original_operation, dict):
             raise OperationRepairError("original operation is not structured")
-        replacement = entry.replacement_operation.model_dump()
         finding = required[identity]
         original_path = original_operation.get("path")
+        anchor: SourceAnchor | None = None
+        if original_operation.get("op") == "replace_in_file":
+            if not isinstance(entry, AnchoredRepairEntry):
+                raise OperationRepairError(
+                    "replace_in_file repair must cite an authorized anchor_id"
+                )
+            anchor = registry.by_id.get(entry.anchor_id)
+            if anchor is None:
+                raise OperationRepairError("unknown repair anchor")
+            if (anchor.step_number, anchor.operation_index) != identity:
+                raise OperationRepairError("anchor belongs to another operation")
+            if anchor.relative_path != original_path:
+                raise OperationRepairError("anchor belongs to another path")
+            if anchor.version_identity != finding.get("source_version_identity"):
+                raise OperationRepairError("anchor source version mismatch")
+            replacement = {
+                "op": "replace_in_file",
+                "path": anchor.relative_path,
+                "old": anchor.text,
+                "new": entry.new,
+            }
+        else:
+            if isinstance(entry, AnchoredRepairEntry):
+                raise OperationRepairError(
+                    "anchored repair is only valid for replace_in_file"
+                )
+            replacement = entry.replacement_operation.model_dump()
         if finding.get("relative_path") != original_path:
             raise OperationRepairError("rejected finding path mismatch")
         if replacement.get("path") != original_path:
@@ -387,6 +538,11 @@ def merge_operation_repairs(
                 raise OperationRepairError(
                     f"replacement old text is not verified: {verdict.failure_code}"
                 )
+            # Re-check uniqueness against the freshly fenced read, not only
+            # against the source the anchor was derived from.
+            full_content = resolved.full_content if resolved is not None else None
+            if full_content is None or full_content.count(replacement["old"]) != 1:
+                raise OperationRepairError("anchor occurrence is ambiguous or absent")
         if replacement["op"] == "write_file" and record.status == SOURCE_STATUS_NEW:
             if not record.creation_authorized:
                 raise OperationRepairError("new-file creation is not authorized")

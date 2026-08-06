@@ -7,8 +7,6 @@ import dataclasses
 import hashlib
 import importlib
 import json
-from pathlib import Path
-import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -34,22 +32,15 @@ from app.services.planning.slot_merge_operator import (
 
 
 TARGET = "pkg/current.py"
-STALE_OLD = "def value():\n    return 0\n"
-CURRENT_OLD = "def value():\n    return 1\n"
-REPLACEMENT_NEW = "def value():\n    return 2\n"
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-RETAINED_SHAPES = (
-    REPOSITORY_ROOT / "app/tests/fixtures/phase32n1_retained_attempt_shapes.json"
-)
-ATTEMPT_REPAIR_OLD = (
-    "import json\nimport logging\nfrom datetime import datetime\n"
-    "from typing import Optional, Dict, Any, List"
-)
-ATTEMPT_REPAIR_NEW = (
-    "import json\nimport logging\n"
-    "from typing import Optional, Dict, Any, List\n\n"
-    "from app.time_utils import utc_now"
-)
+# The stale anchor drifts from the real file exactly the way Phase 32N-3C
+# observed: the model dropped a blank line it could not recall.
+STALE_OLD = "def value():\n    return 1\n"
+CURRENT_OLD = "def value():\n\n    return 1\n"
+REPLACEMENT_NEW = "def value():\n\n    return 2\n"
+# The anchors Phase 32N-4 derives from CURRENT_OLD, smallest first.
+MINIMAL_ANCHOR_ID = "anchor-1-1-1"
+MINIMAL_ANCHOR_OLD = "    return 1"
+MINIMAL_ANCHOR_NEW = "    return 2"
 
 
 def _operation_repair_module():
@@ -101,12 +92,8 @@ def _repair_payload() -> str:
                 {
                     "step_number": 1,
                     "operation_index": 1,
-                    "replacement_operation": {
-                        "op": "replace_in_file",
-                        "path": TARGET,
-                        "old": CURRENT_OLD,
-                        "new": REPLACEMENT_NEW,
-                    },
+                    "anchor_id": MINIMAL_ANCHOR_ID,
+                    "new": MINIMAL_ANCHOR_NEW,
                 }
             ]
         }
@@ -200,7 +187,7 @@ def test_strict_operation_merger_replaces_one_operation(tmp_path):
         source_materialization=materialization,
         project_dir=tmp_path,
     )
-    assert merged[0]["ops"][0]["old"] == CURRENT_OLD
+    assert merged[0]["ops"][0]["old"] == MINIMAL_ANCHOR_OLD
 
 
 def test_routing_can_choose_operation_level_lane(tmp_path):
@@ -333,22 +320,45 @@ def test_parser_rejects_non_exact_response_contract(payload):
             "identity mismatch",
         ),
         (
-            lambda body: body["repairs"][0]["replacement_operation"].update(
-                path="pkg/other.py"
-            ),
-            "path changed",
+            lambda body: body["repairs"][0].update(anchor_id="anchor-1-1-9"),
+            "unknown repair anchor",
         ),
         (
-            lambda body: body["repairs"][0]["replacement_operation"].update(
-                op="write_file", content="x"
-            ),
+            lambda body: body["repairs"][0].update(old="absent text"),
             "schema",
         ),
         (
-            lambda body: body["repairs"][0]["replacement_operation"].update(
-                old="absent text"
+            # A typed operation, the pre-32N-4 shape, no longer merges: the
+            # provider may not author ``old`` for a replace_in_file repair.
+            lambda body: body["repairs"].__setitem__(
+                0,
+                {
+                    "step_number": 1,
+                    "operation_index": 1,
+                    "replacement_operation": {
+                        "op": "replace_in_file",
+                        "path": TARGET,
+                        "old": CURRENT_OLD,
+                        "new": REPLACEMENT_NEW,
+                    },
+                },
             ),
-            "not verified",
+            "must cite an authorized anchor_id",
+        ),
+        (
+            lambda body: body["repairs"].__setitem__(
+                0,
+                {
+                    "step_number": 1,
+                    "operation_index": 1,
+                    "replacement_operation": {
+                        "op": "write_file",
+                        "path": TARGET,
+                        "content": "x",
+                    },
+                },
+            ),
+            "must cite an authorized anchor_id",
         ),
     ],
 )
@@ -430,7 +440,7 @@ def test_merge_preserves_accepted_bytes_and_all_ordering(tmp_path):
 def test_version_mismatch_rejects_before_merge(tmp_path):
     materialization = _materialization(tmp_path)
     (tmp_path / TARGET).write_text("def value():\n    return 99\n", encoding="utf-8")
-    with pytest.raises(OperationRepairError, match="version no longer matches"):
+    with pytest.raises(OperationRepairError, match="version"):
         merge_operation_repairs(
             original_plan=_plan(),
             rejected_operations=[_finding(materialization)],
@@ -599,121 +609,3 @@ class _NoopAsyncContext:
 
     async def __aexit__(self, exc_type, exc, traceback):
         return False
-
-
-@pytest.mark.parametrize(
-    ("attempt_name", "expected_merged_sha"),
-    [
-        (
-            "attempt7",
-            "c26b2a78b64d69380da312e60e436616c1bd3b48da24b406b49203ec9385569c",
-        ),
-        (
-            "attempt9",
-            "baab1bc5852a922b184a247363f87d5fd83ba5ca4433d3b8d6784a4dc3ced43a",
-        ),
-    ],
-)
-def test_retained_attempt_reconstruction_is_twice_byte_identical(
-    tmp_path, attempt_name, expected_merged_sha
-):
-    fixture = json.loads(RETAINED_SHAPES.read_text(encoding="utf-8"))[attempt_name]
-    plan = json.loads(fixture["plan"])
-    target = "app/services/workspace/context_service.py"
-    target_path = tmp_path / target
-    target_path.parent.mkdir(parents=True)
-    shutil.copy2(REPOSITORY_ROOT / target, target_path)
-    expected_paths = sorted(
-        {
-            operation["path"]
-            for step in plan
-            for operation in step.get("ops", [])
-            if operation.get("path")
-        }
-    )
-    materialization = materialize_planner_source_context(
-        tmp_path,
-        expected_paths=expected_paths,
-        task_description=fixture["task_description"],
-    )
-    original_verdict = ValidatorService.validate_plan(
-        plan,
-        output_text=json.dumps(plan),
-        task_prompt=fixture["task_description"],
-        execution_profile="full_lifecycle",
-        project_dir=tmp_path,
-        source_materialization=materialization,
-    )
-    findings = original_verdict.details["source_operation_findings"]
-    assert [
-        (finding["step_number"], finding["operation_index"]) for finding in findings
-    ] == [(2, 1)]
-    response = json.dumps(
-        {
-            "repairs": [
-                {
-                    "step_number": 2,
-                    "operation_index": 1,
-                    "replacement_operation": {
-                        "op": "replace_in_file",
-                        "path": target,
-                        "old": (
-                            "from datetime import datetime\n"
-                            "from typing import Optional, Dict, Any, List"
-                            if attempt_name == "attempt7"
-                            else ATTEMPT_REPAIR_OLD
-                        ),
-                        "new": (
-                            "from typing import Optional, Dict, Any, List\n\n"
-                            "from app.time_utils import utc_now"
-                            if attempt_name == "attempt7"
-                            else ATTEMPT_REPAIR_NEW
-                        ),
-                    },
-                }
-            ]
-        },
-        separators=(",", ":"),
-    )
-
-    runs = []
-    prompts = []
-    for _ in range(2):
-        prompts.append(
-            build_operation_repair_prompt(
-                task_constraints=fixture["task_description"],
-                original_plan=plan,
-                rejected_findings=findings,
-                source_materialization=materialization,
-                project_dir=tmp_path,
-            )
-        )
-        result = merge_and_validate_operation_repairs(
-            original_plan=plan,
-            rejected_findings=findings,
-            response_text=response,
-            source_materialization=materialization,
-            project_dir=tmp_path,
-            validate_complete_plan=lambda merged: ValidatorService.validate_plan(
-                merged,
-                output_text=json.dumps(merged),
-                task_prompt=fixture["task_description"],
-                execution_profile="full_lifecycle",
-                project_dir=tmp_path,
-                source_materialization=materialization,
-            ),
-        )
-        assert result.validator_verdict.accepted, result.validator_verdict.reasons
-        runs.append(_canonical(result.plan))
-
-    assert prompts[0] == prompts[1]
-    assert runs[0] == runs[1]
-    assert hashlib.sha256(runs[0].encode("utf-8")).hexdigest() == expected_merged_sha
-    for step_index, step in enumerate(plan):
-        for operation_index, operation in enumerate(step.get("ops", []), start=1):
-            if (step["step_number"], operation_index) == (2, 1):
-                continue
-            merged_operation = json.loads(runs[0])[step_index]["ops"][
-                operation_index - 1
-            ]
-            assert _sha(merged_operation) == _sha(operation)

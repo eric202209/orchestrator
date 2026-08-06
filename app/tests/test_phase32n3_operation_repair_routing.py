@@ -20,9 +20,14 @@ from app.tests.planner_timeout_test_helpers import _patch_planning_flow_external
 
 
 TARGET = "pkg/current.py"
-CURRENT_OLD = "def value():\n    return 1\n"
-STALE_OLD = "def value():\n    return 0\n"
-REPLACEMENT_NEW = "def value():\n    return 2\n"
+# The stale anchor drops a blank line the real file has, reproducing the
+# Phase 32N-3C provider defect the anchored contract exists to remove.
+CURRENT_OLD = "def value():\n\n    return 1\n"
+STALE_OLD = "def value():\n    return 1\n"
+REPLACEMENT_NEW = "def value():\n\n    return 2\n"
+MINIMAL_ANCHOR_ID = "anchor-1-1-1"
+MINIMAL_ANCHOR_OLD = "    return 1"
+MINIMAL_ANCHOR_NEW = "    return 2"
 
 
 def _plan(old: str) -> list[dict]:
@@ -68,12 +73,8 @@ def _repair_response() -> str:
                 {
                     "step_number": 1,
                     "operation_index": 1,
-                    "replacement_operation": {
-                        "op": "replace_in_file",
-                        "path": TARGET,
-                        "old": CURRENT_OLD,
-                        "new": REPLACEMENT_NEW,
-                    },
+                    "anchor_id": MINIMAL_ANCHOR_ID,
+                    "new": MINIMAL_ANCHOR_NEW,
                 }
             ]
         }
@@ -201,6 +202,11 @@ def _isolate_flow(monkeypatch):
 def test_production_flow_repairs_only_rejected_operation_once(tmp_path, monkeypatch):
     initial = _plan(STALE_OLD)
     accepted = _plan(CURRENT_OLD)
+    # The operation lane reconstructs the operation from the Orchestrator-owned
+    # anchor, so the repaired step carries the anchor text rather than the
+    # model's widened block.
+    anchored = _plan(MINIMAL_ANCHOR_OLD)
+    anchored[0]["ops"][0]["new"] = MINIMAL_ANCHOR_NEW
     ctx = _context(tmp_path, initial)
     _pin_materialization(tmp_path, monkeypatch)
     operation_calls = []
@@ -224,14 +230,17 @@ def test_production_flow_repairs_only_rejected_operation_once(tmp_path, monkeypa
     assert result == {"status": "completed"}
     assert len(operation_calls) == 1
     assert complete_plan_calls == []
-    assert ctx.orchestration_state.plan == accepted
+    assert ctx.orchestration_state.plan == anchored
     prompt = operation_calls[0]["repair_prompt"]
-    assert (
-        json.loads(prompt)["rejected_operations"][0]["original_rejected_operation"][
-            "old"
-        ]
-        == STALE_OLD
-    )
+    rejected = json.loads(prompt)["rejected_operations"][0]
+    # The stale anchor is withheld and the exact source anchors are supplied.
+    assert "old" not in rejected["original_rejected_operation"]
+    assert STALE_OLD not in prompt
+    assert [anchor["anchor_id"] for anchor in rejected["authorized_anchors"]] == [
+        MINIMAL_ANCHOR_ID,
+        "anchor-1-1-2",
+    ]
+    assert rejected["authorized_anchors"][0]["old"] == MINIMAL_ANCHOR_OLD
     assert "pkg/new.py" not in prompt
 
 
