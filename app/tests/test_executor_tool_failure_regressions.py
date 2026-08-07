@@ -21,7 +21,8 @@ def test_directory_read_failure_at_project_root_gets_inventory_first_hint(tmp_pa
 
     assert "Do not read" in combined
     assert "rg --files . | head -200" in combined
-    assert f"{project_dir}/src/index.ts" in combined
+    assert "file-read tool on `src/index.ts`" in combined
+    assert str(project_dir) not in combined
 
 
 def test_directory_read_failure_in_subdir_gets_targeted_listing_hint(tmp_path):
@@ -40,7 +41,8 @@ def test_directory_read_failure_in_subdir_gets_targeted_listing_hint(tmp_path):
     combined = " ".join(hints)
 
     assert "find ./src/utils -maxdepth 4 -type f | sort | head -200" in combined
-    assert str(nested_dir) in combined
+    assert "`src/utils`" in combined
+    assert str(project_dir) not in combined
 
 
 def test_directory_read_failure_at_project_root_short_circuits_to_discovery(tmp_path):

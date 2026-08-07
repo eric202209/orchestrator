@@ -2803,7 +2803,7 @@ def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
     assert attempted[-1]["details"]["diff_capsule_line_count"] > 0
 
 
-def test_diff_scoped_compliance_retry_list_shape_is_normalized_after_parse_failure(
+def test_diff_scoped_parse_failure_fails_closed_without_second_repair_request(
     db_session, tmp_path
 ):
     holder = {}
@@ -2869,23 +2869,21 @@ def test_diff_scoped_compliance_retry_list_shape_is_normalized_after_parse_failu
         record_live_log_fn=lambda *args, **kwargs: None,
     )
 
-    assert result["status"] == "completed", result
+    assert result["status"] == "failed", result
+    assert result["reason"] == "debug_parse_error"
+    assert len(runtime.prompts) == 2
+    assert len(runtime.responses) == 2
     events = read_orchestration_events(
         ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
     )
     rejected = [
         event for event in events if event["event_type"] == EventType.REPAIR_REJECTED
     ]
-    assert rejected == []
-    attempted = [
-        event
-        for event in events
-        if event["event_type"] == EventType.DEBUG_REPAIR_ATTEMPTED
-    ]
-    assert attempted[-1]["details"]["debug_prompt_mode"] == "phase7g_diff_repair"
-    assert ctx.orchestration_state.plan[0]["commands"] == [
-        'python3 -m pytest -q -k "ok"'
-    ]
+    assert (
+        rejected[-1]["details"]["bounded_execution_debug_repair_rejection_reason"]
+        == "json_parse_failed"
+    )
+    assert rejected[-1]["details"]["compliance_retry_attempted"] is False
 
 
 def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
@@ -2934,18 +2932,9 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
     )
     assert rejected[-1]["details"][
         "bounded_execution_debug_repair_rejection_reason"
-    ] == ("unsupported_shape")
-    assert (
-        rejected[-1]["details"]["bounded_execution_debug_repair_rejection_reason"]
-        == "unsupported_shape"
-    )
+    ] == ("json_parse_failed")
     assert rejected[-1]["details"]["bounded_execution_debug_repair_parsed_shape"] == {
-        "type": "list",
-        "length": 0,
-    }
-    assert rejected[-1]["details"]["bounded_execution_debug_repair_parsed_shape"] == {
-        "type": "list",
-        "length": 0,
+        "type": "str",
     }
     assert (
         rejected[-1]["details"]["bounded_execution_debug_repair_raw_output_excerpt"]
@@ -2956,9 +2945,9 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
     assert details["request_id"] == details["debug_repair_request_ids"][-1]
     assert details["raw_response_type"] == "dict"
     assert details["normalized_response_type"] == "str"
-    assert details["top_level_json_type"] == "list"
-    assert details["shape_classification"] == "empty_list"
-    assert details["rejection_code"] == "unsupported_shape"
+    assert details["top_level_json_type"] == "str"
+    assert details["shape_classification"] == "str"
+    assert details["rejection_code"] == "json_parse_failed"
     assert details["exception_type"] == "ValueError"
     assert details["candidate_operations_extracted"] == 0
     assert details["workspace_mutation_occurred"] is False
@@ -2968,7 +2957,7 @@ def test_phase7f_invalid_bounded_repair_terminalizes(db_session, tmp_path):
     )
 
 
-def test_phase7f_compliance_retry_parse_failure_records_diagnostics(
+def test_phase7f_parse_failure_records_diagnostics_without_compliance_retry(
     db_session, tmp_path
 ):
     runtime = _FakeRuntime(
@@ -3014,24 +3003,74 @@ def test_phase7f_compliance_retry_parse_failure_records_diagnostics(
         details["reason_architecture"]
         == "bounded_execution_debug_repair_output_invalid"
     )
-    assert (
-        details["bounded_execution_debug_repair_rejection_reason"]
-        == "compliance_retry_parse_failed"
+    assert details["bounded_execution_debug_repair_rejection_reason"] == (
+        "json_parse_failed"
     )
+    assert details["bounded_execution_debug_repair_parsed_shape"] == {"type": "str"}
     assert (
-        details["bounded_execution_debug_repair_rejection_reason"]
-        == "compliance_retry_parse_failed"
+        details["bounded_execution_debug_repair_raw_output_excerpt"] == "not json first"
     )
-    assert details["bounded_execution_debug_repair_parsed_shape"] is None
-    assert details["bounded_execution_debug_repair_parsed_shape"] is None
-    assert (
-        details["bounded_execution_debug_repair_raw_output_excerpt"] == "not json final"
-    )
-    assert (
-        details["bounded_execution_debug_repair_raw_output_excerpt"] == "not json final"
-    )
-    assert details["compliance_retry_attempted"] is True
+    assert details["compliance_retry_attempted"] is False
     assert details["compliance_retry_succeeded"] is False
+    assert len(runtime.prompts) == 2
+    assert len(runtime.responses) == 1
+
+
+def test_phase7f_missing_command_fails_closed_without_second_repair_request(
+    db_session, tmp_path
+):
+    runtime = _FakeRuntime(
+        [
+            {
+                "status": "failed",
+                "output": "FAILED tests/test_demo.py::test_import - AssertionError",
+                "error": "AssertionError: missing import",
+                "returncode": 1,
+            },
+            {
+                "output": json.dumps(
+                    [
+                        {
+                            "title": "Retry verifier",
+                            "verification_command": "python -m pytest -q",
+                        }
+                    ]
+                )
+            },
+            {"output": "unexpected second debug repair response"},
+        ]
+    )
+    ctx, _execution = _make_run_context(
+        db_session,
+        tmp_path,
+        runtime=runtime,
+        step_overrides={"commands": ["custom-test-command"], "verification": ""},
+    )
+
+    result = execute_step_loop(
+        ctx=ctx,
+        extract_structured_text=_extract_structured_text,
+        normalize_step=_normalize_step,
+        normalize_plan_with_live_logging=lambda *args, **kwargs: [],
+        workspace_violation_error_cls=RuntimeError,
+        write_project_state_snapshot_fn=lambda *args, **kwargs: None,
+        record_live_log_fn=lambda *args, **kwargs: None,
+    )
+
+    assert result == {"status": "failed", "reason": "debug_parse_error"}
+    assert len(runtime.prompts) == 2
+    assert len(runtime.responses) == 1
+    events = read_orchestration_events(
+        ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
+    )
+    rejected = [
+        event for event in events if event["event_type"] == EventType.REPAIR_REJECTED
+    ]
+    assert (
+        rejected[-1]["details"]["bounded_execution_debug_repair_rejection_reason"]
+        == "missing_command"
+    )
+    assert rejected[-1]["details"]["compliance_retry_attempted"] is False
 
 
 def test_phase7f_second_debug_repair_for_task_execution_is_blocked(

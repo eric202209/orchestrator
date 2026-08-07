@@ -467,11 +467,11 @@ Return only a JSON array. No markdown. No prose.
 **Context:** {project_context}
 
 **Path Rules:**
-1. Run everything from `{project_dir}`
-2. Treat shell command paths as relative to `{project_dir}`
-3. Planned file paths may remain relative, but each file-read or file-write tool call must use an absolute canonical path rooted under `{project_dir}` because the tool resolver may not inherit the shell working directory
-4. Never shorten the absolute workspace path. Use the full real path beginning with `{project_dir}`, not a truncated variant like `/vault/...`
-5. Do NOT create files or folders outside `{project_dir}`
+1. The provider process is already rooted at the exact Runtime Workspace; do not add `{project_dir}` or any workspace basename to a path
+2. Treat every shell command path as workspace-relative
+3. Every file-read or file-write tool call must use a workspace-relative path such as `src/index.ts`
+4. Never use an absolute path, `..`, `~`, a TaskExecution ID prefix, or a sibling project folder
+5. Do NOT create files or folders outside the current Runtime Workspace
 6. Do NOT create documentation files unless the task explicitly requires them
 7. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 
@@ -481,19 +481,19 @@ Return only a JSON array. No markdown. No prose.
 3. Before editing a file, inspect whether it already exists and preserve valid existing content when possible
 4. Prefer small, targeted edits over rewriting whole files
 5. If a config file such as `package.json`, `pyproject.toml`, or `.env` is missing, create the minimal valid version needed for this step
-6. When a command fails because a file is missing, recover by creating or initializing the smallest required file inside `{project_dir}`
-7. Keep shell command and verification paths relative to `{project_dir}`
+6. When a command fails because a file is missing, recover by creating or initializing the smallest required file inside the current Runtime Workspace
+7. Keep shell command, verification, and file-tool paths workspace-relative
 8. If the step appears too large to complete safely, do the smallest valid portion and explain the blocker in `error_message`
-9. Do NOT wrap commands with `cd ... &&`; run them directly from `{project_dir}`
+9. Do NOT wrap commands with `cd ... &&`; run them directly from the current Runtime Workspace
 10. Do NOT use shell backgrounding such as `&`, `nohup`, `disown`, or long-lived dev servers unless the step explicitly requires process management
 11. Prefer direct interpreter invocations like `node file.js` or `python file.py`, not complex shell wrappers
 12. If verification needs a server, prefer a one-shot test command or explain that the provided verification command is not tool-safe instead of launching a background process
 13. If the context mentions hydrated baseline files from prior tasks, inspect and reuse them before creating new competing files or duplicate interfaces
 14. Before reading a file path, confirm that it exists; do not attempt to read missing files
 15. Never pass a directory path to a file-read tool; only read actual files
-16. When using a file-read or file-write tool, pass the full absolute path inside `{project_dir}` such as `{project_dir}/src/index.ts`
-17. Do not pass `{project_dir}` itself or any `task-*` directory to a file-read tool; read a specific file inside it
-18. For command execution, pass direct commands only and rely on `{project_dir}` as the working directory instead of wrapping commands with `cd ... && ...`
+16. When using a file-read or file-write tool, pass only the canonical workspace-relative product path such as `src/index.ts`
+17. Do not pass `.`, `{project_dir}`, a TaskExecution ID, or any `task-*` directory to a file-read tool; read a specific relative file path inside it
+18. For command execution, pass direct commands only and rely on the provider cwd instead of wrapping commands with `cd ... && ...`
 19. If the task is architecture, inspection, or review oriented, discover files first with shell commands like `rg --files .`, `find . -maxdepth 4 -type f`, `ls`, `sed`, or `head` before using a file-read tool on a guessed path
 20. If a guessed file path does not exist, do not guess a second path immediately; enumerate the real tree first and then read only confirmed files
 21. Treat step descriptions as human instructions, not filenames. Do NOT invent files like `step-01-*.md` or `step-03-*.md` unless the task explicitly created them

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -20,6 +21,22 @@ from app.services.workspace.permissions import (
     ensure_shared_path_to_root,
     ensure_shared_permissions,
 )
+
+
+@dataclass(frozen=True)
+class ResolvedWorkspaceProductPath:
+    """One canonical product-path identity and its internal filesystem path."""
+
+    relative_path: str
+    resolved_path: Path
+
+
+class WorkspaceProductPathError(ValueError):
+    """Fail-closed product-path rejection with a stable diagnostic code."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ExecutorService:
@@ -72,27 +89,20 @@ class ExecutorService:
             raw_params = ExecutorService._extract_tool_failure_raw_params(message)
 
             raw_path = str(raw_params.get("path") or "").strip()
-            if raw_path and not Path(raw_path).is_absolute():
-                corrected_path = (project_dir / raw_path).resolve()
+            path_diagnostic = ExecutorService.tool_failure_path_diagnostic(
+                message, project_dir
+            )
+            requested_relative_path = path_diagnostic.get("requested_relative_path")
+            if requested_relative_path:
                 hints.append(
-                    "File-tool paths are being resolved against the wrong root. "
-                    f"Retry the file read/write using the absolute task-workspace path "
-                    f"`{corrected_path}` instead of `{raw_path}`."
+                    "File-tool paths are workspace-relative. Retry the read/write "
+                    f"using `{requested_relative_path}` from the current Runtime Workspace."
                 )
             elif raw_path and Path(raw_path).is_absolute():
-                corrected_path = (project_dir / raw_path.lstrip("/")).resolve()
-                if not Path(raw_path).exists() and corrected_path.is_relative_to(
-                    project_dir
-                ):
-                    hints.append(
-                        "The file-tool path looks like a truncated absolute path. "
-                        f"Do not shorten the workspace root. Retry with the real absolute "
-                        f"task-workspace path `{project_dir}` or a file inside it, not `{raw_path}`."
-                    )
-                elif not Path(raw_path).exists():
+                if not Path(raw_path).exists():
                     hints.append(
                         "The agent guessed a file path that does not exist inside the task workspace. "
-                        f"Before reading guessed files, enumerate the real tree from `{project_dir}` with "
+                        "Before reading guessed files, enumerate the current Runtime Workspace with "
                         "`rg --files . | head -200` or `find . -maxdepth 4 -type f | sort | head -200`, "
                         "then read only confirmed files."
                     )
@@ -115,7 +125,7 @@ class ExecutorService:
                 hints.append(
                     "The execution tool rejected a wrapped shell command. "
                     "Retry with a direct command such as `node dist/server.js` and rely "
-                    f"on the task working directory `{project_dir}` instead of `cd ... &&`."
+                    "on the current Runtime Workspace instead of `cd ... &&`."
                 )
 
             if "read failed: eisd" in message.lower():
@@ -151,6 +161,72 @@ class ExecutorService:
                 seen.add(hint)
                 deduped.append(hint)
         return deduped
+
+    @staticmethod
+    def tool_failure_path_diagnostic(failure: str, project_dir: Path) -> Dict[str, Any]:
+        """Separate model-safe identity from raw provider path evidence."""
+
+        message = str(failure or "")
+        raw_params = ExecutorService._extract_tool_failure_raw_params(message)
+        raw_path = str(raw_params.get("path") or "").strip()
+        provider_match = re.search(r"access '([^']+)'", message)
+        provider_reported_path = (
+            provider_match.group(1) if provider_match else raw_path or None
+        )
+        requested_relative_path: Optional[str] = None
+        resolved_internal_path: Optional[str] = None
+        failure_code = "provider_tool_failure"
+
+        if raw_path:
+            try:
+                resolution = ExecutorService.resolve_workspace_product_path(
+                    project_dir, raw_path
+                )
+            except WorkspaceProductPathError as exc:
+                failure_code = exc.code
+                normalized_raw = raw_path.replace("\\", "/")
+                root = project_dir.resolve()
+                prefix = f"{root.name}/"
+                if (
+                    exc.code == "duplicated_task_execution_segment"
+                    and normalized_raw.startswith(prefix)
+                ):
+                    try:
+                        resolution = ExecutorService.resolve_workspace_product_path(
+                            root, normalized_raw[len(prefix) :]
+                        )
+                    except WorkspaceProductPathError:
+                        resolution = None
+                elif Path(raw_path).is_absolute():
+                    try:
+                        relative = Path(raw_path).resolve().relative_to(root).as_posix()
+                        resolution = ExecutorService.resolve_workspace_product_path(
+                            root, relative
+                        )
+                    except (OSError, ValueError, WorkspaceProductPathError):
+                        resolution = None
+                else:
+                    resolution = None
+            if resolution is not None:
+                requested_relative_path = resolution.relative_path
+                resolved_internal_path = str(resolution.resolved_path)
+
+        return {
+            "requested_relative_path": requested_relative_path,
+            "resolved_internal_path": resolved_internal_path,
+            "provider_reported_path": provider_reported_path,
+            "path_resolution_failure_code": failure_code,
+        }
+
+    @staticmethod
+    def tool_failure_path_diagnostics(
+        tool_failures: List[str], project_dir: Path
+    ) -> List[Dict[str, Any]]:
+        return [
+            ExecutorService.tool_failure_path_diagnostic(failure, project_dir)
+            for failure in tool_failures
+            if ExecutorService._extract_tool_failure_raw_params(failure).get("path")
+        ]
 
     @staticmethod
     def stub_file_repair_hints(
@@ -245,10 +321,10 @@ class ExecutorService:
         if normalized_raw_path == normalized_project_dir:
             return [
                 "The file-read tool was pointed at the project root directory itself. "
-                f"Do not read `{normalized_project_dir}` as a file. First inventory the workspace with {inventory_command}, "
-                "then read one confirmed file using its full absolute path inside the project root.",
+                f"Do not read `.` as a file. First inventory the workspace with {inventory_command}, "
+                "then read one confirmed workspace-relative file.",
                 "For example: run `rg --files . | head -200`, choose a returned file such as "
-                f"`src/index.ts`, then call the file-read tool on `{normalized_project_dir}/src/index.ts`.",
+                "`src/index.ts`, then call the file-read tool on `src/index.ts`.",
             ]
 
         if normalized_project_dir in normalized_raw_path.parents:
@@ -256,7 +332,7 @@ class ExecutorService:
             relative_dir_for_shell = relative_dir.as_posix()
             return [
                 "A directory inside the task workspace was passed to the file-read tool. "
-                f"Do not read `{normalized_raw_path}` directly. First inventory files under `{relative_dir}` with "
+                f"Do not read `{relative_dir}` directly. First inventory files under `{relative_dir}` with "
                 f"`find ./{relative_dir_for_shell} -maxdepth 4 -type f | sort | head -200`, then read one confirmed file.",
                 "Use the file-read tool only on a concrete file path returned by that listing, not on the directory.",
             ]
@@ -309,24 +385,59 @@ class ExecutorService:
     _MIN_MEANINGFUL_BYTES = 4  # shared with patch_04
 
     @staticmethod
-    def _resolve_op_path(project_dir: Path, raw_path: str, op_name: str) -> Path:
-        path_text = str(raw_path or "").strip().strip("'\"\\")
-        if not path_text:
-            raise ValueError(f"{op_name} path is empty")
-        if path_text.startswith("~"):
-            raise ValueError(f"{op_name} path uses home directory: {path_text}")
+    def resolve_workspace_product_path(
+        project_dir: Path, raw_path: str
+    ) -> ResolvedWorkspaceProductPath:
+        """Resolve one workspace-relative product path exactly once."""
 
-        candidate = Path(path_text)
-        resolved = (
-            candidate.resolve()
-            if candidate.is_absolute()
-            else (project_dir / candidate).resolve()
-        )
-        normalized_project_dir = project_dir.resolve()
-        if not resolved.is_relative_to(normalized_project_dir):
-            raise ValueError(
-                f"{op_name} path escapes task workspace: {path_text} -> {resolved}"
+        path_text = str(raw_path or "").strip().strip("'\"")
+        if not path_text:
+            raise WorkspaceProductPathError("empty_path", "product path is empty")
+        path_text = path_text.replace("\\", "/")
+        if path_text.startswith("~"):
+            raise WorkspaceProductPathError(
+                "home_path_rejected", f"product path uses home directory: {path_text}"
             )
+        candidate = PurePosixPath(path_text)
+        if candidate.is_absolute() or re.match(r"^[A-Za-z]:/", path_text):
+            raise WorkspaceProductPathError(
+                "absolute_path_rejected", f"absolute product path rejected: {path_text}"
+            )
+        if ".." in candidate.parts:
+            raise WorkspaceProductPathError(
+                "traversal_rejected", f"product path traversal rejected: {path_text}"
+            )
+        parts = tuple(part for part in candidate.parts if part not in {"", "."})
+        if not parts:
+            raise WorkspaceProductPathError("empty_path", "product path is empty")
+
+        normalized_project_dir = project_dir.resolve()
+        if (
+            normalized_project_dir.parent.parent.name == "tasks"
+            and parts[0] == normalized_project_dir.name
+        ):
+            raise WorkspaceProductPathError(
+                "duplicated_task_execution_segment",
+                "product path repeats the bound TaskExecution segment: " + path_text,
+            )
+        relative_path = PurePosixPath(*parts).as_posix()
+        resolved = (normalized_project_dir / relative_path).resolve()
+        if not resolved.is_relative_to(normalized_project_dir):
+            raise WorkspaceProductPathError(
+                "workspace_escape_rejected",
+                f"product path escapes Runtime Workspace: {path_text} -> {resolved}",
+            )
+        return ResolvedWorkspaceProductPath(relative_path, resolved)
+
+    @staticmethod
+    def _resolve_op_path(project_dir: Path, raw_path: str, op_name: str) -> Path:
+        try:
+            resolution = ExecutorService.resolve_workspace_product_path(
+                project_dir, raw_path
+            )
+        except WorkspaceProductPathError as exc:
+            raise ValueError(f"{op_name} {exc}") from exc
+        resolved = resolution.resolved_path
         return resolved
 
     @staticmethod

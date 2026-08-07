@@ -369,12 +369,18 @@ def build_bounded_debug_repair_prompt_with_metadata(
 ) -> DebugRepairPromptBuildResult:
     """Render the bounded debug repair prompt with source/API metadata."""
 
-    workspace = render_workspace_path_for_prompt(Path(envelope.workspace_path or "."))
+    workspace = "current Runtime Workspace"
     zero_test_collect_only = _is_zero_test_collect_only_failure(envelope)
     excerpts = {
-        "stdout_excerpt": envelope.stdout_excerpt,
-        "stderr_excerpt": envelope.stderr_excerpt,
-        "pytest_excerpt": envelope.pytest_excerpt,
+        "stdout_excerpt": _model_visible_workspace_relative_paths(
+            envelope.stdout_excerpt, envelope
+        ),
+        "stderr_excerpt": _model_visible_workspace_relative_paths(
+            envelope.stderr_excerpt, envelope
+        ),
+        "pytest_excerpt": _model_visible_workspace_relative_paths(
+            envelope.pytest_excerpt, envelope
+        ),
     }
     evidence_section = ""
     if evidence_capsule is not None:
@@ -495,6 +501,39 @@ def build_bounded_debug_repair_prompt_with_metadata(
         prompt=prompt,
         metadata={**source_api_metadata, **changed_file_context_metadata},
     )
+
+
+def _model_visible_workspace_relative_paths(
+    text: str, envelope: DebugFeedbackEnvelope
+) -> str:
+    """Keep raw provider paths out of correction prompts, not diagnostics."""
+
+    rendered = str(text or "")
+    workspace = str(envelope.workspace_path or "").rstrip("/\\")
+    workspace_name = Path(workspace).name if workspace else ""
+    relative_paths = list(
+        dict.fromkeys(
+            str(path or "").strip().replace("\\", "/")
+            for path in [*envelope.changed_files, *envelope.expected_files]
+            if str(path or "").strip()
+        )
+    )
+    for relative_path in relative_paths:
+        variants = [relative_path]
+        if workspace_name:
+            variants.append(f"{workspace_name}/{relative_path}")
+        if workspace:
+            variants.extend(
+                [
+                    f"{workspace}/{relative_path}",
+                    f"{workspace}/{workspace_name}/{relative_path}",
+                ]
+            )
+        for variant in sorted(set(variants), key=len, reverse=True):
+            rendered = rendered.replace(variant, relative_path)
+    if workspace:
+        rendered = rendered.replace(workspace, "current Runtime Workspace")
+    return rendered
 
 
 def build_bounded_debug_repair_changed_file_context(
@@ -1152,6 +1191,63 @@ def normalize_bounded_debug_repair_payload(
     ).payload
 
 
+def parse_bounded_debug_repair_output_strict(
+    raw_output: str,
+    *,
+    envelope: Optional[DebugFeedbackEnvelope] = None,
+    source_edit_context: bool = False,
+) -> DebugRepairNormalizationResult:
+    """Parse exactly one canonical bounded repair JSON array, once."""
+
+    text = str(raw_output or "")
+    try:
+        parsed_data = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return _debug_repair_normalization_rejected(text, "json_parse_failed")
+
+    if not isinstance(parsed_data, list) or len(parsed_data) != 1:
+        return _debug_repair_normalization_rejected(parsed_data, "unsupported_shape")
+    item = parsed_data[0]
+    if not isinstance(item, dict):
+        return _debug_repair_normalization_rejected(parsed_data, "unsupported_shape")
+
+    fix_type = str(item.get("fix_type") or item.get("repair_type") or "").strip()
+    ops_shape = source_edit_context or fix_type == "ops_fix" or "ops" in item
+    allowed_keys = (
+        {
+            "title",
+            "repair_type",
+            "fix_type",
+            "ops",
+            "verification_command",
+            "expected_files",
+        }
+        if ops_shape
+        else {"title", "command", "verification_command", "expected_files"}
+    )
+    if set(item) - allowed_keys:
+        return _debug_repair_normalization_rejected(parsed_data, "unsupported_schema")
+    if "expected_files" in item and not isinstance(item["expected_files"], list):
+        return _debug_repair_normalization_rejected(parsed_data, "unsupported_schema")
+    if ops_shape:
+        if fix_type != "ops_fix":
+            return _debug_repair_normalization_rejected(
+                parsed_data, "unsupported_fix_type"
+            )
+        if not isinstance(item.get("ops"), list):
+            return _debug_repair_normalization_rejected(
+                parsed_data, "invalid_ops_fix_ops"
+            )
+    elif not isinstance(item.get("title"), str) or not item["title"].strip():
+        return _debug_repair_normalization_rejected(parsed_data, "missing_title")
+
+    return normalize_bounded_debug_repair_payload_detailed(
+        parsed_data,
+        envelope=envelope,
+        source_edit_context=source_edit_context,
+    )
+
+
 def normalize_bounded_debug_repair_payload_detailed(
     parsed_data: Any,
     *,
@@ -1161,98 +1257,7 @@ def normalize_bounded_debug_repair_payload_detailed(
     """Convert Phase 7F repair output while preserving invalid-branch details."""
 
     if isinstance(parsed_data, dict):
-        fix_type = str(parsed_data.get("fix_type") or "code_fix").strip()
-        if fix_type not in {"code_fix", "command_fix", "ops_fix", "revise_plan"}:
-            return _debug_repair_normalization_rejected(
-                parsed_data, "unsupported_fix_type"
-            )
-
-        ops = _normalize_durable_source_ops(parsed_data.get("ops"))
-        if source_edit_context and _ops_touch_source_files(ops):
-            fix_type = "ops_fix"
-
-        normalized: dict[str, Any] = {
-            "fix_type": fix_type,
-            "fix": str(parsed_data.get("fix") or "").strip(),
-            "analysis": str(parsed_data.get("analysis") or "")[:1200],
-            "confidence": str(parsed_data.get("confidence") or "MEDIUM"),
-        }
-        if isinstance(parsed_data.get("expected_files"), list):
-            normalized["expected_files"] = [
-                str(path).strip()
-                for path in parsed_data.get("expected_files", [])
-                if str(path).strip()
-            ]
-        if fix_type == "command_fix" and not normalized.get("expected_files"):
-            derived_expected_files = _derive_zero_test_expected_files(
-                normalized["fix"],
-                envelope=envelope,
-            )
-            if derived_expected_files:
-                normalized["expected_files"] = derived_expected_files
-        if isinstance(parsed_data.get("verification"), str):
-            normalized["verification"] = str(parsed_data.get("verification") or "")
-        if isinstance(parsed_data.get("ops"), list):
-            normalized["ops"] = ops
-        if isinstance(parsed_data.get("revised_plan"), list):
-            normalized["revised_plan"] = parsed_data.get("revised_plan", [])
-        if source_edit_context and fix_type == "command_fix":
-            if _ops_touch_source_files(normalized.get("ops")):
-                normalized["fix_type"] = "ops_fix"
-                normalized["fix"] = ""
-                return DebugRepairNormalizationResult(
-                    payload=normalized,
-                    rejection_reason=None,
-                    parsed_shape=_debug_repair_parsed_shape(parsed_data),
-                )
-            if not _is_verifier_only_command_fix(
-                normalized["fix"], normalized.get("verification")
-            ):
-                return _debug_repair_normalization_rejected(
-                    parsed_data, "source_context_command_fix_rejected"
-                )
-        if fix_type == "command_fix" and not is_runnable_shell_command_fix(
-            normalized["fix"]
-        ):
-            reason = (
-                "missing_command" if not normalized["fix"] else "non_runnable_command"
-            )
-            return _debug_repair_normalization_rejected(parsed_data, reason)
-        if fix_type == "command_fix" and _source_repair_command_fix_requires_ops(
-            normalized["fix"],
-            normalized.get("verification"),
-            envelope=envelope,
-            source_edit_context=source_edit_context,
-        ):
-            return _debug_repair_normalization_rejected(
-                parsed_data, "source_repair_command_fix_rejected"
-            )
-        if fix_type == "command_fix" and _semantic_pytest_string_edit_repair(
-            normalized["fix"],
-            envelope=envelope,
-        ):
-            return _debug_repair_normalization_rejected(
-                parsed_data, "semantic_string_edit_rejected"
-            )
-        if fix_type == "command_fix" and not _zero_test_repair_creates_semantic_test(
-            normalized["fix"],
-            normalized.get("expected_files"),
-            envelope=envelope,
-        ):
-            return _debug_repair_normalization_rejected(
-                parsed_data, "zero_test_repair_missing_semantic_test"
-            )
-        if fix_type in {"code_fix", "ops_fix"} and not any(
-            key in normalized for key in ("expected_files", "verification", "ops")
-        ):
-            return _debug_repair_normalization_rejected(
-                parsed_data, "missing_ops_or_expected_files"
-            )
-        return DebugRepairNormalizationResult(
-            payload=normalized,
-            rejection_reason=None,
-            parsed_shape=_debug_repair_parsed_shape(parsed_data),
-        )
+        return _debug_repair_normalization_rejected(parsed_data, "unsupported_shape")
 
     if not isinstance(parsed_data, list) or len(parsed_data) != 1:
         return _debug_repair_normalization_rejected(parsed_data, "unsupported_shape")

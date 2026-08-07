@@ -28,7 +28,7 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     build_bounded_debug_repair_observability,
     build_debug_feedback_envelope,
     normalize_bounded_debug_repair_payload_detailed,
-    normalize_diff_scoped_compliance_retry_command_list,
+    parse_bounded_debug_repair_output_strict,
     persist_debug_feedback_envelope,
 )
 from app.services.orchestration.diagnostics.diff_capsule import (
@@ -85,7 +85,6 @@ from app.services.orchestration.policy import (
     MAX_STEP_ATTEMPTS,
 )
 from app.runtime_naming import (
-    BOUNDED_DEBUG_REPAIR_COMPLIANCE_RETRY_CONTEXT,
     BOUNDED_DEBUG_REPAIR_CONTEXT,
     BOUNDED_DEBUG_REPAIR_DIAGNOSTIC_LABEL,
     BOUNDED_DEBUG_REPAIR_OPS_FIX_STALE_REPLACE_REASON,
@@ -127,9 +126,6 @@ from app.services.orchestration.types import (
     classify_failure_root_cause,
 )
 from app.services.orchestration.validation.validator import ValidatorService
-from app.services.orchestration.validation.parsing import (
-    build_json_compliance_retry_prompt,
-)
 from app.services.orchestration.validation.workspace_guard import (
     TaskOperationContractViolation,
     compute_workspace_checksum,
@@ -921,6 +917,9 @@ def execute_step_loop(
                     "step_index": step_index + 1,
                     "tool_failures": tool_failures[:10],
                     "correction_hints": correction_hints[:10],
+                    "path_diagnostics": ExecutorService.tool_failure_path_diagnostics(
+                        tool_failures[:10], orchestration_state.project_dir
+                    ),
                 },
             )
 
@@ -2169,166 +2168,30 @@ def execute_step_loop(
                     debug_result.get("output", "{}")
                 )
                 final_repair_output = repair_output
-                success, parsed_repair, strategy_info = (
-                    error_handler.attempt_json_parsing(
-                        repair_output, context=BOUNDED_DEBUG_REPAIR_CONTEXT
-                    )
-                )
                 compliance_retry_attempted = False
                 compliance_retry_succeeded = False
-                if not success:
-                    compliance_retry_attempted = True
-                    compliance_prompt = build_json_compliance_retry_prompt(
-                        repair_output,
-                        expected_shape="array or object",
-                    )
-                    try:
-                        compliance_result = _invoke_debug_repair(compliance_prompt)
-                        debug_provider_response = compliance_result
-                        compliance_output = extract_structured_text(
-                            compliance_result.get("output", "{}")
-                        )
-                        final_repair_output = compliance_output
-                        success, parsed_repair, strategy_info = (
-                            error_handler.attempt_json_parsing(
-                                compliance_output,
-                                context=BOUNDED_DEBUG_REPAIR_COMPLIANCE_RETRY_CONTEXT,
-                            )
-                        )
-                    except Exception as compliance_error:
-                        success = False
-                        parsed_repair = None
-                        strategy_info = (
-                            "Compliance retry failed: " f"{str(compliance_error)[:200]}"
-                        )
-                    compliance_retry_succeeded = bool(success)
-                    try:
-                        append_orchestration_event(
-                            project_dir=orchestration_state.project_dir,
-                            session_id=session_id,
-                            task_id=task_id,
-                            event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
-                            parent_event_id=(debugging_phase_event or {}).get(
-                                "event_id"
-                            ),
-                            details={
-                                "phase": "execution",
-                                "debug_repair_attempted": True,
-                                "debug_repair_used": True,
-                                **debug_prompt_mode_alias_details(debug_prompt_mode),
-                                "envelope_mode": "direct_capsule",
-                                "task_execution_id": ctx.task_execution_id,
-                                "step_index": step_index + 1,
-                                "compliance_retry_attempted": (
-                                    compliance_retry_attempted
-                                ),
-                                "compliance_retry_succeeded": (
-                                    compliance_retry_succeeded
-                                ),
-                            },
-                        )
-                    except Exception:
-                        pass
                 source_edit_context = is_bounded_debug_repair_mode(
                     debug_prompt_mode
                 ) and _bounded_debug_repair_source_edit_context(
                     step, debug_feedback_envelope
                 )
-                diff_scoped_compliance_retry = (
-                    compliance_retry_attempted
-                    and is_diff_scoped_debug_repair_mode(debug_prompt_mode)
+                normalization_result = parse_bounded_debug_repair_output_strict(
+                    repair_output,
+                    envelope=debug_feedback_envelope,
+                    source_edit_context=source_edit_context,
                 )
-                if diff_scoped_compliance_retry:
-                    normalization_result = (
-                        normalize_diff_scoped_compliance_retry_command_list(
-                            final_repair_output,
-                            parsed_data=parsed_repair if success else None,
-                            envelope=debug_feedback_envelope,
-                            source_edit_context=source_edit_context,
-                        )
-                    )
-                    if normalization_result.payload is not None:
-                        success = True
-                else:
-                    normalization_result = (
-                        normalize_bounded_debug_repair_payload_detailed(
-                            parsed_repair,
-                            envelope=debug_feedback_envelope,
-                            source_edit_context=source_edit_context,
-                        )
-                        if success
-                        else None
-                    )
-                if (
-                    not diff_scoped_compliance_retry
-                    and success
-                    and normalization_result is not None
-                    and normalization_result.payload is None
-                    and not compliance_retry_attempted
-                ):
-                    # JSON shape compliance is a separate contract from JSON
-                    # syntax.  Give the bounded repair lane its existing one
-                    # retry with the concrete normalizer rejection instead of
-                    # terminalizing a parseable but repairable response.
-                    compliance_retry_attempted = True
-                    rejection_reason = (
-                        normalization_result.rejection_reason
-                        or "bounded_repair_shape_rejected"
-                    )
-                    compliance_prompt = (
-                        build_json_compliance_retry_prompt(
-                            repair_output,
-                            expected_shape="array or object",
-                        )
-                        + "\nThe JSON parsed, but the bounded repair contract rejected it for: "
-                        + str(rejection_reason)
-                        + ". Return a contract-compliant repair payload only."
-                    )
-                    try:
-                        compliance_result = _invoke_debug_repair(compliance_prompt)
-                        debug_provider_response = compliance_result
-                        compliance_output = extract_structured_text(
-                            compliance_result.get("output", "{}")
-                        )
-                        final_repair_output = compliance_output
-                        success, parsed_repair, strategy_info = (
-                            error_handler.attempt_json_parsing(
-                                compliance_output,
-                                context=BOUNDED_DEBUG_REPAIR_COMPLIANCE_RETRY_CONTEXT,
-                            )
-                        )
-                        compliance_retry_succeeded = bool(success)
-                        if success:
-                            normalization_result = (
-                                normalize_bounded_debug_repair_payload_detailed(
-                                    parsed_repair,
-                                    envelope=debug_feedback_envelope,
-                                    source_edit_context=source_edit_context,
-                                )
-                            )
-                    except Exception as compliance_error:
-                        success = False
-                        parsed_repair = None
-                        strategy_info = (
-                            "Compliance retry failed: " f"{str(compliance_error)[:200]}"
-                        )
-                        compliance_retry_succeeded = False
-                debug_data = (
-                    normalization_result.payload if normalization_result else None
-                )
+                success = normalization_result.payload is not None
+                debug_data = normalization_result.payload
+                strategy_info = "strict_bounded_debug_repair_json"
+                try:
+                    parsed_repair = json.loads(repair_output)
+                except (TypeError, json.JSONDecodeError):
+                    parsed_repair = None
                 if not success or debug_data is None:
-                    if normalization_result:
-                        debug_repair_rejection_reason = (
-                            normalization_result.rejection_reason
-                        )
-                        debug_repair_parsed_shape = normalization_result.parsed_shape
-                    else:
-                        debug_repair_rejection_reason = (
-                            "compliance_retry_parse_failed"
-                            if compliance_retry_attempted
-                            else "json_parse_failed"
-                        )
-                        debug_repair_parsed_shape = None
+                    debug_repair_rejection_reason = (
+                        normalization_result.rejection_reason
+                    )
+                    debug_repair_parsed_shape = normalization_result.parsed_shape
                     if (
                         bounded_debug_repair_allowed
                         and task_execution_id is not None
