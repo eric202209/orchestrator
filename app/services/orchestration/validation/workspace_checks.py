@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import re
 import shlex
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -183,7 +184,42 @@ def find_nested_expected_file_matches(
     return nested_matches
 
 
-def detect_placeholder_content(path: Path) -> List[str]:
+def _added_or_changed_text(baseline_text: str, current_text: str) -> str:
+    """Lines present in ``current_text`` that ``baseline_text`` does not already contain.
+
+    Used to scope placeholder/TODO detection to candidate-owned content: lines
+    the candidate's diff added or rewrote, excluding lines that are byte-identical
+    to the pre-existing baseline (context or untouched lines).
+    """
+
+    matcher = SequenceMatcher(
+        a=baseline_text.splitlines(),
+        b=current_text.splitlines(),
+        autojunk=False,
+    )
+    current_lines = current_text.splitlines()
+    changed: List[str] = []
+    for tag, _, _, j1, j2 in matcher.get_opcodes():
+        if tag in ("replace", "insert"):
+            changed.extend(current_lines[j1:j2])
+    return "\n".join(changed)
+
+
+def detect_placeholder_content(
+    path: Path,
+    *,
+    baseline_text: Optional[str] = None,
+) -> List[str]:
+    """Scan ``path`` for placeholder/TODO/stub markers.
+
+    ``baseline_text`` is the pre-candidate content of the same file, when
+    known (e.g. from a change-set snapshot). When supplied, the TODO/FIXME/
+    placeholder substring rule is scoped to lines the candidate added or
+    changed, so pre-existing baseline debt the candidate never touched does
+    not block validation. All other checks remain whole-file, matching prior
+    behavior.
+    """
+
     try:
         content = path.read_text(encoding="utf-8")
     except Exception:
@@ -197,18 +233,22 @@ def detect_placeholder_content(path: Path) -> List[str]:
         path.suffix != ".py" or _python_has_stub_pass(content)
     ):
         reasons.append(f"{path.name} still contains `pass` placeholders")
+    todo_scan_text = content
+    if baseline_text is not None:
+        todo_scan_text = _added_or_changed_text(baseline_text, content)
+    todo_scan_lowered = todo_scan_text.lower()
     if (
         (
-            "todo" in lowered
+            "todo" in todo_scan_lowered
             and not fixture_placeholder_content
             and not todo_fixme_literals
         )
         or (
-            "fixme" in lowered
+            "fixme" in todo_scan_lowered
             and not fixture_placeholder_content
             and not todo_fixme_literals
         )
-        or ("placeholder" in lowered and not fixture_placeholder_content)
+        or ("placeholder" in todo_scan_lowered and not fixture_placeholder_content)
     ):
         reasons.append(f"{path.name} still contains TODO or placeholder markers")
     if "notimplemented" in lowered or "raise notimplementederror" in lowered:

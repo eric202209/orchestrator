@@ -1162,6 +1162,48 @@ class ValidatorService:
         return files
 
     @classmethod
+    def _placeholder_baseline_text(
+        cls,
+        candidate: Path,
+        project_dir: Path,
+        change_set: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Pre-candidate content of ``candidate``, when a change-set snapshot has it.
+
+        Returns ``None`` when there is no usable delta authority (no change
+        set, no snapshot, the file is candidate-added, or the baseline copy
+        cannot be read) so callers fall back to whole-file scanning.
+        """
+
+        if not change_set:
+            return None
+        snapshot_raw = str(change_set.get("snapshot_path") or "").strip()
+        if not snapshot_raw:
+            return None
+        snapshot_root = Path(snapshot_raw)
+        if not snapshot_root.exists():
+            return None
+        relative_text = str(candidate.relative_to(project_dir)).replace("\\", "/")
+        added_files = {
+            str(path).replace("\\", "/").lstrip("./")
+            for path in (change_set.get("added_files") or [])
+        }
+        if relative_text.lstrip("./") in added_files:
+            return None
+        baseline_path = (snapshot_root / relative_text).resolve()
+        try:
+            if not baseline_path.is_relative_to(snapshot_root.resolve()):
+                return None
+        except ValueError:
+            return None
+        if not baseline_path.is_file():
+            return None
+        try:
+            return baseline_path.read_text(encoding="utf-8")
+        except Exception:
+            return None
+
+    @classmethod
     def _mutation_completion_evidence(
         cls,
         *,
@@ -2576,7 +2618,12 @@ class ValidatorService:
 
         placeholder_reasons: List[str] = []
         for candidate in candidate_files:
-            placeholder_reasons.extend(cls._detect_placeholder_content(candidate))
+            baseline_text = cls._placeholder_baseline_text(
+                candidate, project_dir, change_set
+            )
+            placeholder_reasons.extend(
+                cls._detect_placeholder_content(candidate, baseline_text=baseline_text)
+            )
         if placeholder_reasons and profile == "implementation":
             repairable_placeholder_reasons, rejected_placeholder_reasons = (
                 cls._split_content_issue_severity(placeholder_reasons)

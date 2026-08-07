@@ -1251,6 +1251,205 @@ def test_detect_placeholder_content_still_flags_stub_python_pass(tmp_path):
     assert reasons == ["health.py still contains `pass` placeholders"]
 
 
+def _delta_scoped_project(tmp_path, *, baseline_content, target_content):
+    """Build a project_dir + change_set snapshot pair for delta-scoped placeholder tests."""
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    (project_dir / "context_service.py").write_text(target_content, encoding="utf-8")
+
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+    (snapshot_dir / "context_service.py").write_text(baseline_content, encoding="utf-8")
+
+    return project_dir, snapshot_dir
+
+
+def _delta_plan():
+    return [
+        {
+            "step_number": 1,
+            "description": "Modify context service",
+            "commands": ["echo done"],
+            "verification": "python3 -m py_compile context_service.py",
+            "expected_files": ["context_service.py"],
+        }
+    ]
+
+
+def test_placeholder_detection_ignores_untouched_baseline_marker(tmp_path):
+    baseline = (
+        "def export(self):\n" "    # For now, return placeholder\n" "    return {}\n"
+    )
+    project_dir, snapshot_dir = _delta_scoped_project(
+        tmp_path, baseline_content=baseline, target_content=baseline
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=_delta_plan(),
+        task_prompt="Add an unrelated helper function.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["context_service.py"],
+            "change_set": {
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(project_dir),
+                "added_files": [],
+                "modified_files": [],
+                "deleted_files": [],
+            },
+        },
+    )
+
+    assert "placeholder_reasons" not in verdict.details
+    assert not any("placeholder" in reason.lower() for reason in verdict.reasons)
+
+
+def test_placeholder_detection_flags_candidate_added_marker(tmp_path):
+    project_dir, snapshot_dir = _delta_scoped_project(
+        tmp_path,
+        baseline_content="",
+        target_content="def helper():\n    # placeholder\n    return None\n",
+    )
+    (snapshot_dir / "context_service.py").unlink()
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=_delta_plan(),
+        task_prompt="Add a new helper function.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["context_service.py"],
+            "change_set": {
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(project_dir),
+                "added_files": ["context_service.py"],
+                "modified_files": [],
+                "deleted_files": [],
+            },
+        },
+    )
+
+    assert verdict.details.get("placeholder_reasons") == [
+        "context_service.py still contains TODO or placeholder markers"
+    ]
+
+
+def test_placeholder_detection_flags_candidate_modified_marker(tmp_path):
+    baseline = "def export(self):\n    return {}\n"
+    target = "def export(self):\n    # placeholder\n    return {}\n"
+    project_dir, snapshot_dir = _delta_scoped_project(
+        tmp_path, baseline_content=baseline, target_content=target
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=_delta_plan(),
+        task_prompt="Add a comment to export.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["context_service.py"],
+            "change_set": {
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(project_dir),
+                "added_files": [],
+                "modified_files": ["context_service.py"],
+                "deleted_files": [],
+            },
+        },
+    )
+
+    assert verdict.details.get("placeholder_reasons") == [
+        "context_service.py still contains TODO or placeholder markers"
+    ]
+
+
+def test_placeholder_detection_clears_when_candidate_removes_marker(tmp_path):
+    baseline = "def export(self):\n    # placeholder\n    return {}\n"
+    target = "def export(self):\n    return {}\n"
+    project_dir, snapshot_dir = _delta_scoped_project(
+        tmp_path, baseline_content=baseline, target_content=target
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=_delta_plan(),
+        task_prompt="Remove stale comment from export.",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["context_service.py"],
+            "change_set": {
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(project_dir),
+                "added_files": [],
+                "modified_files": ["context_service.py"],
+                "deleted_files": [],
+            },
+        },
+    )
+
+    assert "placeholder_reasons" not in verdict.details
+
+
+def test_placeholder_detection_unrelated_changed_lines_do_not_inherit_baseline_debt(
+    tmp_path,
+):
+    baseline = (
+        "def export(self):\n"
+        "    # For now, return placeholder\n"
+        "    return {}\n"
+        "\n"
+        "def other(self):\n"
+        "    return 1\n"
+    )
+    target = (
+        "def export(self):\n"
+        "    # For now, return placeholder\n"
+        "    return {}\n"
+        "\n"
+        "def other(self):\n"
+        "    return 2\n"
+    )
+    project_dir, snapshot_dir = _delta_scoped_project(
+        tmp_path, baseline_content=baseline, target_content=target
+    )
+
+    verdict = ValidatorService.validate_task_completion(
+        project_dir=project_dir,
+        plan=_delta_plan(),
+        task_prompt="Fix the return value of other().",
+        execution_profile="full_lifecycle",
+        workspace_consistency={},
+        completion_evidence={
+            "summary_generated": True,
+            "execution_results_count": 1,
+            "reported_changed_files": ["context_service.py"],
+            "change_set": {
+                "snapshot_path": str(snapshot_dir),
+                "target_path": str(project_dir),
+                "added_files": [],
+                "modified_files": ["context_service.py"],
+                "deleted_files": [],
+            },
+        },
+    )
+
+    assert "placeholder_reasons" not in verdict.details
+
+
 def _seed_finalize_ctx(db_session, tmp_path):
     project_dir = tmp_path / "project"
     project_dir.mkdir()
