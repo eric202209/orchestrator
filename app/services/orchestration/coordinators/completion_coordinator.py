@@ -76,6 +76,51 @@ from app.services.workspace.project_isolation_service import (
 from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
 
 
+def _build_gating_change_set(
+    *,
+    task_service: Any,
+    project: Any,
+    task: Any,
+    task_execution_id: Optional[int],
+    project_dir: Any,
+    preserve_project_root_rules: bool,
+    logger: Any,
+) -> Optional[Dict[str, Any]]:
+    """Build the read-only change set the gating completion validation needs.
+
+    Uses the existing non-persisting builder, so nothing is written and no
+    change-set record is created here — the persisted change set is still built
+    later, after completion verification. Returns None when the change set
+    cannot be built, which restores the previous whole-file validation
+    behaviour rather than failing the gate.
+    """
+
+    if not (
+        project
+        and task
+        and task_execution_id
+        and hasattr(task_service, "build_task_execution_change_set")
+    ):
+        return None
+    try:
+        change_set = task_service.build_task_execution_change_set(
+            project,
+            task,
+            task_execution_id=task_execution_id,
+            snapshot_key=workspace_snapshot_key(task.id, task_execution_id),
+            target_dir=Path(project_dir),
+            preserve_project_root_rules=preserve_project_root_rules,
+        )
+    except Exception as change_set_error:
+        logger.warning(
+            "[COMPLETION_VALIDATION] Gating change set unavailable, "
+            "falling back to whole-file validation: %s",
+            change_set_error,
+        )
+        return None
+    return change_set if isinstance(change_set, dict) else None
+
+
 @dataclass
 class CompletionOutcome:
     """Typed result from CompletionCoordinator.complete_task.
@@ -353,6 +398,37 @@ class CompletionCoordinator:
             reported_changed_files=reported_changed_files,
         )
 
+        # Phase 32P-2: the delta-scoped placeholder rule resolves its baseline
+        # from completion_evidence["change_set"]. Build that change set
+        # read-only here — the persisted one is not created until after
+        # verification — so the gating validation and its revalidations judge
+        # candidate-changed lines instead of pre-existing baseline debt.
+        _gating_change_set_cache: list[Any] = []
+
+        def _gating_completion_evidence(*, rebuild: bool = False) -> Dict[str, Any]:
+            if rebuild:
+                _gating_change_set_cache.clear()
+            if not _gating_change_set_cache:
+                _gating_change_set_cache.append(
+                    _build_gating_change_set(
+                        task_service=task_service,
+                        project=project,
+                        task=task,
+                        task_execution_id=ctx.task_execution_id,
+                        project_dir=orchestration_state.project_dir,
+                        preserve_project_root_rules=runs_in_canonical_baseline,
+                        logger=logger,
+                    )
+                )
+            evidence: Dict[str, Any] = {
+                "summary_generated": bool(summary_result),
+                "execution_results_count": len(orchestration_state.execution_results),
+                "reported_changed_files": reported_changed_files,
+            }
+            if _gating_change_set_cache[0]:
+                evidence["change_set"] = _gating_change_set_cache[0]
+            return evidence
+
         completion_validation = ValidatorService.validate_task_completion(
             project_dir=orchestration_state.project_dir,
             plan=orchestration_state.plan,
@@ -362,11 +438,7 @@ class CompletionCoordinator:
             title=task.title if task else None,
             description=task.description if task else None,
             relaxed_mode=orchestration_state.relaxed_mode,
-            completion_evidence={
-                "summary_generated": bool(summary_result),
-                "execution_results_count": len(orchestration_state.execution_results),
-                "reported_changed_files": reported_changed_files,
-            },
+            completion_evidence=_gating_completion_evidence(),
             validation_severity=ctx.validation_severity,
             workflow_stage=ctx.workflow_stage,
             is_first_ordered_task=bool(task and task.plan_position == 1),
@@ -434,13 +506,7 @@ class CompletionCoordinator:
                     title=task.title if task else None,
                     description=task.description if task else None,
                     relaxed_mode=orchestration_state.relaxed_mode,
-                    completion_evidence={
-                        "summary_generated": bool(summary_result),
-                        "execution_results_count": len(
-                            orchestration_state.execution_results
-                        ),
-                        "reported_changed_files": reported_changed_files,
-                    },
+                    completion_evidence=_gating_completion_evidence(rebuild=True),
                     validation_severity=ctx.validation_severity,
                     workflow_stage=ctx.workflow_stage,
                     is_first_ordered_task=bool(task and task.plan_position == 1),
@@ -616,13 +682,7 @@ class CompletionCoordinator:
                         title=task.title if task else None,
                         description=task.description if task else None,
                         relaxed_mode=orchestration_state.relaxed_mode,
-                        completion_evidence={
-                            "summary_generated": bool(summary_result),
-                            "execution_results_count": len(
-                                orchestration_state.execution_results
-                            ),
-                            "reported_changed_files": reported_changed_files,
-                        },
+                        completion_evidence=_gating_completion_evidence(rebuild=True),
                         validation_severity=ctx.validation_severity,
                         workflow_stage=ctx.workflow_stage,
                         is_first_ordered_task=bool(task and task.plan_position == 1),
@@ -660,13 +720,7 @@ class CompletionCoordinator:
                     title=task.title if task else None,
                     description=task.description if task else None,
                     relaxed_mode=orchestration_state.relaxed_mode,
-                    completion_evidence={
-                        "summary_generated": bool(summary_result),
-                        "execution_results_count": len(
-                            orchestration_state.execution_results
-                        ),
-                        "reported_changed_files": reported_changed_files,
-                    },
+                    completion_evidence=_gating_completion_evidence(rebuild=True),
                     validation_severity=ctx.validation_severity,
                     workflow_stage=ctx.workflow_stage,
                     is_first_ordered_task=bool(task and task.plan_position == 1),

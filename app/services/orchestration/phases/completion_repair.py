@@ -222,15 +222,32 @@ def _detect_completion_verification_command(
         candidate.exists()
         for candidate in [project_dir / "pytest.ini", project_dir / "tests"]
     ):
-        if (project_dir / "pyproject.toml").exists() or (
-            project_dir / "tests"
-        ).exists():
+        # A valid pytest.ini is sufficient evidence on its own: it declares the
+        # suite (including its own testpaths), so requiring pyproject.toml or a
+        # top-level tests/ as well skipped verification entirely for projects
+        # that keep tests elsewhere, e.g. testpaths = app/tests.
+        if (
+            _has_pytest_ini_config(project_dir)
+            or (project_dir / "pyproject.toml").exists()
+            or (project_dir / "tests").exists()
+        ):
             return (
                 f"{shlex.quote(_completion_verification_python(project_dir))} -m pytest",
                 "python test suite detected",
             )
 
     return None, None
+
+
+def _has_pytest_ini_config(project_dir: Path) -> bool:
+    """True when project_dir holds a pytest.ini carrying a real [pytest] section."""
+
+    pytest_ini = project_dir / "pytest.ini"
+    try:
+        content = pytest_ini.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return any(line.strip() == "[pytest]" for line in content.splitlines())
 
 
 def _completion_verification_python(project_dir: Path) -> str:
