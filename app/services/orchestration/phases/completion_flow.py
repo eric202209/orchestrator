@@ -81,10 +81,10 @@ from app.services.orchestration.types import (
     ValidationVerdict,
 )
 from app.services.orchestration.validation.parsing import (
-    build_json_compliance_retry_prompt,
     extract_structured_text,
 )
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.candidate_checks import _run_command
 from app.services.orchestration.validation.integrity import (
     capture_baseline_result,
     compare_baseline,
@@ -94,13 +94,9 @@ from app.services.workspace.system_settings import get_effective_workspace_revie
 from app.services.orchestration.prompt_templates import OrchestrationStatus, StepResult
 from app.services.orchestration.phases.completion_repair import (
     _apply_completion_repair_ops_direct,
-    _augment_completion_verification_command,
-    _classify_completion_verification_failure,
     _completion_failure_signature,
     _completion_repair_invalid_paths,
     _canonicalize_completion_repair_envelope,
-    _detect_completion_verification_command,
-    _execute_completion_verification,
     _extract_completion_repair_step,
     _extract_reported_changed_files,
     _repeats_prior_completion_failure,
@@ -124,11 +120,43 @@ from app.services.orchestration.recovery.execution_recovery_service import (
 
 __all__ = [
     "_attempt_completion_repair",
-    "_augment_completion_verification_command",
-    "_classify_completion_verification_failure",
-    "_execute_completion_verification",
     "_run_evaluator",
 ]
+
+
+def _detect_completion_verification_command(_project_dir):
+    """Removed authority retained only as a non-deciding patch seam."""
+
+    return None, None
+
+
+def _classify_completion_verification_failure(**_kwargs):
+    """Completion verification no longer creates acceptance/repair verdicts."""
+
+    return None
+
+
+def _execute_completion_verification(*, project_dir, command, timeout_seconds=180):
+    """Compatibility command runner; Candidate Validator owns the result truth."""
+
+    if any(token in command for token in (";", "&&", "||", "|", "$(", "`")):
+        return {
+            "success": False,
+            "returncode": None,
+            "output": "unsafe shell metacharacters are not allowed",
+        }
+    returncode, output = _run_command(
+        project_dir=project_dir,
+        command=command,
+        timeout_seconds=timeout_seconds,
+    )
+    return {"success": returncode == 0, "returncode": returncode, "output": output}
+
+
+def _augment_completion_verification_command(command, _test_script):
+    """Removed test-script policy seam; returns the caller command unchanged."""
+
+    return str(command or "").strip()
 
 
 def _create_completion_repair_runtime(db, session_id, task_id):
@@ -208,6 +236,11 @@ def _attempt_completion_repair(
     completion_validation: Any,
     save_orchestration_checkpoint_fn: Callable[..., None],
 ) -> Dict[str, Any]:
+    repairable_findings = list(
+        getattr(completion_validation, "repairable_findings", []) or []
+    )
+    if not repairable_findings:
+        return {"status": "skipped", "reason": "no_typed_repairable_findings"}
     orchestration_state = ctx.orchestration_state
     emit_live = ctx.emit_live
     logger = ctx.logger
@@ -594,32 +627,6 @@ def _attempt_completion_repair(
                 fallback_output, context="completion_repair"
             )
 
-    if not success:
-        repair_generated_details["compliance_retry_attempted"] = True
-        compliance_prompt = build_json_compliance_retry_prompt(
-            repair_output,
-            expected_shape='object containing exactly one "repair_step" object',
-        )
-        try:
-            compliance_result = asyncio.run(
-                ctx.runtime_service.execute_task(
-                    compliance_prompt,
-                    timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS,
-                )
-            )
-            compliance_output = _extract_completion_repair_json_text(
-                compliance_result.get("output", "{}")
-            )
-            compliance_output = _salvage_completion_repair_json_text(compliance_output)
-            success, repair_data, strategy_info = error_handler.attempt_json_parsing(
-                compliance_output, context="completion_repair_compliance_retry"
-            )
-        except Exception as compliance_error:
-            success = False
-            repair_data = None
-            strategy_info = f"Compliance retry failed: {str(compliance_error)[:200]}"
-        repair_generated_details["compliance_retry_succeeded"] = bool(success)
-
     append_orchestration_event(
         project_dir=orchestration_state.project_dir,
         session_id=ctx.session_id,
@@ -668,14 +675,6 @@ def _attempt_completion_repair(
             "[ORCHESTRATION] Completion repair step referenced inventory-missing paths: %s",
             invalid_paths[:10],
         )
-        emit_live(
-            "WARN",
-            "[ORCHESTRATION] Completion repair step referenced paths that are not present in the current workspace inventory; requesting one guarded retry",
-            metadata={
-                "phase": OrchestrationPhase.COMPLETION_REPAIR,
-                "invalid_paths": invalid_paths[:10],
-            },
-        )
         append_orchestration_event(
             project_dir=orchestration_state.project_dir,
             session_id=ctx.session_id,
@@ -687,80 +686,11 @@ def _attempt_completion_repair(
                 "invalid_paths": invalid_paths[:10],
             },
         )
-        guarded_retry_prompt = (
-            repair_prompt
-            + "\n\nThe previous repair step was invalid because it referenced these paths that are not present in the workspace inventory or not created by the repair step:\n"
-            + json.dumps(invalid_paths[:20], indent=2)
-            + "\nReturn a replacement repair step that uses only inventory-confirmed paths or creates the referenced files first."
-        )
-        guarded_retry_result = asyncio.run(
-            ctx.runtime_service.execute_task(
-                guarded_retry_prompt, timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS
-            )
-        )
-        guarded_retry_output = extract_structured_text(
-            guarded_retry_result.get("output", "{}")
-        )
-        guarded_retry_output = _salvage_completion_repair_json_text(
-            guarded_retry_output
-        )
-        retry_success, retry_data, retry_strategy_info = (
-            error_handler.attempt_json_parsing(
-                guarded_retry_output, context="completion_repair"
-            )
-        )
-        if not retry_success:
-            fallback_output = extract_structured_text(guarded_retry_result)
-            if fallback_output and fallback_output != guarded_retry_output:
-                fallback_output = _salvage_completion_repair_json_text(fallback_output)
-                retry_success, retry_data, retry_strategy_info = (
-                    error_handler.attempt_json_parsing(
-                        fallback_output, context="completion_repair"
-                    )
-                )
-        if not retry_success:
-            return {
-                "status": "failed",
-                "reason": f"repair_step_inventory_guard_parse_failed:{retry_strategy_info}",
-            }
-        canonical_retry_data = _canonicalize_completion_repair_envelope(
-            retry_data, next_step_number
-        )
-        repair_step = (
-            _extract_completion_repair_step(canonical_retry_data, next_step_number)
-            if canonical_retry_data is not None
-            else None
-        )
-        if not repair_step or (
-            not repair_step.get("commands") and not repair_step.get("ops")
-        ):
-            return {
-                "status": "failed",
-                "reason": "repair_step_inventory_guard_missing_commands",
-            }
-        invalid_paths = _completion_repair_invalid_paths(
-            repair_step=repair_step,
-            project_dir=Path(orchestration_state.project_dir),
-            completion_validation=completion_validation,
-        )
-        if invalid_paths:
-            append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
-                session_id=ctx.session_id,
-                task_id=ctx.task_id,
-                event_type=EventType.REPAIR_REJECTED,
-                details={
-                    "phase": OrchestrationPhase.COMPLETION_REPAIR,
-                    "reason": "inventory_guard_retry_rejected",
-                    "invalid_paths": invalid_paths[:10],
-                },
-            )
-            return {
-                "status": "failed",
-                "reason": "repair_step_inventory_guard_rejected:"
-                + ", ".join(invalid_paths[:10]),
-            }
-        strategy_info = retry_strategy_info
+        return {
+            "status": "failed",
+            "reason": "repair_step_inventory_guard_rejected:"
+            + ", ".join(invalid_paths[:10]),
+        }
 
     signature_guard_result = check_completion_repair_signature_contract(
         project_dir=Path(orchestration_state.project_dir),
@@ -836,9 +766,6 @@ def _attempt_completion_repair(
         },
     )
 
-    orchestration_state.plan.append(repair_step)
-    task.steps = json.dumps(orchestration_state.plan)
-    task.current_step = next_step_number
     save_orchestration_checkpoint_fn(
         db, ctx.session_id, ctx.task_id, ctx.prompt, orchestration_state
     )
@@ -859,7 +786,13 @@ def _attempt_completion_repair(
     if repair_step.get("ops"):
         # Direct ops application: apply structured file ops in-process, bypass OpenClaw.
         _ops_result = _apply_completion_repair_ops_direct(
-            repair_step["ops"], Path(orchestration_state.project_dir)
+            repair_step["ops"],
+            Path(orchestration_state.project_dir),
+            authorized_paths=set(
+                (getattr(completion_validation, "details", {}) or {}).get(
+                    "candidate_authorized_paths", []
+                )
+            ),
         )
         if not repair_step.get("expected_files"):
             repair_step["expected_files"] = _ops_result["applied"]

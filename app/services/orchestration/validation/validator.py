@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 from ..policy import apply_validation_policy
 from ..types import (
+    CandidateFinding,
     PlanAccepted,
     PlanOutcome,
     PlanRejected,
@@ -16,7 +17,6 @@ from ..types import (
     ValidationVerdict,
 )
 
-from .persistence import persist_validation_result as _persist_validation_result
 from app.services.orchestration.operations.file_ops_contract import (
     normalize_file_op_shape,
     operation_has_file_op_path,
@@ -41,6 +41,11 @@ from .workspace_checks import (
 from .workspace_guard import (
     TaskWorkspaceViolationError,
     normalize_path_reference,
+)
+from .candidate_checks import (
+    candidate_authorized_paths,
+    candidate_delta_identity,
+    validate_candidate_delta,
 )
 from .integrity import (
     check_test_preservation,
@@ -557,7 +562,6 @@ class ValidatorService:
     assess_plan_workspace_compatibility = staticmethod(
         _assess_plan_workspace_compatibility
     )
-    persist_validation_result = staticmethod(_persist_validation_result)
 
     # core_invariant rule delegates (app/services/orchestration/validation/rules/).
     validate_plan_schema = staticmethod(validate_plan_schema)
@@ -2296,6 +2300,32 @@ class ValidatorService:
         )
         if workflow_stage in READ_ONLY_WORKFLOW_STAGES:
             profile = "verification"
+        completion_evidence = completion_evidence or {}
+        if completion_evidence.get("candidate_delta_required") and not isinstance(
+            completion_evidence.get("change_set"), dict
+        ):
+            finding = CandidateFinding(
+                rule_id="candidate_delta_unavailable",
+                source="change_set",
+                category="infrastructure",
+                severity="error",
+                attribution="unknown",
+                repairable=False,
+                message="Trustworthy candidate delta is unavailable",
+                evidence={"change_set_present": False},
+            )
+            return ValidationVerdict(
+                stage="task_completion",
+                status="unknown",
+                profile=profile,
+                reasons=[finding.message],
+                details={
+                    "validated_files": [],
+                    "validator_rule_ids": [finding.rule_id],
+                    "evidence_failure": True,
+                },
+                findings=[finding],
+            )
         bootstrap_contract = build_task1_bootstrap_contract(
             plan=plan,
             task_prompt=" ".join(
@@ -2346,7 +2376,6 @@ class ValidatorService:
         }
         workspace_summary = cls._workspace_materialization_summary(project_dir)
         details["workspace_materialization"] = workspace_summary
-        completion_evidence = completion_evidence or {}
         reported_changed_files = [
             str(path).strip()
             for path in (completion_evidence.get("reported_changed_files") or [])
@@ -2435,6 +2464,9 @@ class ValidatorService:
         change_set = completion_evidence.get("change_set")
         if isinstance(change_set, dict):
             integrity_findings.extend(check_test_preservation(change_set, project_dir))
+            details["candidate_authorized_paths"] = list(
+                candidate_authorized_paths(project_dir, change_set)
+            )
         else:
             change_set = None
         pre_existing_tests = pre_existing_python_test_files(project_dir, change_set)
@@ -2712,6 +2744,97 @@ class ValidatorService:
         except Exception:
             pass
 
+        candidate_findings: List[CandidateFinding] = []
+        structured_rule_ids = cls._validator_rule_ids_from_details(
+            stage="task_completion", details=details
+        )
+        for index, message in enumerate(rejected):
+            candidate_findings.append(
+                CandidateFinding(
+                    rule_id=(
+                        structured_rule_ids[index]
+                        if index < len(structured_rule_ids)
+                        else f"candidate_contract_rejected_{index + 1}"
+                    ),
+                    source="task_contract",
+                    category="task_contract",
+                    severity="error",
+                    attribution="candidate_introduced",
+                    repairable=False,
+                    message=message,
+                )
+            )
+        for index, message in enumerate(repairable):
+            candidate_findings.append(
+                CandidateFinding(
+                    rule_id=(
+                        structured_rule_ids[index]
+                        if index < len(structured_rule_ids)
+                        else f"candidate_contract_repairable_{index + 1}"
+                    ),
+                    source="task_contract",
+                    category="task_contract",
+                    severity="error",
+                    attribution="candidate_introduced",
+                    repairable=True,
+                    message=message,
+                )
+            )
+        for index, message in enumerate(warnings):
+            candidate_findings.append(
+                CandidateFinding(
+                    rule_id=f"candidate_warning_{index + 1}",
+                    source="task_contract",
+                    category="task_contract",
+                    severity="warning",
+                    attribution="unknown",
+                    repairable=False,
+                    message=message,
+                )
+            )
+        candidate_identity = None
+        if completion_evidence.get("run_candidate_checks") and change_set is not None:
+            candidate_identity = candidate_delta_identity(
+                change_set, project_dir=project_dir
+            )
+            candidate_checks = validate_candidate_delta(
+                project_dir=project_dir,
+                change_set=change_set,
+                plan=plan,
+                task_prompt=task_prompt,
+                include_static_checks=bool(
+                    completion_evidence.get("include_static_checks", True)
+                ),
+                allow_broad_fallback=bool(
+                    completion_evidence.get("allow_broad_verification_fallback", False)
+                ),
+            )
+            candidate_findings.extend(candidate_checks.findings)
+            details["focused_test_selection"] = {
+                "command": candidate_checks.selection.command,
+                "source": candidate_checks.selection.source,
+                "paths": list(candidate_checks.selection.paths),
+                "fallback": candidate_checks.selection.fallback,
+            }
+            details["candidate_commands"] = list(candidate_checks.commands_run)
+            details["test_findings"] = [
+                finding.to_dict()
+                for finding in candidate_checks.findings
+                if finding.category == "test"
+            ]
+            details["static_findings"] = [
+                finding.to_dict()
+                for finding in candidate_checks.findings
+                if finding.category == "static"
+            ]
+            for finding in candidate_checks.findings:
+                if finding.severity != "error":
+                    warnings.append(finding.message)
+                elif finding.repairable:
+                    repairable.append(finding.message)
+                else:
+                    rejected.append(finding.message)
+
         failure_signature = cls.build_failure_signature(
             rejected + repairable + warnings
         )
@@ -2736,6 +2859,8 @@ class ValidatorService:
                 warnings=warnings, repairable=repairable, rejected=rejected
             ),
             details=details,
+            findings=candidate_findings,
+            candidate_identity=candidate_identity,
         )
 
     @staticmethod

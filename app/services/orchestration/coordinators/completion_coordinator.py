@@ -9,10 +9,8 @@ validators, and lifecycle services.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -41,13 +39,6 @@ from app.services.orchestration.phases.completion_summary import (
 from app.services.orchestration.phases.completion_workspace import (
     _scope_workspace_consistency_to_task_changes,
 )
-from app.services.orchestration.recovery.execution_recovery_evidence import (
-    build_completion_recovery_evidence,
-)
-from app.services.orchestration.recovery.recovery_context import RecoveryContext
-from app.services.orchestration.recovery.recovery_strategy_registry import (
-    RecoveryStrategyRegistry,
-)
 from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.state.execution_states import (
@@ -62,11 +53,9 @@ from app.services.orchestration.state.persistence import (
 )
 from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
-from app.services.orchestration.validation.integrity import (
-    capture_baseline_result,
-    compare_baseline,
+from app.services.orchestration.validation.candidate_checks import (
+    candidate_delta_identity,
 )
-from app.services.orchestration.validation.parsing import extract_structured_text
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.workspace.project_isolation_service import (
@@ -259,17 +248,13 @@ class CompletionCoordinator:
     ) -> Dict[str, Any]:
         """Execute the completion lifecycle and return a result dict.
 
-        Owns: validation routing, repair routing, verification routing, terminal
-        outcome decision.
+        Owns: sequencing one candidate result through repair and terminal outcome.
         Delegates: summary generation, validators, repair helpers, finalizer.
         """
         # Deferred imports from completion_flow so that test patches on
         # completion_flow.* are respected at call time.
         from app.services.orchestration.phases.completion_flow import (
             _attempt_completion_repair,
-            _classify_completion_verification_failure,
-            _detect_completion_verification_command,
-            _execute_completion_verification,
             _resolve_template_review_policy,
             _run_evaluator,
             _write_progress_notes,
@@ -394,6 +379,9 @@ class CompletionCoordinator:
                 "summary_generated": bool(summary_result),
                 "execution_results_count": len(orchestration_state.execution_results),
                 "reported_changed_files": reported_changed_files,
+                "candidate_delta_required": True,
+                "run_candidate_checks": True,
+                "include_static_checks": True,
             }
             if _gating_change_set_cache[0]:
                 evidence["change_set"] = _gating_change_set_cache[0]
@@ -460,7 +448,7 @@ class CompletionCoordinator:
                     "[SYMBOL_VERIFICATION] LogEntry write failed (non-fatal): %s", _exc
                 )
 
-        if completion_validation.repairable:
+        if completion_validation.repairable_findings:
             repair_result = _attempt_completion_repair(
                 ctx=ctx,
                 completion_validation=completion_validation,
@@ -600,105 +588,8 @@ class CompletionCoordinator:
                 phase="task_summary",
                 coordinator="CompletionCoordinator",
             )
-            # Phase 13B-S3: bounded execution recovery before aborting.
-            # Routes to real recovery only when failure_class=="missing_requested_symbol".
-            # All other failures fall through to ABORT unchanged.
-            _completion_recovery_evidence = build_completion_recovery_evidence(
-                completion_validation=completion_validation,
-                debug_feedback_envelope=debug_feedback_envelope,
-                orchestration_state=orchestration_state,
-                task_title=getattr(task, "title", "") or "",
-                task_prompt=prompt,
-            )
-
-            _completion_recovery_timeout = 90
-
-            def _completion_recovery_llm_callable(_prompt_text: str) -> str:
-                try:
-                    _result = asyncio.run(
-                        runtime_service.execute_task(
-                            _prompt_text,
-                            timeout_seconds=_completion_recovery_timeout,
-                        )
-                    )
-                    return extract_structured_text(_result.get("output", ""))
-                except Exception:
-                    return ""
-
-            def _completion_recovery_command_runner(_cmd: str) -> tuple:
-                try:
-                    _proc = subprocess.run(
-                        _cmd,
-                        shell=True,
-                        capture_output=True,
-                        text=True,
-                        cwd=str(orchestration_state.project_dir),
-                        timeout=120,
-                    )
-                    return _proc.returncode, _proc.stdout, _proc.stderr
-                except subprocess.TimeoutExpired:
-                    return -1, "", "Recovery rerun timed out"
-                except Exception as _exc:
-                    return -1, "", f"Recovery rerun error: {_exc}"
-
-            def _completion_recovery_validator_callable(_patch_path: str) -> tuple:
-                try:
-                    _verdict = ValidatorService.validate_task_completion(
-                        project_dir=orchestration_state.project_dir,
-                        plan=orchestration_state.plan,
-                        task_prompt=prompt,
-                        execution_profile=execution_profile,
-                        workspace_consistency=workspace_consistency,
-                        title=task.title if task else None,
-                        description=task.description if task else None,
-                        relaxed_mode=orchestration_state.relaxed_mode,
-                        completion_evidence=_gating_completion_evidence(rebuild=True),
-                        validation_severity=ctx.validation_severity,
-                        workflow_stage=ctx.workflow_stage,
-                        is_first_ordered_task=bool(task and task.plan_position == 1),
-                    )
-                    if not _verdict.accepted:
-                        return False, " | ".join(_verdict.reasons[:3])
-                    return True, ""
-                except Exception as _exc:
-                    return False, f"validator_exception:{_exc}"
-
-            _completion_recovery_context = RecoveryContext(
-                project_dir=orchestration_state.project_dir,
-                session_id=session_id,
-                task_id=task_id,
-                evidence=_completion_recovery_evidence,
-                orchestration_state=orchestration_state,
-                scope="completion",
-                step_index=None,
-                llm_callable=_completion_recovery_llm_callable,
-                command_runner=_completion_recovery_command_runner,
-                validator_callable=_completion_recovery_validator_callable,
-            )
-            _completion_recovery_result = RecoveryStrategyRegistry.execute_recovery(
-                context=_completion_recovery_context,
-            )
-
-            # S3: if recovery succeeded, re-run the authoritative completion validator.
-            if _completion_recovery_result.get("status") == "success":
-                completion_validation = ValidatorService.validate_task_completion(
-                    project_dir=orchestration_state.project_dir,
-                    plan=orchestration_state.plan,
-                    task_prompt=prompt,
-                    execution_profile=execution_profile,
-                    workspace_consistency=workspace_consistency,
-                    title=task.title if task else None,
-                    description=task.description if task else None,
-                    relaxed_mode=orchestration_state.relaxed_mode,
-                    completion_evidence=_gating_completion_evidence(rebuild=True),
-                    validation_severity=ctx.validation_severity,
-                    workflow_stage=ctx.workflow_stage,
-                    is_first_ordered_task=bool(task and task.plan_position == 1),
-                )
-                record_validation_verdict(
-                    db, session_id, task_id, orchestration_state, completion_validation
-                )
-                db.commit()
+            # Candidate Repair is the only automatic recovery path.
+            # Non-repairable and unknown findings fail closed.
 
             # ABORT path — fires when original validation failed and recovery did not
             # succeed, OR when recovery succeeded but re-validation still rejected.
@@ -752,338 +643,6 @@ class CompletionCoordinator:
             # else: recovery succeeded and re-validation accepted — fall through to
             # success path.
 
-        completion_verification_command, completion_verification_source = (
-            _detect_completion_verification_command(orchestration_state.project_dir)
-        )
-        behavior_baseline_result = None
-        if completion_verification_command:
-            emit_live(
-                "INFO",
-                f"[ORCHESTRATION] Running completion verification: {completion_verification_command}",
-                metadata={
-                    "phase": "task_verification",
-                    "command": completion_verification_command,
-                    "source": completion_verification_source,
-                },
-            )
-            completion_verification = _execute_completion_verification(
-                project_dir=orchestration_state.project_dir,
-                command=completion_verification_command,
-            )
-            if not completion_verification.get("success", False):
-                verification_failure_verdict = (
-                    _classify_completion_verification_failure(
-                        command=completion_verification_command,
-                        source=completion_verification_source,
-                        verification_output=str(
-                            completion_verification.get("output") or ""
-                        ),
-                        completion_validation=completion_validation,
-                    )
-                )
-                if (
-                    verification_failure_verdict
-                    and verification_failure_verdict.repairable
-                ):
-                    completion_verification_before_repair = dict(
-                        completion_verification
-                    )
-                    record_validation_verdict(
-                        db,
-                        session_id,
-                        task_id,
-                        orchestration_state,
-                        verification_failure_verdict,
-                    )
-                    db.commit()
-                    repair_result = _attempt_completion_repair(
-                        ctx=ctx,
-                        completion_validation=verification_failure_verdict,
-                        save_orchestration_checkpoint_fn=save_orchestration_checkpoint_fn,
-                    )
-                    if repair_result.get("status") == "success":
-                        emit_live(
-                            "INFO",
-                            "[ORCHESTRATION] Completion verification repair applied, rerunning verification",
-                            metadata={
-                                "phase": OrchestrationPhase.COMPLETION_REPAIR,
-                                "command": completion_verification_command,
-                            },
-                        )
-                        completion_verification = _execute_completion_verification(
-                            project_dir=orchestration_state.project_dir,
-                            command=completion_verification_command,
-                        )
-                        behavior_baseline_result = compare_baseline(
-                            capture_baseline_result(
-                                command=completion_verification_command,
-                                returncode=completion_verification_before_repair.get(
-                                    "returncode"
-                                ),
-                                stderr=str(
-                                    completion_verification_before_repair.get("output")
-                                    or ""
-                                ),
-                            ),
-                            capture_baseline_result(
-                                command=completion_verification_command,
-                                returncode=completion_verification.get("returncode"),
-                                stderr=str(completion_verification.get("output") or ""),
-                            ),
-                            policy="pass_fail_transition",
-                        )
-                    else:
-                        completion_error = "Completion repair failed: " + str(
-                            repair_result.get("reason") or "unknown reason"
-                        )
-                        completion_failure_reason = str(
-                            repair_result.get("reason") or "unknown reason"
-                        )
-                        orchestration_state.status = OrchestrationStatus.ABORTED
-                        orchestration_state.abort_reason = completion_error
-                        task_execution = (
-                            db.query(TaskExecution)
-                            .filter(TaskExecution.id == ctx.task_execution_id)
-                            .first()
-                            if ctx.task_execution_id
-                            else None
-                        )
-                        mark_task_attempt_failed(
-                            task=task,
-                            session_task_link=session_task_link,
-                            task_execution=task_execution,
-                            error_message=completion_error,
-                            completed_at=datetime.now(UTC),
-                            workspace_status="blocked",
-                        )
-                        task.current_step = len(orchestration_state.plan)
-                        if session:
-                            mark_session_paused(
-                                session,
-                                alert_level="error",
-                                alert_message=completion_error[:2000],
-                            )
-                        db.commit()
-                        emit_live(
-                            "ERROR",
-                            f"[ORCHESTRATION] Completion repair failed: {completion_failure_reason}",
-                            metadata={
-                                "phase": OrchestrationPhase.COMPLETION_REPAIR,
-                                "reason": completion_failure_reason,
-                            },
-                        )
-                        save_orchestration_checkpoint_fn(
-                            db, session_id, task_id, prompt, orchestration_state
-                        )
-                        append_orchestration_event(
-                            project_dir=orchestration_state.project_dir,
-                            session_id=session_id,
-                            task_id=task_id,
-                            event_type=EventType.PHASE_FINISHED,
-                            details={
-                                "phase": "task_summary",
-                                "status": "repair_failed",
-                                "task_status": str(
-                                    task.status.value if task else "failed"
-                                ),
-                            },
-                            phase="task_summary",
-                            coordinator="CompletionCoordinator",
-                        )
-                        write_project_state_snapshot_fn(db, project, task, session_id)
-                        return {
-                            "status": "failed",
-                            "reason": TerminalReason.COMPLETION_REPAIR_FAILED,
-                        }
-
-                if not completion_verification.get("success", False):
-                    verification_error = (
-                        "Completion verification failed: "
-                        f"`{completion_verification_command}` "
-                        f"({completion_verification_source or 'auto-detected'})"
-                    )
-                    debug_feedback_envelope = build_debug_feedback_envelope(
-                        task_execution_id=ctx.task_execution_id,
-                        task_id=task_id,
-                        step_index=len(orchestration_state.plan),
-                        failure_phase="completion_verification",
-                        failed_command=completion_verification_command,
-                        return_code=completion_verification.get("returncode"),
-                        stdout="",
-                        stderr=str(completion_verification.get("output") or ""),
-                        validator_reasons=[verification_error],
-                        changed_files=reported_changed_files[:20],
-                        workspace_path=orchestration_state.project_dir,
-                    )
-                    persist_debug_feedback_envelope(
-                        db=db,
-                        session_id=session_id,
-                        task_id=task_id,
-                        session_instance_id=ctx.session_instance_id,
-                        project_dir=orchestration_state.project_dir,
-                        envelope=debug_feedback_envelope,
-                    )
-
-                    task_execution_id = (
-                        int(ctx.task_execution_id)
-                        if ctx.task_execution_id is not None
-                        else None
-                    )
-                    if (
-                        debug_feedback_envelope.eligible_for_debug_repair
-                        and task_execution_id is not None
-                    ):
-                        fallback_verdict = ValidationVerdict(
-                            stage="completion_verification",
-                            status="repair_required",
-                            profile=(
-                                getattr(completion_validation, "profile", None)
-                                or "implementation"
-                            ),
-                            reasons=[
-                                verification_error
-                                + ": "
-                                + str(completion_verification.get("output") or "")[:400]
-                            ],
-                            details={
-                                "expected_core_files": reported_changed_files[:20],
-                                "verification_command": completion_verification_command,
-                                "verification_source": (
-                                    completion_verification_source or "auto-detected"
-                                ),
-                                "verification_output_preview": str(
-                                    completion_verification.get("output") or ""
-                                )[:400],
-                                "completion_repair_source": (
-                                    "final_completion_verification"
-                                ),
-                                "failure_class": debug_feedback_envelope.failure_class,
-                            },
-                        )
-                        record_validation_verdict(
-                            db,
-                            session_id,
-                            task_id,
-                            orchestration_state,
-                            fallback_verdict,
-                        )
-                        db.commit()
-                        repair_result = _attempt_completion_repair(
-                            ctx=ctx,
-                            completion_validation=fallback_verdict,
-                            save_orchestration_checkpoint_fn=(
-                                save_orchestration_checkpoint_fn
-                            ),
-                        )
-                        save_orchestration_checkpoint_fn(
-                            db, session_id, task_id, prompt, orchestration_state
-                        )
-                        if repair_result.get("status") == "success":
-                            emit_live(
-                                "INFO",
-                                "[ORCHESTRATION] Final verification repair applied, rerunning verification",
-                                metadata={
-                                    "phase": OrchestrationPhase.COMPLETION_REPAIR,
-                                    "completion_repair_source": (
-                                        "final_completion_verification"
-                                    ),
-                                    "command": completion_verification_command,
-                                    "failure_class": (
-                                        debug_feedback_envelope.failure_class
-                                    ),
-                                },
-                            )
-                            completion_verification = _execute_completion_verification(
-                                project_dir=orchestration_state.project_dir,
-                                command=completion_verification_command,
-                            )
-                            behavior_baseline_result = compare_baseline(
-                                capture_baseline_result(
-                                    command=completion_verification_command,
-                                    returncode=debug_feedback_envelope.return_code,
-                                    stderr=debug_feedback_envelope.stderr_excerpt,
-                                ),
-                                capture_baseline_result(
-                                    command=completion_verification_command,
-                                    returncode=completion_verification.get(
-                                        "returncode"
-                                    ),
-                                    stderr=str(
-                                        completion_verification.get("output") or ""
-                                    ),
-                                ),
-                                policy="pass_fail_transition",
-                            )
-                        else:
-                            verification_error = "Completion repair failed: " + str(
-                                repair_result.get("reason") or "unknown reason"
-                            )
-
-                    if not completion_verification.get("success", False):
-                        verification_error_message = (
-                            verification_error
-                            + ": "
-                            + str(completion_verification.get("output") or "")[:1500]
-                        )
-                        task_execution = (
-                            db.query(TaskExecution)
-                            .filter(TaskExecution.id == ctx.task_execution_id)
-                            .first()
-                            if ctx.task_execution_id
-                            else None
-                        )
-                        mark_task_attempt_failed(
-                            task=task,
-                            session_task_link=session_task_link,
-                            task_execution=task_execution,
-                            error_message=verification_error_message,
-                            completed_at=datetime.now(UTC),
-                            workspace_status="blocked",
-                        )
-                        task.current_step = len(orchestration_state.plan)
-                        orchestration_state.status = OrchestrationStatus.ABORTED
-                        orchestration_state.abort_reason = verification_error
-                        if session:
-                            mark_session_paused(
-                                session,
-                                alert_level="error",
-                                alert_message=task.error_message[:2000],
-                            )
-                        db.commit()
-                        emit_live(
-                            "ERROR",
-                            "[ORCHESTRATION] Task completion verification failed",
-                            metadata={
-                                "phase": "task_verification",
-                                "command": completion_verification_command,
-                                "source": completion_verification_source,
-                                "output": str(
-                                    completion_verification.get("output") or ""
-                                )[:2000],
-                            },
-                        )
-                        save_orchestration_checkpoint_fn(
-                            db, session_id, task_id, prompt, orchestration_state
-                        )
-                        append_orchestration_event(
-                            project_dir=orchestration_state.project_dir,
-                            session_id=session_id,
-                            task_id=task_id,
-                            event_type=EventType.PHASE_FINISHED,
-                            details={
-                                "phase": "task_summary",
-                                "status": "verification_failed",
-                                "verification_command": completion_verification_command,
-                            },
-                            phase="task_summary",
-                            coordinator="CompletionCoordinator",
-                        )
-                        write_project_state_snapshot_fn(db, project, task, session_id)
-                        return {
-                            "status": "failed",
-                            "reason": TerminalReason.COMPLETION_VERIFICATION_FAILED,
-                        }
-
         task_change_set = None
         workspace_review_policy = get_effective_workspace_review_policy(
             settings.WORKSPACE_REVIEW_POLICY, db=db
@@ -1131,9 +690,9 @@ class CompletionCoordinator:
                         ),
                         "reported_changed_files": reported_changed_files,
                         "change_set": task_change_set,
-                        "completion_verification_command": completion_verification_command,
-                        "completion_verification_source": completion_verification_source,
-                        "behavior_baseline": behavior_baseline_result,
+                        "candidate_delta_required": True,
+                        "run_candidate_checks": True,
+                        "include_static_checks": True,
                     },
                     validation_severity=ctx.validation_severity,
                     workflow_stage=ctx.workflow_stage,
@@ -1236,13 +795,38 @@ class CompletionCoordinator:
                 ),
             )
         should_hold_for_review = bool(review_decision["held_for_review"])
-        publication_allowed = bool(review_decision.get("publication_allowed", True))
+        change_set_identity = (
+            candidate_delta_identity(task_change_set) if task_change_set else None
+        )
+        if (
+            task_change_set
+            and completion_validation.accepted
+            and not completion_validation.candidate_identity
+        ):
+            # Compatibility for injected/legacy accepted verdicts. Production
+            # candidate validation sets this identity itself.
+            completion_validation.candidate_identity = change_set_identity
+        candidate_handoff_valid = bool(
+            completion_validation.accepted
+            and completion_validation.candidate_identity
+            and completion_validation.candidate_identity == change_set_identity
+        )
+        publication_allowed = bool(
+            review_decision.get("publication_allowed", True)
+            and (not task_change_set or candidate_handoff_valid)
+        )
         review_decision = {
             **review_decision,
             "review_required": should_hold_for_review,
             "publication_eligible": bool(
                 publication_allowed and not should_hold_for_review
             ),
+            "candidate_validation": {
+                "status": completion_validation.status,
+                "candidate_identity": completion_validation.candidate_identity,
+                "change_set_identity": change_set_identity,
+                "accepted_identity_match": candidate_handoff_valid,
+            },
         }
         evaluator_result = None
         if (

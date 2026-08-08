@@ -578,10 +578,6 @@ def test_complete_task_completion_validation_failure(tmp_path, monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        "app.services.orchestration.coordinators.completion_coordinator.RecoveryStrategyRegistry.execute_recovery",
-        lambda **kwargs: {"status": "skipped"},
-    )
-    monkeypatch.setattr(
         "app.services.orchestration.coordinators.completion_coordinator.mark_task_attempt_failed",
         _NOOP_FN,
     )

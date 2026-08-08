@@ -32,7 +32,7 @@ from app.services.orchestration.diagnostics.signature_guard import (
     check_completion_repair_signature_contract,
 )
 from app.services.orchestration.phases.completion_flow import _attempt_completion_repair
-from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 
 
@@ -70,14 +70,14 @@ class _MockRuntime:
 
 
 def _completion_validation(src_file="src/formatting.py"):
-    return SimpleNamespace(
+    return ValidationVerdict(
         stage="task_completion",
         status="repair_required",
-        repairable=True,
         profile="implementation",
         reasons=["pytest failure: format_task_line missing include_status parameter"],
         details={
             "expected_core_files": [src_file],
+            "candidate_authorized_paths": [src_file],
             "failure_class": "completion_verification:pytest_failure",
             "completion_repair_source": "final_completion_verification",
         },

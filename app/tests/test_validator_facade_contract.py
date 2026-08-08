@@ -30,7 +30,6 @@ EXPECTED_PUBLIC_METHODS = {
     "build_failure_signature",
     "has_explicit_repair_intent",
     "infer_validation_profile",
-    "persist_validation_result",
     "repair_requires_independent_evidence",
     "validate_baseline_publish",
     "validate_plan",
@@ -50,6 +49,8 @@ EXPECTED_VERDICT_DICT_KEYS = {
     "details",
     "used_small_model",
     "confidence",
+    "findings",
+    "candidate_identity",
 }
 
 

@@ -312,7 +312,7 @@ def test_apply_path_escape_rejected(tmp_path):
     assert result["errors"]
 
 
-def test_apply_multiple_ops_partial_failure(tmp_path):
+def test_apply_multiple_ops_failure_is_rejected_before_any_write(tmp_path):
     _write(tmp_path / "src/a.py", "a = 1\n")
     ops = [
         {"op": "write_file", "path": "src/b.py", "content": "b = 2\n"},
@@ -320,7 +320,8 @@ def test_apply_multiple_ops_partial_failure(tmp_path):
     ]
     result = _apply_completion_repair_ops_direct(ops, tmp_path)
     assert not result["success"]
-    assert "src/b.py" in result["applied"]
+    assert result["applied"] == []
+    assert not (tmp_path / "src/b.py").exists()
 
 
 # ---------------------------------------------------------------------------

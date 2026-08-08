@@ -21,10 +21,6 @@ from app.models import (
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.orchestration.phases.completion_flow import (
-    _augment_completion_verification_command,
-    _classify_completion_verification_failure,
-    _detect_completion_verification_command,
-    _execute_completion_verification,
     _scope_workspace_consistency_to_task_changes,
 )
 from app.services.orchestration.coordinators.completion_coordinator import (
@@ -270,242 +266,6 @@ def test_python_verification_imports_leave_unittest_checks_alone():
     assert patch_python_verification_imports(command) == command
 
 
-def test_missing_jest_binary_is_treated_as_repairable_completion_verification():
-    completion_validation = SimpleNamespace(
-        profile="implementation",
-        details={"expected_core_files": ["src/index.ts", "src/utils/format.test.ts"]},
-    )
-
-    verdict = _classify_completion_verification_failure(
-        command="pnpm test",
-        source="package.json test script via pnpm",
-        verification_output=(
-            "> demo@1.0.0 test /workspace/demo\n" "> jest\n" "sh: 1: jest: not found\n"
-        ),
-        completion_validation=completion_validation,
-    )
-
-    assert verdict is not None
-    assert verdict.repairable is True
-    assert verdict.stage == "completion_verification"
-    assert "dependencies are missing or not installed" in verdict.reasons[0]
-    assert verdict.details["verification_command"] == "pnpm test"
-    assert (
-        verdict.details["completion_repair_source"] == "final_completion_verification"
-    )
-    assert verdict.details["failure_class"] == "missing_dependency"
-    assert "src/utils/format.test.ts" in verdict.details["expected_core_files"]
-
-
-def test_python_no_module_named_is_repairable_completion_verification():
-    completion_validation = SimpleNamespace(
-        profile="implementation",
-        details={"expected_core_files": ["calc_smoke.py", "tests/test_calc.py"]},
-    )
-
-    verdict = _classify_completion_verification_failure(
-        command="pytest",
-        source="python test suite detected",
-        verification_output=(
-            "ModuleNotFoundError: No module named 'calc_smoke'\n"
-            "ERROR tests/test_calc.py"
-        ),
-        completion_validation=completion_validation,
-    )
-
-    assert verdict is not None
-    assert verdict.repairable is True
-    assert verdict.stage == "completion_verification"
-    assert "repairable test/module issue" in verdict.reasons[0]
-    assert verdict.details["verification_command"] == "pytest"
-    assert (
-        verdict.details["completion_repair_source"] == "final_completion_verification"
-    )
-    assert verdict.details["failure_class"] == "module_not_found"
-
-
-def test_python_modulenotfounderror_prefix_is_repairable_completion_verification():
-    completion_validation = SimpleNamespace(
-        profile="implementation",
-        details={"expected_core_files": ["calc_smoke.py"]},
-    )
-
-    verdict = _classify_completion_verification_failure(
-        command="pytest",
-        source="python test suite detected",
-        verification_output="ModuleNotFoundError while importing test module",
-        completion_validation=completion_validation,
-    )
-
-    assert verdict is not None
-    assert verdict.repairable is True
-
-
-def test_real_test_failure_is_not_reclassified_as_missing_dependency():
-    completion_validation = SimpleNamespace(
-        profile="implementation",
-        details={"expected_core_files": ["src/index.ts"]},
-    )
-
-    verdict = _classify_completion_verification_failure(
-        command="pnpm test",
-        source="package.json test script via pnpm",
-        verification_output=(
-            "FAIL src/index.test.ts\n" "Expected: 2\n" "Received: 1\n"
-        ),
-        completion_validation=completion_validation,
-    )
-
-    assert verdict is None
-
-
-def test_vitest_completion_verification_excludes_openclaw_snapshots():
-    command = _augment_completion_verification_command(
-        "pnpm test",
-        "vitest run",
-    )
-
-    assert command == "pnpm test -- --exclude=.agent/**"
-
-
-def test_jest_completion_verification_excludes_openclaw_snapshots():
-    command = _augment_completion_verification_command(
-        "pnpm test",
-        "node --runInBand jest",
-    )
-
-    assert command == "pnpm test -- --testPathIgnorePatterns=.agent/"
-
-
-def test_python_completion_verification_detects_python_module_pytest(tmp_path):
-    project_dir = tmp_path / "project"
-    (project_dir / "tests").mkdir(parents=True)
-    (project_dir / "tests" / "test_config.py").write_text(
-        "def test_ok():\n    assert True\n",
-        encoding="utf-8",
-    )
-
-    command, source = _detect_completion_verification_command(project_dir)
-
-    assert command.endswith(" -m pytest")
-    assert source == "python test suite detected"
-
-
-def test_python_completion_verification_prefers_project_venv(tmp_path):
-    project_dir = tmp_path / "project"
-    (project_dir / "tests").mkdir(parents=True)
-    (project_dir / "venv" / "bin").mkdir(parents=True)
-    python_bin = project_dir / "venv" / "bin" / "python"
-    python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    python_bin.chmod(python_bin.stat().st_mode | 0o111)
-
-    command, source = _detect_completion_verification_command(project_dir)
-
-    assert command == f"{shlex.quote(str(python_bin))} -m pytest"
-    assert source == "python test suite detected"
-
-
-def test_python_completion_verification_uses_system_python_without_project_venv(
-    tmp_path, monkeypatch
-):
-    project_dir = tmp_path / "project"
-    (project_dir / "tests").mkdir(parents=True)
-    system_bin = tmp_path / "sysbin"
-    system_bin.mkdir()
-    python_bin = system_bin / "python3"
-    python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    python_bin.chmod(0o755)
-    monkeypatch.setenv("PATH", str(system_bin))
-
-    command, source = _detect_completion_verification_command(project_dir)
-
-    assert command == f"{shlex.quote(str(python_bin))} -m pytest"
-    assert source == "python test suite detected"
-
-
-def test_completion_verification_does_not_adopt_orchestrator_cwd_venv(
-    tmp_path, monkeypatch
-):
-    project_dir = tmp_path / "project"
-    (project_dir / "tests").mkdir(parents=True)
-    system_bin = tmp_path / "sysbin"
-    system_bin.mkdir()
-    python_bin = system_bin / "python3"
-    python_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    python_bin.chmod(0o755)
-    orchestrator_like_venv = tmp_path / "cwd" / ".venv" / "bin"
-    orchestrator_like_venv.mkdir(parents=True)
-    adopted_python = orchestrator_like_venv / "python"
-    adopted_python.write_text("#!/bin/sh\nexit 99\n", encoding="utf-8")
-    adopted_python.chmod(0o755)
-    monkeypatch.setenv("PATH", str(system_bin))
-    monkeypatch.chdir(tmp_path / "cwd")
-
-    command, _ = _detect_completion_verification_command(project_dir)
-
-    assert command == f"{shlex.quote(str(python_bin))} -m pytest"
-
-
-def test_python_module_pytest_completion_verification_imports_workspace_root(
-    tmp_path,
-):
-    project_dir = tmp_path / "project"
-    (project_dir / "tests").mkdir(parents=True)
-    (project_dir / "app_config.py").write_text(
-        "FEATURE_FLAG = True\n",
-        encoding="utf-8",
-    )
-    (project_dir / "tests" / "test_config.py").write_text(
-        "import app_config\n\n"
-        "def test_feature_flag_is_true():\n"
-        "    assert app_config.FEATURE_FLAG is True\n",
-        encoding="utf-8",
-    )
-    command, _ = _detect_completion_verification_command(project_dir)
-
-    result = _execute_completion_verification(
-        project_dir=project_dir,
-        command=command,
-        timeout_seconds=10,
-    )
-
-    assert result["success"] is True
-
-
-def test_completion_verification_honors_pytest_ini_src_pythonpath(tmp_path):
-    project_dir = tmp_path / "project"
-    package_dir = project_dir / "src" / "notes_app"
-    tests_dir = project_dir / "tests"
-    package_dir.mkdir(parents=True)
-    tests_dir.mkdir()
-    (project_dir / "pytest.ini").write_text(
-        "[pytest]\npythonpath = src\n",
-        encoding="utf-8",
-    )
-    (package_dir / "__init__.py").write_text("", encoding="utf-8")
-    (package_dir / "greetings.py").write_text(
-        "def greeting(name):\n    return f'Hello, {name}!'\n",
-        encoding="utf-8",
-    )
-    (tests_dir / "test_greetings.py").write_text(
-        "from notes_app.greetings import greeting\n\n"
-        "def test_greeting():\n"
-        "    assert greeting('Ada') == 'Hello, Ada!'\n",
-        encoding="utf-8",
-    )
-    command, source = _detect_completion_verification_command(project_dir)
-
-    result = _execute_completion_verification(
-        project_dir=project_dir,
-        command=command or "",
-        timeout_seconds=10,
-    )
-
-    assert command is not None
-    assert source == "python test suite detected"
-    assert result["success"] is True
-
-
 def test_completion_validation_requires_source_path_named_by_task(tmp_path):
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -550,67 +310,6 @@ def test_completion_validation_requires_source_path_named_by_task(tmp_path):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a POSIX shebang executable")
-def test_completion_verification_executes_project_venv_python(tmp_path):
-    project_dir = tmp_path / "project"
-    (project_dir / "tests").mkdir(parents=True)
-    (project_dir / "venv" / "bin").mkdir(parents=True)
-    marker = project_dir / "used-venv-python"
-    python_bin = project_dir / "venv" / "bin" / "python"
-    python_bin.write_text(
-        "#!/bin/sh\n" f"touch {marker}\n" "exit 0\n",
-        encoding="utf-8",
-    )
-    python_bin.chmod(python_bin.stat().st_mode | 0o111)
-
-    command, _ = _detect_completion_verification_command(project_dir)
-    result = _execute_completion_verification(
-        project_dir=project_dir,
-        command=command,
-        timeout_seconds=10,
-    )
-
-    assert result["success"] is True
-    assert marker.exists()
-
-
-def test_completion_verification_rejects_shell_metacharacters(tmp_path):
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
-
-    result = _execute_completion_verification(
-        project_dir=project_dir,
-        command="pytest; echo pwned",
-        timeout_seconds=1,
-    )
-
-    assert result["success"] is False
-    assert "unsafe shell metacharacters" in result["output"]
-
-
-def test_module_resolution_failure_is_treated_as_repairable_verification_issue():
-    completion_validation = SimpleNamespace(
-        profile="implementation",
-        details={
-            "expected_core_files": ["src/utils/format.ts", "src/utils/format.spec.ts"]
-        },
-    )
-
-    verdict = _classify_completion_verification_failure(
-        command="pnpm test -- --exclude=.agent/**",
-        source="package.json test script via pnpm",
-        verification_output=(
-            "FAIL src/utils/format.spec.ts\n"
-            "Error: Failed to load url ./format.js in src/utils/format.spec.ts. "
-            "Does the file exist?\n"
-        ),
-        completion_validation=completion_validation,
-    )
-
-    assert verdict is not None
-    assert verdict.repairable is True
-    assert "repairable test/module issue" in verdict.reasons[0]
-
-
 def test_verification_completion_does_not_require_execution_results(tmp_path):
     project_dir = tmp_path / "project"
     project_dir.mkdir()
@@ -1629,7 +1328,7 @@ def _seed_legacy_finalize_ctx(db_session, tmp_path, *, task_subfolder="task-work
     return ctx, execution, project_root, workspace_dir
 
 
-def test_final_verification_7f_gate_repairs_when_classifier_misses(
+def test_removed_final_verification_gate_cannot_override_candidate_acceptance(
     db_session, tmp_path, monkeypatch
 ):
     ctx, execution = _seed_finalize_ctx(db_session, tmp_path)
@@ -1682,11 +1381,7 @@ def test_final_verification_7f_gate_repairs_when_classifier_misses(
     )
 
     assert result["status"] == "completed", result
-    assert repair_calls
-    assert repair_calls[0].details["completion_repair_source"] == (
-        "final_completion_verification"
-    )
-    assert repair_calls[0].details["failure_class"] == "import_error"
+    assert repair_calls == []
     assert ctx.orchestration_state.debug_repair_task_execution_ids == []
     assert ctx.task.status == TaskStatus.DONE
 
@@ -2437,7 +2132,7 @@ def test_hold_all_policy_holds_trivial_change_set_for_manual_review(
     assert payload["warning_flags"] == []
 
 
-def test_final_verification_repair_runs_with_prior_execution_debug_attempt(
+def test_removed_final_verification_route_does_not_create_second_repair_authority(
     db_session, tmp_path, monkeypatch
 ):
     ctx, execution = _seed_finalize_ctx(db_session, tmp_path)
@@ -2481,17 +2176,12 @@ def test_final_verification_repair_runs_with_prior_execution_debug_attempt(
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result == {"status": "failed", "reason": "completion_verification_failed"}
-    assert repair_calls
-    assert ctx.task.status == TaskStatus.FAILED
-    events = read_orchestration_events(
-        ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
-    )
-    assert events[-1]["event_type"] == EventType.PHASE_FINISHED
-    assert events[-1]["details"]["status"] == "verification_failed"
+    assert result["status"] == "completed"
+    assert repair_calls == []
+    assert ctx.task.status == TaskStatus.DONE
 
 
-def test_completion_verification_repair_has_separate_budget_from_execution_debug(
+def test_removed_completion_verification_route_has_no_separate_repair_budget(
     db_session, tmp_path, monkeypatch
 ):
     ctx, execution = _seed_finalize_ctx(db_session, tmp_path)
@@ -2596,10 +2286,10 @@ def test_completion_verification_repair_has_separate_budget_from_execution_debug
     )
 
     assert result["status"] == "completed"
-    assert ctx.orchestration_state.completion_repair_attempts == 1
+    assert ctx.orchestration_state.completion_repair_attempts == 0
     assert ctx.task.status == TaskStatus.DONE
-    assert ctx.task.current_step == 4
-    assert len(ctx.orchestration_state.execution_results) == 4
+    assert ctx.task.current_step == 3
+    assert len(ctx.orchestration_state.execution_results) == 3
 
 
 def test_baseline_publish_preflight_projects_deleted_candidate_paths(tmp_path):

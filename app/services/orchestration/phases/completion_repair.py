@@ -6,19 +6,18 @@ import json
 import os
 import re
 import shlex
-import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from app.services.orchestration.context.assembly import (
     collect_workspace_inventory_paths,
 )
-from app.services.orchestration.execution.python_resolution import (
-    resolve_project_python,
-)
-from app.services.orchestration.policy import COMPLETION_VERIFICATION_TIMEOUT_SECONDS
-from app.services.orchestration.types import FailureEnvelope, ValidationVerdict
+from app.services.orchestration.types import FailureEnvelope
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.workspace_guard import (
+    TaskWorkspaceViolationError,
+    normalize_path_reference,
+)
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 from app.services.workspace.permissions import ensure_shared_permissions
 
@@ -125,32 +124,24 @@ def _completion_repair_invalid_paths(
     project_dir: Path,
     completion_validation: Any,
 ) -> list[str]:
-    inventory_files = set(collect_workspace_inventory_paths(project_dir))
-    expected_files = set(
-        list((completion_validation.details or {}).get("expected_core_files", []) or [])
+    authorized_paths = set(
+        list(
+            (completion_validation.details or {}).get("candidate_authorized_paths", [])
+            or []
+        )
     )
-    commands = [str(command) for command in repair_step.get("commands", []) or []]
-    created_files, created_dirs = _collect_created_paths_from_commands(commands)
-    referenced_paths: set[str] = set()
-    for text in commands + [
-        str(repair_step.get("verification") or ""),
-        str(repair_step.get("rollback") or ""),
-    ]:
-        referenced_paths.update(_extract_relative_paths_from_text(text))
-
     invalid: list[str] = []
-    for path in sorted(referenced_paths):
-        if (
-            path in inventory_files
-            or path in expected_files
-            or path in created_files
-            or any(
-                path == directory or path.startswith(f"{directory}/")
-                for directory in created_dirs
-            )
-        ):
+    for operation in repair_step.get("ops") or []:
+        raw_path = (
+            str(operation.get("path") or "") if isinstance(operation, dict) else ""
+        )
+        try:
+            path = normalize_path_reference(raw_path, project_dir.resolve())
+        except TaskWorkspaceViolationError:
+            invalid.append(raw_path or "<missing>")
             continue
-        invalid.append(path)
+        if path not in authorized_paths:
+            invalid.append(path)
     return invalid
 
 
@@ -177,317 +168,82 @@ def _extract_reported_changed_files(output_text: str, project_dir: Path) -> list
     return reported
 
 
-def _detect_completion_verification_command(
-    project_dir: Path,
-) -> tuple[Optional[str], Optional[str]]:
-    package_json = project_dir / "package.json"
-    if package_json.exists():
-        try:
-            package_data = json.loads(package_json.read_text(encoding="utf-8"))
-        except Exception:
-            package_data = {}
-        scripts = (
-            package_data.get("scripts", {}) if isinstance(package_data, dict) else {}
-        )
-        has_tests = any(
-            candidate.exists()
-            for candidate in [
-                project_dir / "tests",
-                project_dir / "test",
-                project_dir / "src" / "tests",
-            ]
-        )
-        if (
-            has_tests
-            and isinstance(scripts, dict)
-            and str(scripts.get("test") or "").strip()
-        ):
-            test_script = str(scripts.get("test") or "").strip()
-            if (project_dir / "pnpm-lock.yaml").exists():
-                return (
-                    _augment_completion_verification_command("pnpm test", test_script),
-                    "package.json test script via pnpm",
-                )
-            if (project_dir / "yarn.lock").exists():
-                return (
-                    _augment_completion_verification_command("yarn test", test_script),
-                    "package.json test script via yarn",
-                )
-            return (
-                _augment_completion_verification_command("npm test", test_script),
-                "package.json test script via npm",
-            )
-
-    if any(
-        candidate.exists()
-        for candidate in [project_dir / "pytest.ini", project_dir / "tests"]
-    ):
-        # A valid pytest.ini is sufficient evidence on its own: it declares the
-        # suite (including its own testpaths), so requiring pyproject.toml or a
-        # top-level tests/ as well skipped verification entirely for projects
-        # that keep tests elsewhere, e.g. testpaths = app/tests.
-        if (
-            _has_pytest_ini_config(project_dir)
-            or (project_dir / "pyproject.toml").exists()
-            or (project_dir / "tests").exists()
-        ):
-            return (
-                f"{shlex.quote(_completion_verification_python(project_dir))} -m pytest",
-                "python test suite detected",
-            )
-
-    return None, None
-
-
-def _has_pytest_ini_config(project_dir: Path) -> bool:
-    """True when project_dir holds a pytest.ini carrying a real [pytest] section."""
-
-    pytest_ini = project_dir / "pytest.ini"
-    try:
-        content = pytest_ini.read_text(encoding="utf-8")
-    except OSError:
-        return False
-    return any(line.strip() == "[pytest]" for line in content.splitlines())
-
-
-def _completion_verification_python(project_dir: Path) -> str:
-    """Use the shared project-first interpreter policy."""
-
-    return resolve_project_python(project_dir)
-
-
-def _augment_completion_verification_command(command: str, test_script: str) -> str:
-    normalized_command = str(command or "").strip()
-    normalized_script = str(test_script or "").strip().lower()
-
-    if not normalized_command or not normalized_script:
-        return normalized_command
-
-    if ".agent" in normalized_script:
-        return normalized_command
-
-    if "vitest" in normalized_script and "--exclude" not in normalized_script:
-        return f"{normalized_command} -- --exclude=.agent/**"
-
-    if re.search(r"(^|\s)jest(\s|$)", normalized_script) and (
-        "--testpathignorepatterns" not in normalized_script
-    ):
-        return f"{normalized_command} -- --testPathIgnorePatterns=.agent/"
-
-    return normalized_command
-
-
-def _execute_completion_verification(
-    *,
-    project_dir: Path,
-    command: str,
-    timeout_seconds: int = COMPLETION_VERIFICATION_TIMEOUT_SECONDS,
-) -> Dict[str, Any]:
-    try:
-        if any(token in command for token in (";", "&&", "||", "|", "$(", "`")):
-            return {
-                "success": False,
-                "returncode": None,
-                "output": (
-                    "Completion verification command was rejected because it contains "
-                    "unsafe shell metacharacters"
-                ),
-            }
-        argv = shlex.split(command, posix=True)
-        if not argv:
-            return {
-                "success": False,
-                "returncode": None,
-                "output": "Completion verification command was empty after parsing",
-            }
-        executable_name = Path(argv[0]).name
-        if executable_name in {"python", "python3"}:
-            argv[0] = _completion_verification_python(project_dir)
-        env = dict(os.environ)
-        raw_pythonpath = env.get("PYTHONPATH", "")
-        if raw_pythonpath:
-            caller_cwd = Path.cwd()
-            absolute_entries = []
-            for entry in raw_pythonpath.split(os.pathsep):
-                p = Path(entry)
-                resolved = (caller_cwd / p).resolve() if not p.is_absolute() else p
-                if resolved.exists():
-                    absolute_entries.append(str(resolved))
-            if absolute_entries:
-                env["PYTHONPATH"] = os.pathsep.join(absolute_entries)
-            else:
-                env.pop("PYTHONPATH", None)
-        pythonpath_entries = [str(project_dir.resolve())]
-        if env.get("PYTHONPATH"):
-            pythonpath_entries.append(env["PYTHONPATH"])
-        env["PYTHONPATH"] = os.pathsep.join(pythonpath_entries)
-        completed = subprocess.run(
-            argv,
-            cwd=str(project_dir),
-            shell=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            env=env,
-        )
-        output = "\n".join(
-            part
-            for part in [completed.stdout.strip(), completed.stderr.strip()]
-            if part
-        ).strip()
-        return {
-            "success": completed.returncode == 0,
-            "returncode": completed.returncode,
-            "output": output[:6000],
-        }
-    except subprocess.TimeoutExpired:
-        return {
-            "success": False,
-            "returncode": None,
-            "output": f"Completion verification timed out after {timeout_seconds}s",
-        }
-    except ValueError as exc:
-        return {
-            "success": False,
-            "returncode": None,
-            "output": f"Completion verification command could not be parsed: {exc}",
-        }
-
-
-def _classify_completion_verification_failure(
-    *,
-    command: str,
-    source: Optional[str],
-    verification_output: str,
-    completion_validation: Any,
-) -> Optional[ValidationVerdict]:
-    normalized_output = str(verification_output or "").strip()
-    lowered = normalized_output.lower()
-    missing_dependency_markers = (
-        "jest: not found",
-        "vitest: not found",
-        "mocha: not found",
-        "tsx: not found",
-        "ts-node: not found",
-        "command not found",
-        "cannot find module",
-    )
-    repairable_test_failure_markers = (
-        "failed to load url",
-        "does the file exist?",
-        "failed suites",
-        "no test suite found",
-        "module not found",
-        "cannot find module",
-        "no module named",
-        "modulenotfounderror",
-    )
-
-    if not any(marker in lowered for marker in missing_dependency_markers):
-        if "timed out" in lowered:
-            return None
-        if not any(marker in lowered for marker in repairable_test_failure_markers):
-            return None
-
-    expected_core_files = (
-        list((completion_validation.details or {}).get("expected_core_files", []) or [])
-        if completion_validation
-        else []
-    )
-    preview = normalized_output[:400]
-    if any(marker in lowered for marker in missing_dependency_markers):
-        reason = (
-            "Completion verification could not run because the test runner or project "
-            f"dependencies are missing or not installed for `{command}`"
-        )
-        failure_class = "missing_dependency"
-    else:
-        reason = (
-            "Completion verification found a repairable test/module issue under "
-            f"`{command}`"
-        )
-        failure_class = (
-            "module_not_found"
-            if (
-                "no module named" in lowered
-                or "modulenotfounderror" in lowered
-                or "module not found" in lowered
-                or "cannot find module" in lowered
-            )
-            else "completion_validation_failed"
-        )
-    if preview:
-        reason += f": {preview}"
-
-    return ValidationVerdict(
-        stage="completion_verification",
-        status="repair_required",
-        profile=(getattr(completion_validation, "profile", None) or "implementation"),
-        reasons=[reason],
-        details={
-            "expected_core_files": expected_core_files[:20],
-            "verification_command": command,
-            "verification_source": source or "auto-detected",
-            "verification_output_preview": preview,
-            "completion_repair_source": "final_completion_verification",
-            "failure_class": failure_class,
-        },
-    )
-
-
 def _apply_completion_repair_ops_direct(
     ops: list[Dict[str, Any]],
     project_dir: Path,
+    *,
+    authorized_paths: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
-    """Apply structured file ops directly without going through the external runtime.
+    """Validate and atomically apply one candidate-authorized repair batch."""
 
-    Returns {"applied": [...], "errors": [...], "success": bool}.
-    Supported ops: write_file, append_file, replace_in_file.
-    """
-    applied: list[str] = []
     errors: list[str] = []
     project_root = project_dir.resolve()
+    normalized_authority = None
+    if authorized_paths is not None:
+        normalized_authority = set()
+        for path in authorized_paths:
+            try:
+                normalized_authority.add(
+                    normalize_path_reference(str(path), project_root)
+                )
+            except TaskWorkspaceViolationError as exc:
+                errors.append(f"invalid candidate-authorized path {path}: {exc}")
+
+    prepared: list[tuple[str, str, Path, Dict[str, Any]]] = []
+    seen_paths: set[str] = set()
     for op in ops:
         if not isinstance(op, dict):
+            errors.append(f"repair operation must be an object: {op!r}")
             continue
         op_name = str(op.get("op") or "").strip()
         raw_path = str(op.get("path") or "").strip().replace("\\", "/")
         if not raw_path or not op_name:
             errors.append(f"op missing 'op' or 'path': {op}")
             continue
-        # Reject traversal before normalizing leading ./
-        if ".." in raw_path.split("/"):
-            errors.append(f"path traversal not allowed: {raw_path}")
+        if Path(raw_path).is_absolute() or raw_path.startswith("~"):
+            errors.append(f"absolute/home path not allowed: {raw_path}")
             continue
-        path_str = raw_path.lstrip("./")
-        if not path_str:
-            errors.append(f"path resolves to empty after normalization: {raw_path}")
-            continue
-        abs_path = (project_dir / path_str).resolve()
         try:
-            abs_path.relative_to(project_root)
-        except ValueError:
-            errors.append(f"path escapes project dir: {raw_path}")
+            path_str = normalize_path_reference(raw_path, project_root)
+        except TaskWorkspaceViolationError as exc:
+            errors.append(str(exc))
             continue
-        if op_name == "write_file":
-            content = str(op.get("content") or "")
-            abs_path.parent.mkdir(parents=True, exist_ok=True)
-            abs_path.write_text(content, encoding="utf-8")
-            try:
-                ensure_shared_permissions(abs_path)
-            except Exception:
-                pass
-            applied.append(path_str)
-        elif op_name == "replace_in_file":
-            old = str(op.get("old") or "")
-            new = str(op.get("new") or "")
-            if not abs_path.exists():
-                errors.append(f"replace_in_file: file not found: {path_str}")
-                continue
-            if not old:
+        if path_str == ".":
+            errors.append(f"path resolves to workspace root: {raw_path}")
+            continue
+        if normalized_authority is not None and path_str not in normalized_authority:
+            errors.append(f"path is not candidate-authorized: {path_str}")
+            continue
+        if path_str in seen_paths:
+            errors.append(f"duplicate/conflicting repair operation: {path_str}")
+            continue
+        seen_paths.add(path_str)
+        abs_path = project_root / path_str
+        if op_name not in _COMPLETION_REPAIR_OPS:
+            errors.append(f"unsupported op: {op_name}")
+            continue
+        if op_name in {"write_file", "append_file"} and not isinstance(
+            op.get("content"), str
+        ):
+            errors.append(f"{op_name}: content must be a string for {path_str}")
+            continue
+        if op_name == "replace_in_file":
+            old = op.get("old")
+            new = op.get("new")
+            if not isinstance(old, str) or not old:
                 errors.append(f"replace_in_file: 'old' is empty for {path_str}")
                 continue
-            text = abs_path.read_text(encoding="utf-8")
+            if not isinstance(new, str):
+                errors.append(f"replace_in_file: 'new' must be a string for {path_str}")
+                continue
+            if not abs_path.is_file():
+                errors.append(f"replace_in_file: file not found: {path_str}")
+                continue
+            try:
+                text = abs_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                errors.append(f"replace_in_file: cannot read {path_str}: {exc}")
+                continue
             if old not in text:
                 old_preview = old[:200].replace("\n", "\\n") if old else ""
                 errors.append(
@@ -495,25 +251,54 @@ def _apply_completion_repair_ops_direct(
                     + (f" (attempted: {old_preview!r})" if old_preview else "")
                 )
                 continue
-            abs_path.write_text(text.replace(old, new, 1), encoding="utf-8")
-            try:
-                ensure_shared_permissions(abs_path)
-            except Exception:
-                pass
-            applied.append(path_str)
-        elif op_name == "append_file":
-            content = str(op.get("content") or "")
+        prepared.append((op_name, path_str, abs_path, op))
+
+    if errors:
+        return {"applied": [], "errors": errors, "success": False, "rolled_back": False}
+
+    snapshots = {
+        path_str: (
+            abs_path.read_bytes() if abs_path.exists() else None,
+            abs_path.stat().st_mode if abs_path.exists() else None,
+        )
+        for _op_name, path_str, abs_path, _op in prepared
+    }
+    applied: list[str] = []
+    try:
+        for op_name, path_str, abs_path, op in prepared:
             abs_path.parent.mkdir(parents=True, exist_ok=True)
-            existing = abs_path.read_text(encoding="utf-8") if abs_path.exists() else ""
-            abs_path.write_text(existing + content, encoding="utf-8")
+            if op_name == "write_file":
+                abs_path.write_text(op["content"], encoding="utf-8")
+            elif op_name == "append_file":
+                existing = (
+                    abs_path.read_text(encoding="utf-8") if abs_path.exists() else ""
+                )
+                abs_path.write_text(existing + op["content"], encoding="utf-8")
+            else:
+                text = abs_path.read_text(encoding="utf-8")
+                abs_path.write_text(
+                    text.replace(op["old"], op["new"], 1), encoding="utf-8"
+                )
             try:
                 ensure_shared_permissions(abs_path)
             except Exception:
                 pass
             applied.append(path_str)
-        else:
-            errors.append(f"unsupported op: {op_name}")
-    return {"applied": applied, "errors": errors, "success": not errors}
+    except Exception as exc:
+        errors.append(f"repair transaction failed: {type(exc).__name__}: {exc}")
+        for _op_name, path_str, abs_path, _op in reversed(prepared):
+            prior_bytes, prior_mode = snapshots[path_str]
+            if prior_bytes is None:
+                if abs_path.exists():
+                    abs_path.unlink()
+            else:
+                abs_path.parent.mkdir(parents=True, exist_ok=True)
+                abs_path.write_bytes(prior_bytes)
+                if prior_mode is not None:
+                    os.chmod(abs_path, prior_mode)
+        return {"applied": [], "errors": errors, "success": False, "rolled_back": True}
+
+    return {"applied": applied, "errors": [], "success": True, "rolled_back": False}
 
 
 def _build_completion_repair_prompt(
@@ -679,14 +464,8 @@ def _valid_completion_repair_step(raw_step: Any) -> bool:
     if not isinstance(description, str) or not description.strip():
         return False
 
-    commands = raw_step.get("commands")
-    valid_commands = (
-        isinstance(commands, list)
-        and bool(commands)
-        and all(isinstance(command, str) and command.strip() for command in commands)
-    )
     valid_ops = _valid_completion_repair_ops(raw_step.get("ops"))
-    if not (valid_commands or valid_ops):
+    if raw_step.get("commands") or not valid_ops:
         return False
 
     verification = raw_step.get("verification", raw_step.get("verification_command"))
