@@ -42,6 +42,7 @@ def _set_a0_compatible_settings(db_session, monkeypatch):
     monkeypatch.setattr(settings, "EXECUTION_MODEL", "")
     monkeypatch.setattr(settings, "OLLAMA_AGENT_MODEL", "execution-model")
     monkeypatch.setattr(settings, "PLANNING_REPAIR_MODEL", "repair-model")
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", 200000)
     monkeypatch.setattr(settings, "DEBUG_REPAIR_MODEL", "")
     monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "completion-model")
     for setting_name in (
