@@ -35,7 +35,6 @@ LEGACY_ENV_ALIASES = {
         "PLANNING_REPAIR_TIMEOUT_SECONDS"
     ),
     **DEBUG_REPAIR_LEGACY_ENV_ALIASES,
-    "ORCHESTRATOR_ENABLE_JUDGE_AGENT": "JUDGE_AGENT_ENABLED",
     "ORCHESTRATOR_TRACE_EXPORTER_BACKEND": "TRACE_EXPORTER_BACKEND",
     "ORCHESTRATOR_LANGFUSE_ENABLED": "LANGFUSE_ENABLED",
     "ORCHESTRATOR_ADMIN_EMAILS": "ADMIN_EMAILS",
@@ -190,8 +189,6 @@ class Settings(BaseSettings):
     REPAIR_ADAPTATION_PROFILE: Optional[str] = None
     DEBUG_REPAIR_ADAPTATION_PROFILE: Optional[str] = None
     PLANNING_REPAIR_ENABLED: bool = True
-    CANDIDATE_RECOVERY_ENABLED: bool = False
-    CANDIDATE_SLOT_MERGE_ENABLED: bool = False
     PLANNING_REPAIR_BASE_URL: str = "http://ai-gateway:8000/v1"
     PLANNING_REPAIR_MODEL: str = "qwen-local"
     # Effective context declared by the selected repair deployment.  This is
@@ -217,7 +214,6 @@ class Settings(BaseSettings):
     PLANNING_REPAIR_TIMEOUT_SECONDS: int = 90
     PLANNING_SYNTHESIS_TIMEOUT_SECONDS: int = 180
     REPLAN_SYNTHESIS_TIMEOUT_SECONDS: int = 45
-    JUDGE_AGENT_ENABLED: bool = False
     TRACE_EXPORTER_BACKEND: str = "local_json"
     LANGFUSE_ENABLED: bool = False
     LANGFUSE_PUBLIC_KEY: str = ""
@@ -270,12 +266,6 @@ class Settings(BaseSettings):
     # avoid duplication. Requires PSS_CONTINUATION_INJECTION_ENABLED=True for full
     # task-history + constraint-language coverage.
     ARTIFACT_CONTINUATION_ENABLED: bool = False
-    # Priority 8: Arm B reduced planning prompt experiment.
-    # When True, build_planning_prompt uses the Arm B template (69% static frame
-    # reduction). Off by default. No evaluation — implementation only.
-    # Arm A (current production) is unchanged when False.
-    REDUCED_PLANNING_PROMPT_ENABLED: bool = False
-
     # HG-P1a: dedicated HumanGuidance table.
     # When False (default), the existing LogEntry path for operator-guidance is authoritative.
     # When True, the new table is the authority (enabled in HG-P1b+).

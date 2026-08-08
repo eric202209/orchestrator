@@ -14,7 +14,6 @@ import pytest
 
 from app.services.orchestration.coordinators.completion_coordinator import (
     CompletionCoordinator,
-    CompletionOutcome,
 )
 from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.state.execution_states import TerminalReason
@@ -229,17 +228,6 @@ def _make_mock_finalizer():
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-
-def test_outcome_dataclass_has_expected_fields():
-    outcome = CompletionOutcome(status="completed", task_id=1, session_id=2)
-    assert outcome.status == "completed"
-    assert outcome.task_id == 1
-    assert outcome.session_id == 2
-    assert outcome.terminal_reason is None
-    assert outcome.repair_attempted is False
-    assert outcome.repair_succeeded is False
-    assert outcome.verification_passed is False
 
 
 def test_complete_task_validation_success(tmp_path, monkeypatch):

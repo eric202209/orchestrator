@@ -96,10 +96,6 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
 from app.services.orchestration.phases.planning_guidance_enforcement import (
     run_guidance_plan_enforcement as _run_guidance_plan_enforcement,
 )
-from app.services.orchestration.phases.planning_candidate_recovery import (
-    apply_candidate_recovery_after_validation as _apply_candidate_recovery_after_validation,
-    capture_slot_merge_parent_lineage as _capture_slot_parent,
-)
 from app.services.orchestration.phases.planning_phase_persistence import (
     emit_planning_phase_finished as _emit_planning_phase_finished,
 )
@@ -1858,18 +1854,6 @@ def execute_planning_phase(
                     schema_validation.get("errors", []),
                     schema_validation.get("details", {}),
                 )
-            candidate_recovery = _apply_candidate_recovery_after_validation(
-                ctx=ctx,
-                retry_state=retry_state,
-                plan_verdict=plan_verdict,
-                output_text=output_text,
-                recovery_hooks=dict(locals(), coerce_output_text=__coerce_output_text),
-            )
-            if candidate_recovery is not None:
-                if candidate_recovery.get("return_result"):
-                    return candidate_recovery["return_result"]
-                output_text = candidate_recovery["output_text"]
-                plan_verdict = candidate_recovery["plan_verdict"]
             _emit_repair_outcome_if_pending(ctx, retry_state, plan_verdict)
             if plan_verdict.accepted:
                 emit_final_repair_outcome_summary(ctx, retry_state, plan_verdict)
@@ -1918,7 +1902,6 @@ def execute_planning_phase(
                 retry_state.last_repair_reason = "plan_validation_failed"
                 if "verification_mutates_source_assets" in semantic_violation_codes:
                     retry_state.vma_repair_triggered = True
-                _capture_slot_parent(ctx, retry_state, plan_verdict, output_text)
                 retry_state.task1_bootstrap_rejection_contract = (
                     plan_verdict.details or {}
                 ).get("task1_bootstrap_contract")

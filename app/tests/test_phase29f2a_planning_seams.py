@@ -17,8 +17,6 @@ TARGET_FILES = {
     / "app/services/orchestration/stage_engine.py",
     "app.services.orchestration.events": REPO_ROOT
     / "app/services/orchestration/events/__init__.py",
-    "app.services.orchestration.phases.planning_candidate_recovery": REPO_ROOT
-    / "app/services/orchestration/phases/planning_candidate_recovery.py",
     "app.services.orchestration.planning.planning_brief_stage": REPO_ROOT
     / "app/services/orchestration/planning/planning_brief_stage.py",
     "app.services.orchestration.planning.structured_task_plan_stage": REPO_ROOT
@@ -127,7 +125,6 @@ def test_planning_stage_contract_is_engine_independent() -> None:
 
 def test_planning_domain_modules_do_not_import_orchestration_implementations() -> None:
     domain_modules = (
-        "app.services.planning.candidate_recovery",
         "app.services.planning.planning_brief_stage_support",
         "app.services.planning.structured_task_plan_stage_support",
         OPERATOR_REVIEW,

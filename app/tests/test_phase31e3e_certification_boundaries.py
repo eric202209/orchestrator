@@ -209,11 +209,6 @@ def test_failed_execution_cannot_invoke_completion_boundary(
 ):
     _, _, _, _, _, fixture = _seed_successful_boundary(db_session, tmp_path)
     failed = replace(fixture, execution_status="failed").with_integrity()
-    monkeypatch.setattr(
-        CompletionCoordinator,
-        "evaluate_completed_execution",
-        lambda *args, **kwargs: pytest.fail("Lane A must not invoke completion"),
-    )
     with pytest.raises(
         CertificationPreconditionError, match="execution is not complete"
     ):
@@ -295,32 +290,6 @@ def test_source_risk_and_hold_all_still_hold_lane_a(db_session, tmp_path):
         == CompletionPublicationClassification.REVIEW_HELD.value
     )
     assert evidence["publication_attempt"] is False
-
-
-def test_completion_coordinator_does_not_publish_not_required_or_forbidden():
-    service = type("TaskServiceDouble", (), {})()
-    service.change_set_review_decision = lambda *args, **kwargs: {
-        "held_for_review": False,
-        "publication_allowed": False,
-        "registered_publication_expectation": "PUBLICATION_NOT_REQUIRED",
-        "contract_resolution": "valid",
-    }
-    service.promote_change_set_into_baseline = lambda *args, **kwargs: pytest.fail(
-        "publication must not be invoked"
-    )
-    result = CompletionCoordinator().evaluate_completed_execution(
-        db=type("DB", (), {"commit": lambda self: None})(),
-        project=object(),
-        task=type("Task", (), {"id": 1})(),
-        task_execution=type("Execution", (), {"id": 2})(),
-        session_id=3,
-        change_set={"task_execution_id": 2},
-        workspace_review_policy="hold_nontrivial",
-        planner_contract=None,
-        task_service=service,
-    )
-    assert result["publication_attempted"] is False
-    assert result["publication_result"]["status"] == "not_published"
 
 
 def test_debug_repair_not_exercised_is_independent():

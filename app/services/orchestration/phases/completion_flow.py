@@ -128,7 +128,6 @@ __all__ = [
     "_classify_completion_verification_failure",
     "_execute_completion_verification",
     "_run_evaluator",
-    "finalize_successful_task",
 ]
 
 
@@ -1166,31 +1165,6 @@ def _run_evaluator(
         verdict = "PASS"
         if "VERDICT: NEEDS_REVIEW" in eval_output.upper():
             verdict = "NEEDS_REVIEW"
-        judge_verdict = None
-        if settings.JUDGE_AGENT_ENABLED:
-            judge_prompt = (
-                "You are a control-plane judge. Review whether the finished task still "
-                "matches the accepted reasoning artifact.\n\n"
-                f"## Reasoning artifact\n{reasoning_summary}\n\n"
-                f"## Evaluator output\n{eval_output[:1200]}\n\n"
-                "Respond exactly with:\n"
-                "JUDGE: ACCEPT or WARN or REJECT\n"
-                "RATIONALE: one sentence\n"
-            )
-            judge_result = asyncio.run(
-                runtime_service.execute_task(judge_prompt, timeout_seconds=90)
-            )
-            judge_output = (
-                judge_result.get("output", "")
-                if isinstance(judge_result, dict)
-                else str(judge_result)
-            )
-            if "JUDGE: REJECT" in judge_output.upper():
-                judge_verdict = "REJECT"
-            elif "JUDGE: WARN" in judge_output.upper():
-                judge_verdict = "WARN"
-            else:
-                judge_verdict = "ACCEPT"
         log_level = "INFO" if verdict == "PASS" else "WARN"
         emit_live(
             log_level,
@@ -1198,7 +1172,6 @@ def _run_evaluator(
             metadata={
                 "phase": "evaluation",
                 "verdict": verdict,
-                "judge_verdict": judge_verdict,
                 "eval_output": eval_output[:800],
             },
         )
@@ -1209,8 +1182,6 @@ def _run_evaluator(
             event_type=EventType.EVALUATOR_RESULT,
             details={
                 "verdict": verdict,
-                "judge_verdict": judge_verdict,
-                "judge_enabled": bool(settings.JUDGE_AGENT_ENABLED),
                 "reasoning_artifact_used": bool(reasoning_artifact),
                 "reasoning_intent": reasoning_artifact.get("intent"),
                 "output": eval_output[:800],
@@ -1218,7 +1189,6 @@ def _run_evaluator(
         )
         return {
             "verdict": verdict,
-            "judge_verdict": judge_verdict,
             "output": eval_output[:800],
         }
     except Exception as e:
@@ -1333,33 +1303,3 @@ def _write_progress_notes(
         )
     except Exception as exc:
         logger.warning("[REPO_MEMORY] Unexpected error during write: %s", exc)
-
-
-def finalize_successful_task(
-    *,
-    ctx: OrchestrationRunContext,
-    write_project_state_snapshot_fn: Callable[..., None] = write_project_state_snapshot,
-    save_orchestration_checkpoint_fn: Callable[
-        ..., None
-    ] = save_orchestration_checkpoint,
-    get_next_pending_project_task_fn: Optional[Callable[..., Any]] = None,
-    get_latest_session_task_link_fn: Optional[Callable[..., Any]] = None,
-    execute_orchestration_task_delay_fn: Optional[Callable[..., Any]] = None,
-    build_task_report_payload_fn: Optional[Callable[..., Dict[str, Any]]] = None,
-    render_task_report_fn: Optional[Callable[..., Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
-    """Shim — completion lifecycle is owned by CompletionCoordinator."""
-    from app.services.orchestration.coordinators.completion_coordinator import (
-        CompletionCoordinator,
-    )
-
-    return CompletionCoordinator().complete_task(
-        ctx=ctx,
-        write_project_state_snapshot_fn=write_project_state_snapshot_fn,
-        save_orchestration_checkpoint_fn=save_orchestration_checkpoint_fn,
-        get_next_pending_project_task_fn=get_next_pending_project_task_fn,
-        get_latest_session_task_link_fn=get_latest_session_task_link_fn,
-        execute_orchestration_task_delay_fn=execute_orchestration_task_delay_fn,
-        build_task_report_payload_fn=build_task_report_payload_fn,
-        render_task_report_fn=render_task_report_fn,
-    )

@@ -13,7 +13,6 @@ import asyncio
 import json
 import os
 import subprocess
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -121,28 +120,6 @@ def _build_gating_change_set(
     return change_set if isinstance(change_set, dict) else None
 
 
-@dataclass
-class CompletionOutcome:
-    """Typed result from CompletionCoordinator.complete_task.
-
-    Exposes orchestration intent (what happened and why) rather than raw dict
-    keys. The coordinator converts this to the externally observable dict on
-    return so no callers are affected.
-    """
-
-    status: str
-    terminal_reason: Optional[str] = None
-    verification_passed: bool = False
-    repair_attempted: bool = False
-    repair_succeeded: bool = False
-    task_id: Optional[int] = None
-    session_id: Optional[int] = None
-    steps_completed: int = 0
-    debug_attempts: int = 0
-    summary: str = ""
-    events: list = field(default_factory=list)
-
-
 class CompletionCoordinator:
     """Owns the completion lifecycle orchestration for a task.
 
@@ -165,14 +142,7 @@ class CompletionCoordinator:
         publish: bool = True,
         task_service: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Evaluate a previously verified execution at the completion boundary.
-
-        This is a narrow seam for callers that already possess authoritative
-        successful-execution evidence. It reuses the same task/change-set,
-        review-policy, and baseline-promotion services as the normal
-        completion lifecycle; it does not execute verification, retry, repair,
-        or alter the execution loop.
-        """
+        """Compatibility seam for the Phase 31 certification harness only."""
 
         if not change_set:
             raise ValueError("completed execution requires a persisted change set")

@@ -26,7 +26,9 @@ from app.services.orchestration.phases.completion_flow import (
     _detect_completion_verification_command,
     _execute_completion_verification,
     _scope_workspace_consistency_to_task_changes,
-    finalize_successful_task,
+)
+from app.services.orchestration.coordinators.completion_coordinator import (
+    CompletionCoordinator,
 )
 from app.services.orchestration.phases.completion_workspace import (
     _stack_set_for_paths,
@@ -40,6 +42,10 @@ from app.services.orchestration.types import OrchestrationRunContext, Validation
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 from app.services.tasks.service import TaskService
+
+
+def _complete_task(**kwargs):
+    return CompletionCoordinator().complete_task(**kwargs)
 
 
 class _FakeRuntime:
@@ -1669,7 +1675,7 @@ def test_final_verification_7f_gate_repairs_when_classifier_misses(
         _fake_repair,
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -1716,7 +1722,7 @@ def test_finalize_reuses_workspace_consistency_across_completion_validations(
         lambda project_dir: (None, None),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -1750,7 +1756,7 @@ def test_finalize_uses_deterministic_summary_when_runtime_summary_times_out(
         lambda project_dir: (None, None),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -1797,7 +1803,7 @@ def test_auto_advance_preserves_current_timeout_budget(
 
     captured_delay = {}
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -1851,7 +1857,7 @@ def test_auto_completion_stamps_change_set_metadata_on_trivial_publish(
         ),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -1922,7 +1928,7 @@ def test_auto_completion_flushes_done_state_before_next_task_lookup(
         ),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         get_next_pending_project_task_fn=lambda db, project_id: TaskService(
             db
@@ -1974,7 +1980,7 @@ def test_auto_completion_marks_session_completed_when_no_work_remains(
         ),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         get_next_pending_project_task_fn=lambda db, project_id: TaskService(
             db
@@ -2029,7 +2035,7 @@ def test_auto_completion_holds_nontrivial_change_set_for_manual_review(
         ),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -2083,7 +2089,7 @@ def test_canonical_root_completion_archives_task_path_metadata(
         lambda project_dir: (None, None),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -2124,7 +2130,7 @@ def test_runtime_sandboxed_completion_leaves_workspace_ready_not_promoted(
         lambda project_dir: (None, None),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -2184,7 +2190,7 @@ def test_runtime_sandboxed_auto_promote_materializes_change_set(
         lambda project_dir: (None, None),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -2248,7 +2254,7 @@ def test_auto_publish_all_policy_publishes_nontrivial_change_set(
         ),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -2304,7 +2310,7 @@ def test_evaluator_needs_review_holds_before_auto_publish(
         ),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -2363,7 +2369,7 @@ def test_successful_later_task_does_not_complete_session_with_failed_link(
         lambda project_dir: (None, None),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -2408,7 +2414,7 @@ def test_hold_all_policy_holds_trivial_change_set_for_manual_review(
         ),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -2469,7 +2475,7 @@ def test_final_verification_repair_runs_with_prior_execution_debug_attempt(
         lambda *args, **kwargs: repair_calls.append(args) or {"status": "success"},
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
@@ -2583,7 +2589,7 @@ def test_completion_verification_repair_has_separate_budget_from_execution_debug
         ),
     )
 
-    result = finalize_successful_task(
+    result = _complete_task(
         ctx=ctx,
         write_project_state_snapshot_fn=lambda *args, **kwargs: None,
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,

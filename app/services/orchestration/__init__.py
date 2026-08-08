@@ -44,7 +44,6 @@ from .events import (
 from .phases import (
     execute_planning_phase,
     execute_step_loop,
-    finalize_successful_task,
     handle_task_failure,
 )
 from .state.persistence import (
@@ -258,6 +257,5 @@ __all__ = [
     "render_task_report",
     "execute_planning_phase",
     "execute_step_loop",
-    "finalize_successful_task",
     "handle_task_failure",
 ]

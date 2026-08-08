@@ -83,12 +83,6 @@ from app.services.orchestration.coordinators.completion_coordinator import (
 from app.services.orchestration.coordinators.failure_coordinator import (
     FailureCoordinator as _FailureCoordinator,
 )
-from app.services.orchestration.coordinators.execution_coordinator import (
-    ExecutionCoordinator as _ExecutionCoordinator,
-)
-from app.services.orchestration.coordinators.planning_coordinator import (
-    PlanningCoordinator as _PlanningCoordinator,
-)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
@@ -109,6 +103,12 @@ from app.services.orchestration.execution.runtime import (
 )
 from app.services.orchestration.execution.runtime_context import (
     RuntimeExecutorContext,
+)
+from app.services.orchestration.phases.execution_loop import (
+    execute_step_loop as _execute_step_loop,
+)
+from app.services.orchestration.phases.planning_flow import (
+    execute_planning_phase as _execute_planning_phase,
 )
 from app.services.orchestration.error_handler import error_handler
 from app.services.workspace.checkpoint_service import CheckpointService
@@ -2143,16 +2143,21 @@ def execute_orchestration_task(
                     pass  # diagnostic only — never block planning
 
                 if not _incremental_route_taken:
-                    planning_phase_result = _PlanningCoordinator().run_planning(
-                        ctx=run_ctx,
-                        workspace_review=workspace_review,
-                        extract_structured_text=_extract_structured_text,
-                        extract_plan_steps=_extract_plan_steps,
-                        looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
-                        normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
-                        workspace_violation_error_cls=TaskWorkspaceViolationError,
-                        planning_runtime_service=planning_runtime_service,
-                    )
+                    original_runtime_service = run_ctx.runtime_service
+                    if planning_runtime_service is not None:
+                        run_ctx.runtime_service = planning_runtime_service
+                    try:
+                        planning_phase_result = _execute_planning_phase(
+                            ctx=run_ctx,
+                            workspace_review=workspace_review,
+                            extract_structured_text=_extract_structured_text,
+                            extract_plan_steps=_extract_plan_steps,
+                            looks_like_truncated_multistep_plan=_looks_like_truncated_multistep_plan,
+                            normalize_plan_with_live_logging=_normalize_plan_with_live_logging,
+                            workspace_violation_error_cls=TaskWorkspaceViolationError,
+                        )
+                    finally:
+                        run_ctx.runtime_service = original_runtime_service
                 if not _incremental_route_taken:
                     update_langfuse_observation(
                         planning_phase_observation,
@@ -2316,7 +2321,7 @@ def execute_orchestration_task(
                 "phase": "executing",
             },
         ) as execution_phase_observation:
-            step_loop_result = _ExecutionCoordinator().run_execution(
+            step_loop_result = _execute_step_loop(
                 ctx=run_ctx,
                 extract_structured_text=_extract_structured_text,
                 normalize_step=_normalize_step,

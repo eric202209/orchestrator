@@ -25,10 +25,6 @@ from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
 )
 from app.services.orchestration.validation.validator import ValidatorService
-from app.services.planning.slot_merge_operator import (
-    SlotMergeInput,
-    SlotMergeOperator,
-)
 
 
 TARGET = "pkg/current.py"
@@ -243,49 +239,6 @@ def test_path_merges_and_revalidates_one_operation(tmp_path):
     )
     assert result.validator_verdict.accepted
     assert result.plan[1] == _plan()[1]
-
-
-def test_legacy_slot_merge_remains_disabled_and_unchanged():
-    original = _plan()
-    repaired = _plan(CURRENT_OLD)
-    result = SlotMergeOperator().merge(
-        SlotMergeInput(
-            parent_a_plan=original,
-            parent_b_plan=repaired,
-            parent_a_reasons=(
-                "replace_in_file old text not found in workspace in steps [1]",
-            ),
-            parent_b_reasons=(),
-        )
-    )
-    assert result.merged_plan[0]["ops"][0]["old"] == STALE_OLD
-
-
-def test_legacy_slot_merge_unsafe_authority_remains_unchanged():
-    original = _plan()
-    injected = copy.deepcopy(original)
-    injected.append(
-        {
-            "step_number": 9,
-            "description": "unauthorized",
-            "commands": [],
-            "ops": [
-                {"op": "write_file", "path": "pkg/unauthorized.py", "content": "x"}
-            ],
-            "verification": "true",
-            "rollback": None,
-            "expected_files": ["pkg/unauthorized.py"],
-        }
-    )
-    result = SlotMergeOperator().merge(
-        SlotMergeInput(
-            parent_a_plan=original,
-            parent_b_plan=injected,
-            parent_a_reasons=("step 1 stale",),
-            parent_b_reasons=(),
-        )
-    )
-    assert result.merged_plan[-1]["ops"][0]["path"] == "pkg/unauthorized.py"
 
 
 @pytest.mark.parametrize(

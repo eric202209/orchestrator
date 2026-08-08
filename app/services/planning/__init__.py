@@ -10,11 +10,6 @@ from typing import Any
 
 
 _EXPORTS = {
-    "CandidatePlanningOutcome": (
-        "app.services.planning.candidate_planning_outcome",
-        "CandidatePlanningOutcome",
-    ),
-    "PlanCandidate": ("app.services.planning.plan_candidate", "PlanCandidate"),
     "PlanCommitService": (
         "app.services.planning.plan_commit_service",
         "PlanCommitService",
@@ -148,14 +143,6 @@ _EXPORTS = {
     "ProtocolPersistenceService": (
         "app.services.planning.protocol_persistence",
         "ProtocolPersistenceService",
-    ),
-    "select_candidate": (
-        "app.services.planning.candidate_selection_policy",
-        "select_candidate",
-    ),
-    "selection_key": (
-        "app.services.planning.candidate_selection_policy",
-        "selection_key",
     ),
 }
 

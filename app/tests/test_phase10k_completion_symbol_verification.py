@@ -331,8 +331,8 @@ class TestLogEntryEmission:
             TaskExecution,
             TaskStatus,
         )
-        from app.services.orchestration.phases.completion_flow import (
-            finalize_successful_task,
+        from app.services.orchestration.coordinators.completion_coordinator import (
+            CompletionCoordinator,
         )
         from app.services.orchestration.types import OrchestrationRunContext
         from app.services.orchestration.prompt_templates import (
@@ -439,7 +439,7 @@ class TestLogEntryEmission:
             restore_workspace_snapshot_if_needed=lambda reason: None,
         )
 
-        finalize_successful_task(
+        CompletionCoordinator().complete_task(
             ctx=ctx,
             save_orchestration_checkpoint_fn=lambda *a, **kw: None,
             write_project_state_snapshot_fn=lambda *a, **kw: None,

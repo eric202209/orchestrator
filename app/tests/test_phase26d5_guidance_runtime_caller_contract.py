@@ -173,10 +173,9 @@ def _run_worker_handoff(monkeypatch, tmp_path, *, mixed_lane, legacy_nulls=False
             "model_family": runtime_metadata["model_family"],
         }
 
-    class _ExecutionCoordinator:
-        def run_execution(self, **kwargs):
-            coordinator_calls.append(kwargs)
-            return {"status": "stopped", "reason": "phase26d5_intentional_stop"}
+    def _execute_step_loop(**kwargs):
+        coordinator_calls.append(kwargs)
+        return {"status": "stopped", "reason": "phase26d5_intentional_stop"}
 
     class _FailureCoordinator:
         def handle_failure(self, **kwargs):
@@ -277,7 +276,7 @@ def _run_worker_handoff(monkeypatch, tmp_path, *, mixed_lane, legacy_nulls=False
         SimpleNamespace(infer_validation_profile=lambda *args, **kwargs: "standard"),
     )
     monkeypatch.setattr(worker, "_run_virtual_merge_gate", lambda **kwargs: None)
-    monkeypatch.setattr(worker, "_ExecutionCoordinator", _ExecutionCoordinator)
+    monkeypatch.setattr(worker, "_execute_step_loop", _execute_step_loop)
     monkeypatch.setattr(worker, "_FailureCoordinator", _FailureCoordinator)
     monkeypatch.setattr(
         worker, "resolve_guidance_runtime_target", resolve_guidance_runtime_target
