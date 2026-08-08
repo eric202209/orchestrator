@@ -7,9 +7,11 @@ import pytest
 from app.config import settings
 from app.services.agents.agent_runtime import (
     BackendRole,
+    RuntimeCapabilityError,
     UnsupportedRuntimeProfileError,
     create_agent_runtime,
     resolve_runtime_configuration,
+    runtime_provider_role_matrix,
 )
 from app.services.agents.providers.ollama_adapter import OllamaRuntime
 from app.services.agents.providers.openai_adapter import OpenAIResponsesRuntime
@@ -41,7 +43,7 @@ def _set_a0_compatible_settings(db_session, monkeypatch):
     monkeypatch.setattr(settings, "OLLAMA_AGENT_MODEL", "execution-model")
     monkeypatch.setattr(settings, "PLANNING_REPAIR_MODEL", "repair-model")
     monkeypatch.setattr(settings, "DEBUG_REPAIR_MODEL", "")
-    monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "")
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "completion-model")
     for setting_name in (
         "PLANNING_ADAPTATION_PROFILE",
         "EXECUTION_ADAPTATION_PROFILE",
@@ -144,22 +146,54 @@ def test_repair_and_debug_repair_keep_direct_path_model_backend_fallbacks(
     }
 
 
-def test_completion_repair_unset_values_inherit_execution_then_repair(
-    db_session, monkeypatch
-):
+def test_completion_repair_explicit_model_is_role_owned(db_session, monkeypatch):
     _set_a0_compatible_settings(db_session, monkeypatch)
-    monkeypatch.setattr(settings, "EXECUTION_BACKEND", "direct_ollama")
-    monkeypatch.setattr(settings, "COMPLETION_REPAIR_BACKEND", None)
-    monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "")
-    monkeypatch.setattr(settings, "PLANNING_REPAIR_MODEL", "repair-model")
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_BACKEND", "direct_ollama")
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "qwen3-coder:30b")
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_MODEL", "qwen-local")
 
     configuration = resolve_runtime_configuration(
         db_session, BackendRole.COMPLETION_REPAIR
     )
 
-    assert configuration.backend_name == "direct_ollama"
-    assert configuration.model_family == "repair-model"
-    assert configuration.adaptation_profile == "ollama_default"
+    assert configuration.to_dict() == {
+        "role": "completion_repair",
+        "backend_name": "direct_ollama",
+        "model_family": "qwen3-coder:30b",
+        "adaptation_profile": "ollama_default",
+    }
+
+
+def test_role_inventory_reports_completion_repair_from_runtime_resolver(
+    db_session, monkeypatch
+):
+    _set_a0_compatible_settings(db_session, monkeypatch)
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_BACKEND", "direct_ollama")
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "qwen3-coder:30b")
+
+    matrix = runtime_provider_role_matrix(db_session)
+    completion = matrix["completion_repair"]
+
+    assert completion["backend"] == "direct_ollama"
+    assert completion["role"] == "completion_repair"
+    assert completion["provider_ready"] is True
+    assert completion["model"] == "qwen3-coder:30b"
+    assert completion["adaptation_profile"] == "ollama_default"
+
+
+def test_completion_repair_blank_model_fails_closed_without_cross_lane_fallback(
+    db_session, monkeypatch
+):
+    _set_a0_compatible_settings(db_session, monkeypatch)
+    monkeypatch.setattr(settings, "EXECUTION_BACKEND", "direct_ollama")
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_BACKEND", "direct_ollama")
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "")
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_MODEL", "qwen-local")
+    monkeypatch.setattr(settings, "EXECUTION_MODEL", "execution-model")
+    monkeypatch.setattr(settings, "OLLAMA_AGENT_MODEL", "ollama-model")
+
+    with pytest.raises(RuntimeCapabilityError, match="COMPLETION_REPAIR_MODEL"):
+        resolve_runtime_configuration(db_session, BackendRole.COMPLETION_REPAIR)
 
 
 @pytest.mark.parametrize(

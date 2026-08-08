@@ -100,17 +100,23 @@ def _role_provider_configuration_errors(role: BackendRole) -> list[str]:
     }:
         return []
     base_url = getattr(settings, "PLANNING_REPAIR_BASE_URL", "")
-    model = getattr(settings, "PLANNING_REPAIR_MODEL", "")
+    if role is BackendRole.COMPLETION_REPAIR:
+        model = getattr(settings, "COMPLETION_REPAIR_MODEL", "")
+    else:
+        model = getattr(settings, "PLANNING_REPAIR_MODEL", "")
     if role is BackendRole.DEBUG_REPAIR:
         base_url = getattr(settings, "DEBUG_REPAIR_BASE_URL", "") or base_url
         model = getattr(settings, "DEBUG_REPAIR_MODEL", "") or model
-    if role is BackendRole.COMPLETION_REPAIR:
-        model = getattr(settings, "COMPLETION_REPAIR_MODEL", "") or model
     errors: list[str] = []
     if not str(base_url or "").strip():
         errors.append("repair endpoint is not configured")
     if not str(model or "").strip():
-        errors.append("repair model is not configured")
+        setting_name = (
+            "COMPLETION_REPAIR_MODEL"
+            if role is BackendRole.COMPLETION_REPAIR
+            else "repair model"
+        )
+        errors.append(f"{setting_name} is not configured")
     return errors
 
 
@@ -407,6 +413,7 @@ def runtime_provider_role_matrix(db: Session) -> dict[str, dict[str, Any]]:
         BackendRole.EXECUTION,
         BackendRole.REPAIR,
         BackendRole.DEBUG_REPAIR,
+        BackendRole.COMPLETION_REPAIR,
     ):
         try:
             matrix[role.value] = validate_runtime_provider_contract(db, role)
@@ -483,10 +490,15 @@ def _role_model_family(db: Session, role: BackendRole, backend_name: str) -> str
         BackendRole.REPAIR: getattr(settings, "PLANNING_REPAIR_MODEL", ""),
         BackendRole.DEBUG_REPAIR: getattr(settings, "DEBUG_REPAIR_MODEL", "")
         or getattr(settings, "PLANNING_REPAIR_MODEL", ""),
-        BackendRole.COMPLETION_REPAIR: getattr(settings, "COMPLETION_REPAIR_MODEL", "")
-        or getattr(settings, "PLANNING_REPAIR_MODEL", ""),
+        BackendRole.COMPLETION_REPAIR: getattr(settings, "COMPLETION_REPAIR_MODEL", ""),
     }
-    return str(role_models[role] or "").strip() or global_model_family
+    model_family = str(role_models[role] or "").strip()
+    if role is BackendRole.COMPLETION_REPAIR and not model_family:
+        raise RuntimeCapabilityError(
+            "COMPLETION_REPAIR_MODEL is not configured for the completion_repair role.",
+            code="provider_model_unavailable",
+        )
+    return model_family or global_model_family
 
 
 def _configured_profile_name(db: Session, key: str, setting_name: str) -> Optional[str]:
