@@ -31,7 +31,10 @@ from app.services.orchestration.phases.completion_flow import (
     _attempt_completion_repair,
 )
 from app.services.orchestration.policy import COMPLETION_REPAIR_TIMEOUT_SECONDS
-from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.types import (
+    CandidateValidationResult,
+    OrchestrationRunContext,
+)
 from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 
 
@@ -99,10 +102,9 @@ def _make_state(tmp_path):
 
 
 def _completion_validation():
-    return SimpleNamespace(
+    return CandidateValidationResult(
         stage="task_completion",
         status="repair_required",
-        repairable=True,
         profile="implementation",
         reasons=["pytest failure: assertion error"],
         details={

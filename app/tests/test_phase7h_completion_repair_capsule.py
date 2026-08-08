@@ -28,7 +28,10 @@ from app.services.orchestration.phases.completion_flow import (
     _attempt_completion_repair,
     _extract_completion_repair_json_text,
 )
-from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.types import (
+    CandidateValidationResult,
+    OrchestrationRunContext,
+)
 from app.services.orchestration.validation.integrity import scan_python_test_text
 from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 
@@ -91,10 +94,9 @@ def _make_state(tmp_path):
 
 
 def _completion_validation():
-    return SimpleNamespace(
+    return CandidateValidationResult(
         stage="task_completion",
         status="repair_required",
-        repairable=True,
         profile="implementation",
         reasons=[
             "Core implementation file src/main.py is present but import in tests/test_format.py failed",
@@ -258,11 +260,11 @@ def test_completion_repair_branch_uses_phase7h_capsule_prompt(db_session, tmp_pa
     assert generated[-1]["details"]["capsule_relevant_file_count"] == 3
     assert generated[-1]["details"]["capsule_last_step_present"] is True
     assert generated[-1]["details"]["envelope_mode"] == "direct_capsule"
-    assert generated[-1]["details"]["compliance_retry_attempted"] is True
+    assert generated[-1]["details"]["compliance_retry_attempted"] is False
     assert generated[-1]["details"]["compliance_retry_succeeded"] is False
 
 
-def test_completion_repair_compliance_retry_recovers_valid_json(db_session, tmp_path):
+def test_completion_repair_parse_failure_is_not_retried(db_session, tmp_path):
     valid_step = (
         '{"step_number": 3, "description": "Retry JSON only", '
         '"commands": [], "verification": null, "rollback": null, '
@@ -280,18 +282,17 @@ def test_completion_repair_compliance_retry_recovers_valid_json(db_session, tmp_
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result == {"status": "failed", "reason": "repair_step_invalid_contract"}
-    assert len(runtime.prompts) == 2
-    assert runtime.prompts[1].startswith("Your previous response was not valid JSON.")
-    assert "Relevant existing files:" not in runtime.prompts[1]
+    assert result["status"] == "failed"
+    assert result["reason"].startswith("repair_step_parse_failed:")
+    assert len(runtime.prompts) == 1
     events = read_orchestration_events(
         ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
     )
     generated = [
         event for event in events if event["event_type"] == EventType.REPAIR_GENERATED
     ]
-    assert generated[-1]["details"]["compliance_retry_attempted"] is True
-    assert generated[-1]["details"]["compliance_retry_succeeded"] is True
+    assert generated[-1]["details"]["compliance_retry_attempted"] is False
+    assert generated[-1]["details"]["compliance_retry_succeeded"] is False
 
 
 def test_completion_repair_preserves_direct_non_step_json_for_classification():
@@ -338,9 +339,7 @@ def test_completion_repair_generic_json_response_classifies_as_non_step(
     assert generated[-1]["details"]["compliance_retry_succeeded"] is False
 
 
-def test_completion_repair_compliance_retry_wrapper_json_classifies_as_non_step(
-    db_session, tmp_path
-):
+def test_completion_repair_wrapper_parse_failure_is_not_retried(db_session, tmp_path):
     wrapped_ready_json = (
         '{"finalAssistantVisibleText":"{\\n'
         '  \\"status\\": \\"ready\\",\\n'
@@ -359,16 +358,17 @@ def test_completion_repair_compliance_retry_wrapper_json_classifies_as_non_step(
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result == {"status": "failed", "reason": "repair_step_invalid_contract"}
-    assert len(runtime.prompts) == 2
+    assert result["status"] == "failed"
+    assert result["reason"].startswith("repair_step_parse_failed:")
+    assert len(runtime.prompts) == 1
     events = read_orchestration_events(
         ctx.orchestration_state.project_dir, ctx.session_id, ctx.task_id
     )
     generated = [
         event for event in events if event["event_type"] == EventType.REPAIR_GENERATED
     ]
-    assert generated[-1]["details"]["compliance_retry_attempted"] is True
-    assert generated[-1]["details"]["compliance_retry_succeeded"] is True
+    assert generated[-1]["details"]["compliance_retry_attempted"] is False
+    assert generated[-1]["details"]["compliance_retry_succeeded"] is False
 
 
 def _task_871_malformed_repair(command: str | None = None) -> str:

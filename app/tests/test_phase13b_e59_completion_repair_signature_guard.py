@@ -23,7 +23,10 @@ from app.services.orchestration.diagnostics.signature_guard import (
     completion_repair_signature_violation_event_details,
 )
 from app.services.orchestration.phases.completion_flow import _attempt_completion_repair
-from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.types import (
+    CandidateValidationResult,
+    OrchestrationRunContext,
+)
 from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 
 
@@ -171,10 +174,9 @@ class _Runtime:
 
 
 def _completion_validation():
-    return SimpleNamespace(
+    return CandidateValidationResult(
         stage="task_completion",
         status="repair_required",
-        repairable=True,
         profile="implementation",
         reasons=["pytest failure"],
         details={
@@ -247,7 +249,7 @@ def test_completion_guard_rejects_before_append_or_execution(db_session, tmp_pat
     output = json.dumps(
         {
             "description": "bad signature",
-            "commands": ["true"],
+            "commands": [],
             "verification": "true",
             "expected_files": ["src/api.py"],
             "ops": _op("src/api.py", "def api(task):\n    return ''\n"),

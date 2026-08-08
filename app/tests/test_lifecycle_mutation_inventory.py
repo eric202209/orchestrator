@@ -74,7 +74,7 @@ EXPECTED_SESSION_CALLS = {
         "mark_session_running": 1,
     },
     "app/services/orchestration/coordinators/completion_coordinator.py": {
-        "mark_session_paused": 7,
+        "mark_session_paused": 5,
     },
     "app/services/orchestration/coordinators/failure_coordinator.py": {
         "mark_session_paused": 3,
@@ -130,7 +130,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
         "mark_task_attempt_pending": 2,
     },
     "app/services/orchestration/coordinators/completion_coordinator.py": {
-        "mark_task_attempt_failed": 7,
+        "mark_task_attempt_failed": 5,
     },
     "app/services/orchestration/coordinators/failure_coordinator.py": {
         "mark_task_attempt_failed": 3,
