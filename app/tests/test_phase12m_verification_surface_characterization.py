@@ -167,7 +167,7 @@ def test_phase12m_same_command_same_workspace_different_pythonpath_environment(
     }
 
 
-def test_phase12m_leading_python_command_resolution_differs_across_surfaces(
+def test_phase32q5_leading_python_command_uses_worker_authority_without_venv(
     tmp_path,
     monkeypatch,
 ):
@@ -186,12 +186,14 @@ def test_phase12m_leading_python_command_resolution_differs_across_surfaces(
     completion = _execute_completion_verification(project_dir=tmp_path, command=command)
     score = _run_scorer_verifier(tmp_path, command)
 
-    assert step["success"] is False
-    assert step["returncode"] == 42
-    assert step["output"] == "fake-python-from-path"
+    assert resolve_project_python(tmp_path) == sys.executable
+    assert step["success"] is True
+    assert step["returncode"] == 0
+    assert "fake-python-from-path" not in step["output"]
+    # Legacy completion verification remains a compatibility seam; Candidate
+    # Validator and repair-step verification are the corrected authorities.
     assert completion["success"] is False
     assert completion["returncode"] == 42
-    assert completion["output"] == "fake-python-from-path"
     assert score["passed"] is True
     assert score["command"] != score["original_command"]
     assert _classify_surface_result_mismatch(
@@ -611,7 +613,7 @@ def test_resolve_project_python_prefers_project_dot_venv(tmp_path, monkeypatch):
     assert resolve_project_python(tmp_path) == str(python_bin)
 
 
-def test_step_verification_python_module_pip_show_uses_system_python_without_venv(
+def test_phase32q5_step_verification_python_module_pip_show_uses_worker_without_venv(
     tmp_path, monkeypatch
 ):
     project_dir = tmp_path / "project"
@@ -636,5 +638,5 @@ def test_step_verification_python_module_pip_show_uses_system_python_without_ven
         command="python3 -m pip show pathtools",
     )
 
-    assert result["success"] is True
-    assert "SYSTEM_PYTHON_PIP_USED" in result["output"]
+    assert resolve_project_python(project_dir) == sys.executable
+    assert "SYSTEM_PYTHON_PIP_USED" not in result["output"]

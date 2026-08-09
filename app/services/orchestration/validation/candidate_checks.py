@@ -8,11 +8,13 @@ import json
 import os
 import shlex
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from app.services.orchestration.execution.python_resolution import (
+    resolve_project_python,
+)
 from app.services.orchestration.types import CandidateFinding
 
 from .workspace_guard import TaskWorkspaceViolationError, normalize_path_reference
@@ -110,13 +112,7 @@ def _pytest_selection(
 def _candidate_python(project_dir: Path) -> str:
     """Use candidate-local Python, otherwise the running Orchestrator environment."""
 
-    for candidate in (
-        project_dir / ".venv" / "bin" / "python",
-        project_dir / "venv" / "bin" / "python",
-    ):
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    return sys.executable
+    return resolve_project_python(project_dir)
 
 
 def select_candidate_verification(
@@ -211,9 +207,6 @@ def _run_command(
     *, project_dir: Path, command: str, timeout_seconds: int
 ) -> tuple[int | None, str]:
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(
-        part for part in (str(project_dir.resolve()), env.get("PYTHONPATH", "")) if part
-    )
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTEST_ADDOPTS"] = (
         str(env.get("PYTEST_ADDOPTS") or "") + " -p no:cacheprovider"
@@ -313,7 +306,7 @@ def validate_candidate_delta(
             if path.endswith(".py") and (project_dir / path).is_file()
         )
         if python_paths:
-            quoted_python = shlex.quote(sys.executable)
+            quoted_python = shlex.quote(_candidate_python(project_dir))
             quoted_paths = " ".join(shlex.quote(path) for path in python_paths)
             static_commands = (
                 (

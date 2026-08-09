@@ -36,6 +36,10 @@ from app.services.orchestration.lifecycle.completion import TaskCompletionFinali
 from app.services.orchestration.phases.completion_summary import (
     _generate_task_summary_with_fallback,
 )
+from app.services.orchestration.phases.completion_repair_capsule import (
+    CompletionRepairProgress,
+    classify_completion_repair_progress,
+)
 from app.services.orchestration.phases.completion_workspace import (
     _scope_workspace_consistency_to_task_changes,
 )
@@ -449,6 +453,7 @@ class CompletionCoordinator:
                 )
 
         if completion_validation.repairable_findings:
+            completion_validation_before_repair = completion_validation
             repair_result = _attempt_completion_repair(
                 ctx=ctx,
                 completion_validation=completion_validation,
@@ -468,6 +473,19 @@ class CompletionCoordinator:
                     validation_severity=ctx.validation_severity,
                     workflow_stage=ctx.workflow_stage,
                     is_first_ordered_task=bool(task and task.plan_position == 1),
+                )
+                repair_progress = classify_completion_repair_progress(
+                    completion_validation_before_repair,
+                    completion_validation,
+                )
+                completion_validation.details["completion_repair_progress"] = (
+                    repair_progress.value
+                )
+                completion_validation.details["completion_repair_before_identity"] = (
+                    completion_validation_before_repair.candidate_identity
+                )
+                completion_validation.details["completion_repair_after_identity"] = (
+                    completion_validation.candidate_identity
                 )
                 record_validation_verdict(
                     db,
@@ -638,7 +656,14 @@ class CompletionCoordinator:
                 write_project_state_snapshot_fn(db, project, task, session_id)
                 return {
                     "status": "failed",
-                    "reason": TerminalReason.COMPLETION_VALIDATION_FAILED,
+                    "reason": (
+                        "completion_repair_partial_progress_budget_exhausted"
+                        if completion_validation.details.get(
+                            "completion_repair_progress"
+                        )
+                        == CompletionRepairProgress.PARTIAL_PROGRESS.value
+                        else TerminalReason.COMPLETION_VALIDATION_FAILED
+                    ),
                 }
             # else: recovery succeeded and re-validation accepted — fall through to
             # success path.
