@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -214,14 +215,43 @@ def _repair_objective_from_finding(finding: Any) -> dict[str, Any]:
 def _repair_finding_identity(finding: Any) -> tuple[str, str, str, str, str, bool]:
     """Stable identity excludes diagnostic text that naturally changes per run."""
 
+    def value(key: str, default: Any = "") -> Any:
+        if isinstance(finding, dict):
+            return finding.get(key, default)
+        return getattr(finding, key, default)
+
     return (
-        str(getattr(finding, "rule_id", "") or ""),
-        str(getattr(finding, "source", "") or ""),
-        str(getattr(finding, "category", "") or ""),
-        str(getattr(finding, "severity", "") or ""),
-        str(getattr(finding, "attribution", "") or ""),
-        bool(getattr(finding, "repairable", False)),
+        str(value("rule_id") or ""),
+        str(value("source") or ""),
+        str(value("category") or ""),
+        str(value("severity") or ""),
+        str(value("attribution") or ""),
+        bool(value("repairable", False)),
     )
+
+
+def completion_repair_finding_signature(validation: Any) -> str:
+    """Return one stable signature for the normalized blocking finding set."""
+
+    findings = (
+        validation.get("findings", [])
+        if isinstance(validation, dict)
+        else getattr(validation, "findings", [])
+    )
+    identities = sorted(
+        _repair_finding_identity(finding)
+        for finding in list(findings or [])
+        if (
+            finding.get("severity", "")
+            if isinstance(finding, dict)
+            else getattr(finding, "severity", "")
+        )
+        == "error"
+    )
+    if not identities:
+        return ""
+    payload = json.dumps(identities, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def classify_completion_repair_progress(

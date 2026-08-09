@@ -39,6 +39,7 @@ from app.services.orchestration.phases.completion_summary import (
 from app.services.orchestration.phases.completion_repair_capsule import (
     CompletionRepairProgress,
     classify_completion_repair_progress,
+    completion_repair_finding_signature,
 )
 from app.services.orchestration.phases.completion_workspace import (
     _scope_workspace_consistency_to_task_changes,
@@ -66,6 +67,65 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
+
+
+def _completion_plan_identity(plan: Any) -> str:
+    """Canonical in-memory identity for the already accepted Plan."""
+
+    return json.dumps(plan, sort_keys=True, separators=(",", ":"))
+
+
+def _completion_candidate_scope(validation: Any) -> tuple[str, ...]:
+    details = getattr(validation, "details", {}) or {}
+    return tuple(
+        sorted(str(path) for path in details.get("candidate_authorized_paths", []))
+    )
+
+
+def _annotate_completion_repair_progress(
+    *,
+    before_validation: Any,
+    after_validation: Any,
+    orchestration_state: Any,
+    repair_budget: int,
+    accepted_plan_identity: str,
+    accepted_candidate_scope: tuple[str, ...],
+) -> CompletionRepairProgress:
+    """Classify one iteration and retain its bounded convergence evidence."""
+
+    progress = classify_completion_repair_progress(
+        before_validation,
+        after_validation,
+    )
+    plan_unchanged = (
+        _completion_plan_identity(orchestration_state.plan) == accepted_plan_identity
+    )
+    scope_unchanged = (
+        _completion_candidate_scope(after_validation) == accepted_candidate_scope
+    )
+    if not plan_unchanged or not scope_unchanged:
+        progress = CompletionRepairProgress.NO_PROGRESS_OR_REGRESSION
+
+    budget_used = int(orchestration_state.completion_repair_attempts)
+    after_validation.details.update(
+        {
+            "completion_repair_iteration": budget_used,
+            "completion_repair_before_identity": before_validation.candidate_identity,
+            "completion_repair_after_identity": after_validation.candidate_identity,
+            "completion_repair_before_finding_signature": completion_repair_finding_signature(
+                before_validation
+            ),
+            "completion_repair_after_finding_signature": completion_repair_finding_signature(
+                after_validation
+            ),
+            "completion_repair_progress": progress.value,
+            "completion_repair_budget_used": budget_used,
+            "completion_repair_budget_remaining": max(repair_budget - budget_used, 0),
+            "completion_repair_plan_unchanged": plan_unchanged,
+            "completion_repair_scope_unchanged": scope_unchanged,
+        }
+    )
+    return progress
 
 
 def _build_gating_change_set(
@@ -453,13 +513,23 @@ class CompletionCoordinator:
                 )
 
         if completion_validation.repairable_findings:
-            completion_validation_before_repair = completion_validation
-            repair_result = _attempt_completion_repair(
-                ctx=ctx,
-                completion_validation=completion_validation,
-                save_orchestration_checkpoint_fn=save_orchestration_checkpoint_fn,
+            accepted_plan_identity = _completion_plan_identity(orchestration_state.plan)
+            accepted_candidate_scope = _completion_candidate_scope(
+                completion_validation
             )
-            if repair_result.get("status") == "success":
+            repair_result: Dict[str, Any] = {
+                "status": "skipped",
+                "reason": "no_completion_repair_iteration",
+            }
+            while completion_validation.repairable_findings:
+                completion_validation_before_repair = completion_validation
+                repair_result = _attempt_completion_repair(
+                    ctx=ctx,
+                    completion_validation=completion_validation,
+                    save_orchestration_checkpoint_fn=save_orchestration_checkpoint_fn,
+                )
+                if repair_result.get("status") != "success":
+                    break
                 completion_validation = ValidatorService.validate_task_completion(
                     project_dir=orchestration_state.project_dir,
                     plan=orchestration_state.plan,
@@ -474,18 +544,13 @@ class CompletionCoordinator:
                     workflow_stage=ctx.workflow_stage,
                     is_first_ordered_task=bool(task and task.plan_position == 1),
                 )
-                repair_progress = classify_completion_repair_progress(
-                    completion_validation_before_repair,
-                    completion_validation,
-                )
-                completion_validation.details["completion_repair_progress"] = (
-                    repair_progress.value
-                )
-                completion_validation.details["completion_repair_before_identity"] = (
-                    completion_validation_before_repair.candidate_identity
-                )
-                completion_validation.details["completion_repair_after_identity"] = (
-                    completion_validation.candidate_identity
+                repair_progress = _annotate_completion_repair_progress(
+                    before_validation=completion_validation_before_repair,
+                    after_validation=completion_validation,
+                    orchestration_state=orchestration_state,
+                    repair_budget=ctx.completion_repair_budget,
+                    accepted_plan_identity=accepted_plan_identity,
+                    accepted_candidate_scope=accepted_candidate_scope,
                 )
                 record_validation_verdict(
                     db,
@@ -495,7 +560,14 @@ class CompletionCoordinator:
                     completion_validation,
                 )
                 db.commit()
-            else:
+                if (
+                    repair_progress != CompletionRepairProgress.PARTIAL_PROGRESS
+                    or orchestration_state.completion_repair_attempts
+                    >= ctx.completion_repair_budget
+                ):
+                    break
+
+            if repair_result.get("status") != "success":
                 completion_error = "Completion repair failed: " + str(
                     repair_result.get("reason") or "unknown reason"
                 )

@@ -13,6 +13,9 @@ from app.services.orchestration.context.assembly import (
     collect_workspace_inventory_paths,
 )
 from app.services.orchestration.types import FailureEnvelope
+from app.services.orchestration.phases.completion_repair_capsule import (
+    completion_repair_finding_signature,
+)
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.validation.workspace_guard import (
     TaskWorkspaceViolationError,
@@ -720,6 +723,9 @@ def _extract_completion_repair_step(
 
 
 def _completion_failure_signature(completion_validation: Any) -> str:
+    typed_signature = completion_repair_finding_signature(completion_validation)
+    if typed_signature:
+        return typed_signature
     reasons = list(getattr(completion_validation, "reasons", []) or [])
     details = getattr(completion_validation, "details", {}) or {}
     existing = str(details.get("failure_signature") or "").strip()
@@ -734,12 +740,24 @@ def _repeats_prior_completion_failure(
     current_signature = _completion_failure_signature(completion_validation)
     if not current_signature:
         return False
-    prior_signature = str(
-        (
-            (getattr(orchestration_state, "last_completion_validation", {}) or {})
-            .get("details", {})
-            .get("failure_signature")
+    prior_validation = (
+        getattr(orchestration_state, "last_completion_validation", {}) or {}
+    )
+    prior_signature = completion_repair_finding_signature(prior_validation)
+    if not prior_signature:
+        prior_signature = str(
+            (prior_validation.get("details", {}) or {}).get("failure_signature") or ""
+        ).strip()
+    if not (prior_signature and prior_signature == current_signature):
+        return False
+    # A PARTIAL_PROGRESS verdict is the newly validated input to the next
+    # bounded iteration, not proof that an iteration repeated itself. The
+    # coordinator compares that input with the next same-validator result;
+    # unchanged findings then become NO_PROGRESS_OR_REGRESSION and stop.
+    progress = str(
+        (getattr(completion_validation, "details", {}) or {}).get(
+            "completion_repair_progress"
         )
         or ""
-    ).strip()
-    return bool(prior_signature and prior_signature == current_signature)
+    )
+    return progress != "PARTIAL_PROGRESS"

@@ -14,6 +14,10 @@ from app.services.orchestration.phases.completion_repair_capsule import (
     build_bounded_completion_repair_prompt,
     build_completion_repair_capsule,
     classify_completion_repair_progress,
+    completion_repair_finding_signature,
+)
+from app.services.orchestration.phases.completion_repair import (
+    _repeats_prior_completion_failure,
 )
 from app.services.orchestration.types import CandidateFinding, CandidateValidationResult
 from app.services.orchestration.validation.candidate_checks import _candidate_python
@@ -153,3 +157,31 @@ def test_no_local_venv_uses_the_worker_interpreter_for_both_authorities(
 ) -> None:
     assert _candidate_python(tmp_path) == resolve_project_python(tmp_path)
     assert resolve_project_python(tmp_path) == sys.executable
+
+
+def test_q6_typed_finding_signature_is_stable_and_partial_input_is_not_a_repeat() -> (
+    None
+):
+    first = _finding("candidate_black_failed", paths=["app/time_utils.py"])
+    changed_evidence = CandidateFinding(
+        rule_id=first.rule_id,
+        source=first.source,
+        category=first.category,
+        severity=first.severity,
+        attribution=first.attribution,
+        repairable=first.repairable,
+        message="diagnostic prose changed",
+        evidence={"output": "different run output"},
+    )
+    prior = _verdict([first], "sha256:before")
+    current = _verdict([changed_evidence], "sha256:after")
+    current.details["completion_repair_progress"] = "PARTIAL_PROGRESS"
+    state = SimpleNamespace(last_completion_validation=prior.to_dict())
+
+    assert completion_repair_finding_signature(prior) == (
+        completion_repair_finding_signature(current)
+    )
+    assert _repeats_prior_completion_failure(state, current) is False
+
+    current.details["completion_repair_progress"] = "NO_PROGRESS_OR_REGRESSION"
+    assert _repeats_prior_completion_failure(state, current) is True

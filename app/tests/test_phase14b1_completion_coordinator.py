@@ -15,9 +15,12 @@ import pytest
 from app.services.orchestration.coordinators.completion_coordinator import (
     CompletionCoordinator,
 )
+from app.services.orchestration.phases.completion_repair_capsule import (
+    build_completion_repair_capsule,
+)
 from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.state.execution_states import TerminalReason
-from app.services.orchestration.types import ValidationVerdict
+from app.services.orchestration.types import CandidateFinding, ValidationVerdict
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +682,276 @@ def test_complete_task_completion_repair_failure(tmp_path, monkeypatch):
 
     assert result["status"] == "failed"
     assert result["reason"] == TerminalReason.COMPLETION_REPAIR_FAILED
+
+
+def _q6_finding(rule_id: str, path: str) -> CandidateFinding:
+    return CandidateFinding(
+        rule_id=rule_id,
+        source="pytest" if rule_id == "focused_pytest_failed" else "static",
+        category="test" if rule_id == "focused_pytest_failed" else "static",
+        severity="error",
+        attribution="candidate_introduced",
+        repairable=True,
+        message=f"{rule_id}: {path}",
+        evidence={"paths": [path]},
+    )
+
+
+def _q6_verdict(
+    findings: list[CandidateFinding],
+    identity: str,
+    *,
+    authorized_paths: list[str],
+) -> ValidationVerdict:
+    return ValidationVerdict.from_findings(
+        profile="implementation",
+        findings=findings,
+        candidate_identity=identity,
+        details={"candidate_authorized_paths": authorized_paths},
+    )
+
+
+def _q6_patch_terminal_helpers(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.orchestration.coordinators.completion_coordinator.persist_debug_feedback_envelope",
+        _NOOP_FN,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.coordinators.completion_coordinator.build_debug_feedback_envelope",
+        lambda **kwargs: SimpleNamespace(
+            failure_class="candidate_validation",
+            eligible_for_debug_repair=False,
+            stderr_excerpt="",
+            return_code=None,
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.coordinators.completion_coordinator.mark_task_attempt_failed",
+        _NOOP_FN,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.coordinators.completion_coordinator.mark_session_paused",
+        _NOOP_FN,
+    )
+
+
+def _q6_complete(ctx):
+    with patch(
+        "app.services.human_guidance.post_write_checker.run_post_write_check_if_enabled",
+        _NOOP_FN,
+    ):
+        return CompletionCoordinator().complete_task(
+            ctx=ctx,
+            write_project_state_snapshot_fn=_NOOP_FN,
+            save_orchestration_checkpoint_fn=_NOOP_FN,
+        )
+
+
+def test_q6_balanced_partial_progress_stops_after_one_route_call(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    ctx.completion_repair_budget = 1
+    ctx.orchestration_state.plan = [{"step_number": 1, "description": "accepted"}]
+    paths = ["app/time_utils.py", "app/tests/test_utc_now_helper.py"]
+    pytest_finding = _q6_finding(
+        "focused_pytest_failed", "app/tests/test_utc_now_helper.py"
+    )
+    black = _q6_finding("candidate_black_failed", "app/time_utils.py")
+    flake8 = _q6_finding("candidate_flake8_failed", "app/time_utils.py")
+    before = _q6_verdict(
+        [pytest_finding, black, flake8], "sha256:before", authorized_paths=paths
+    )
+    partial = _q6_verdict([black, flake8], "sha256:partial", authorized_paths=paths)
+    validations = iter([before, partial])
+    repair_inputs = []
+    _patch_coordinator_delegates(monkeypatch, validation_verdict=before)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: next(validations),
+    )
+
+    def _balanced_repair(**kwargs):
+        repair_inputs.append(kwargs["completion_validation"])
+        ctx.orchestration_state.completion_repair_attempts += 1
+        return {"status": "success", "step": {}}
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._attempt_completion_repair",
+        _balanced_repair,
+    )
+    _q6_patch_terminal_helpers(monkeypatch)
+
+    result = _q6_complete(ctx)
+
+    assert len(repair_inputs) == 1
+    assert ctx.orchestration_state.completion_repair_attempts == 1
+    assert result["reason"] == "completion_repair_partial_progress_budget_exhausted"
+
+
+def test_q6_existing_budget_two_reenters_same_route_with_remaining_findings_only(
+    tmp_path, monkeypatch
+):
+    ctx = _make_ctx(tmp_path)
+    ctx.completion_repair_budget = 2
+    accepted_plan = [{"step_number": 1, "description": "accepted"}]
+    ctx.orchestration_state.plan = [dict(accepted_plan[0])]
+    paths = ["app/time_utils.py", "app/tests/test_utc_now_helper.py"]
+    pytest_finding = _q6_finding(
+        "focused_pytest_failed", "app/tests/test_utc_now_helper.py"
+    )
+    black = _q6_finding("candidate_black_failed", "app/time_utils.py")
+    flake8 = _q6_finding("candidate_flake8_failed", "app/time_utils.py")
+    before = _q6_verdict(
+        [pytest_finding, black, flake8], "sha256:before", authorized_paths=paths
+    )
+    partial = _q6_verdict([black, flake8], "sha256:partial", authorized_paths=paths)
+    resolved = _q6_verdict([], "sha256:resolved", authorized_paths=paths)
+    validations = iter([before, partial, resolved])
+    repair_inputs = []
+    objective_sets = []
+    _patch_coordinator_delegates(monkeypatch, validation_verdict=before)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: next(validations),
+    )
+
+    def _repair(**kwargs):
+        current_validation = kwargs["completion_validation"]
+        repair_inputs.append(current_validation)
+        capsule = build_completion_repair_capsule(
+            task_prompt=ctx.prompt,
+            completion_validation=current_validation,
+            orchestration_state=ctx.orchestration_state,
+        )
+        objective_sets.append(
+            [objective["rule_id"] for objective in capsule.repair_objectives]
+        )
+        ctx.orchestration_state.completion_repair_attempts += 1
+        return {"status": "success", "step": {}}
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._attempt_completion_repair",
+        _repair,
+    )
+
+    result = _q6_complete(ctx)
+
+    assert result["status"] == "completed"
+    assert len(repair_inputs) == 2
+    assert [finding.rule_id for finding in repair_inputs[0].repairable_findings] == [
+        "focused_pytest_failed",
+        "candidate_black_failed",
+        "candidate_flake8_failed",
+    ]
+    assert [finding.rule_id for finding in repair_inputs[1].repairable_findings] == [
+        "candidate_black_failed",
+        "candidate_flake8_failed",
+    ]
+    assert objective_sets == [
+        [
+            "focused_pytest_failed",
+            "candidate_black_failed",
+            "candidate_flake8_failed",
+        ],
+        ["candidate_black_failed", "candidate_flake8_failed"],
+    ]
+    assert ctx.orchestration_state.completion_repair_attempts == 2
+    assert ctx.orchestration_state.plan == accepted_plan
+    assert partial.details["completion_repair_budget_remaining"] == 1
+    assert partial.details["completion_repair_plan_unchanged"] is True
+    assert partial.details["completion_repair_scope_unchanged"] is True
+    assert partial.details["completion_repair_before_finding_signature"]
+    assert partial.details["completion_repair_after_finding_signature"]
+    assert resolved.details["completion_repair_progress"] == "RESOLVED"
+
+
+@pytest.mark.parametrize(
+    "regression", [False, True], ids=["same_findings", "new_blocker"]
+)
+def test_q6_no_progress_or_regression_never_reenters(tmp_path, monkeypatch, regression):
+    ctx = _make_ctx(tmp_path)
+    ctx.completion_repair_budget = 2
+    paths = ["app/time_utils.py", "app/tests/test_utc_now_helper.py"]
+    pytest_finding = _q6_finding(
+        "focused_pytest_failed", "app/tests/test_utc_now_helper.py"
+    )
+    black = _q6_finding("candidate_black_failed", "app/time_utils.py")
+    before = _q6_verdict(
+        [pytest_finding, black], "sha256:before", authorized_paths=paths
+    )
+    after_findings = [pytest_finding, black]
+    if regression:
+        after_findings = [
+            black,
+            _q6_finding("candidate_python_compile_failed", "app/time_utils.py"),
+        ]
+    after = _q6_verdict(after_findings, "sha256:after", authorized_paths=paths)
+    validations = iter([before, after])
+    repair_inputs = []
+    _patch_coordinator_delegates(monkeypatch, validation_verdict=before)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: next(validations),
+    )
+
+    def _repair(**kwargs):
+        repair_inputs.append(kwargs["completion_validation"])
+        ctx.orchestration_state.completion_repair_attempts += 1
+        return {"status": "success", "step": {}}
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._attempt_completion_repair",
+        _repair,
+    )
+    _q6_patch_terminal_helpers(monkeypatch)
+
+    result = _q6_complete(ctx)
+
+    assert result["status"] == "failed"
+    assert len(repair_inputs) == 1
+    assert after.details["completion_repair_progress"] == "NO_PROGRESS_OR_REGRESSION"
+
+
+def test_q6_failed_second_iteration_preserves_first_repair_state(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    ctx.completion_repair_budget = 2
+    repaired_file = tmp_path / "app" / "tests" / "test_utc_now_helper.py"
+    repaired_file.parent.mkdir(parents=True)
+    paths = ["app/time_utils.py", "app/tests/test_utc_now_helper.py"]
+    pytest_finding = _q6_finding(
+        "focused_pytest_failed", "app/tests/test_utc_now_helper.py"
+    )
+    black = _q6_finding("candidate_black_failed", "app/time_utils.py")
+    before = _q6_verdict(
+        [pytest_finding, black], "sha256:before", authorized_paths=paths
+    )
+    partial = _q6_verdict([black], "sha256:partial", authorized_paths=paths)
+    validations = iter([before, partial])
+    calls = []
+    _patch_coordinator_delegates(monkeypatch, validation_verdict=before)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
+        lambda **kwargs: next(validations),
+    )
+
+    def _repair(**kwargs):
+        calls.append(kwargs["completion_validation"])
+        ctx.orchestration_state.completion_repair_attempts += 1
+        if len(calls) == 1:
+            repaired_file.write_text("first repair retained\n", encoding="utf-8")
+            return {"status": "success", "step": {}}
+        return {"status": "failed", "reason": "completion_repair_scope_violation"}
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.completion_flow._attempt_completion_repair",
+        _repair,
+    )
+    _q6_patch_terminal_helpers(monkeypatch)
+
+    result = _q6_complete(ctx)
+
+    assert len(calls) == 2
+    assert result["reason"] == TerminalReason.COMPLETION_REPAIR_FAILED
+    assert repaired_file.read_text(encoding="utf-8") == "first repair retained\n"
 
 
 def test_complete_task_verification_integrity_failure(tmp_path, monkeypatch):
