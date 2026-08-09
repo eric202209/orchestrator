@@ -22,7 +22,32 @@ MAX_PLAN_REVISIONS = 1
 DEBUG_TIMEOUT_SECONDS = 180
 SUMMARY_TIMEOUT_SECONDS = 45
 COMPLETION_VERIFICATION_TIMEOUT_SECONDS = 180
-COMPLETION_REPAIR_TIMEOUT_SECONDS = 120
+# Bounded default used only when the deployment declares no Candidate Repair
+# budget. See resolve_completion_repair_timeout_seconds below.
+COMPLETION_REPAIR_TIMEOUT_DEFAULT_SECONDS = 120
+
+
+def resolve_completion_repair_timeout_seconds(config: Any = None) -> int:
+    """Resolve the deployment-owned Candidate Repair generation budget.
+
+    Ownership is deployment configuration (``Settings`` plus its
+    ``RUNTIME_PROFILE`` clamps), not provider-independent application policy:
+    generation latency depends on the bound model, quantization, serving
+    runtime, contention and hardware, and the same authority already owns
+    ``COMPLETION_REPAIR_BACKEND``/``COMPLETION_REPAIR_MODEL``. A deployment
+    that declares nothing gets the bounded default rather than an unbounded
+    budget, so Candidate Repair semantics never depend on the value.
+    """
+
+    source = settings if config is None else config
+    try:
+        value = int(getattr(source, "COMPLETION_REPAIR_TIMEOUT_SECONDS", 0) or 0)
+    except (TypeError, ValueError):
+        value = 0
+    return value if value > 0 else COMPLETION_REPAIR_TIMEOUT_DEFAULT_SECONDS
+
+
+COMPLETION_REPAIR_TIMEOUT_SECONDS = resolve_completion_repair_timeout_seconds()
 # Reasons that trigger an automatic rollback to the pre-run snapshot.
 # Isolation violations always restore (dangerous partial writes).
 # Most execution failures also restore so phantom / empty files do not

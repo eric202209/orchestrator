@@ -197,6 +197,13 @@ class Settings(BaseSettings):
     PLANNING_REPAIR_CONTEXT_TOKENS: Optional[int] = None
     COMPLETION_REPAIR_MODEL: str = ""
     COMPLETION_REPAIR_ADAPTATION_PROFILE: Optional[str] = None
+    # Candidate Repair generation budget. Deployment-owned, like the backend,
+    # model and adaptation profile above: generation latency depends on the
+    # bound model, quantization, serving runtime, contention and hardware, so
+    # the deployment that binds the role also binds its budget. 120s is the
+    # bounded default and reproduces the historical application-policy value
+    # when a deployment sets nothing.
+    COMPLETION_REPAIR_TIMEOUT_SECONDS: int = 120
     PLANNING_REPAIR_API_KEY: str = ""
     PLANNING_REPAIR_DISABLE_THINKING: bool = True
     DEBUG_REPAIR_DIRECT_ENABLED: bool = True
@@ -363,6 +370,16 @@ class Settings(BaseSettings):
     SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS: int = SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS
     LOCAL_VERIFICATION_TIMEOUT_SECONDS: int = 300
 
+    @field_validator("COMPLETION_REPAIR_TIMEOUT_SECONDS")
+    @classmethod
+    def validate_completion_repair_timeout(cls, value: int) -> int:
+        if value <= 0 or value > TASK_WIDE_EXECUTION_TIMEOUT_SECONDS:
+            raise ValueError(
+                "COMPLETION_REPAIR_TIMEOUT_SECONDS must be between 1 and "
+                f"{TASK_WIDE_EXECUTION_TIMEOUT_SECONDS} seconds"
+            )
+        return value
+
     @field_validator("RUNTIME_PROFILE")
     @classmethod
     def validate_runtime_profile(cls, value: str) -> str:
@@ -383,6 +400,8 @@ class Settings(BaseSettings):
                 self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS = 90
             if self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS > 30:
                 self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS = 30
+            if self.COMPLETION_REPAIR_TIMEOUT_SECONDS > 60:
+                self.COMPLETION_REPAIR_TIMEOUT_SECONDS = 60
             if self.KNOWLEDGE_MAX_ITEMS > 1:
                 self.KNOWLEDGE_MAX_ITEMS = 1
             if self.KNOWLEDGE_MAX_TOTAL_CHARS > 800:
@@ -395,6 +414,8 @@ class Settings(BaseSettings):
                 self.PLANNING_SYNTHESIS_TIMEOUT_SECONDS = 120
             if self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS > 38:
                 self.REPLAN_SYNTHESIS_TIMEOUT_SECONDS = 38
+            if self.COMPLETION_REPAIR_TIMEOUT_SECONDS > 90:
+                self.COMPLETION_REPAIR_TIMEOUT_SECONDS = 90
             if self.KNOWLEDGE_MAX_ITEMS > 2:
                 self.KNOWLEDGE_MAX_ITEMS = 2
             if self.KNOWLEDGE_MAX_TOTAL_CHARS > 1400:

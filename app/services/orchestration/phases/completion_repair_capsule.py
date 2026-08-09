@@ -221,6 +221,20 @@ def _read_bounded_source_contents(
     return contents
 
 
+def source_visibility_label(content: str) -> str:
+    """Label rendered source evidence as complete or truncated.
+
+    A byte-exact ``replace_in_file`` anchor is only constructible from a file
+    rendered in full, so the prompt labels each block and the operation rules
+    offer exact-anchor operations for nothing else.
+    """
+
+    if content.endswith(_SOURCE_TRUNCATED_MARKER):
+        shown = len(content) - len(_SOURCE_TRUNCATED_MARKER)
+        return f"[TRUNCATED: only the first {shown} characters are shown]"
+    return "[COMPLETE]"
+
+
 def build_completion_repair_capsule(
     *,
     task_prompt: str,
@@ -235,10 +249,13 @@ def build_completion_repair_capsule(
     details = getattr(completion_validation, "details", {}) or {}
     verification_failure = str(details.get("verification_output_preview") or "")[:1200]
     candidates: list[str] = []
+    # Finding-aware ordering: the bounded source budget is spent first on the
+    # files the validation reasons actually implicate, so the repair objective
+    # is not the file most likely to be truncated out of provider visibility.
+    candidates.extend(_extract_reason_paths(reasons))
     candidates.extend(
         str(path) for path in details.get("expected_core_files", []) or []
     )
-    candidates.extend(_extract_reason_paths(reasons))
     for result in list(getattr(orchestration_state, "execution_results", []) or [])[
         -2:
     ]:
@@ -291,7 +308,9 @@ def build_bounded_completion_repair_prompt(
     if capsule.source_file_contents:
         blocks = []
         for rel_path, content in capsule.source_file_contents.items():
-            blocks.append(f"--- {rel_path} ---\n{content}")
+            blocks.append(
+                f"--- {rel_path} --- {source_visibility_label(content)}\n{content}"
+            )
         source_content_section = "\n\nCURRENT FILE CONTENT:\n" + "\n\n".join(blocks)
 
     api_contract_section = ""
@@ -328,10 +347,10 @@ Rules:
 4. Each op must have "op" (write_file, append_file, or replace_in_file), "path" (relative to workspace root), and op-specific fields: "content" for write_file/append_file; "old" and "new" for replace_in_file.
 5. "verification" must be one non-empty top-level shell command string. No shell metacharacters.
 6. Do not use a "commands" key. Use ops only. The repair_step wrapper is canonical.
-7. Prefer replace_in_file for targeted in-place edits; use write_file only to create or fully overwrite a file.
+7. Prefer replace_in_file for targeted in-place edits in files marked [COMPLETE]; use write_file only to create a new file or fully overwrite a file marked [COMPLETE].
 8. Use relative paths only; no absolute paths, "..", or "~". Do not return prose, markdown, comments, lists, plans, or fenced code.
 9. Touch only relevant existing files, unless explicitly creating a required file. expected_files must list every file written.
-10. For replace_in_file, copy old character-for-character from CURRENT FILE CONTENT. If absent, use complete-file write_file. Do not invent or guess old text.
+10. For replace_in_file, copy old character-for-character from a file marked [COMPLETE] in CURRENT FILE CONTENT. Do not invent or guess old text. Never emit replace_in_file or write_file for an existing file marked [TRUNCATED] or missing from CURRENT FILE CONTENT: its full content is not visible, so any edit would be a guess.
 11. Use only methods, attributes (including no invented attributes such as .tasks), and signatures in SOURCE API CONTRACT/CURRENT FILE CONTENT; match argument shapes. Implement any shown NotImplementedError with the same signature.
 12. Generate every required op, including files beyond the traceback when shown in context.
 13. directly address the reported expected/actual mismatch; do not make a cosmetic-only change.

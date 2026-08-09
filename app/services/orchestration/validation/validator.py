@@ -1166,46 +1166,52 @@ class ValidatorService:
         return files
 
     @classmethod
-    def _placeholder_baseline_text(
+    def _placeholder_delta_baseline(
         cls,
         candidate: Path,
         project_dir: Path,
         change_set: Optional[Dict[str, Any]],
-    ) -> Optional[str]:
-        """Pre-candidate content of ``candidate``, when a change-set snapshot has it.
+    ) -> tuple[Optional[str], bool]:
+        """Pre-candidate content of ``candidate`` plus whether the delta is known.
 
-        Returns ``None`` when there is no usable delta authority (no change
-        set, no snapshot, the file is candidate-added, or the baseline copy
-        cannot be read) so callers fall back to whole-file scanning.
+        Returns ``(baseline_text, delta_available)``.
+
+        ``delta_available`` is ``True`` when the candidate delta for this file
+        is established: the file is candidate-added or absent from the
+        pre-candidate snapshot (baseline ``""`` — every line is candidate
+        authored), or a readable snapshot copy exists. It is ``False`` when no
+        change set, no snapshot root, or no readable baseline copy is
+        available. Callers still scan the whole file in that case, but must not
+        attribute what they find to the candidate.
         """
 
         if not change_set:
-            return None
-        snapshot_raw = str(change_set.get("snapshot_path") or "").strip()
-        if not snapshot_raw:
-            return None
-        snapshot_root = Path(snapshot_raw)
-        if not snapshot_root.exists():
-            return None
+            return None, False
         relative_text = str(candidate.relative_to(project_dir)).replace("\\", "/")
         added_files = {
             str(path).replace("\\", "/").lstrip("./")
             for path in (change_set.get("added_files") or [])
         }
         if relative_text.lstrip("./") in added_files:
-            return None
+            return "", True
+        snapshot_raw = str(change_set.get("snapshot_path") or "").strip()
+        if not snapshot_raw:
+            return None, False
+        snapshot_root = Path(snapshot_raw)
+        if not snapshot_root.exists():
+            return None, False
         baseline_path = (snapshot_root / relative_text).resolve()
         try:
             if not baseline_path.is_relative_to(snapshot_root.resolve()):
-                return None
+                return None, False
         except ValueError:
-            return None
+            return None, False
         if not baseline_path.is_file():
-            return None
+            return "", True
         try:
-            return baseline_path.read_text(encoding="utf-8")
+            return baseline_path.read_text(encoding="utf-8"), True
         except Exception:
-            return None
+            return None, False
 
     @classmethod
     def _mutation_completion_evidence(
@@ -2649,20 +2655,55 @@ class ValidatorService:
                     )
 
         placeholder_reasons: List[str] = []
+        unattributable_placeholder_reasons: List[str] = []
         for candidate in candidate_files:
-            baseline_text = cls._placeholder_baseline_text(
+            baseline_text, delta_available = cls._placeholder_delta_baseline(
                 candidate, project_dir, change_set
             )
-            placeholder_reasons.extend(
-                cls._detect_placeholder_content(candidate, baseline_text=baseline_text)
+            file_reasons = cls._detect_placeholder_content(
+                candidate, baseline_text=baseline_text
             )
+            placeholder_reasons.extend(file_reasons)
+            if not delta_available:
+                # Only the TODO/placeholder marker rule is delta-scoped; the
+                # remaining rules are whole-file by construction and already
+                # fail closed as rejections.
+                unattributable_placeholder_reasons.extend(
+                    reason
+                    for reason in file_reasons
+                    if "todo or placeholder markers" in reason.lower()
+                )
         if placeholder_reasons and profile == "implementation":
             repairable_placeholder_reasons, rejected_placeholder_reasons = (
                 cls._split_content_issue_severity(placeholder_reasons)
             )
-            repairable.extend(repairable_placeholder_reasons[:10])
-            rejected.extend(rejected_placeholder_reasons[:10])
+            # A placeholder marker may only become a candidate repair objective
+            # when the candidate delta proves the candidate wrote it. Without
+            # that evidence the reason still fails the gate, but it is rejected
+            # rather than offered to Candidate Repair as candidate-introduced.
+            unattributable = set(unattributable_placeholder_reasons)
+            repairable.extend(
+                [
+                    reason
+                    for reason in repairable_placeholder_reasons
+                    if reason not in unattributable
+                ][:10]
+            )
+            rejected.extend(
+                (
+                    rejected_placeholder_reasons
+                    + [
+                        reason
+                        for reason in repairable_placeholder_reasons
+                        if reason in unattributable
+                    ]
+                )[:10]
+            )
             details["placeholder_reasons"] = placeholder_reasons[:20]
+            if unattributable:
+                details["unattributable_placeholder_reasons"] = sorted(unattributable)[
+                    :20
+                ]
 
         if (
             profile == "implementation"
@@ -2748,7 +2789,11 @@ class ValidatorService:
         structured_rule_ids = cls._validator_rule_ids_from_details(
             stage="task_completion", details=details
         )
+        unattributable_messages = set(
+            details.get("unattributable_placeholder_reasons") or []
+        )
         for index, message in enumerate(rejected):
+            unattributable_message = message in unattributable_messages
             candidate_findings.append(
                 CandidateFinding(
                     rule_id=(
@@ -2759,9 +2804,16 @@ class ValidatorService:
                     source="task_contract",
                     category="task_contract",
                     severity="error",
-                    attribution="candidate_introduced",
+                    attribution=(
+                        "unknown" if unattributable_message else "candidate_introduced"
+                    ),
                     repairable=False,
                     message=message,
+                    evidence=(
+                        {"delta_evidence": "unavailable"}
+                        if unattributable_message
+                        else {}
+                    ),
                 )
             )
         for index, message in enumerate(repairable):
