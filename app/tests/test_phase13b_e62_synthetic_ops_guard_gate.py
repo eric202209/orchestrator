@@ -343,7 +343,7 @@ def test_e61_structured_ops_path_checked_flag_is_true_not_unavailable(
                 "new": "def format_task_line(task):\n",
             }
         ],
-        "verification": "true",
+        "verification": 'python -c "import sys; sys.exit(0)"',
         "expected_files": ["src/formatting.py"],
     }
     runtime = _MockRuntime(json.dumps(repair_step))

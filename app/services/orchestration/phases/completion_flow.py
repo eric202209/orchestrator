@@ -40,8 +40,10 @@ from app.services.orchestration.context.assembly import (
 )
 from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
 from app.services.orchestration.execution.execution_flow import (
+    StepExecutionAssessment,
     assess_step_execution,
     determine_step_timeout,
+    execute_verification_command,
 )
 from app.services.orchestration.execution.runtime import (
     workspace_snapshot_key,
@@ -110,6 +112,9 @@ from app.services.orchestration.phases.completion_workspace import (
     _completion_expected_paths,
     _scope_workspace_consistency_to_task_changes,
     _stack_set_for_paths,
+)
+from app.services.orchestration.phases.execution_local_steps import (
+    _is_simple_verification_command,
 )
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     build_completion_recovery_evidence,
@@ -665,6 +670,28 @@ def _attempt_completion_repair(
     if not repair_step.get("commands") and not repair_step.get("ops"):
         return {"status": "failed", "reason": "repair_step_missing_commands_or_ops"}
 
+    verification_command = str(repair_step.get("verification") or "").strip()
+    if not _is_simple_verification_command(
+        verification_command,
+        project_dir=Path(orchestration_state.project_dir),
+    ):
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.REPAIR_REJECTED,
+            details={
+                "phase": OrchestrationPhase.COMPLETION_REPAIR,
+                "reason": "completion_repair_verification_command_unsafe",
+                "verification_command_valid": False,
+                "verification_command": verification_command[:1000],
+            },
+        )
+        return {
+            "status": "failed",
+            "reason": "completion_repair_verification_command_unsafe",
+        }
+
     invalid_paths = _completion_repair_invalid_paths(
         repair_step=repair_step,
         project_dir=Path(orchestration_state.project_dir),
@@ -923,18 +950,54 @@ def _attempt_completion_repair(
                     "reason": COMPLETION_REPAIR_POST_DIFF_VIOLATION_REASON,
                 }
 
-    assessment = assess_step_execution(
-        db=db,
-        session_id=ctx.session_id,
-        task_id=ctx.task_id,
-        project_dir=orchestration_state.project_dir,
-        step=repair_step,
-        step_result=repair_exec_result,
-        step_started_at=step_started_at,
-        validation_profile=ctx.validation_profile,
-        validation_severity=ctx.validation_severity,
-        relaxed_mode=orchestration_state.relaxed_mode,
-    )
+    provider_verification = None
+    if repair_exec_result.get("status") == "completed":
+        verification_result = execute_verification_command(
+            project_dir=Path(orchestration_state.project_dir),
+            command=verification_command,
+        )
+        verification_output = str(verification_result.get("output") or "")
+        provider_verification = {
+            "verification_command_valid": True,
+            "verification_command": verification_command,
+            "verification_exit_code": verification_result.get("returncode"),
+            "verification_passed": bool(verification_result.get("success")),
+            "verification_output_preview": verification_output[:1000],
+        }
+        repair_exec_result["skip_declared_verification"] = True
+        repair_exec_result["verification_output"] = verification_output
+
+    if repair_step.get("ops"):
+        application_succeeded = repair_exec_result.get("status") == "completed"
+        assessment = StepExecutionAssessment(
+            step_status="success" if application_succeeded else "failed",
+            step_output=str(repair_exec_result.get("output") or ""),
+            error_message=(
+                ""
+                if application_succeeded
+                else str(repair_exec_result.get("error") or "")
+            ),
+            missing_files=[],
+            stub_files=[],
+            tool_failures=[],
+            correction_hints=[],
+            verification_output=str(
+                repair_exec_result.get("verification_output") or ""
+            ),
+        )
+    else:
+        assessment = assess_step_execution(
+            db=db,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            project_dir=orchestration_state.project_dir,
+            step=repair_step,
+            step_result=repair_exec_result,
+            step_started_at=step_started_at,
+            validation_profile=ctx.validation_profile,
+            validation_severity=ctx.validation_severity,
+            relaxed_mode=orchestration_state.relaxed_mode,
+        )
     if assessment.validation_verdict:
         record_validation_verdict(
             db,
@@ -982,9 +1045,14 @@ def _attempt_completion_repair(
                 "phase": OrchestrationPhase.COMPLETION_REPAIR,
                 "step_index": next_step_number,
                 "expected_files": repair_step.get("expected_files", [])[:20],
+                **(provider_verification or {}),
             },
         )
-        return {"status": "success", "step": repair_step}
+        return {
+            "status": "success",
+            "step": repair_step,
+            "provider_verification": provider_verification,
+        }
 
     orchestration_state.record_failure(step_record)
     task.error_message = assessment.error_message[:2000]

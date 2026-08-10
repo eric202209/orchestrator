@@ -82,6 +82,26 @@ def _completion_candidate_scope(validation: Any) -> tuple[str, ...]:
     )
 
 
+def _retain_completion_repair_verification_evidence(
+    validation: Any, repair_result: dict[str, Any]
+) -> None:
+    """Carry provider verification evidence into the canonical verdict details."""
+
+    provider_verification = repair_result.get("provider_verification") or {}
+    validation.details.update(
+        {
+            key: provider_verification.get(key)
+            for key in (
+                "verification_command_valid",
+                "verification_command",
+                "verification_exit_code",
+                "verification_passed",
+                "verification_output_preview",
+            )
+        }
+    )
+
+
 def _annotate_completion_repair_progress(
     *,
     before_validation: Any,
@@ -119,6 +139,7 @@ def _annotate_completion_repair_progress(
                 after_validation
             ),
             "completion_repair_progress": progress.value,
+            "canonical_progress": progress.value,
             "completion_repair_budget_used": budget_used,
             "completion_repair_budget_remaining": max(repair_budget - budget_used, 0),
             "completion_repair_plan_unchanged": plan_unchanged,
@@ -543,6 +564,9 @@ class CompletionCoordinator:
                     validation_severity=ctx.validation_severity,
                     workflow_stage=ctx.workflow_stage,
                     is_first_ordered_task=bool(task and task.plan_position == 1),
+                )
+                _retain_completion_repair_verification_evidence(
+                    completion_validation, repair_result
                 )
                 repair_progress = _annotate_completion_repair_progress(
                     before_validation=completion_validation_before_repair,

@@ -250,7 +250,7 @@ def test_completion_guard_rejects_before_append_or_execution(db_session, tmp_pat
         {
             "description": "bad signature",
             "commands": [],
-            "verification": "true",
+            "verification": 'python -c "import sys; sys.exit(0)"',
             "expected_files": ["src/api.py"],
             "ops": _op("src/api.py", "def api(task):\n    return ''\n"),
         }

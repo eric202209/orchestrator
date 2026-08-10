@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -106,6 +107,27 @@ def _is_simple_verification_command(
     normalized = " ".join(str(command or "").strip().split())
     if not normalized:
         return False
+    try:
+        tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    executable = Path(tokens[0])
+    if executable.is_absolute():
+        try:
+            if executable.resolve() != Path(sys.executable).resolve():
+                return False
+        except OSError:
+            return False
+        normalized = shlex.join([Path(sys.executable).name, *tokens[1:]])
+    elif tokens[0] in {
+        ".venv/bin/python",
+        ".venv/bin/python3",
+        "venv/bin/python",
+        "venv/bin/python3",
+    }:
+        normalized = shlex.join([executable.name, *tokens[1:]])
     if _is_safe_compileall_command(normalized, project_dir=project_dir):
         return True
     if normalized.startswith(("python -c ", "python3 -c ")):
@@ -115,21 +137,30 @@ def _is_simple_verification_command(
         )
     if normalized.startswith("node -e "):
         return _node_eval_script(normalized) is not None
-    allowed_prefixes = (
-        "python -m py_compile ",
-        "python3 -m py_compile ",
-        "python -m unittest ",
-        "python3 -m unittest ",
-        "npm run build",
-        "pytest",
-        "python -m pytest",
-        "python3 -m pytest",
-    )
-    if not normalized.startswith(allowed_prefixes):
+    if re.search(r";|\||>|<|&|`|\$\(", normalized):
         return False
-    return not any(
-        token in normalized for token in (" >", ">>", ";", "&&", "||", "$(", "`")
+    try:
+        normalized_tokens = shlex.split(normalized, posix=True)
+    except ValueError:
+        return False
+    executable_name = normalized_tokens[0]
+    module_command = normalized_tokens[1:3]
+    allowed = executable_name == "pytest"
+    allowed = allowed or (
+        executable_name in {"python", "python3"}
+        and module_command
+        in (["-m", "pytest"], ["-m", "py_compile"], ["-m", "unittest"])
     )
+    allowed = allowed or normalized_tokens[:3] == ["npm", "run", "build"]
+    if not allowed:
+        return False
+    arguments = normalized_tokens[1:]
+    for argument in arguments:
+        if argument.startswith("~") or Path(argument).is_absolute():
+            return False
+        if ".." in Path(argument).parts:
+            return False
+    return True
 
 
 def _is_safe_compileall_command(
@@ -405,12 +436,9 @@ def _node_eval_script(command: str) -> str | None:
         tokens = shlex.split(normalized, posix=True)
     except ValueError:
         tokens = []
-    if len(tokens) == 3 and tokens[0] == "node" and tokens[1] == "-e":
-        script = tokens[2]
-    else:
-        script = normalized[len("node -e ") :].strip()
-        if len(script) >= 2 and script[0] == script[-1] and script[0] in {"'", '"'}:
-            script = script[1:-1]
+    if len(tokens) != 3 or tokens[0] != "node" or tokens[1] != "-e":
+        return None
+    script = tokens[2]
     return script.replace('\\\\"', '"').replace('\\"', '"')
 
 
