@@ -158,6 +158,45 @@ def test_terminal_failure_marks_task_failed_and_reraises(db_session):
     assert session.status == "paused"
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "planning_source_materialization_unavailable",
+        "planning_provider_initialization_failed",
+        "plan_validation_terminal_failure",
+        "planning_repair_output_contract_violation",
+    ],
+)
+def test_planning_terminal_failures_terminalize_every_product_record(
+    db_session, reason
+):
+    """The canonical coordinator owns all pre-execution Planning failures."""
+    ctx, session, task, execution = _seed_ctx(db_session)
+
+    with pytest.raises(RuntimeError, match=reason):
+        FailureCoordinator().handle_failure(
+            self_task=_TerminalSelfTask(),
+            ctx=ctx,
+            exc=RuntimeError(reason),
+            get_latest_session_task_link_fn=lambda *a, **k: None,
+            write_project_state_snapshot_fn=_NOOP,
+            save_orchestration_checkpoint_fn=_NOOP,
+            record_live_log_fn=_NOOP,
+        )
+
+    link = db_session.query(SessionTask).filter_by(task_id=task.id).one()
+    db_session.refresh(task)
+    db_session.refresh(link)
+    db_session.refresh(execution)
+    assert task.status == TaskStatus.FAILED
+    assert link.status == TaskStatus.FAILED
+    assert execution.status == TaskStatus.FAILED
+    assert task.completed_at is not None
+    assert link.completed_at == task.completed_at
+    assert execution.completed_at == task.completed_at
+    assert session.status == "paused"
+
+
 # ---------------------------------------------------------------------------
 # 2. Retry-eligible failure path — retry is raised
 # ---------------------------------------------------------------------------

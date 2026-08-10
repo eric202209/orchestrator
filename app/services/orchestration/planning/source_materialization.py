@@ -110,7 +110,7 @@ _TRUNCATED_PREFIX_MARKER = _SOURCE_TRUNCATED_MARKER + "\n"
 _TRUNCATED_SUFFIX_MARKER = "\n" + _SOURCE_TRUNCATED_MARKER
 
 _CREATION_WORD_RE = re.compile(
-    r"\b(add|author|create|generate|introduce|new|scaffold|write)\b",
+    r"\b(add|author|create|generate|introduce|new|scaffold|write)\b|\bif\s+needed\b",
     re.IGNORECASE,
 )
 
@@ -246,6 +246,18 @@ def _ordered_unique_paths(values: Iterable[Any]) -> list[str]:
         seen.add(normalized)
         paths.append(normalized)
     return paths
+
+
+def _unsafe_requested_paths(values: Iterable[Any]) -> list[str]:
+    """Retain invalid requested paths long enough to report fail-closed evidence."""
+    unsafe: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        raw = str(value or "").strip().replace("\\", "/")
+        if raw and not _safe_relative_path(raw) and raw not in seen:
+            seen.add(raw)
+            unsafe.append(raw)
+    return unsafe
 
 
 def _workspace_identity_text(project_dir: Path, workspace_identity: Any = None) -> str:
@@ -850,15 +862,15 @@ def materialize_planner_source_context(
 
     root = Path(project_dir).resolve()
     identity = _workspace_identity_text(root, workspace_identity)
-    expected = _ordered_unique_paths(
-        [
-            *planner_expected_source_paths(
-                task_description=task_description,
-                planner_contract=planner_contract,
-                additional_paths=expected_paths,
-            )
-        ]
-    )
+    requested_expected_paths = [
+        *planner_expected_source_paths(
+            task_description=task_description,
+            planner_contract=planner_contract,
+        ),
+        *expected_paths,
+    ]
+    unsafe_expected = _unsafe_requested_paths(requested_expected_paths)
+    expected = _ordered_unique_paths(requested_expected_paths)
     expected_set = set(expected)
     creation_authorized_set = set(
         _ordered_unique_paths(creation_authorized_paths or ())
@@ -892,8 +904,28 @@ def materialize_planner_source_context(
         maximum_files=maximum_files,
     )
     selected = list(priorities)
-    records: list[MaterializedSourceFile] = []
-    unavailable: list[str] = []
+    records: list[MaterializedSourceFile] = [
+        MaterializedSourceFile(
+            relative_path=relative_path,
+            workspace_identity=identity,
+            content=None,
+            content_hash=None,
+            version_identity=None,
+            status=SOURCE_STATUS_UNREADABLE,
+            truncated=False,
+            source_length=None,
+            source_length_chars=None,
+            included_prompt_length=0,
+            expected=True,
+            creation_authorized=False,
+            omission_reason="unsafe_path",
+            priority="P0",
+        )
+        for relative_path in unsafe_expected
+    ]
+    unavailable: list[str] = [
+        f"{relative_path}:unsafe_path" for relative_path in unsafe_expected
+    ]
     total_bytes = 0
 
     for index, relative_path in enumerate(selected):

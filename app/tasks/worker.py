@@ -2252,33 +2252,9 @@ def execute_orchestration_task(
                 metadata=terminal_evidence,
             )
             if planning_phase_result.get("status") != "completed":
-                mark_session_paused(
-                    session,
-                    alert_level="error",
-                    alert_message=str(
-                        planning_phase_result.get("reason") or "planning_failed"
-                    )[:2000],
+                raise RuntimeError(
+                    str(planning_phase_result.get("reason") or "planning_failed")
                 )
-                db.commit()
-                update_langfuse_observation(
-                    trace_observation,
-                    output=planning_phase_result,
-                    level=(
-                        "ERROR"
-                        if planning_phase_result.get("status") == "failed"
-                        else None
-                    ),
-                    status_message=str(planning_phase_result.get("reason") or "")[:500]
-                    or None,
-                )
-                _emit_task1_product_event(
-                    "task1_execution_failed",
-                    reason=str(
-                        planning_phase_result.get("reason") or "planning_failed"
-                    ),
-                    level="WARN",
-                )
-                return planning_phase_result
 
         _save_orchestration_checkpoint(
             db, session_id, task_id, prompt, orchestration_state

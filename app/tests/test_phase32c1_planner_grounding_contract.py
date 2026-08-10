@@ -333,6 +333,48 @@ def test_new_expected_file_is_creation_authorized_without_fake_source(tmp_path):
     assert outcome.accepted, outcome.reasons
 
 
+def test_optional_creation_authorized_path_is_not_required_existing_source(tmp_path):
+    """A task may authorize a new path without using the literal word create."""
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        expected_paths=["app/current.py", "app/tests/test_current.py"],
+        task_description=(
+            "Update app/current.py and add focused tests under "
+            "app/tests/test_current.py if needed."
+        ),
+    )
+
+    existing = tmp_path / "app" / "current.py"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("VALUE = 1\n", encoding="utf-8")
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        expected_paths=["app/current.py", "app/tests/test_current.py"],
+        task_description=(
+            "Update app/current.py and add focused tests under "
+            "app/tests/test_current.py if needed."
+        ),
+    )
+
+    created = materialization.file_map()["app/tests/test_current.py"]
+    assert created.status == SOURCE_STATUS_NEW
+    assert created.creation_authorized is True
+    assert materialization.available
+
+
+def test_unsafe_expected_creation_path_fails_closed(tmp_path):
+    materialization = materialize_planner_source_context(
+        tmp_path,
+        expected_paths=["../escape.py"],
+        task_description="Create ../escape.py if needed.",
+    )
+
+    assert not materialization.available
+    assert any(
+        "unsafe_path" in reason for reason in materialization.unavailable_reasons
+    )
+
+
 def test_binary_expected_file_fails_closed_without_replacement_evidence(tmp_path):
     (tmp_path / "binary.dat").write_bytes(b"\x00\x01binary")
 
