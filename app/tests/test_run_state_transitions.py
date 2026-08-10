@@ -311,6 +311,34 @@ def test_explicit_failure_timestamp_only_fills_missing_terminal_evidence(db_sess
     assert task.error_message == "historical failure"
 
 
+def test_authoritative_failure_metadata_can_update_existing_terminal_failure(
+    db_session,
+):
+    task, link, execution = _make_task_attempt(db_session)
+    completed_at = datetime(2026, 5, 14, 2, 3, 4, tzinfo=UTC)
+    task.status = TaskStatus.FAILED
+    task.completed_at = completed_at
+    task.error_message = "initial failure"
+    link.status = TaskStatus.FAILED
+    link.completed_at = completed_at
+    execution.status = TaskStatus.FAILED
+    execution.completed_at = completed_at
+
+    mark_task_attempt_failed(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="authoritative retry-blocked failure",
+        completed_at=datetime(2026, 5, 14, 2, 4, 4, tzinfo=UTC),
+        failure_metadata_authoritative=True,
+    )
+
+    assert task.error_message == "authoritative retry-blocked failure"
+    assert task.completed_at == completed_at
+    assert link.completed_at == completed_at
+    assert execution.completed_at == completed_at
+
+
 def test_mark_task_attempt_cancelled_updates_task_link_and_execution(db_session):
     task, link, execution = _make_task_attempt(db_session)
     completed_at = datetime(2026, 5, 14, 3, 4, 5, tzinfo=UTC)

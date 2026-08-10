@@ -123,6 +123,7 @@ def mark_task_attempt_failed(
     error_message: str | None = None,
     completed_at: datetime | None = None,
     workspace_status: str | None = None,
+    failure_metadata_authoritative: bool = False,
 ) -> datetime:
     """Mark a task attempt as failed across domain rows."""
 
@@ -144,7 +145,9 @@ def mark_task_attempt_failed(
     if task:
         task.status = TaskStatus.FAILED
         if error_message is not None and (
-            not task_was_failed or getattr(task, "error_message", None) is None
+            not task_was_failed
+            or getattr(task, "error_message", None) is None
+            or failure_metadata_authoritative
         ):
             task.error_message = error_message
         if getattr(task, "completed_at", None) is None or not task_was_failed:

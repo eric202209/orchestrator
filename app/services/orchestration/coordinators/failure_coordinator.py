@@ -509,6 +509,7 @@ class FailureCoordinator:
                     workspace_status=(
                         "blocked" if task and task.task_subfolder else "not_created"
                     ),
+                    failure_metadata_authoritative=True,
                 )
                 mark_session_paused(
                     session,
