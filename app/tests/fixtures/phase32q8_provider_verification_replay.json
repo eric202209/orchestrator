@@ -1,0 +1,53 @@
+{
+  "plan": [
+    {
+      "step_number": 1,
+      "description": "Create the utc_now helper function in app/time_utils.py",
+      "commands": [],
+      "verification": "python -m pytest app/tests/test_utc_now_helper.py",
+      "rollback": "rm -f app/time_utils.py",
+      "expected_files": ["app/time_utils.py"],
+      "ops": []
+    },
+    {
+      "step_number": 2,
+      "description": "Update context_service.py to use the new utc_now helper",
+      "commands": [],
+      "verification": "python -m pytest app/tests/test_utc_now_helper.py",
+      "rollback": "git checkout app/services/workspace/context_service.py",
+      "expected_files": ["app/services/workspace/context_service.py"],
+      "ops": []
+    },
+    {
+      "step_number": 3,
+      "description": "Create tests for the utc_now helper function",
+      "commands": [],
+      "verification": "python -m pytest app/tests/test_utc_now_helper.py",
+      "rollback": "rm -f app/tests/test_utc_now_helper.py",
+      "expected_files": ["app/tests/test_utc_now_helper.py"],
+      "ops": []
+    }
+  ],
+  "response": {
+    "repair_step": {
+      "commands": [],
+      "description": "Fix pytest AttributeError by importing timedelta, add missing blank lines for flake8 E302, and ensure black formatting compliance.",
+      "expected_files": ["app/tests/test_utc_now_helper.py", "app/time_utils.py"],
+      "ops": [
+        {
+          "op": "write_file",
+          "path": "app/tests/test_utc_now_helper.py",
+          "content": "import pytest\nfrom datetime import datetime, timedelta\nfrom app.time_utils import utc_now\n\n\ndef test_utc_now_is_timezone_aware():\n    \"\"\"Test that utc_now returns a timezone-aware datetime\"\"\"\n    result = utc_now()\n    assert result.tzinfo is not None\n    assert result.tzinfo.utcoffset(result) == timedelta(0)\n\n\ndef test_utc_now_has_utc_offset():\n    \"\"\"Test that utc_now returns UTC offset\"\"\"\n    result = utc_now()\n    assert result.utcoffset() == timedelta(0)\n\n\ndef test_utc_now_is_reasonably_close_to_current_time():\n    \"\"\"Test that utc_now result is reasonably close to current UTC time\"\"\"\n    result = utc_now()\n    now = datetime.now(datetime.timezone.utc)\n    # Allow for a reasonable time difference (e.g., 5 seconds)\n    time_diff = abs((now - result).total_seconds())\n    assert time_diff < 5\n"
+        },
+        {
+          "op": "write_file",
+          "path": "app/time_utils.py",
+          "content": "from datetime import datetime, timezone\n\n\ndef utc_now() -> datetime:\n    return datetime.now(timezone.utc)\n"
+        }
+      ],
+      "rollback": null,
+      "step_number": 4,
+      "verification": "python -m pytest app/tests/test_utc_now_helper.py"
+    }
+  }
+}

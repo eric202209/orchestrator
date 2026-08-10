@@ -36,14 +36,8 @@ from app.services.orchestration.validation.validator import ValidatorService
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_Q6V_RAW_RESPONSE = (
-    _REPO_ROOT / "docs/roadmap/reports/evidence/"
-    "phase32q6v-recovery-friendly-qwen36-candidate-repair-qualification-20260809/"
-    "iteration1-response.raw"
-)
-_ATTEMPT10_PLAN = (
-    _REPO_ROOT / "docs/roadmap/reports/evidence/"
-    "phase32o1r1-redeployment-and-attempt10-20260806/merged-plan.json"
+_Q6V_REPLAY_FIXTURE = (
+    _REPO_ROOT / "app/tests/fixtures/phase32q8_provider_verification_replay.json"
 )
 _TASK_PROMPT = (
     "Create a utc_now helper in app/time_utils.py, use it in "
@@ -197,7 +191,8 @@ def _seed_context(db_session, tmp_path: Path, response: str):
         (_REPO_ROOT / "app/services/workspace/context_service.py").read_bytes()
     )
     _write_q6v_candidate(project_dir)
-    plan = json.loads(_ATTEMPT10_PLAN.read_text(encoding="utf-8"))
+    fixture = json.loads(_Q6V_REPLAY_FIXTURE.read_text(encoding="utf-8"))
+    plan = fixture["plan"]
     state = OrchestrationState(
         session_id="1",
         task_description=_TASK_PROMPT,
@@ -270,8 +265,8 @@ def _seed_context(db_session, tmp_path: Path, response: str):
 
 
 def _retained_q6v_content() -> str:
-    response = json.loads(_Q6V_RAW_RESPONSE.read_text(encoding="utf-8"))
-    return response["choices"][0]["message"]["content"]
+    fixture = json.loads(_Q6V_REPLAY_FIXTURE.read_text(encoding="utf-8"))
+    return json.dumps(fixture["response"])
 
 
 def _corrected_test_content() -> str:
