@@ -102,6 +102,8 @@ from .reporting.policy_simulation import (
     simulate_policy_from_replay,
 )
 from .task_rules import (
+    EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC,
+    EXECUTION_PROFILE_SOURCE_TASK_ROW,
     classify_task_intent,
     get_workflow_profile,
     get_task_report_path,
@@ -245,6 +247,8 @@ __all__ = [
     "get_task_report_path",
     "get_workflow_profile",
     "classify_task_intent",
+    "EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC",
+    "EXECUTION_PROFILE_SOURCE_TASK_ROW",
     "is_verification_style_task",
     "run_virtual_merge_gate",
     "should_execute_in_canonical_project_root",

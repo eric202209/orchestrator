@@ -52,6 +52,8 @@ from app.services.session.session_execution_service import (
     update_execution_failure_metadata,
 )
 from app.services.orchestration import (
+    EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC as _EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC,
+    EXECUTION_PROFILE_SOURCE_TASK_ROW as _EXECUTION_PROFILE_SOURCE_TASK_ROW,
     STALE_RUN_GUARD_SECONDS,
     OrchestrationRunContext,
     TaskWorkspaceViolationError,
@@ -525,6 +527,8 @@ def execute_orchestration_task(
             or getattr(session, "default_execution_profile", None)
             or "full_lifecycle"
         )
+        persisted_execution_profile = execution_profile
+        execution_profile_source = _EXECUTION_PROFILE_SOURCE_TASK_ROW
         if _should_force_review_execution_profile(
             execution_profile,
             task.description if task else None,
@@ -532,12 +536,15 @@ def execute_orchestration_task(
             task.description if task else None,
         ):
             execution_profile = "review_only"
+            execution_profile_source = _EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC
             emit_live(
                 "INFO",
                 "[ORCHESTRATION] Task intent is inspection/review-oriented; using review_only execution profile",
                 metadata={
                     "phase": "profile_selection",
                     "execution_profile": execution_profile,
+                    "persisted_execution_profile": persisted_execution_profile,
+                    "execution_profile_source": execution_profile_source,
                 },
             )
 
@@ -1859,6 +1866,7 @@ def execute_orchestration_task(
             current_task=task,
             execution_profile=execution_profile,
             get_state_manager_path_fn=_get_state_manager_path,
+            profile_source=execution_profile_source,
         )
         if gate_error:
             admission_metadata = getattr(gate_error, "admission_metadata", {})

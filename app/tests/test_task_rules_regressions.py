@@ -2,6 +2,7 @@ import json
 
 from app.models import Plan, Project, Task, TaskStatus
 from app.services.orchestration.task_rules import (
+    EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC,
     classify_task_intent,
     get_task_report_path,
     get_workflow_profile,
@@ -618,3 +619,183 @@ def test_implementation_intent_wins_over_test_contract_language():
 
     for title, description in implementation_tasks:
         assert is_verification_style_task("full_lifecycle", title, description) is False
+
+
+# --- Phase 32T-5: execution-profile authority and provenance ---
+# Product Attempt 14 persisted execution_profile="full_lifecycle" but the review
+# marker "inspect" matched inside "inspectable", forcing review_only, after which
+# classification reported the synthesized profile as an explicit operator choice.
+
+_ATTEMPT14_TITLE = "Add structured log metadata normalization"
+_ATTEMPT14_DESCRIPTION = (
+    "Add app/services/observability/log_metadata.py with a normalization helper "
+    "and route both log_stream.py parse sites through it. Acceptance criteria: "
+    "streaming remains inspectable."
+)
+
+
+def test_review_marker_does_not_match_inside_unrelated_word():
+    assert (
+        should_force_review_execution_profile(
+            "full_lifecycle",
+            _ATTEMPT14_DESCRIPTION,
+            _ATTEMPT14_TITLE,
+            _ATTEMPT14_DESCRIPTION,
+        )
+        is False
+    )
+
+
+def test_attempt14_wording_stays_implementation_style_with_title_authority():
+    assert classify_task_intent(
+        "full_lifecycle",
+        _ATTEMPT14_TITLE,
+        _ATTEMPT14_DESCRIPTION,
+    ).as_dict() == {
+        "classification": "implementation_style",
+        "classification_reason": "implementation_intent_in_title",
+        "classification_authority": "task_title",
+    }
+
+
+def test_review_markers_match_words_and_regular_inflections_only():
+    matching = ("inspect", "inspects", "inspecting", "inspection", "analysis")
+    non_matching = ("inspectable", "inspector", "auditable", "analytics")
+
+    for word in matching:
+        assert (
+            should_force_review_execution_profile(
+                "full_lifecycle", f"streaming remains {word}", "Add helper", ""
+            )
+            is True
+        ), word
+    for word in non_matching:
+        assert (
+            should_force_review_execution_profile(
+                "full_lifecycle", f"streaming remains {word}", "Add helper", ""
+            )
+            is False
+        ), word
+
+
+def test_heuristic_review_profile_reports_its_own_authority():
+    assert classify_task_intent(
+        "review_only",
+        "Add helper",
+        "Inspect the current implementation and report findings.",
+        profile_source=EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC,
+    ).as_dict() == {
+        "classification": "verification_style",
+        "classification_reason": "review_intent_heuristic",
+        "classification_authority": "review_intent_heuristic",
+    }
+
+
+def test_persisted_review_only_profile_remains_explicit_authority():
+    assert classify_task_intent(
+        "review_only",
+        "Report on streaming behavior",
+        "Report findings only.",
+    ).as_dict() == {
+        "classification": "verification_style",
+        "classification_reason": "explicit_execution_profile",
+        "classification_authority": "execution_profile",
+    }
+
+
+def test_genuine_review_task_still_forces_review_profile():
+    assert (
+        should_force_review_execution_profile(
+            "full_lifecycle",
+            "Inspect the current implementation and report findings.",
+            "Current project architecture",
+            "Inspect the current implementation. Do not modify production code.",
+        )
+        is True
+    )
+
+
+def test_virtual_merge_gate_reports_heuristic_profile_authority(db_session, tmp_path):
+    project = Project(name="Heuristic Profile Authority", workspace_path=str(tmp_path))
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    prior_task = Task(
+        project_id=project.id,
+        title="Implementation predecessor",
+        description="The implementation is pending.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+        task_subfolder="task-prior",
+    )
+    current_task = Task(
+        project_id=project.id,
+        title="Current project architecture",
+        description="Inspect the current implementation and report findings.",
+        status=TaskStatus.PENDING,
+        plan_position=2,
+        task_subfolder="task-review",
+    )
+    db_session.add_all([prior_task, current_task])
+    db_session.commit()
+    db_session.refresh(current_task)
+
+    reason = run_virtual_merge_gate(
+        db_session,
+        project,
+        current_task,
+        "review_only",
+        lambda root: root / ".agent" / "state_manager.json",
+        profile_source=EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC,
+    )
+
+    assert reason is not None
+    assert reason.admission_metadata["classification"] == "verification_style"
+    assert (
+        reason.admission_metadata["classification_reason"] == "review_intent_heuristic"
+    )
+    assert (
+        reason.admission_metadata["classification_authority"]
+        == "review_intent_heuristic"
+    )
+    assert reason.admission_metadata["blocking_scope"] == "ordered_project_history"
+
+
+def test_attempt14_shaped_task_is_admitted_by_virtual_merge_gate(db_session, tmp_path):
+    project = Project(name="Attempt14 Shape", workspace_path=str(tmp_path))
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    prior_task = Task(
+        project_id=project.id,
+        title="Historical incomplete task",
+        description="The prior work is still pending.",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+        task_subfolder="task-prior",
+    )
+    current_task = Task(
+        project_id=project.id,
+        title=_ATTEMPT14_TITLE,
+        description=_ATTEMPT14_DESCRIPTION,
+        status=TaskStatus.PENDING,
+        execution_profile="full_lifecycle",
+        plan_position=2,
+        task_subfolder="task-attempt14",
+    )
+    db_session.add_all([prior_task, current_task])
+    db_session.commit()
+    db_session.refresh(current_task)
+
+    assert (
+        run_virtual_merge_gate(
+            db_session,
+            project,
+            current_task,
+            "full_lifecycle",
+            lambda root: root / ".agent" / "state_manager.json",
+        )
+        is None
+    )

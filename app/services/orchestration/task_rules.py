@@ -47,6 +47,42 @@ _INTEGRATION_VERIFICATION_TITLE_INTENT_RE = re.compile(
 )
 
 
+# Provenance of the execution profile handed to admission. The persisted task
+# row is the only operator-visible authority; anything synthesized in-flight
+# must identify itself so classification never claims operator intent it does
+# not have.
+EXECUTION_PROFILE_SOURCE_TASK_ROW = "task_execution_profile"
+EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC = "review_intent_heuristic"
+
+# Review markers are words, not arbitrary substrings: matching "inspect" inside
+# "inspectable" silently converted implementation work into review work. Regular
+# inflections are listed explicitly so genuine review wording still matches.
+_REVIEW_INTENT_MARKERS = (
+    "inspect",
+    "inspects",
+    "inspected",
+    "inspecting",
+    "inspection",
+    "inspections",
+    "analysis",
+    "analyze",
+    "analyzes",
+    "analyzed",
+    "analyzing",
+    "inventory",
+    "extension points",
+    "current project structure",
+    "current project architecture",
+    "codebase walkthrough",
+)
+_REVIEW_INTENT_MARKER_RE = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(marker) for marker in _REVIEW_INTENT_MARKERS)
+    + r")\b",
+    re.IGNORECASE,
+)
+
+
 @dataclass(frozen=True)
 class TaskIntentClassification:
     """The single admission-intent decision and its human-readable authority."""
@@ -106,16 +142,27 @@ def classify_task_intent(
     execution_profile: Optional[str],
     title: Optional[str],
     description: Optional[str],
+    profile_source: str = EXECUTION_PROFILE_SOURCE_TASK_ROW,
 ) -> TaskIntentClassification:
     """Classify admission intent from structured profile or explicit title intent.
 
     Description text is deliberately not an authority: paths, commands,
     filenames, and acceptance criteria commonly mention tests while the task
     still delivers implementation work.
+
+    ``profile_source`` records where ``execution_profile`` came from. A profile
+    synthesized in-flight is reported under its own authority so the recorded
+    provenance can never contradict the persisted task row.
     """
 
     normalized_profile = str(execution_profile or "").strip().lower()
     if normalized_profile in {"test_only", "review_only"}:
+        if profile_source == EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC:
+            return TaskIntentClassification(
+                classification="verification_style",
+                reason="review_intent_heuristic",
+                authority=EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC,
+            )
         return TaskIntentClassification(
             classification="verification_style",
             reason="explicit_execution_profile",
@@ -180,18 +227,7 @@ def should_force_review_execution_profile(
     if execution_profile in {"review_only", "test_only", "debug_only"}:
         return False
     combined = " ".join([task_prompt or "", title or "", description or ""]).lower()
-    review_markers = (
-        "inspect",
-        "inspection",
-        "analysis",
-        "analyze",
-        "inventory",
-        "extension points",
-        "current project structure",
-        "current project architecture",
-        "codebase walkthrough",
-    )
-    if any(marker in combined for marker in review_markers):
+    if _REVIEW_INTENT_MARKER_RE.search(combined):
         return True
 
     implementation_markers = get_implementation_intent_markers()
@@ -356,11 +392,15 @@ def run_virtual_merge_gate(
     current_task: Optional[Task],
     execution_profile: str,
     get_state_manager_path_fn: Any,
+    profile_source: str = EXECUTION_PROFILE_SOURCE_TASK_ROW,
 ) -> Optional[str]:
     if not project or not current_task:
         return None
     classification = classify_task_intent(
-        execution_profile, current_task.title, current_task.description
+        execution_profile,
+        current_task.title,
+        current_task.description,
+        profile_source=profile_source,
     )
     # Free-standing implementation work is not ordered behind unrelated
     # historical project tasks. Explicit Plan membership remains governed by
