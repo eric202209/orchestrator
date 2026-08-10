@@ -10,6 +10,7 @@ coordinator-boundary concerns.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -23,10 +24,16 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.coordinators.failure_coordinator import (
     FailureCoordinator,
 )
 from app.services.orchestration.phases.failure_flow import handle_task_failure
+from app.services.orchestration.prompt_templates import OrchestrationState
+from app.services.orchestration.state.persistence import (
+    append_orchestration_event,
+    read_orchestration_events,
+)
 from app.services.orchestration.types import OrchestrationRunContext
 
 _LOG = logging.getLogger(__name__)
@@ -221,6 +228,64 @@ def test_retry_eligible_path_raises_retry_signal(db_session):
             save_orchestration_checkpoint_fn=_NOOP,
             record_live_log_fn=_NOOP,
         )
+
+
+def test_retry_eligible_path_stamps_a_fresh_dispatch_provenance(
+    db_session, tmp_path: Path, monkeypatch
+):
+    ctx, session, task, execution = _seed_ctx(db_session)
+    ctx.orchestration_state = OrchestrationState(
+        session_id=str(session.id),
+        task_description=task.description or "",
+        project_name="retry-provenance",
+        task_id=task.id,
+        _project_dir_override=str(tmp_path),
+    )
+    first_dispatch = append_orchestration_event(
+        project_dir=tmp_path,
+        session_id=session.id,
+        task_id=task.id,
+        event_type=EventType.TASK_QUEUED,
+        details={"dispatch_attempt": 1, "task_execution_id": execution.id},
+    )
+
+    retry_task = _RetryCapableSelfTask()
+    retry_task.request.kwargs = {
+        "session_id": session.id,
+        "task_id": task.id,
+        "prompt": "test prompt",
+        "task_execution_id": execution.id,
+        "queued_event_id": first_dispatch["event_id"],
+    }
+    error_handler = type("EH", (), {"should_retry": staticmethod(lambda e, c: True)})()
+    object.__setattr__(ctx, "error_handler", error_handler)
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.failure_flow._prepare_retry_workspace",
+        lambda **kwargs: (True, None, False),
+    )
+
+    with pytest.raises(_RetryCapableSelfTask._RetrySignal):
+        FailureCoordinator().handle_failure(
+            self_task=retry_task,
+            ctx=ctx,
+            exc=RuntimeError("transient error"),
+            get_latest_session_task_link_fn=lambda *a, **k: None,
+            write_project_state_snapshot_fn=_NOOP,
+            save_orchestration_checkpoint_fn=_NOOP,
+            record_live_log_fn=_NOOP,
+        )
+
+    queued_events = [
+        event
+        for event in read_orchestration_events(tmp_path, session.id, task.id)
+        if event.get("event_type") == EventType.TASK_QUEUED
+    ]
+    assert len(queued_events) == 2
+    assert queued_events[-1]["event_id"] != first_dispatch["event_id"]
+    assert (
+        retry_task.retry_kwargs["kwargs"]["queued_event_id"]
+        == queued_events[-1]["event_id"]
+    )
 
 
 # ---------------------------------------------------------------------------

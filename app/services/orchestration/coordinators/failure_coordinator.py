@@ -53,6 +53,53 @@ class FailureCoordinator:
     _prepare_retry_workspace, and other helpers to failure_flow.py.
     """
 
+    @staticmethod
+    def _stamp_retry_dispatch_provenance(
+        *,
+        self_task: Any,
+        retry_kwargs: Optional[dict[str, Any]],
+        orchestration_state: Any,
+        session: Any,
+        task: Any,
+        task_execution_id: Optional[int],
+        retry_count: int,
+        append_orchestration_event_fn: Callable[..., Any],
+    ) -> Optional[dict[str, Any]]:
+        """Give each architecture-owned Celery retry its own queue event.
+
+        ``TaskExecution`` remains the logical execution identity and Celery's
+        task id remains the delivery chain identity.  The persisted queued
+        event is the dispatch-attempt provenance consumed by the stale guard.
+        """
+
+        request = getattr(self_task, "request", None)
+        if retry_kwargs is None:
+            request_kwargs = getattr(request, "kwargs", None)
+            if not isinstance(request_kwargs, dict):
+                return None
+            retry_kwargs = dict(request_kwargs)
+        if orchestration_state is None or session is None or task is None:
+            return retry_kwargs
+
+        previous_queued_event_id = retry_kwargs.get("queued_event_id")
+        retry_event = append_orchestration_event_fn(
+            project_dir=orchestration_state.project_dir,
+            session_id=session.id,
+            task_id=task.id,
+            event_type=EventType.TASK_QUEUED,
+            parent_event_id=previous_queued_event_id,
+            details={
+                "dispatch_kind": "architecture_owned_retry",
+                "task_execution_id": task_execution_id,
+                "celery_task_id": getattr(request, "id", None),
+                "retry_count": retry_count + 1,
+                "previous_queued_event_id": previous_queued_event_id,
+                "session_instance_id": getattr(session, "instance_id", None),
+            },
+        )
+        retry_kwargs["queued_event_id"] = retry_event["event_id"]
+        return retry_kwargs
+
     def handle_failure(
         self,
         *,
@@ -495,6 +542,16 @@ class FailureCoordinator:
                 )[:2000],
             )
             db.commit()
+            retry_kwargs = self._stamp_retry_dispatch_provenance(
+                self_task=self_task,
+                retry_kwargs=retry_kwargs,
+                orchestration_state=orchestration_state,
+                session=session,
+                task=task,
+                task_execution_id=task_execution_id,
+                retry_count=retry_count,
+                append_orchestration_event_fn=append_orchestration_event,
+            )
             if retry_kwargs is not None:
                 raise self_task.retry(exc=exc, kwargs=retry_kwargs)
             raise self_task.retry(exc=exc)

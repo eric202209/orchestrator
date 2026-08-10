@@ -24,6 +24,8 @@ from app.services.observability.runtime_identity import (
     RuntimeIdentityProjection,
     build_runtime_identity_projection,
 )
+from app.services.orchestration.run_state import finalize_attempt_planning_failure
+from app.services.orchestration.state.session_state import mark_session_paused
 
 from .common import _parse_event_timestamp
 from .execution_state import _clear_orphaned_running_state_without_active_execution
@@ -268,7 +270,64 @@ def _emit_dispatch_rejected(
             event_type=EventType.TASK_DISPATCH_REJECTED,
             details=reject_details,
         )
-    if task_execution_id:
+    terminalized = False
+    latest_queued_event = _find_queued_event_for_dispatch(
+        dispatch_project_dir=dispatch_project_dir,
+        session_id=session_id,
+        task_id=task_id,
+    )
+    if (
+        task_execution_id
+        and queued_event
+        and latest_queued_event
+        and queued_event.get("event_id") == latest_queued_event.get("event_id")
+    ):
+        current_task = db.query(Task).filter(Task.id == task_id).first()
+        current_execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.id == task_execution_id)
+            .first()
+        )
+        current_link = _get_latest_session_task_link(db, session_id, task_id)
+        has_progressed_owner = any(
+            status in {TaskStatus.RUNNING, TaskStatus.DONE}
+            for status in (
+                getattr(current_task, "status", None),
+                getattr(current_link, "status", None),
+                getattr(current_execution, "status", None),
+            )
+        )
+        if not has_progressed_owner and current_task and current_link:
+            finalize_attempt_planning_failure(
+                task=current_task,
+                session_task_link=current_link,
+                task_execution=(
+                    current_execution
+                    if getattr(current_execution, "status", None)
+                    not in {TaskStatus.CANCELLED, TaskStatus.DONE}
+                    else None
+                ),
+                error_message=f"Dispatch rejected before claim: {reason}",
+                workspace_status=(
+                    "blocked"
+                    if getattr(current_task, "task_subfolder", None)
+                    else "not_created"
+                ),
+            )
+            if getattr(session, "status", None) in {
+                "pending",
+                "running",
+                "paused",
+                "awaiting_input",
+            } and getattr(session, "is_active", False):
+                mark_session_paused(
+                    session,
+                    alert_level="error",
+                    alert_message=f"Task {task_id} dispatch rejected: {reason}",
+                )
+            terminalized = True
+            db.commit()
+    if task_execution_id and not terminalized:
         _clear_orphaned_running_state_without_active_execution(
             db,
             session_id=session_id,

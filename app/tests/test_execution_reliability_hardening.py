@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -26,7 +26,10 @@ from app.services.orchestration.phases.execution_loop import (
 from app.services.orchestration.phases.execution_local_steps import (
     _execute_simple_verification_step,
 )
-from app.services.orchestration.state.persistence import read_orchestration_events
+from app.services.orchestration.state.persistence import (
+    append_orchestration_event,
+    read_orchestration_events,
+)
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
 )
@@ -523,6 +526,58 @@ def test_worker_rejects_stale_dispatch_that_already_progressed(tmp_path):
     )
 
     assert reason == "stale_queue_dispatch_already_progressed"
+
+
+def test_attempt15_shaped_retries_are_fresh_but_old_delivery_is_rejected(tmp_path):
+    project_dir = tmp_path / "attempt15-shaped"
+    project_dir.mkdir()
+    logical_started_at = (
+        datetime.now(timezone.utc) - timedelta(seconds=1200)
+    ).isoformat()
+    current_dispatches = []
+
+    for retry_delivery in range(1, 5):
+        queued_event = append_orchestration_event(
+            project_dir=project_dir,
+            session_id=15,
+            task_id=182,
+            event_type=EventType.TASK_QUEUED,
+            details={
+                "dispatch_kind": (
+                    "initial" if retry_delivery == 1 else "architecture_owned_retry"
+                ),
+                "logical_started_at": logical_started_at,
+                "retry_delivery": retry_delivery,
+            },
+        )
+        current_dispatches.append(queued_event)
+        assert (
+            _should_reject_stale_dispatch_claim(
+                dispatch_project_dir=project_dir,
+                session_id=15,
+                task_id=182,
+                queued_event=queued_event,
+                queue_latency_seconds=0.1,
+            )
+            is None
+        )
+        append_orchestration_event(
+            project_dir=project_dir,
+            session_id=15,
+            task_id=182,
+            event_type=EventType.TASK_CLAIMED,
+            details={"queued_event_id": queued_event["event_id"]},
+        )
+
+    stale_reason = _should_reject_stale_dispatch_claim(
+        dispatch_project_dir=project_dir,
+        session_id=15,
+        task_id=182,
+        queued_event=current_dispatches[0],
+        queue_latency_seconds=1200.0,
+    )
+    assert stale_reason == "stale_queue_dispatch_already_progressed"
+    assert len(current_dispatches) == 4
 
 
 def test_worker_does_not_reject_fresh_specific_queued_event(tmp_path):
