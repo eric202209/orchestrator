@@ -42,6 +42,9 @@ EXPECTED_SESSION_CALLS = {
         "mark_session_paused": 4,
         "mark_session_running": 1,
     },
+    "app/tasks/worker_support/dispatch.py": {
+        "mark_session_paused": 1,
+    },
     "app/services/session/session_lifecycle_service.py": {
         "mark_session_failed": 1,
         "mark_session_paused": 2,
