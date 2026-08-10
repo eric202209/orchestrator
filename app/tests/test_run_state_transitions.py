@@ -177,6 +177,140 @@ def test_mark_task_attempt_failed_updates_task_link_and_execution(db_session):
     assert execution.completed_at == completed_at
 
 
+def test_repeated_failed_terminalization_preserves_lifecycle_snapshot(db_session):
+    task, link, execution = _make_task_attempt(db_session)
+    execution_completed_at = datetime(2026, 5, 14, 2, 3, 4, tzinfo=UTC)
+    execution.status = TaskStatus.FAILED
+    execution.completed_at = execution_completed_at
+
+    mark_task_attempt_failed(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="planner unavailable",
+    )
+    first_snapshot = (
+        task.status,
+        task.completed_at,
+        task.error_message,
+        link.status,
+        link.completed_at,
+        execution.status,
+        execution.completed_at,
+    )
+
+    mark_task_attempt_failed(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="planner unavailable",
+    )
+    second_snapshot = (
+        task.status,
+        task.completed_at,
+        task.error_message,
+        link.status,
+        link.completed_at,
+        execution.status,
+        execution.completed_at,
+    )
+
+    assert second_snapshot == first_snapshot
+
+
+def test_failed_terminalization_preserves_task_timestamp_and_fills_link(
+    db_session,
+):
+    task, link, execution = _make_task_attempt(db_session)
+    task_completed_at = datetime(2026, 5, 14, 2, 3, 4, tzinfo=UTC)
+    execution_completed_at = datetime(2026, 5, 14, 2, 3, 5, tzinfo=UTC)
+    task.status = TaskStatus.FAILED
+    task.completed_at = task_completed_at
+    task.error_message = "existing failure"
+    task.workspace_status = "blocked"
+    execution.status = TaskStatus.FAILED
+    execution.completed_at = execution_completed_at
+
+    result = mark_task_attempt_failed(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="replacement failure",
+        completed_at=datetime(2026, 5, 14, 2, 4, 4, tzinfo=UTC),
+        workspace_status="not_created",
+    )
+
+    assert result == task_completed_at
+    assert task.status == TaskStatus.FAILED
+    assert task.completed_at == task_completed_at
+    assert task.error_message == "existing failure"
+    assert task.workspace_status == "blocked"
+    assert link.status == TaskStatus.FAILED
+    assert link.completed_at == task_completed_at
+    assert execution.status == TaskStatus.FAILED
+    assert execution.completed_at == execution_completed_at
+
+
+def test_failed_terminalization_preserves_link_timestamp_and_fills_task(db_session):
+    task, link, execution = _make_task_attempt(db_session)
+    link_completed_at = datetime(2026, 5, 14, 2, 3, 4, tzinfo=UTC)
+    execution_completed_at = datetime(2026, 5, 14, 2, 3, 5, tzinfo=UTC)
+    link.status = TaskStatus.FAILED
+    link.completed_at = link_completed_at
+    execution.status = TaskStatus.FAILED
+    execution.completed_at = execution_completed_at
+
+    result = mark_task_attempt_failed(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="planning failed",
+        completed_at=datetime(2026, 5, 14, 2, 4, 4, tzinfo=UTC),
+    )
+
+    assert result == link_completed_at
+    assert task.status == TaskStatus.FAILED
+    assert task.completed_at == link_completed_at
+    assert task.error_message == "planning failed"
+    assert link.status == TaskStatus.FAILED
+    assert link.completed_at == link_completed_at
+    assert execution.status == TaskStatus.FAILED
+    assert execution.completed_at == execution_completed_at
+
+
+def test_explicit_failure_timestamp_only_fills_missing_terminal_evidence(db_session):
+    task, link, execution = _make_task_attempt(db_session)
+    explicit_completed_at = datetime(2026, 5, 14, 2, 3, 4, tzinfo=UTC)
+
+    result = mark_task_attempt_failed(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="historical failure",
+        completed_at=explicit_completed_at,
+    )
+
+    assert result == explicit_completed_at
+    assert task.completed_at == explicit_completed_at
+    assert link.completed_at == explicit_completed_at
+    assert execution.completed_at == explicit_completed_at
+
+    later_completed_at = datetime(2026, 5, 14, 2, 4, 4, tzinfo=UTC)
+    result = mark_task_attempt_failed(
+        task=task,
+        session_task_link=link,
+        task_execution=execution,
+        error_message="different repeated failure",
+        completed_at=later_completed_at,
+    )
+
+    assert result == explicit_completed_at
+    assert task.completed_at == explicit_completed_at
+    assert link.completed_at == explicit_completed_at
+    assert execution.completed_at == explicit_completed_at
+    assert task.error_message == "historical failure"
+
+
 def test_mark_task_attempt_cancelled_updates_task_link_and_execution(db_session):
     task, link, execution = _make_task_attempt(db_session)
     completed_at = datetime(2026, 5, 14, 3, 4, 5, tzinfo=UTC)

@@ -126,17 +126,40 @@ def mark_task_attempt_failed(
 ) -> datetime:
     """Mark a task attempt as failed across domain rows."""
 
-    completed_at = completed_at or datetime.now(timezone.utc)
+    task_was_failed = task is not None and task.status == TaskStatus.FAILED
+    session_task_was_failed = (
+        session_task_link is not None and session_task_link.status == TaskStatus.FAILED
+    )
+    existing_completed_at = (
+        getattr(task, "completed_at", None)
+        if task_was_failed and getattr(task, "completed_at", None) is not None
+        else (
+            getattr(session_task_link, "completed_at", None)
+            if session_task_was_failed
+            and getattr(session_task_link, "completed_at", None) is not None
+            else None
+        )
+    )
+    completed_at = existing_completed_at or completed_at or datetime.now(timezone.utc)
     if task:
         task.status = TaskStatus.FAILED
-        if error_message is not None:
+        if error_message is not None and (
+            not task_was_failed or getattr(task, "error_message", None) is None
+        ):
             task.error_message = error_message
-        task.completed_at = completed_at
-        if workspace_status is not None:
+        if getattr(task, "completed_at", None) is None or not task_was_failed:
+            task.completed_at = completed_at
+        if workspace_status is not None and (
+            not task_was_failed or getattr(task, "workspace_status", None) is None
+        ):
             task.workspace_status = workspace_status
     if session_task_link:
         session_task_link.status = TaskStatus.FAILED
-        session_task_link.completed_at = completed_at
+        if (
+            getattr(session_task_link, "completed_at", None) is None
+            or not session_task_was_failed
+        ):
+            session_task_link.completed_at = completed_at
     if task_execution:
         task_execution.status = TaskStatus.FAILED
         task_execution.completed_at = task_execution.completed_at or completed_at

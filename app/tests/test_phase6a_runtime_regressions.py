@@ -16,7 +16,10 @@ from app.models import (
 )
 from app.services.agents.openclaw_service import OpenClawSessionService
 from app.services.orchestration.events.event_types import EventType
-from app.services.orchestration.state.persistence import append_orchestration_event
+from app.services.orchestration.state.persistence import (
+    append_orchestration_event,
+    read_orchestration_events,
+)
 from app.tasks.worker_support.dispatch import _find_queued_event_for_dispatch
 from app.tasks.worker import _emit_dispatch_rejected
 
@@ -160,6 +163,20 @@ def test_current_rejected_dispatch_terminalizes_the_canonical_graph(
     assert execution.status == TaskStatus.FAILED
     assert session.status == "paused"
     assert session.is_active is False
+    first_snapshot = (
+        task.status,
+        task.completed_at,
+        task.error_message,
+        task.workspace_status,
+        link.status,
+        link.completed_at,
+        execution.status,
+        execution.completed_at,
+        session.status,
+        session.is_active,
+        session.last_alert_level,
+        session.last_alert_message,
+    )
 
     # Reprocessing the same rejected delivery is lifecycle-idempotent.
     _emit_dispatch_rejected(
@@ -180,9 +197,36 @@ def test_current_rejected_dispatch_terminalizes_the_canonical_graph(
     db_session.refresh(task)
     db_session.refresh(link)
     db_session.refresh(execution)
+    db_session.refresh(session)
     assert task.status == TaskStatus.FAILED
     assert link.status == TaskStatus.FAILED
     assert execution.status == TaskStatus.FAILED
+    second_snapshot = (
+        task.status,
+        task.completed_at,
+        task.error_message,
+        task.workspace_status,
+        link.status,
+        link.completed_at,
+        execution.status,
+        execution.completed_at,
+        session.status,
+        session.is_active,
+        session.last_alert_level,
+        session.last_alert_message,
+    )
+    assert second_snapshot == first_snapshot
+    assert (
+        len(
+            read_orchestration_events(
+                tmp_path,
+                session.id,
+                task.id,
+                event_type_filter=EventType.TASK_DISPATCH_REJECTED,
+            )
+        )
+        == 2
+    )
 
 
 def test_rejected_old_dispatch_does_not_consume_a_newer_retry(
