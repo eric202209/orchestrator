@@ -220,6 +220,26 @@ class BaselinePromotionService:
             return None
         return path
 
+    @staticmethod
+    def _destination_is_containable(baseline_dir: Path, relative: Path) -> bool:
+        """Reject a baseline write destination reachable only through a symlink.
+
+        Phase 33C-1: `_safe_change_set_relative_path` is a *lexical* declaration
+        check and provably cannot see a symlink, so a `some/link -> /etc` segment
+        already present in the canonical baseline would make `shutil.copy2` write
+        through it and mutate a target outside the baseline.  Each segment is
+        observed with `lstat` semantics (`Path.is_symlink`), never resolved, so
+        the check is symmetric with the trusted-inventory rule: a symlink is
+        observed as a symlink, and an untrusted write through one fails closed.
+        """
+
+        current = baseline_dir
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                return False
+        return True
+
     def promote_change_set_into_baseline(
         self,
         project: Project,
@@ -293,6 +313,8 @@ class BaselinePromotionService:
             # scaffolding, but promotion must never apply it if an older or
             # hand-built artifact contains the generated AGENTS.md.
             if is_executor_runtime_scaffold(source_path):
+                continue
+            if not self._destination_is_containable(baseline_dir, relative):
                 continue
             destination = baseline_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)

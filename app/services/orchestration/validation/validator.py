@@ -5,7 +5,8 @@ from __future__ import annotations
 import copy
 import re
 import shlex
-from pathlib import Path
+import stat
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Mapping, Optional
 from ..policy import apply_validation_policy
 from ..types import (
@@ -40,7 +41,6 @@ from .workspace_checks import (
 )
 from .workspace_guard import (
     TaskWorkspaceViolationError,
-    normalize_path_reference,
 )
 from .candidate_checks import (
     candidate_authorized_paths,
@@ -187,6 +187,89 @@ def is_orchestration_internal_path(relative_path: str) -> bool:
 
 def _product_baseline_paths(paths: set[str]) -> set[str]:
     return {path for path in paths if not is_orchestration_internal_path(path)}
+
+
+def _trusted_baseline_inventory(baseline_dir: Path) -> tuple[set[str], set[str]]:
+    """Enumerate a pre-existing canonical baseline without resolving targets.
+
+    Phase 33C-1: a baseline entry is *trusted filesystem observation*, not a
+    candidate-declared path, so it must not be pushed through the
+    filesystem-resolving `normalize_path_reference` primitive.  Doing so made an
+    ordinary hydrated toolchain symlink (`venv/bin/python3 ->
+    /usr/bin/python3.12`) look like an escaping candidate path and aborted
+    publication preflight with `TaskWorkspaceViolationError` before the
+    orchestration-internal filter ever ran (Product Attempt 16).
+
+    Ownership is therefore classified *first*, by the same
+    `is_orchestration_internal_path` / `HYDRATION_EXCLUDED_NAMES` authority the
+    rest of publication already uses, and the entry type is read with `lstat`
+    semantics so a symlink is observed as a symlink rather than followed.  No
+    allowlist is involved: `venv/`, `node_modules/` and `.agent/` are excluded
+    because they are not product content, not because of what they point at.
+
+    Returns `(product_paths, excluded_paths)`; both are canonical relative POSIX
+    strings and neither has had any target resolved.
+    """
+
+    product_paths: set[str] = set()
+    excluded_paths: set[str] = set()
+    for path in baseline_dir.rglob("*"):
+        relative = path.relative_to(baseline_dir).as_posix()
+        excluded = is_orchestration_internal_path(relative)
+        try:
+            mode = path.lstat().st_mode
+        except OSError:
+            continue
+        if not (stat.S_ISREG(mode) or stat.S_ISLNK(mode)):
+            continue
+        if excluded:
+            excluded_paths.add(relative)
+        else:
+            product_paths.add(relative)
+    return product_paths, excluded_paths
+
+
+def _declared_candidate_relative_path(path_text: str) -> str:
+    """Validate a candidate-declared product path lexically, without the filesystem.
+
+    Phase 33C-1: candidate/Change Set path strings are untrusted *declarations*.
+    Deciding whether a declaration is acceptable is a syntax question, so it must
+    not depend on `.resolve()`, on symlink following, or on the path existing.
+    The unsafe declaration classes previously rejected by
+    `normalize_path_reference` in this flow (empty, `~`, absolute, `..`
+    traversal) stay rejected, and drive-letter declarations — which the resolving
+    primitive silently accepted as relative filenames on POSIX — are now rejected
+    too.  Orchestration-owned and hydration-excluded roots continue to be filtered
+    by `_product_baseline_paths`, the existing ownership authority.
+
+    Phase 33C-2 supersedes this helper with the shared `declare()` primitive in
+    `validation/path_authority.py`; it is deliberately private and local to
+    publication until then.
+    """
+
+    raw = (path_text or "").strip().strip("\"'")
+    if not raw:
+        raise TaskWorkspaceViolationError("Empty path reference is not allowed")
+    if raw.startswith("~"):
+        raise TaskWorkspaceViolationError(
+            f"Home-directory path is not allowed in task workspace: {raw}"
+        )
+    if raw.startswith("/") or re.match(r"^[A-Za-z]:([\\/]|$)", raw):
+        raise TaskWorkspaceViolationError(
+            f"Absolute path is not allowed in task workspace: {raw}"
+        )
+    segments = [part for part in PurePosixPath(raw).parts if part != "."]
+    if any(part == ".." for part in segments):
+        raise TaskWorkspaceViolationError(f"Path escapes task workspace: {raw}")
+    if not segments:
+        raise TaskWorkspaceViolationError("Empty path reference is not allowed")
+    return PurePosixPath(*segments).as_posix()
+
+
+def _declared_candidate_paths(paths: Any) -> set[str]:
+    return _product_baseline_paths(
+        {_declared_candidate_relative_path(str(path)) for path in paths or []}
+    )
 
 
 MIXED_LANGUAGE_WORKSPACE_ISSUE = (
@@ -2940,31 +3023,21 @@ class ValidatorService:
         }
 
         baseline_dir = Path(baseline_path).resolve()
-        raw_canonical_paths = {
-            normalize_path_reference(
-                path.relative_to(baseline_dir).as_posix(), baseline_dir
-            )
-            for path in baseline_dir.rglob("*")
-            if path.is_file()
-        }
-        canonical_paths = _product_baseline_paths(raw_canonical_paths)
-        added_paths = _product_baseline_paths(
-            {
-                normalize_path_reference(str(path), baseline_dir)
-                for path in (candidate_change_set or {}).get("added_files") or []
-            }
+        # Phase 33C-1: two trust classes, two primitives.  Pre-existing baseline
+        # entries are trusted observation (classified before any target is
+        # followed); Change Set entries are untrusted declarations (validated
+        # lexically, never resolved).
+        canonical_paths, excluded_baseline_paths = _trusted_baseline_inventory(
+            baseline_dir
         )
-        modified_paths = _product_baseline_paths(
-            {
-                normalize_path_reference(str(path), baseline_dir)
-                for path in (candidate_change_set or {}).get("modified_files") or []
-            }
+        added_paths = _declared_candidate_paths(
+            (candidate_change_set or {}).get("added_files")
         )
-        deleted_paths = _product_baseline_paths(
-            {
-                normalize_path_reference(str(path), baseline_dir)
-                for path in (candidate_change_set or {}).get("deleted_files") or []
-            }
+        modified_paths = _declared_candidate_paths(
+            (candidate_change_set or {}).get("modified_files")
+        )
+        deleted_paths = _declared_candidate_paths(
+            (candidate_change_set or {}).get("deleted_files")
         )
         projected_paths = canonical_paths | added_paths | modified_paths
         projected_paths.difference_update(deleted_paths)
@@ -2973,10 +3046,10 @@ class ValidatorService:
             details["preflight_candidate_projection"] = {
                 "mode": "candidate_aware",
                 "canonical_paths": sorted(canonical_paths)[:20],
-                "canonical_raw_paths": sorted(raw_canonical_paths)[:20],
-                "orchestration_internal_paths": sorted(
-                    raw_canonical_paths - canonical_paths
+                "canonical_raw_paths": sorted(
+                    canonical_paths | excluded_baseline_paths
                 )[:20],
+                "orchestration_internal_paths": sorted(excluded_baseline_paths)[:20],
                 "added_paths": sorted(added_paths)[:20],
                 "modified_paths": sorted(modified_paths)[:20],
                 "deleted_paths": sorted(deleted_paths)[:20],
