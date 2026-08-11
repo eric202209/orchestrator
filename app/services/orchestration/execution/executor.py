@@ -21,6 +21,16 @@ from app.services.workspace.permissions import (
     ensure_shared_path_to_root,
     ensure_shared_permissions,
 )
+from app.services.orchestration.validation.accepted_path_authority import (
+    AcceptedPathAuthority,
+)
+from app.services.orchestration.validation.path_authority import (
+    EntryType,
+    GrantClass,
+    PathAuthorityError,
+    declare,
+    observe,
+)
 
 
 @dataclass(frozen=True)
@@ -445,7 +455,92 @@ class ExecutorService:
         return ExecutorService._resolve_op_path(project_dir, raw_path, "write_file")
 
     @staticmethod
-    def execute_file_ops(project_dir: Path, ops: Any) -> Dict[str, Any]:
+    def _authorize_file_op(
+        project_dir: Path,
+        operation: Dict[str, Any],
+        accepted_path_authority: AcceptedPathAuthority,
+    ) -> str:
+        """Authorize one structured mutation immediately before resolution."""
+
+        op_name = str(operation.get("op") or "")
+        declared = declare(operation.get("path"))
+        observation = observe(project_dir, declared)
+        if observation.symlink_segment:
+            raise PathAuthorityError(
+                "path_symlink_rejected",
+                f"{op_name} target contains a symlink segment: {declared.value}",
+            )
+
+        if op_name == "mkdir":
+            if (
+                declared.value
+                not in accepted_path_authority.creation_parent_directories()
+            ):
+                raise PathAuthorityError(
+                    "path_not_authorized",
+                    f"mkdir target is not an implied parent of a creation grant: {declared.value}",
+                )
+            if observation.exists and observation.entry_type is not EntryType.DIRECTORY:
+                raise PathAuthorityError(
+                    "path_target_type_invalid",
+                    f"mkdir target is not a directory: {declared.value}",
+                )
+            return declared.value
+
+        if op_name == "delete_file":
+            required_class = GrantClass.DELETION_AUTHORIZED
+        elif op_name == "replace_in_file":
+            required_class = GrantClass.EXISTING_MUTABLE
+        elif op_name in {"write_file", "append_file"}:
+            if observation.entry_type is EntryType.REGULAR_FILE:
+                required_class = GrantClass.EXISTING_MUTABLE
+            elif not observation.exists and observation.entry_type is EntryType.MISSING:
+                required_class = GrantClass.CREATION_AUTHORIZED
+            else:
+                raise PathAuthorityError(
+                    "path_target_type_invalid",
+                    f"{op_name} target is not a regular file or missing path: {declared.value}",
+                )
+        else:
+            raise PathAuthorityError(
+                "structured_mutation_unsupported",
+                f"no authority rule exists for structured operation: {op_name}",
+            )
+
+        grant = accepted_path_authority.grant_for(declared)
+        if grant is None:
+            raise PathAuthorityError(
+                "authority_missing",
+                f"no {required_class.value} grant exists for {declared.value}",
+            )
+        if grant.grant_class is not required_class:
+            raise PathAuthorityError(
+                "grant_class_mismatch",
+                f"{declared.value} has {grant.grant_class.value}, not {required_class.value}",
+            )
+        if op_name == "replace_in_file" and not observation.exists:
+            raise PathAuthorityError(
+                "path_target_missing",
+                f"replace_in_file target does not exist: {declared.value}",
+            )
+        if (
+            op_name == "delete_file"
+            and observation.exists
+            and observation.entry_type is not EntryType.REGULAR_FILE
+        ):
+            raise PathAuthorityError(
+                "path_target_type_invalid",
+                f"delete_file target is not a file: {declared.value}",
+            )
+        return declared.value
+
+    @staticmethod
+    def execute_file_ops(
+        project_dir: Path,
+        ops: Any,
+        *,
+        accepted_path_authority: AcceptedPathAuthority | None = None,
+    ) -> Dict[str, Any]:
         """Execute structured file operations without shell quoting."""
 
         if not ops:
@@ -479,12 +574,49 @@ class ExecutorService:
                     "files_changed": files_changed,
                     "output": f"op {index} unsupported op: {op_name}",
                 }
+            declared_relative = None
             try:
+                if accepted_path_authority is None:
+                    raise PathAuthorityError(
+                        "authority_record_missing",
+                        "structured mutations require an accepted path authority",
+                    )
+                declared_relative = ExecutorService._authorize_file_op(
+                    normalized_project_dir,
+                    operation,
+                    accepted_path_authority,
+                )
                 target = ExecutorService._resolve_op_path(
                     normalized_project_dir,
                     str(operation.get("path") or ""),
                     str(op_name),
                 )
+                # Re-observe after the existing containment resolution and
+                # immediately before the operation branch.  This closes the
+                # important creation-collision and final-symlink window
+                # without treating a source-region digest as a whole-file lock.
+                ExecutorService._authorize_file_op(
+                    normalized_project_dir,
+                    operation,
+                    accepted_path_authority,
+                )
+            except PathAuthorityError as exc:
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": str(exc),
+                    "failure_category": "validation_failure",
+                    "authority_error": {
+                        "code": exc.code,
+                        "message": exc.message,
+                        "path": locals().get("declared_relative"),
+                    },
+                    "authority_identity": (
+                        accepted_path_authority.authority_identity
+                        if accepted_path_authority is not None
+                        else None
+                    ),
+                }
             except ValueError as exc:
                 return {
                     "success": False,
@@ -509,6 +641,11 @@ class ExecutorService:
                         "files_changed": files_changed,
                         "output": f"delete_file target is not a file: {relative}",
                     }
+                ExecutorService._authorize_file_op(
+                    normalized_project_dir,
+                    operation,
+                    accepted_path_authority,
+                )
                 target.unlink()
                 files_changed.append(relative)
                 output_lines.append(f"delete_file {relative}")
@@ -526,6 +663,11 @@ class ExecutorService:
                 if op_name == "write_file":
                     target.parent.mkdir(parents=True, exist_ok=True)
                     ensure_shared_path_to_root(target.parent, normalized_project_dir)
+                    ExecutorService._authorize_file_op(
+                        normalized_project_dir,
+                        operation,
+                        accepted_path_authority,
+                    )
                     target.write_text(content, encoding="utf-8")
                     ensure_shared_permissions(target)
                     output_lines.append(f"write_file {relative} ({len(content)} chars)")
@@ -542,6 +684,11 @@ class ExecutorService:
                             "files_changed": files_changed,
                             "output": f"append_file parent is not a directory: {target.parent.relative_to(normalized_project_dir).as_posix()}",
                         }
+                    ExecutorService._authorize_file_op(
+                        normalized_project_dir,
+                        operation,
+                        accepted_path_authority,
+                    )
                     with target.open("a", encoding="utf-8") as handle:
                         handle.write(content)
                     ensure_shared_permissions(target)
@@ -601,6 +748,11 @@ class ExecutorService:
                 except re.error:
                     regex_matches = []
                 if len(regex_matches) == 1:
+                    ExecutorService._authorize_file_op(
+                        normalized_project_dir,
+                        operation,
+                        accepted_path_authority,
+                    )
                     target.write_text(
                         re.sub(old, lambda _match: new, original, count=1),
                         encoding="utf-8",
@@ -617,6 +769,11 @@ class ExecutorService:
                         "files_changed": files_changed,
                         "output": f"replace_in_file regex old text is ambiguous in {relative}: {len(regex_matches)} occurrences",
                     }
+                ExecutorService._authorize_file_op(
+                    normalized_project_dir,
+                    operation,
+                    accepted_path_authority,
+                )
                 patch_result = try_deterministic_patch(
                     target, old, new, normalized_project_dir
                 )
@@ -647,6 +804,11 @@ class ExecutorService:
                     "files_changed": files_changed,
                     "output": f"replace_in_file old text is ambiguous in {relative}: {occurrence_count} occurrences",
                 }
+            ExecutorService._authorize_file_op(
+                normalized_project_dir,
+                operation,
+                accepted_path_authority,
+            )
             target.write_text(original.replace(old, new, 1), encoding="utf-8")
             ensure_shared_permissions(target)
             files_changed.append(relative)

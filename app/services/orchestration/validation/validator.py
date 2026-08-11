@@ -496,6 +496,8 @@ def _source_operation_contract_issues(
         "new_file_write_without_creation_authorization": [],
         "source_materialization_unavailable": [],
         "source_operation_verdicts": [],
+        "accepted_creation_paths": [],
+        "accepted_existing_mutation_paths": [],
     }
     unavailable = list(getattr(source_materialization, "unavailable_reasons", ()) or ())
     if unavailable:
@@ -544,6 +546,7 @@ def _source_operation_contract_issues(
                         and not (project_dir / relative_path).exists()
                     ):
                         current_content[relative_path] = content
+                        details["accepted_creation_paths"].append(relative_path)
                         continue
                     if (
                         (project_dir / relative_path).is_file()
@@ -555,6 +558,9 @@ def _source_operation_contract_issues(
                         )
                     ):
                         current_content[relative_path] = content
+                        details["accepted_existing_mutation_paths"].append(
+                            relative_path
+                        )
                         continue
                     details["new_file_write_without_creation_authorization"].append(
                         label
@@ -1432,6 +1438,8 @@ class ValidatorService:
         repairable: List[str] = []
         rejected: List[str] = []
         details: Dict[str, Any] = {"plan_length": len(plan)}
+        accepted_creation_paths: set[str] = set()
+        accepted_existing_mutation_paths: set[str] = set()
         if source_materialization is None and project_dir is not None:
             source_materialization = materialize_planner_source_context(
                 Path(project_dir),
@@ -1623,6 +1631,12 @@ class ValidatorService:
                 ),
                 project_dir=Path(project_dir),
                 source_materialization=source_materialization,
+            )
+            accepted_creation_paths.update(
+                source_contract_issues["accepted_creation_paths"]
+            )
+            accepted_existing_mutation_paths.update(
+                source_contract_issues["accepted_existing_mutation_paths"]
             )
             if (
                 source_contract_issues["source_materialization_unavailable"]
@@ -2252,6 +2266,8 @@ class ValidatorService:
                         creation_requested_paths=_plan_creation_authorized_paths(
                             accepted_plan
                         ),
+                        accepted_creation_paths=accepted_creation_paths,
+                        accepted_existing_mutation_paths=accepted_existing_mutation_paths,
                     )
                 except PathAuthorityError as exc:
                     # A contradictory grant set is not downgraded to a warning

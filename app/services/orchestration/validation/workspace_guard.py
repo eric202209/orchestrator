@@ -19,6 +19,10 @@ from app.services.orchestration.operations.file_ops_contract import (
     expected_file_op_keys,
     normalize_file_op_shape,
 )
+from app.services.orchestration.validation.path_authority import (
+    AcceptedPathAuthority,
+    GrantClass,
+)
 
 
 class TaskWorkspaceViolationError(ValueError):
@@ -837,16 +841,30 @@ def detect_scope_violations(
     project_dir: Path,
     expected_files: List[str],
     pre_checksum: Dict[str, str],
+    *,
+    accepted_path_authority: AcceptedPathAuthority | None = None,
 ) -> List[str]:
-    """Return paths written or modified outside expected_files since pre_checksum.
+    """Return paths written or modified outside accepted authority since pre_checksum.
 
-    Only flags files not declared in the step's expected_files list and either
-    newly created or byte-level changed.  Config/lock files are excluded from
-    the violation list to avoid noise from package-manager side-effects.
+    When an AcceptedPathAuthority is supplied, it is the only authorization
+    input.  ``expected_files`` remains a compatibility input for observation
+    callers outside the accepted-plan execution path.
     """
     _NOISE_SUFFIXES = {".lock", ".log"}
     _NOISE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml"}
-    allowed = {Path(str(f).lstrip("./")).as_posix() for f in (expected_files or [])}
+    if accepted_path_authority is None:
+        allowed = {Path(str(f).lstrip("./")).as_posix() for f in (expected_files or [])}
+    else:
+        allowed = {
+            grant.path.value
+            for grant in accepted_path_authority.grants
+            if grant.grant_class
+            in {
+                GrantClass.EXISTING_MUTABLE,
+                GrantClass.CREATION_AUTHORIZED,
+                GrantClass.DELETION_AUTHORIZED,
+            }
+        }
     post_checksum = compute_workspace_checksum(project_dir)
     violations: List[str] = []
     for rel_path, checksum in post_checksum.items():

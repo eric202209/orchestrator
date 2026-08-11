@@ -12,6 +12,7 @@ from app.services.orchestration.operations.patch_python import (
     replace_test_function,
     try_deterministic_patch,
 )
+from app.tests.phase33c4_test_helpers import executor_test_authority
 
 
 # --- add_missing_import ---
@@ -320,7 +321,11 @@ def test_executor_stale_replace_triggers_replace_test_function(tmp_path: Path):
         }
     ]
 
-    result = ExecutorService.execute_file_ops(tmp_path, ops)
+    result = ExecutorService.execute_file_ops(
+        tmp_path,
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
+    )
 
     assert result["success"], result.get("output")
     assert "test_service.py" in result["files_changed"]
@@ -343,7 +348,11 @@ def test_executor_stale_replace_triggers_add_missing_import(tmp_path: Path):
         }
     ]
 
-    result = ExecutorService.execute_file_ops(tmp_path, ops)
+    result = ExecutorService.execute_file_ops(
+        tmp_path,
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
+    )
 
     assert result["success"], result.get("output")
     assert "utils.py" in result["files_changed"]
@@ -365,7 +374,11 @@ def test_executor_stale_replace_with_placeholder_replacement_fails(tmp_path: Pat
         }
     ]
 
-    result = ExecutorService.execute_file_ops(tmp_path, ops)
+    result = ExecutorService.execute_file_ops(
+        tmp_path,
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
+    )
 
     assert not result["success"]
     assert "patch_helper" in result["output"]
@@ -385,7 +398,11 @@ def test_executor_stale_replace_non_python_file_returns_standard_error(tmp_path:
         }
     ]
 
-    result = ExecutorService.execute_file_ops(tmp_path, ops)
+    result = ExecutorService.execute_file_ops(
+        tmp_path,
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
+    )
 
     assert not result["success"]
     assert "patch_helper" not in result["output"]

@@ -1809,12 +1809,20 @@ def execute_planning_phase(
             if _is_first_ordered_task(ctx.task) and _task1_bootstrap_contract_passed(
                 plan_verdict
             ):
-                normalized_plan = _normalize_task1_python_src_layout_verification(
-                    ctx.orchestration_state.plan, plan_verdict
+                reconciled_verdict = _reconcile_task1_bootstrap_plan(
+                    ctx,
+                    normalize=lambda current_plan: _normalize_task1_python_src_layout_verification(
+                        current_plan, plan_verdict
+                    ),
+                    reason="task1_bootstrap_src_layout_normalized",
+                    message=(
+                        "[ORCHESTRATION] Normalized Task 1 src-layout verification "
+                        "before the final accepted-plan checkpoint"
+                    ),
                 )
-                if normalized_plan != ctx.orchestration_state.plan:
-                    ctx.orchestration_state.plan = normalized_plan
-                    output_text = json.dumps(normalized_plan)
+                if reconciled_verdict is not None:
+                    plan_verdict = reconciled_verdict
+                    output_text = json.dumps(ctx.orchestration_state.plan)
             record_validation_verdict(
                 ctx.db,
                 ctx.session_id,

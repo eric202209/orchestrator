@@ -23,6 +23,7 @@ from app.services.orchestration.execution.executor import (
 from app.services.orchestration.execution.runtime import restore_workspace_after_abort
 from app.services.orchestration.prompt_templates import OrchestrationState
 from app.services.orchestration.validation.validator import ValidatorService
+from app.tests.phase33c4_test_helpers import executor_test_authority
 
 
 ATTEMPT10_RELATIVE_PATH = "app/services/workspace/context_service.py"
@@ -118,6 +119,10 @@ def test_absolute_structured_operation_path_fails_closed(tmp_path):
     result = ExecutorService.execute_file_ops(
         tmp_path,
         [{"op": "write_file", "path": str(target), "content": "VALUE = 1\n"}],
+        accepted_path_authority=executor_test_authority(
+            tmp_path,
+            [{"op": "write_file", "path": str(target), "content": ""}],
+        ),
     )
 
     assert result["success"] is False
@@ -369,6 +374,16 @@ def _provider_free_attempt10_replay(runtime_workspace: Path) -> dict[str, object
                 ),
             }
         ],
+        accepted_path_authority=executor_test_authority(
+            runtime_workspace,
+            [
+                {
+                    "op": "write_file",
+                    "path": "app/time_utils.py",
+                    "content": "",
+                }
+            ],
+        ),
     )
     step2_ops = [
         {
@@ -404,7 +419,11 @@ def _provider_free_attempt10_replay(runtime_workspace: Path) -> dict[str, object
             "new": "",
         },
     ]
-    step2 = ExecutorService.execute_file_ops(runtime_workspace, step2_ops)
+    step2 = ExecutorService.execute_file_ops(
+        runtime_workspace,
+        step2_ops,
+        accepted_path_authority=executor_test_authority(runtime_workspace, step2_ops),
+    )
     provider_resolution = ExecutorService.resolve_workspace_product_path(
         runtime_workspace, ATTEMPT10_RELATIVE_PATH
     )
@@ -449,7 +468,11 @@ def _provider_free_attempt10_replay(runtime_workspace: Path) -> dict[str, object
             ),
         }
     ]
-    step3 = ExecutorService.execute_file_ops(runtime_workspace, step3_ops)
+    step3 = ExecutorService.execute_file_ops(
+        runtime_workspace,
+        step3_ops,
+        accepted_path_authority=executor_test_authority(runtime_workspace, step3_ops),
+    )
     replay_plan = [
         {
             "step_number": 1,

@@ -227,6 +227,7 @@ def reconcile_task1_bootstrap_plan(
         workflow_profile=ctx.workflow_profile,
         workflow_stage=ctx.workflow_stage,
         is_first_ordered_task=is_first_ordered_task(ctx.task),
+        source_materialization=ctx.planner_source_materialization,
     )
 
 

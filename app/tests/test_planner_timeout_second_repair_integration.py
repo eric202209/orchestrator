@@ -783,6 +783,10 @@ def test_post_repair_argparse_framework_mismatch_gets_one_targeted_second_repair
         emit_live=lambda *args, **kwargs: None,
         error_handler=MagicMock(),
     )
+    ctx.planner_contract = {
+        "source_paths": ["src/medium_cli/cli.py"],
+        "test_paths": ["tests/test_summary.py"],
+    }
     ctx.error_handler.attempt_json_parsing = lambda output, **kwargs: (
         True,
         json.loads(output),

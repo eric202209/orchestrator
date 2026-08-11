@@ -112,6 +112,7 @@ from app.services.orchestration.state.persistence import (
     attach_failure_envelope,
     emit_intent_outcome_mismatch,
     maybe_emit_divergence_detected,
+    load_accepted_path_authority_for_execution,
     read_orchestration_events,
     record_validation_verdict,
     save_orchestration_checkpoint,
@@ -126,6 +127,7 @@ from app.services.orchestration.types import (
     classify_failure_root_cause,
 )
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.path_authority import PathAuthorityError
 from app.services.orchestration.validation.workspace_guard import (
     TaskOperationContractViolation,
     compute_workspace_checksum,
@@ -331,6 +333,51 @@ def execute_step_loop(
     emit_live = ctx.emit_live
     error_handler = ctx.error_handler
     restore_workspace_snapshot_if_needed = ctx.restore_workspace_snapshot_if_needed
+
+    try:
+        accepted_path_authority = load_accepted_path_authority_for_execution(
+            db,
+            task_id=task_id,
+            session_id=session_id,
+            task_execution_id=ctx.task_execution_id,
+            plan=orchestration_state.plan,
+            workspace_identity=str(Path(orchestration_state.project_dir).resolve()),
+        )
+    except PathAuthorityError as exc:
+        error_message = f"Execution authority admission failed: {exc}"
+        orchestration_state.status = OrchestrationStatus.ABORTED
+        orchestration_state.abort_reason = error_message
+        save_orchestration_checkpoint(
+            db, session_id, task_id, prompt, orchestration_state
+        )
+        _persist_terminal_execution_failure(
+            db=db,
+            session=session,
+            task=task,
+            session_task_link=session_task_link,
+            task_execution_id=ctx.task_execution_id,
+            error_message=error_message,
+            failure_category="validation_failure",
+        )
+        emit_live(
+            "ERROR",
+            error_message,
+            metadata={
+                "phase": "execution_admission",
+                "failure_category": "validation_failure",
+                "authority_error": {
+                    "code": exc.code,
+                    "message": exc.message,
+                },
+            },
+        )
+        write_project_state_snapshot_fn(db, project, task, session_id)
+        return {
+            "status": "failed",
+            "reason": "execution_authority_admission_failed",
+            "failure_category": "validation_failure",
+            "authority_error": {"code": exc.code, "message": exc.message},
+        }
 
     # Synthesize a minimal artifact when resuming from an old checkpoint that
     # predates the reasoning_artifact field (stored None).
@@ -564,6 +611,7 @@ def execute_step_loop(
             verification_command = step.get("verification")
             rollback_command = step.get("rollback")
             expected_files = step.get("expected_files", [])
+
         scope_violations: list = []
         pre_step_checksum: dict = {}
         pre_step_file_snapshot: dict = {}
@@ -616,7 +664,9 @@ def execute_step_loop(
         )
 
         ops_result = ExecutorService.execute_file_ops(
-            Path(orchestration_state.project_dir), step_ops
+            Path(orchestration_state.project_dir),
+            step_ops,
+            accepted_path_authority=accepted_path_authority,
         )
         if not ops_result.get("success", False):
             step_result = {
@@ -674,6 +724,85 @@ def execute_step_loop(
                     )
 
         step_started_at = datetime.now(timezone.utc)
+        if (
+            not ops_result.get("success", False)
+            and ops_result.get("failure_category") == "validation_failure"
+        ):
+            authority_error = ops_result.get("authority_error") or {}
+            terminal_message = (
+                f"Structured mutation denied before filesystem mutation on step "
+                f"{step_index + 1}: {ops_result.get('output', '')}"
+            )
+            step_result["error"] = terminal_message
+            step_record = StepResult(
+                step_number=step_index + 1,
+                status="failed",
+                output=str(ops_result.get("output", ""))[:1000],
+                verification_output="",
+                files_changed=[],
+                error_message=terminal_message,
+                attempt=1,
+            )
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = terminal_message
+            orchestration_state.record_failure(step_record)
+            save_orchestration_checkpoint(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            _persist_terminal_execution_failure(
+                db=db,
+                session=session,
+                task=task,
+                session_task_link=session_task_link,
+                task_execution_id=ctx.task_execution_id,
+                error_message=terminal_message,
+                failure_category="validation_failure",
+            )
+            try:
+                phase_finished_event = append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.PHASE_FINISHED,
+                    parent_event_id=(step_started_event or {}).get("event_id"),
+                    details={
+                        "phase": "executing",
+                        "status": "structured_mutation_denied",
+                        "step_index": step_index + 1,
+                        "failure_category": "validation_failure",
+                        "authority_error": authority_error,
+                    },
+                )
+                write_orchestration_state_snapshot(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    orchestration_state=orchestration_state,
+                    trigger="phase_finished",
+                    related_event_id=phase_finished_event.get("event_id"),
+                )
+            except Exception:
+                pass
+            emit_live(
+                "ERROR",
+                terminal_message,
+                metadata={
+                    "phase": "execution",
+                    "step_index": step_index + 1,
+                    "failure_category": "validation_failure",
+                    "authority_identity": accepted_path_authority.authority_identity,
+                    "authority_error": authority_error,
+                },
+            )
+            write_project_state_snapshot_fn(db, project, task, session_id)
+            return {
+                "status": "failed",
+                "reason": "execution_mutation_authority_denied",
+                "failure_category": "validation_failure",
+                "authority_identity": accepted_path_authority.authority_identity,
+                "authority_error": authority_error,
+                "execution_output": ops_result.get("output", ""),
+            }
         if ops_result.get("success", False):
             if any(str(command or "").strip() for command in (step_commands or [])):
                 local_inspection_result = _execute_read_only_inspection_step(
@@ -860,20 +989,25 @@ def execute_step_loop(
 
         # Audit-on-write: flag files created/modified outside the declared scope
         scope_violations = detect_scope_violations(
-            orchestration_state.project_dir, expected_files, pre_step_checksum
+            orchestration_state.project_dir,
+            expected_files,
+            pre_step_checksum,
+            accepted_path_authority=accepted_path_authority,
         )
         if scope_violations:
             emit_live(
-                "WARN",
+                "ERROR",
                 (
                     f"[WORKSPACE_GUARD] Step {step_index + 1} wrote "
-                    f"{len(scope_violations)} file(s) outside declared scope: "
+                    f"{len(scope_violations)} file(s) outside accepted authority: "
                     f"{', '.join(scope_violations[:6])}"
                 ),
                 metadata={
                     "phase": "executing",
                     "step_index": step_index + 1,
                     "scope_violations": scope_violations[:20],
+                    "authority_identity": accepted_path_authority.authority_identity,
+                    "failure_category": "validation_failure",
                 },
             )
 
@@ -970,6 +1104,92 @@ def execute_step_loop(
                         "reasons": assessment.validation_verdict.reasons[:10],
                     },
                 )
+
+        if scope_violations:
+            authority_error = {
+                "code": "observed_path_outside_authority",
+                "message": "Execution mutated a path absent from AcceptedPathAuthority",
+                "paths": scope_violations[:20],
+            }
+            terminal_message = (
+                f"Execution observed mutation outside accepted authority on step "
+                f"{step_index + 1}: {', '.join(scope_violations[:20])}"
+            )
+            observed_files = sorted(
+                set(step_result.get("files_changed", []) or []) | set(scope_violations)
+            )
+            step_result["error"] = terminal_message
+            step_record = StepResult(
+                step_number=step_index + 1,
+                status="failed",
+                output=step_output[:1000],
+                verification_output=assessment.verification_output,
+                files_changed=observed_files,
+                error_message=terminal_message,
+                attempt=current_attempt,
+            )
+            orchestration_state.status = OrchestrationStatus.ABORTED
+            orchestration_state.abort_reason = terminal_message
+            orchestration_state.record_failure(step_record)
+            save_orchestration_checkpoint(
+                db, session_id, task_id, prompt, orchestration_state
+            )
+            _persist_terminal_execution_failure(
+                db=db,
+                session=session,
+                task=task,
+                session_task_link=session_task_link,
+                task_execution_id=ctx.task_execution_id,
+                error_message=terminal_message,
+                failure_category="validation_failure",
+            )
+            try:
+                phase_finished_event = append_orchestration_event(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.PHASE_FINISHED,
+                    parent_event_id=(step_started_event or {}).get("event_id"),
+                    details={
+                        "phase": "executing",
+                        "status": "observed_scope_violation",
+                        "step_index": step_index + 1,
+                        "failure_category": "validation_failure",
+                        "authority_identity": accepted_path_authority.authority_identity,
+                        "observed_scope_violations": scope_violations[:20],
+                    },
+                )
+                write_orchestration_state_snapshot(
+                    project_dir=orchestration_state.project_dir,
+                    session_id=session_id,
+                    task_id=task_id,
+                    orchestration_state=orchestration_state,
+                    trigger="phase_finished",
+                    related_event_id=phase_finished_event.get("event_id"),
+                )
+            except Exception:
+                pass
+            emit_live(
+                "ERROR",
+                terminal_message,
+                metadata={
+                    "phase": "execution",
+                    "step_index": step_index + 1,
+                    "failure_category": "validation_failure",
+                    "authority_identity": accepted_path_authority.authority_identity,
+                    "authority_error": authority_error,
+                },
+            )
+            write_project_state_snapshot_fn(db, project, task, session_id)
+            return {
+                "status": "failed",
+                "reason": "execution_observed_scope_violation",
+                "failure_category": "validation_failure",
+                "authority_identity": accepted_path_authority.authority_identity,
+                "authority_error": authority_error,
+                "execution_output": step_output,
+                "observed_scope_violations": scope_violations,
+            }
 
         step_record = StepResult(
             step_number=step_index + 1,

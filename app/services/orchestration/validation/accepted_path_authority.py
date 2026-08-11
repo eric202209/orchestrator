@@ -17,8 +17,9 @@ incapable of granting authority, so ``execution_observed`` and
 
 This module owns the *construction* of the authority; the value object, its
 identity, and its serialization live in :mod:`.path_authority` and are not
-duplicated here.  Phase 33C-3 adds no runtime consumer: the record is written
-into the accepted plan verdict and nothing reads it to make a decision.
+duplicated here.  Phase 33C-4 reconstructs the persisted record at Execution;
+no later candidate, repair, Change Set, or publication stage may treat it as a
+new grant source.
 """
 
 from __future__ import annotations
@@ -197,6 +198,8 @@ def build_accepted_path_authority(
     source_materialization: Any,
     task_explicit_scope_paths: Iterable[Any] = (),
     creation_requested_paths: Iterable[Any] = (),
+    accepted_creation_paths: Iterable[Any] = (),
+    accepted_existing_mutation_paths: Iterable[Any] = (),
 ) -> tuple[AcceptedPathAuthority, tuple[str, ...]]:
     """Freeze the grant an accepted Plan carries.
 
@@ -236,6 +239,15 @@ def build_accepted_path_authority(
         Change Set ``deleted_files`` entry, Execution behaviour) is exactly the
         category error this contract exists to remove, so the limitation is left
         explicit rather than papered over.
+
+    ``accepted_creation_paths`` and ``accepted_existing_mutation_paths`` are
+    narrow facts returned by the existing Plan Validator contract.  They cover
+    the two accepted shapes where the validator deliberately permits a
+    write-side operation without a source-materialization record.  Creation is
+    still safe to represent because its grant carries no baseline hash.  An
+    existing-file write is deliberately rejected here when its source evidence
+    is absent: manufacturing an existing-file baseline digest would either be
+    a whole-file mutation fence or fabricated evidence.
     """
 
     scope_paths = {str(path) for path in (task_explicit_scope_paths or ()) if str(path)}
@@ -243,13 +255,39 @@ def build_accepted_path_authority(
         str(path) for path in (creation_requested_paths or ()) if str(path)
     }
     mutation_paths = plan_mutation_paths(plan)
+    deletion_paths = {
+        _normalized_plan_path(operation.get("path"))
+        for step in plan or []
+        if isinstance(step, Mapping)
+        for operation in step.get("ops") or []
+        if isinstance(operation, Mapping)
+        and str(operation.get("op") or "").strip() == "delete_file"
+        and _normalized_plan_path(operation.get("path"))
+    }
+    if deletion_paths:
+        raise PathGrantError(
+            "deletion_authorization_unavailable",
+            "delete_file has no deterministic Plan-validation authorization: "
+            + ", ".join(sorted(deletion_paths)[:8]),
+        )
+    mkdir_paths = {
+        _normalized_plan_path(operation.get("path"))
+        for step in plan or []
+        if isinstance(step, Mapping)
+        for operation in step.get("ops") or []
+        if isinstance(operation, Mapping)
+        and str(operation.get("op") or "").strip() == "mkdir"
+        and _normalized_plan_path(operation.get("path"))
+    }
 
     grants: list[PathGrant] = []
     undeclarable: list[str] = []
+    source_paths: set[str] = set()
     for item in getattr(source_materialization, "files", ()) or ():
         relative_path = str(getattr(item, "relative_path", "") or "")
         if not relative_path:
             continue
+        source_paths.add(relative_path)
         status = getattr(item, "status", None)
         baseline_content_hash: str | None
         if status == SOURCE_STATUS_EXISTING:
@@ -289,6 +327,59 @@ def build_accepted_path_authority(
             )
         )
 
+    existing_mutable_paths = {
+        grant.path.value
+        for grant in grants
+        if grant.grant_class is GrantClass.EXISTING_MUTABLE
+    }
+    missing_existing_evidence = {
+        str(path).strip().replace("\\", "/").lstrip("./")
+        for path in (accepted_existing_mutation_paths or ())
+        if str(path).strip()
+        and str(path).strip().replace("\\", "/").lstrip("./")
+        not in existing_mutable_paths
+    }
+    missing_existing_evidence.update(
+        str(getattr(item, "relative_path", "") or "")
+        for item in getattr(source_materialization, "files", ()) or ()
+        if getattr(item, "status", None) == SOURCE_STATUS_EXISTING
+        and str(getattr(item, "relative_path", "") or "") in mutation_paths
+        and not getattr(item, "content_hash", None)
+    )
+    missing_existing_evidence = {path for path in missing_existing_evidence if path}
+    if missing_existing_evidence:
+        raise PathGrantError(
+            "existing_mutation_source_evidence_missing",
+            "existing mutable write lacks source-grounding evidence: "
+            + ", ".join(sorted(missing_existing_evidence)[:8]),
+        )
+
+    granted_paths = {grant.path.value for grant in grants}
+    for raw_path in sorted(
+        {
+            str(path).strip().replace("\\", "/").lstrip("./")
+            for path in (accepted_creation_paths or ())
+            if str(path).strip()
+        }
+    ):
+        if raw_path in source_paths or raw_path in granted_paths:
+            continue
+        try:
+            path = declare(raw_path)
+        except PathDeclarationError as exc:
+            undeclarable.append(f"{raw_path}:{exc.code}")
+            continue
+        grant = PathGrant(
+            path=path,
+            grant_class=GrantClass.CREATION_AUTHORIZED,
+            provenance=_provenance_for(
+                raw_path, GrantClass.CREATION_AUTHORIZED, scope_paths
+            ),
+            baseline_content_hash=None,
+        )
+        grants.append(grant)
+        granted_paths.add(raw_path)
+
     authority = AcceptedPathAuthority.create(
         accepted_plan_identity=accepted_plan_identity(plan),
         workspace_identity=str(
@@ -300,6 +391,15 @@ def build_accepted_path_authority(
         ),
         grants=grants,
     )
+    unauthorized_mkdir_paths = sorted(
+        set(mkdir_paths) - set(authority.creation_parent_directories())
+    )
+    if unauthorized_mkdir_paths:
+        raise PathGrantError(
+            "mkdir_parent_authority_missing",
+            "mkdir is not a deterministic parent materialization for a creation grant: "
+            + ", ".join(unauthorized_mkdir_paths[:8]),
+        )
     return authority, tuple(sorted(undeclarable))
 
 
@@ -311,8 +411,8 @@ def accepted_path_authority_from_verdict(verdict: Any) -> AcceptedPathAuthority 
     the ordinary :mod:`.path_authority` load errors for a malformed or tampered
     record — a forged record never loads as valid authority.
 
-    This is a pure parser.  It performs no database access, and Phase 33C-3
-    deliberately leaves it with zero runtime callers.
+    This is a pure parser.  It performs no database access; the existing
+    checkpoint persistence helper is its bounded Execution reader.
     """
 
     details = getattr(verdict, "details", None)

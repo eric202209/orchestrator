@@ -12,6 +12,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskCheckpoint,
     TaskExecution,
     TaskStatus,
 )
@@ -54,6 +55,7 @@ from app.services.orchestration.phases.execution_loop import (
 from app.services.orchestration.state.persistence import read_orchestration_events
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.prompt_templates import OrchestrationState
+from app.tests.phase33c4_test_helpers import executor_test_authority
 
 
 def _seed_execution(db_session, tmp_path):
@@ -259,6 +261,38 @@ def _make_run_context(
         },
     )
     state._project_dir_override = str(project_dir)
+    authority = executor_test_authority(
+        project_dir,
+        list(step.get("ops") or []),
+        plan=state.plan,
+        existing_paths=[
+            path
+            for path in (expected_files or [])
+            if path
+            not in {
+                str(operation.get("path") or "")
+                for operation in (step.get("ops") or [])
+                if isinstance(operation, dict)
+                and str(operation.get("op") or "") in {"write_file", "append_file"}
+            }
+        ],
+    )
+    db_session.add(
+        TaskCheckpoint(
+            session_id=session.id,
+            task_id=task.id,
+            checkpoint_type="validation_plan",
+            description="plan:accepted",
+            state_snapshot=json.dumps(
+                {
+                    "stage": "plan",
+                    "status": "accepted",
+                    "details": {"accepted_path_authority": authority.to_dict()},
+                }
+            ),
+        )
+    )
+    db_session.flush()
     if used_debug_repair:
         state.debug_repair_task_execution_ids = [execution.id]
     ctx = OrchestrationRunContext(
@@ -2381,6 +2415,29 @@ def test_wrapped_typed_ops_fix_applies_to_repeated_structured_op_failures(
         "Update package.json",
         "Update README.md version",
     ]
+    checkpoint = (
+        db_session.query(TaskCheckpoint)
+        .filter(
+            TaskCheckpoint.task_id == ctx.task_id,
+            TaskCheckpoint.session_id == ctx.session_id,
+            TaskCheckpoint.checkpoint_type == "validation_plan",
+        )
+        .one()
+    )
+    authority = executor_test_authority(
+        ctx.orchestration_state.project_dir,
+        [],
+        plan=ctx.orchestration_state.plan,
+        existing_paths=["package.json", "README.md"],
+    )
+    checkpoint.state_snapshot = json.dumps(
+        {
+            "stage": "plan",
+            "status": "accepted",
+            "details": {"accepted_path_authority": authority.to_dict()},
+        }
+    )
+    db_session.flush()
     (ctx.orchestration_state.project_dir / "package.json").write_text(
         '{"name":"demo","version":"1.1.0"}\n',
         encoding="utf-8",

@@ -2,10 +2,9 @@
 
 This module implements the value types and pure/security primitives designed in
 Phase 33B (`docs/roadmap/done/phase33/phase33b-single-path-authority-contract-design-20260810.md`).
-It has **zero production callers** by design: Phase 33C-2 is an additive
-foundation phase, and wiring these primitives into Planning, Execution,
-Candidate Validation, Candidate Repair, the Change Set, and Publication begins in
-Phase 33C-3 and later.
+Plan acceptance constructs the immutable value and Phase 33C-4 consumes it at
+Execution's mutation and observed-scope gates. Candidate Validation, Candidate
+Repair, the Change Set, and Publication remain outside this authority boundary.
 
 The module keeps three concerns permanently separate, because collapsing them is
 the Attempt-16 category error (``observed path`` silently became ``authorized

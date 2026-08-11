@@ -451,29 +451,27 @@ def test_no_deletion_grants_are_constructed(tmp_path):
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "stale.py").write_text("STALE = 1\n", encoding="utf-8")
 
-    authority, _ = build_accepted_path_authority(
-        plan=[
-            {
-                "step_number": 1,
-                "description": "Delete the stale module",
-                "ops": [{"op": "delete_file", "path": "app/stale.py"}],
-            }
-        ],
-        source_materialization=PlannerSourceMaterialization(
-            workspace_identity=str(tmp_path),
-            files=(
-                _existing_record(
-                    "app/stale.py",
-                    workspace_identity=str(tmp_path),
-                    content_hash=_digest("stale"),
+    with pytest.raises(PathGrantError) as exc_info:
+        build_accepted_path_authority(
+            plan=[
+                {
+                    "step_number": 1,
+                    "description": "Delete the stale module",
+                    "ops": [{"op": "delete_file", "path": "app/stale.py"}],
+                }
+            ],
+            source_materialization=PlannerSourceMaterialization(
+                workspace_identity=str(tmp_path),
+                files=(
+                    _existing_record(
+                        "app/stale.py",
+                        workspace_identity=str(tmp_path),
+                        content_hash=_digest("stale"),
+                    ),
                 ),
             ),
-        ),
-    )
-    classes = {grant.grant_class for grant in authority.grants}
-    assert GrantClass.DELETION_AUTHORIZED not in classes
-    # A requested deletion does not even confer mutation authority.
-    assert classes == {GrantClass.EXISTING_READONLY}
+        )
+    assert exc_info.value.code == "deletion_authorization_unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -876,7 +874,7 @@ def test_authority_is_absent_and_explained_when_source_grounding_is_unavailable(
 
 
 # ---------------------------------------------------------------------------
-# zero-consumer proof
+# bounded-consumer proof (Phase 33C-4)
 # ---------------------------------------------------------------------------
 
 
@@ -920,6 +918,12 @@ def test_authority_is_constructed_only_by_plan_validation():
 def test_no_downstream_stage_reads_the_authority():
     sources = dict(_production_sources())
     for relative in DOWNSTREAM_MODULES:
+        if relative in {
+            "orchestration/execution/executor.py",
+            "orchestration/phases/execution_loop.py",
+            "orchestration/validation/workspace_guard.py",
+        }:
+            continue
         text = sources[relative]
         assert "AcceptedPathAuthority" not in text, relative
         assert "accepted_path_authority_from_verdict" not in text, relative
@@ -941,4 +945,4 @@ def test_reader_helper_has_no_production_callers():
         if "accepted_path_authority_from_verdict" in text
         and relative != "orchestration/validation/accepted_path_authority.py"
     }
-    assert callers == set()
+    assert callers == {"orchestration/state/persistence.py"}

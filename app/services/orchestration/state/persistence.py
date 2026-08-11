@@ -17,7 +17,12 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models import LogEntry, Session as SessionModel, TaskCheckpoint
+from app.models import (
+    LogEntry,
+    Session as SessionModel,
+    TaskCheckpoint,
+    TaskExecution,
+)
 from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
@@ -1059,7 +1064,136 @@ def read_orchestration_events(
                 events.append(event)
     except OSError:
         pass
+
     return events
+
+
+def load_accepted_path_authority_for_execution(
+    db: Session,
+    *,
+    task_id: int,
+    session_id: int,
+    task_execution_id: int | None,
+    plan: Any,
+    workspace_identity: str,
+):
+    """Load the one accepted authority bound to the executing Plan.
+
+    ``TaskCheckpoint`` is the existing durable validation-verdict record.  A
+    validation checkpoint is selected by the execution task/session lineage
+    and then by the canonical identity of the Plan entering Execution; no
+    unfenced ``latest`` record is authoritative.  Identical duplicate writes
+    are harmless, but conflicting records fail closed.
+    """
+
+    from app.services.orchestration.validation.accepted_path_authority import (
+        ACCEPTED_PLAN_STATUSES,
+        accepted_path_authority_from_verdict,
+        accepted_plan_identity,
+    )
+    from app.services.orchestration.validation.path_authority import PathAuthorityError
+
+    if task_execution_id is not None:
+        execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.id == task_execution_id)
+            .one_or_none()
+        )
+        if (
+            execution is None
+            or execution.task_id != task_id
+            or execution.session_id != session_id
+        ):
+            raise PathAuthorityError(
+                "authority_execution_context_mismatch",
+                "TaskExecution is not bound to the requested task/session",
+            )
+
+    try:
+        expected_plan_identity = accepted_plan_identity(plan)
+    except PathAuthorityError:
+        raise
+    except Exception as exc:
+        raise PathAuthorityError(
+            "accepted_plan_identity_invalid",
+            f"executing Plan identity could not be computed: {exc}",
+        ) from exc
+
+    checkpoints = (
+        db.query(TaskCheckpoint)
+        .filter(
+            TaskCheckpoint.task_id == task_id,
+            TaskCheckpoint.session_id == session_id,
+            TaskCheckpoint.checkpoint_type == "validation_plan",
+        )
+        .order_by(TaskCheckpoint.id.asc())
+        .all()
+    )
+    if not checkpoints:
+        raise PathAuthorityError(
+            "authority_record_missing",
+            "no validation_plan checkpoint exists for this task/session",
+        )
+
+    matching: list[Any] = []
+    for checkpoint in checkpoints:
+        try:
+            verdict = json.loads(checkpoint.state_snapshot or "")
+        except (TypeError, ValueError) as exc:
+            raise PathAuthorityError(
+                "authority_record_invalid",
+                f"validation_plan checkpoint {checkpoint.id} is not valid JSON",
+            ) from exc
+        if not isinstance(verdict, dict):
+            raise PathAuthorityError(
+                "authority_record_invalid",
+                f"validation_plan checkpoint {checkpoint.id} is not a mapping",
+            )
+        if verdict.get("status") not in ACCEPTED_PLAN_STATUSES:
+            continue
+        try:
+            authority = accepted_path_authority_from_verdict(verdict)
+        except PathAuthorityError as exc:
+            error_code = (
+                exc.code
+                if exc.code == "authority_identity_mismatch"
+                else "authority_record_invalid"
+            )
+            raise PathAuthorityError(
+                error_code,
+                f"validation_plan checkpoint {checkpoint.id} contains invalid authority: {exc}",
+            ) from exc
+        if authority is None:
+            raise PathAuthorityError(
+                "authority_record_invalid",
+                f"accepted validation_plan checkpoint {checkpoint.id} has no authority",
+            )
+        if authority.accepted_plan_identity == expected_plan_identity:
+            matching.append(authority)
+
+    if not matching:
+        raise PathAuthorityError(
+            "authority_plan_identity_mismatch",
+            "no accepted authority matches the Plan entering Execution",
+        )
+
+    payloads = {
+        json.dumps(authority.to_dict(), sort_keys=True, separators=(",", ":"))
+        for authority in matching
+    }
+    if len(payloads) != 1:
+        raise PathAuthorityError(
+            "authority_ambiguous",
+            "multiple accepted authorities match the executing Plan",
+        )
+
+    authority = matching[0]
+    if authority.workspace_identity != str(workspace_identity):
+        raise PathAuthorityError(
+            "authority_workspace_mismatch",
+            "accepted authority belongs to a different logical workspace",
+        )
+    return authority
 
 
 def find_latest_orchestration_event(

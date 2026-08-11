@@ -26,6 +26,7 @@ from app.services.orchestration.validation.workspace_guard import (
     TaskWorkspaceViolationError,
     normalize_step,
 )
+from app.tests.phase33c4_test_helpers import executor_test_authority
 
 
 def _ops_only_step(path: str = "src/main.ts") -> dict:
@@ -1766,15 +1767,17 @@ def test_normalized_o_alias_python_write_file_still_validates_syntax(tmp_path):
 
 
 def test_executor_write_file_ops_create_parent_directory(tmp_path):
+    ops = [
+        {
+            "op": "write_file",
+            "path": "src/main.ts",
+            "content": "export const ok = true;\n",
+        }
+    ]
     result = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [
-            {
-                "op": "write_file",
-                "path": "src/main.ts",
-                "content": "export const ok = true;\n",
-            }
-        ],
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
     )
 
     assert result["success"] is True
@@ -1785,15 +1788,17 @@ def test_executor_write_file_ops_create_parent_directory(tmp_path):
 
 
 def test_executor_write_file_ops_create_shared_workspace_permissions(tmp_path):
+    ops = [
+        {
+            "op": "write_file",
+            "path": "src/nested/main.ts",
+            "content": "export const ok = true;\n",
+        }
+    ]
     result = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [
-            {
-                "op": "write_file",
-                "path": "src/nested/main.ts",
-                "content": "export const ok = true;\n",
-            }
-        ],
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
     )
 
     assert result["success"] is True
@@ -2135,20 +2140,22 @@ def test_phase8k_executor_runs_file_ops_in_order_and_reports_changed_files(tmp_p
     tmp_dir.mkdir()
     (tmp_dir / "output.txt").write_text("stale\n", encoding="utf-8")
 
+    ops = [
+        {"op": "mkdir", "path": "src"},
+        {"op": "append_file", "path": "README.md", "content": "\nUsage\n"},
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
+            "old": "Usage",
+            "new": "API",
+        },
+        {"op": "write_file", "path": "src/main.py", "content": "print('ok')\n"},
+        {"op": "delete_file", "path": "tmp/output.txt"},
+    ]
     result = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [
-            {"op": "mkdir", "path": "src"},
-            {"op": "append_file", "path": "README.md", "content": "\nUsage\n"},
-            {
-                "op": "replace_in_file",
-                "path": "README.md",
-                "old": "Usage",
-                "new": "API",
-            },
-            {"op": "write_file", "path": "src/main.py", "content": "print('ok')\n"},
-            {"op": "delete_file", "path": "tmp/output.txt"},
-        ],
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
     )
 
     assert result["success"] is True
@@ -2165,9 +2172,11 @@ def test_phase8k_executor_runs_file_ops_in_order_and_reports_changed_files(tmp_p
 
 
 def test_phase8k_append_file_requires_existing_parent_directory(tmp_path):
+    ops = [{"op": "append_file", "path": "missing/README.md", "content": "Usage\n"}]
     result = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [{"op": "append_file", "path": "missing/README.md", "content": "Usage\n"}],
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
     )
 
     assert result["success"] is False
@@ -2176,18 +2185,22 @@ def test_phase8k_append_file_requires_existing_parent_directory(tmp_path):
 
 
 def test_phase8o_delete_file_accepts_missing_and_rejects_directory_targets(tmp_path):
+    missing_ops = [{"op": "delete_file", "path": "missing.txt"}]
     missing = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [{"op": "delete_file", "path": "missing.txt"}],
+        missing_ops,
+        accepted_path_authority=executor_test_authority(tmp_path, missing_ops),
     )
     assert missing["success"] is True
     assert missing["files_changed"] == []
     assert "already absent" in missing["output"]
 
     (tmp_path / "src").mkdir()
+    directory_ops = [{"op": "delete_file", "path": "src"}]
     directory = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [{"op": "delete_file", "path": "src"}],
+        directory_ops,
+        accepted_path_authority=executor_test_authority(tmp_path, directory_ops),
     )
     assert directory["success"] is False
     assert "target is not a file" in directory["output"]
@@ -2199,8 +2212,13 @@ def test_phase8o_delete_file_is_idempotent_when_already_absent(tmp_path):
     target.write_text("remove me\n", encoding="utf-8")
     operation = {"op": "delete_file", "path": "scratch/remove-me.txt"}
 
-    first = ExecutorService.execute_file_ops(Path(tmp_path), [operation])
-    second = ExecutorService.execute_file_ops(Path(tmp_path), [operation])
+    authority = executor_test_authority(tmp_path, [operation])
+    first = ExecutorService.execute_file_ops(
+        Path(tmp_path), [operation], accepted_path_authority=authority
+    )
+    second = ExecutorService.execute_file_ops(
+        Path(tmp_path), [operation], accepted_path_authority=authority
+    )
 
     assert first["success"] is True
     assert first["files_changed"] == ["scratch/remove-me.txt"]
@@ -2214,25 +2232,31 @@ def test_phase8k_replace_in_file_requires_exactly_one_old_text(tmp_path):
     target = tmp_path / "README.md"
     target.write_text("same\nsame\n", encoding="utf-8")
 
+    ambiguous_ops = [
+        {"op": "replace_in_file", "path": "README.md", "old": "same", "new": "done"}
+    ]
     ambiguous = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [{"op": "replace_in_file", "path": "README.md", "old": "same", "new": "done"}],
+        ambiguous_ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ambiguous_ops),
     )
     assert ambiguous["success"] is False
     assert "ambiguous" in ambiguous["output"]
     assert target.read_text(encoding="utf-8") == "same\nsame\n"
 
     target.write_text("before\n", encoding="utf-8")
+    missing_ops = [
+        {
+            "op": "replace_in_file",
+            "path": "README.md",
+            "old": "absent",
+            "new": "done",
+        }
+    ]
     missing = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [
-            {
-                "op": "replace_in_file",
-                "path": "README.md",
-                "old": "absent",
-                "new": "done",
-            }
-        ],
+        missing_ops,
+        accepted_path_authority=executor_test_authority(tmp_path, missing_ops),
     )
     assert missing["success"] is False
     assert "not found" in missing["output"]
@@ -2248,8 +2272,13 @@ def test_phase8o_replace_in_file_is_idempotent_when_already_applied(tmp_path):
         "new": "DEBUG = True",
     }
 
-    first = ExecutorService.execute_file_ops(Path(tmp_path), [operation])
-    second = ExecutorService.execute_file_ops(Path(tmp_path), [operation])
+    authority = executor_test_authority(tmp_path, [operation])
+    first = ExecutorService.execute_file_ops(
+        Path(tmp_path), [operation], accepted_path_authority=authority
+    )
+    second = ExecutorService.execute_file_ops(
+        Path(tmp_path), [operation], accepted_path_authority=authority
+    )
 
     assert first["success"] is True
     assert first["files_changed"] == ["app_config.py"]
@@ -2263,16 +2292,18 @@ def test_phase8o_replace_in_file_still_fails_when_target_state_is_unproven(tmp_p
     target = tmp_path / "app_config.py"
     target.write_text("DEBUG = None\n", encoding="utf-8")
 
+    missing_new_ops = [
+        {
+            "op": "replace_in_file",
+            "path": "app_config.py",
+            "old": "DEBUG = False",
+            "new": "DEBUG = True",
+        }
+    ]
     missing_new = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [
-            {
-                "op": "replace_in_file",
-                "path": "app_config.py",
-                "old": "DEBUG = False",
-                "new": "DEBUG = True",
-            }
-        ],
+        missing_new_ops,
+        accepted_path_authority=executor_test_authority(tmp_path, missing_new_ops),
     )
     assert missing_new["success"] is False
     assert "old text not found" in missing_new["output"]
@@ -2282,16 +2313,18 @@ def test_phase8u_replace_in_file_uses_regex_fallback_for_pattern_alias(tmp_path)
     target = tmp_path / "app_config.py"
     target.write_text("FEATURE_FLAG = False\n", encoding="utf-8")
 
+    ops = [
+        {
+            "op": "replace_in_file",
+            "path": "app_config.py",
+            "old": r"FEATURE_FLAG\s*=\s*False",
+            "new": "FEATURE_FLAG = True",
+        }
+    ]
     result = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [
-            {
-                "op": "replace_in_file",
-                "path": "app_config.py",
-                "old": r"FEATURE_FLAG\s*=\s*False",
-                "new": "FEATURE_FLAG = True",
-            }
-        ],
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
     )
 
     assert result["success"] is True
@@ -2304,32 +2337,36 @@ def test_phase8u_replace_in_file_regex_fallback_rejects_ambiguous_matches(tmp_pa
     target = tmp_path / "app_config.py"
     target.write_text("FEATURE_FLAG = False\nFEATURE_FLAG=False\n", encoding="utf-8")
 
+    ops = [
+        {
+            "op": "replace_in_file",
+            "path": "app_config.py",
+            "old": r"FEATURE_FLAG\s*=\s*False",
+            "new": "FEATURE_FLAG = True",
+        }
+    ]
     result = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [
-            {
-                "op": "replace_in_file",
-                "path": "app_config.py",
-                "old": r"FEATURE_FLAG\s*=\s*False",
-                "new": "FEATURE_FLAG = True",
-            }
-        ],
+        ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ops),
     )
 
     assert result["success"] is False
     assert "regex old text is ambiguous" in result["output"]
 
     target.write_text("DEBUG = True\nOTHER_DEBUG = True\n", encoding="utf-8")
+    ambiguous_new_ops = [
+        {
+            "op": "replace_in_file",
+            "path": "app_config.py",
+            "old": "DEBUG = False",
+            "new": "DEBUG = True",
+        }
+    ]
     ambiguous_new = ExecutorService.execute_file_ops(
         Path(tmp_path),
-        [
-            {
-                "op": "replace_in_file",
-                "path": "app_config.py",
-                "old": "DEBUG = False",
-                "new": "DEBUG = True",
-            }
-        ],
+        ambiguous_new_ops,
+        accepted_path_authority=executor_test_authority(tmp_path, ambiguous_new_ops),
     )
     assert ambiguous_new["success"] is False
     assert "new text is ambiguous" in ambiguous_new["output"]
