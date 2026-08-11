@@ -52,6 +52,7 @@ from app.services.orchestration.state.execution_states import (
 from app.services.orchestration.state.persistence import (
     append_orchestration_event,
     attach_failure_envelope,
+    load_accepted_path_authority,
     record_validation_verdict,
     save_orchestration_checkpoint,
 )
@@ -63,6 +64,7 @@ from app.services.orchestration.validation.accepted_path_authority import (
 from app.services.orchestration.validation.candidate_checks import (
     candidate_delta_identity,
 )
+from app.services.orchestration.validation.path_authority import PathAuthorityError
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.workspace.project_isolation_service import (
@@ -370,6 +372,39 @@ class CompletionCoordinator:
         emit_live = ctx.emit_live
         logger = ctx.logger
 
+        # Candidate Validator must consume the same task/session/Plan/workspace
+        # fenced authority that Execution consumed.  This is one bounded reader
+        # with multiple consumers, not a second checkpoint-selection path.
+        candidate_authority = None
+        candidate_authority_error: dict[str, str] | None = None
+        try:
+            candidate_authority = load_accepted_path_authority(
+                db,
+                task_id=task_id,
+                session_id=session_id,
+                task_execution_id=ctx.task_execution_id,
+                plan=orchestration_state.plan,
+                workspace_identity=str(Path(orchestration_state.project_dir).resolve()),
+            )
+        except PathAuthorityError as exc:
+            candidate_authority_error = {
+                "code": exc.code,
+                "message": str(exc)[:500],
+            }
+            logger.warning(
+                "[COMPLETION_VALIDATION] Accepted Path Authority unavailable: %s",
+                exc,
+            )
+        except Exception as exc:
+            candidate_authority_error = {
+                "code": "authority_loader_failure",
+                "message": f"{type(exc).__name__}: {str(exc)[:400]}",
+            }
+            logger.warning(
+                "[COMPLETION_VALIDATION] Accepted Path Authority loader failed: %s",
+                exc,
+            )
+
         def _checkpoint(
             operation: str,
             status: str,
@@ -492,6 +527,9 @@ class CompletionCoordinator:
             validation_severity=ctx.validation_severity,
             workflow_stage=ctx.workflow_stage,
             is_first_ordered_task=bool(task and task.plan_position == 1),
+            accepted_path_authority=candidate_authority,
+            accepted_path_authority_error=candidate_authority_error,
+            require_accepted_path_authority=True,
         )
         record_validation_verdict(
             db,
@@ -540,7 +578,11 @@ class CompletionCoordinator:
                     "[SYMBOL_VERIFICATION] LogEntry write failed (non-fatal): %s", _exc
                 )
 
-        if completion_validation.repairable_findings:
+        if completion_validation.repairable_findings and not (
+            (completion_validation.details or {}).get(
+                "candidate_authority_invariant_failed"
+            )
+        ):
             accepted_plan_identity = _completion_plan_identity(orchestration_state.plan)
             accepted_candidate_scope = _completion_candidate_scope(
                 completion_validation
@@ -571,6 +613,9 @@ class CompletionCoordinator:
                     validation_severity=ctx.validation_severity,
                     workflow_stage=ctx.workflow_stage,
                     is_first_ordered_task=bool(task and task.plan_position == 1),
+                    accepted_path_authority=candidate_authority,
+                    accepted_path_authority_error=candidate_authority_error,
+                    require_accepted_path_authority=True,
                 )
                 _retain_completion_repair_verification_evidence(
                     completion_validation, repair_result
@@ -825,6 +870,9 @@ class CompletionCoordinator:
                     validation_severity=ctx.validation_severity,
                     workflow_stage=ctx.workflow_stage,
                     is_first_ordered_task=bool(task and task.plan_position == 1),
+                    accepted_path_authority=candidate_authority,
+                    accepted_path_authority_error=candidate_authority_error,
+                    require_accepted_path_authority=True,
                 ),
             )
             record_validation_verdict(

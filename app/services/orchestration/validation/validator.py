@@ -44,11 +44,12 @@ from .workspace_guard import (
 )
 from .accepted_path_authority import (
     ACCEPTED_PLAN_STATUSES,
+    accepted_plan_identity,
     build_accepted_path_authority,
 )
-from .path_authority import PathAuthorityError
+from .path_authority import GrantClass, PathAuthorityError
 from .candidate_checks import (
-    candidate_authorized_paths,
+    candidate_observed_paths,
     candidate_delta_identity,
     validate_candidate_delta,
 )
@@ -169,6 +170,33 @@ from .rules.core_paths import (
 )
 
 MAX_INITIAL_PLAN_STEPS = 4
+
+
+def _apa_mutation_scope(accepted_path_authority: Any) -> tuple[str, ...]:
+    """Project only mutation grants from the persisted APA."""
+
+    return tuple(
+        sorted(
+            str(grant.path)
+            for grant in accepted_path_authority.grants
+            if grant.grant_class
+            in {
+                GrantClass.EXISTING_MUTABLE,
+                GrantClass.CREATION_AUTHORIZED,
+                GrantClass.DELETION_AUTHORIZED,
+            }
+        )
+    )
+
+
+def _candidate_verification_scope(
+    authorized_scope: tuple[str, ...], observed_scope: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Include observed authorized paths and authorized-but-missing mutations."""
+
+    observed_authorized = set(authorized_scope).intersection(observed_scope)
+    missing_expected = set(authorized_scope).difference(observed_scope)
+    return tuple(sorted(observed_authorized | missing_expected))
 
 
 def is_orchestration_internal_path(relative_path: str) -> bool:
@@ -2453,6 +2481,9 @@ class ValidatorService:
         validation_severity: str = "standard",
         workflow_stage: Optional[str] = None,
         is_first_ordered_task: bool = False,
+        accepted_path_authority: Any = None,
+        accepted_path_authority_error: Optional[Mapping[str, Any]] = None,
+        require_accepted_path_authority: bool = False,
     ) -> ValidationVerdict:
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
@@ -2621,13 +2652,131 @@ class ValidatorService:
             project_dir,
         )
         change_set = completion_evidence.get("change_set")
+        observed_scope: tuple[str, ...] = ()
+        authorized_scope: tuple[str, ...] = ()
+        verification_scope: tuple[str, ...] = ()
+        authority_scope_violation: Optional[CandidateFinding] = None
+        authority_invariant_failure: Optional[CandidateFinding] = None
         if isinstance(change_set, dict):
             integrity_findings.extend(check_test_preservation(change_set, project_dir))
-            details["candidate_authorized_paths"] = list(
-                candidate_authorized_paths(project_dir, change_set)
-            )
+            observed_scope = candidate_observed_paths(change_set)
+            details["candidate_observed_paths"] = list(observed_scope)
+            details["observed_scope"] = list(observed_scope)
+            if accepted_path_authority is not None:
+                authorized_scope = _apa_mutation_scope(accepted_path_authority)
+                # Mutable APA grants are the deterministic expected-mutation
+                # boundary.  Read-only source grants are intentionally absent.
+                verification_scope = _candidate_verification_scope(
+                    authorized_scope, observed_scope
+                )
+                details["accepted_path_authority_identity"] = (
+                    accepted_path_authority.authority_identity
+                )
+                details["authorized_scope"] = list(authorized_scope)
+                details["verification_scope"] = list(verification_scope)
+                # Temporary 33C-5 bridge: this legacy diagnostic key now carries
+                # only APA authority.  Candidate Repair remains unchanged and
+                # will be re-sourced explicitly in 33C-6.
+                details["candidate_authorized_paths"] = list(authorized_scope)
+                details["missing_authorized_paths"] = sorted(
+                    set(authorized_scope).difference(observed_scope)
+                )
+                try:
+                    if accepted_plan_identity(plan) != (
+                        accepted_path_authority.accepted_plan_identity
+                    ):
+                        authority_invariant_failure = CandidateFinding(
+                            rule_id="candidate_authority_plan_identity_mismatch",
+                            source="accepted_path_authority",
+                            category="scope",
+                            severity="error",
+                            attribution="unknown",
+                            repairable=False,
+                            message=(
+                                "Candidate Validator received an authority for a "
+                                "different accepted Plan"
+                            ),
+                        )
+                except PathAuthorityError as exc:
+                    authority_invariant_failure = CandidateFinding(
+                        rule_id="candidate_authority_plan_identity_invalid",
+                        source="accepted_path_authority",
+                        category="scope",
+                        severity="error",
+                        attribution="unknown",
+                        repairable=False,
+                        message=f"Accepted Plan identity is invalid: {exc.code}",
+                    )
+                unauthorized_observed = sorted(
+                    set(observed_scope).difference(authorized_scope)
+                )
+                if unauthorized_observed:
+                    details["candidate_authority_invariant_failed"] = True
+                    details["candidate_authority_invariant_role"] = (
+                        "defensive_consistency_assertion"
+                    )
+                    authority_scope_violation = CandidateFinding(
+                        rule_id="candidate_observed_scope_outside_accepted_authority",
+                        source="accepted_path_authority",
+                        category="scope",
+                        severity="error",
+                        attribution="unknown",
+                        repairable=False,
+                        message=(
+                            "Candidate observed paths are outside the accepted "
+                            "mutation authority: "
+                            + ", ".join(unauthorized_observed[:10])
+                        ),
+                        evidence={
+                            "observed_scope": list(observed_scope),
+                            "authorized_scope": list(authorized_scope),
+                            "unauthorized_observed_paths": unauthorized_observed[:20],
+                            "enforcement_owner": "execution",
+                            "validator_role": "defensive_invariant_check",
+                        },
+                    )
+            elif require_accepted_path_authority:
+                details["candidate_authority_invariant_failed"] = True
+                authority_invariant_failure = CandidateFinding(
+                    rule_id="candidate_accepted_path_authority_missing",
+                    source="accepted_path_authority",
+                    category="scope",
+                    severity="error",
+                    attribution="unknown",
+                    repairable=False,
+                    message="Candidate Validator could not load the accepted Path Authority",
+                    evidence=dict(accepted_path_authority_error or {}),
+                )
         else:
             change_set = None
+            if require_accepted_path_authority and accepted_path_authority is None:
+                details["candidate_authority_invariant_failed"] = True
+                authority_invariant_failure = CandidateFinding(
+                    rule_id="candidate_accepted_path_authority_missing",
+                    source="accepted_path_authority",
+                    category="scope",
+                    severity="error",
+                    attribution="unknown",
+                    repairable=False,
+                    message="Candidate Validator could not load the accepted Path Authority",
+                    evidence=dict(accepted_path_authority_error or {}),
+                )
+        if authority_scope_violation is not None:
+            rejected.append(authority_scope_violation.message)
+        if authority_invariant_failure is not None:
+            details["candidate_authority_invariant_failed"] = True
+            rejected.append(authority_invariant_failure.message)
+        if accepted_path_authority is not None and not isinstance(change_set, dict):
+            authorized_scope = _apa_mutation_scope(accepted_path_authority)
+            verification_scope = _candidate_verification_scope(
+                authorized_scope, observed_scope
+            )
+            details["accepted_path_authority_identity"] = (
+                accepted_path_authority.authority_identity
+            )
+            details["authorized_scope"] = list(authorized_scope)
+            details["verification_scope"] = list(verification_scope)
+            details["candidate_authorized_paths"] = list(authorized_scope)
         pre_existing_tests = pre_existing_python_test_files(project_dir, change_set)
         pre_existing_sources = pre_existing_source_files(project_dir, change_set)
         behavior_baseline = completion_evidence.get("behavior_baseline")
@@ -2938,7 +3087,11 @@ class ValidatorService:
         except Exception:
             pass
 
-        candidate_findings: List[CandidateFinding] = []
+        candidate_findings: List[CandidateFinding] = [
+            finding
+            for finding in (authority_scope_violation, authority_invariant_failure)
+            if finding is not None
+        ]
         structured_rule_ids = cls._validator_rule_ids_from_details(
             stage="task_completion", details=details
         )
@@ -3012,6 +3165,12 @@ class ValidatorService:
                 ),
                 allow_broad_fallback=bool(
                     completion_evidence.get("allow_broad_verification_fallback", False)
+                ),
+                observed_scope=observed_scope,
+                verification_scope=(
+                    verification_scope
+                    if accepted_path_authority is not None
+                    else observed_scope
                 ),
             )
             candidate_findings.extend(candidate_checks.findings)

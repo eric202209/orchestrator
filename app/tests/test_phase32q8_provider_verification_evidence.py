@@ -33,6 +33,16 @@ from app.services.orchestration.phases.completion_repair_capsule import (
 from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.accepted_path_authority import (
+    accepted_plan_identity,
+)
+from app.services.orchestration.validation.path_authority import (
+    AcceptedPathAuthority,
+    GrantClass,
+    GrantProvenance,
+    PathGrant,
+    declare,
+)
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -168,6 +178,20 @@ def _completion_evidence(project_dir: Path) -> dict:
 
 
 def _validate_candidate(project_dir: Path, plan: list[dict]):
+    authority = AcceptedPathAuthority.create(
+        accepted_plan_identity=accepted_plan_identity(plan),
+        workspace_identity=str(project_dir.resolve()),
+        maximum_scope_digest="0" * 64,
+        grants=[
+            PathGrant(
+                path=declare(path),
+                grant_class=GrantClass.EXISTING_MUTABLE,
+                provenance=GrantProvenance.ACCEPTED_PLAN,
+                baseline_content_hash="0" * 64,
+            )
+            for path in _CANDIDATE_PATHS
+        ],
+    )
     return ValidatorService.validate_task_completion(
         project_dir=project_dir,
         plan=plan,
@@ -180,6 +204,7 @@ def _validate_candidate(project_dir: Path, plan: list[dict]):
         validation_severity="standard",
         workflow_stage="implementation",
         is_first_ordered_task=True,
+        accepted_path_authority=authority,
     )
 
 

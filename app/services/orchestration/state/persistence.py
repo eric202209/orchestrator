@@ -1068,7 +1068,7 @@ def read_orchestration_events(
     return events
 
 
-def load_accepted_path_authority_for_execution(
+def load_accepted_path_authority(
     db: Session,
     *,
     task_id: int,
@@ -1077,7 +1077,7 @@ def load_accepted_path_authority_for_execution(
     plan: Any,
     workspace_identity: str,
 ):
-    """Load the one accepted authority bound to the executing Plan.
+    """Load the one accepted authority bound to a task's accepted Plan.
 
     ``TaskCheckpoint`` is the existing durable validation-verdict record.  A
     validation checkpoint is selected by the execution task/session lineage
@@ -1194,6 +1194,27 @@ def load_accepted_path_authority_for_execution(
             "accepted authority belongs to a different logical workspace",
         )
     return authority
+
+
+def load_accepted_path_authority_for_execution(
+    db: Session,
+    *,
+    task_id: int,
+    session_id: int,
+    task_execution_id: int | None,
+    plan: Any,
+    workspace_identity: str,
+):
+    """Compatibility name for the Execution consumer of the generic loader."""
+
+    return load_accepted_path_authority(
+        db,
+        task_id=task_id,
+        session_id=session_id,
+        task_execution_id=task_execution_id,
+        plan=plan,
+        workspace_identity=workspace_identity,
+    )
 
 
 def find_latest_orchestration_event(

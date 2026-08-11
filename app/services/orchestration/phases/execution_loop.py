@@ -112,7 +112,7 @@ from app.services.orchestration.state.persistence import (
     attach_failure_envelope,
     emit_intent_outcome_mismatch,
     maybe_emit_divergence_detected,
-    load_accepted_path_authority_for_execution,
+    load_accepted_path_authority,
     read_orchestration_events,
     record_validation_verdict,
     save_orchestration_checkpoint,
@@ -335,7 +335,7 @@ def execute_step_loop(
     restore_workspace_snapshot_if_needed = ctx.restore_workspace_snapshot_if_needed
 
     try:
-        accepted_path_authority = load_accepted_path_authority_for_execution(
+        accepted_path_authority = load_accepted_path_authority(
             db,
             task_id=task_id,
             session_id=session_id,

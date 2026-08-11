@@ -17,6 +17,7 @@ from app.services.orchestration.execution.python_resolution import (
 )
 from app.services.orchestration.types import CandidateFinding
 
+from .path_authority import PathDeclarationError, declare
 from .workspace_guard import TaskWorkspaceViolationError, normalize_path_reference
 
 
@@ -70,15 +71,20 @@ def candidate_delta_identity(
     return f"sha256:{digest}"
 
 
-def candidate_authorized_paths(
-    project_dir: Path, change_set: Mapping[str, Any]
-) -> tuple[str, ...]:
+def candidate_observed_paths(change_set: Mapping[str, Any]) -> tuple[str, ...]:
+    """Return canonical paths observed by the Change Set.
+
+    This is an observation projection only.  It deliberately has no
+    authorization vocabulary and cannot consult or manufacture a grant.
+    Accepted Path Authority is supplied separately by the Candidate Validator.
+    """
+
     paths: list[str] = []
-    for key in ("added_files", "modified_files"):
+    for key in ("added_files", "modified_files", "deleted_files"):
         for raw_path in change_set.get(key) or []:
             try:
-                path = normalize_path_reference(str(raw_path), project_dir)
-            except TaskWorkspaceViolationError:
+                path = declare(str(raw_path)).value
+            except PathDeclarationError:
                 continue
             if path != "." and path not in paths:
                 paths.append(path)
@@ -122,13 +128,24 @@ def select_candidate_verification(
     plan: Sequence[Mapping[str, Any]],
     task_prompt: str,
     allow_broad_fallback: bool = False,
+    observed_scope: Sequence[str] | None = None,
+    verification_scope: Sequence[str] | None = None,
 ) -> CandidateVerificationSelection:
     """Select the smallest deterministic test scope owned by the candidate."""
 
-    candidate_paths = candidate_authorized_paths(project_dir, change_set)
+    observed_paths = tuple(
+        candidate_observed_paths(change_set)
+        if observed_scope is None
+        else (str(path) for path in observed_scope)
+    )
+    scoped_paths = tuple(
+        observed_paths
+        if verification_scope is None
+        else (str(path) for path in verification_scope)
+    )
     changed_python_tests = tuple(
         path
-        for path in candidate_paths
+        for path in observed_paths
         if _is_python_test(path) and (project_dir / path).is_file()
     )
     if changed_python_tests:
@@ -163,7 +180,7 @@ def select_candidate_verification(
         )
 
     regression_tests: list[str] = []
-    for changed_path in candidate_paths:
+    for changed_path in scoped_paths:
         path = Path(changed_path)
         if path.suffix != ".py" or _is_python_test(changed_path):
             continue
@@ -245,6 +262,8 @@ def validate_candidate_delta(
     include_static_checks: bool = True,
     allow_broad_fallback: bool = False,
     timeout_seconds: int = 180,
+    observed_scope: Sequence[str] | None = None,
+    verification_scope: Sequence[str] | None = None,
 ) -> CandidateCheckRun:
     """Run candidate-owned checks and return typed, attributed findings."""
 
@@ -254,6 +273,8 @@ def validate_candidate_delta(
         plan=plan,
         task_prompt=task_prompt,
         allow_broad_fallback=allow_broad_fallback,
+        observed_scope=observed_scope,
+        verification_scope=verification_scope,
     )
     findings: list[CandidateFinding] = []
     commands_run: list[str] = []
@@ -300,9 +321,14 @@ def validate_candidate_delta(
             )
 
     if include_static_checks:
+        observed_paths = tuple(
+            candidate_observed_paths(change_set)
+            if observed_scope is None
+            else (str(path) for path in observed_scope)
+        )
         python_paths = tuple(
             path
-            for path in candidate_authorized_paths(project_dir, change_set)
+            for path in observed_paths
             if path.endswith(".py") and (project_dir / path).is_file()
         )
         if python_paths:
@@ -372,7 +398,7 @@ def validate_candidate_delta(
                 )
 
         if (project_dir / ".git").exists():
-            changed_paths = candidate_authorized_paths(project_dir, change_set)
+            changed_paths = observed_paths
             if changed_paths:
                 quoted_paths = " ".join(shlex.quote(path) for path in changed_paths)
                 command = f"git diff --check -- {quoted_paths}"
