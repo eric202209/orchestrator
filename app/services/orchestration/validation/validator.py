@@ -42,6 +42,11 @@ from .workspace_checks import (
 from .workspace_guard import (
     TaskWorkspaceViolationError,
 )
+from .accepted_path_authority import (
+    ACCEPTED_PLAN_STATUSES,
+    build_accepted_path_authority,
+)
+from .path_authority import PathAuthorityError
 from .candidate_checks import (
     candidate_authorized_paths,
     candidate_delta_identity,
@@ -1409,6 +1414,11 @@ class ValidatorService:
         planner_contract: Mapping[str, Any] | None = None,
         source_materialization: Any = None,
     ) -> PlanOutcome:
+        # The Accepted Path Authority binds the plan the caller holds, which is
+        # also what ``_completion_plan_identity`` hashes downstream.  The local
+        # deep copy below may be reordered by the step-order correction, and
+        # that correction deliberately never escapes this function.
+        accepted_plan = plan
         plan = copy.deepcopy(plan)
         profile = cls.infer_validation_profile(
             task_prompt, execution_profile, title=title, description=description
@@ -2217,16 +2227,60 @@ class ValidatorService:
                 dict.fromkeys(semantic_violation_codes)
             )
 
+        status = cls._select_status(
+            warnings=warnings,
+            repairable=repairable,
+            rejected=rejected,
+            severity=validation_severity,
+            stage="plan",
+        )
+        # Phase 33C-3: the Plan requests scope; the validator grants it.  The
+        # authority is minted only once the plan is authoritative enough to
+        # enter Execution, and is frozen as evidence beside — never instead of —
+        # the source-materialization record it was derived from.
+        if status in ACCEPTED_PLAN_STATUSES:
+            if source_materialization is None:
+                details["accepted_path_authority_unavailable"] = (
+                    "source_materialization_absent"
+                )
+            else:
+                try:
+                    authority, undeclarable_paths = build_accepted_path_authority(
+                        plan=accepted_plan,
+                        source_materialization=source_materialization,
+                        task_explicit_scope_paths=scope_paths,
+                        creation_requested_paths=_plan_creation_authorized_paths(
+                            accepted_plan
+                        ),
+                    )
+                except PathAuthorityError as exc:
+                    # A contradictory grant set is not downgraded to a warning
+                    # and is never silently omitted: an accepted plan without a
+                    # valid authority is not a valid accepted plan.
+                    rejected.append(
+                        "accepted_path_authority_construction_failed: " f"{exc.code}"
+                    )
+                    details["accepted_path_authority_error"] = {
+                        "code": exc.code,
+                        "message": str(exc),
+                    }
+                    status = cls._select_status(
+                        warnings=warnings,
+                        repairable=repairable,
+                        rejected=rejected,
+                        severity=validation_severity,
+                        stage="plan",
+                    )
+                else:
+                    details["accepted_path_authority"] = authority.to_dict()
+                    if undeclarable_paths:
+                        details["accepted_path_authority_undeclarable_paths"] = list(
+                            undeclarable_paths[:20]
+                        )
         details = cls._with_validator_rule_ids(stage="plan", details=details)
         verdict = ValidationVerdict(
             stage="plan",
-            status=cls._select_status(
-                warnings=warnings,
-                repairable=repairable,
-                rejected=rejected,
-                severity=validation_severity,
-                stage="plan",
-            ),
+            status=status,
             profile=profile,
             reasons=cls._ordered_reasons(
                 warnings=warnings, repairable=repairable, rejected=rejected

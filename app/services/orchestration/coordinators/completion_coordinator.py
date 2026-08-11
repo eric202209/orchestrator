@@ -9,7 +9,6 @@ validators, and lifecycle services.
 
 from __future__ import annotations
 
-import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
@@ -58,6 +57,9 @@ from app.services.orchestration.state.persistence import (
 )
 from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
+from app.services.orchestration.validation.accepted_path_authority import (
+    plan_identity_text,
+)
 from app.services.orchestration.validation.candidate_checks import (
     candidate_delta_identity,
 )
@@ -70,9 +72,14 @@ from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
 
 
 def _completion_plan_identity(plan: Any) -> str:
-    """Canonical in-memory identity for the already accepted Plan."""
+    """Canonical in-memory identity for the already accepted Plan.
 
-    return json.dumps(plan, sort_keys=True, separators=(",", ":"))
+    Delegates to the single plan-identity authority so that the value the
+    Accepted Path Authority binds and the value this coordinator compares are
+    the same canonical serialization, not two lookalikes.
+    """
+
+    return plan_identity_text(plan)
 
 
 def _completion_candidate_scope(validation: Any) -> tuple[str, ...]:
