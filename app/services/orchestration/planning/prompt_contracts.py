@@ -43,16 +43,18 @@ def render_ops_first_contract() -> str:
     return (
         "Use `ops` for file writes; put source in write_file/append_file/replace_in_file, not shell. "
         f"Supported ops: {render_supported_file_ops()}. "
-        "Shapes: write/append {op,path,content}; replace {op,path,old,new}; mkdir/delete {op,path}."
+        "Shapes: write/append {op,path,content}; replace legacy {op,path,old,new} "
+        "or semantic {op,path,target_id,new}; mkdir/delete {op,path}; replace forms are exclusive."
     )
 
 
 def render_operation_choice_contract() -> str:
     return (
-        "`replace_in_file` is only for exact old text already confirmed from "
-        "current workspace evidence. If the old text is guessed, stale, or not "
-        "shown in the current excerpt, inspect first or use another supported "
-        "operation; do not invent helper identifiers or functions."
+        "Accepted replace shapes are `{op,path,old,new}` or `{op,path,target_id,new}`. "
+        "For replace_in_file, use a listed Orchestrator `target_id` for the exact path; "
+        "otherwise use exact `old` plus `new` from current evidence. Never mix `old` "
+        "with `target_id`, invent IDs, or emit selector internals (offsets, versions, "
+        "hashes, or derivation data)."
     )
 
 

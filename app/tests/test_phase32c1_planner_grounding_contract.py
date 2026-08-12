@@ -493,7 +493,8 @@ def test_repair_prompt_reuses_exact_source_and_provenance(tmp_path):
 
     assert "CURRENT SOURCE MATERIALIZATION" in prompt
     assert source in prompt
-    assert hashlib.sha256(source.encode()).hexdigest() in prompt
+    assert hashlib.sha256(source.encode()).hexdigest() not in prompt
+    assert "content_hash:" not in prompt
     assert "future read_file" in prompt
 
 
@@ -889,10 +890,11 @@ def test_repair_prompt_receives_the_same_target_region(tmp_path):
     )
 
     assert "datetime.utcnow()" in prompt
-    assert f"visible_lines: {record.start_line}-{record.end_line}" in prompt
-    assert "selection_strategy: target_centered_exact_match" in prompt
-    assert "target_hint: datetime.utcnow()" in prompt
-    assert "target_included: true" in prompt
+    assert f"visible_lines: {record.start_line}-{record.end_line}" not in prompt
+    assert "selection_strategy: target_centered_exact_match" not in prompt
+    assert "target_hint: datetime.utcnow()" not in prompt
+    assert "target_included: true" not in prompt
+    assert "target_id: tgt_" in prompt
     assert "Never reconstruct a whole file from a partial excerpt." in prompt
 
 
@@ -1028,7 +1030,7 @@ def test_first_pass_and_repair_prompts_share_one_compact_renderer(tmp_path):
         expected_paths=["pkg/deep.py"],
         supporting_paths=[],
     )
-    first_pass_block = materialization.to_prompt_block()
+    first_pass_block = materialization.to_prompt_block(provider_safe=True)
 
     repair_prompt = build_planning_repair_prompt(
         task_description=task,
@@ -1144,9 +1146,10 @@ def test_attempt1_repair_projection_fits_without_dropping_target_branch():
     assert len(prompt) <= 8000
     assert "query.offset(skip).limit(limit)" in prompt
     assert "if page is None:" in prompt
-    assert "version_identity:" in prompt
-    assert "visible_lines:" in prompt
-    assert "target_included: true" in prompt
+    assert "version_identity:" not in prompt
+    assert "visible_lines:" not in prompt
+    assert "target_included: true" not in prompt
+    assert "target_id: tgt_" in prompt
 
 
 def test_rejected_operation_is_r0_without_a_task_hint(tmp_path):

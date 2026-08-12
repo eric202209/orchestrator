@@ -281,8 +281,8 @@ def test_production_repair_prompt_is_produced_and_carries_r0_grounding(
         "app/services/workspace/context_service.py"
     ]
     assert target.content in result, "the R0 source excerpt must survive intact"
-    assert target.version_identity in result
-    assert target.content_hash in result
+    assert target.version_identity not in result
+    assert target.content_hash not in result
     for path in REQUIRED_PATHS:
         assert path in result
 
@@ -297,12 +297,12 @@ def test_attempt9_repair_prompt_retains_every_required_grounding_record(
     assert [item.relative_path for item, _ in required] == list(REQUIRED_PATHS)
     assert {priority for _, priority in required} == {"R0"}
 
-    # R0 records, their version identity, hash and creation authorization.
+    # R0 records, their source excerpt and provider-safe target handles.
     for path in REQUIRED_PATHS:
         assert path in prompt
     target = materialization.file_map()["app/services/workspace/context_service.py"]
-    assert target.version_identity in prompt
-    assert target.content_hash in prompt
+    assert target.version_identity not in prompt
+    assert target.content_hash not in prompt
     assert target.content in prompt, "the R0 source excerpt must survive intact"
     assert "new_file_authorized_for_creation" in prompt
 

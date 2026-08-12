@@ -399,7 +399,7 @@ def build_planning_repair_prompt_with_metadata(
         )
     )
     materialization_block = (
-        planner_source_materialization.to_prompt_block()
+        planner_source_materialization.to_prompt_block(provider_safe=True)
         if source_materialization_required
         else ""
     )
@@ -2412,6 +2412,7 @@ def build_minimum_safe_stale_replace_repair_envelope(
         source_materialization,
         rejected_paths=rejected_paths,
         compaction_level=4,
+        provider_safe=True,
     )
     if not source_block or not required_records:
         return None
@@ -2592,6 +2593,7 @@ def build_compact_stale_replace_repair_prompt(
                 source_materialization,
                 rejected_paths=rejected_operation_paths,
                 compaction_level=level,
+                provider_safe=True,
             )
             for level in range(4)
         ]
@@ -2832,6 +2834,7 @@ Stale replace second-pass target preservation:
             source_materialization,
             rejected_paths=rejected_operation_paths,
             compaction_level=4,
+            provider_safe=True,
         )
         return RequiredRepairSourceEvidenceExceeded(
             diagnostics={

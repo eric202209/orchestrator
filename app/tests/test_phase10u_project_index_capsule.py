@@ -83,7 +83,7 @@ def test_planning_prompt_includes_capsule_as_context_not_static_site_rewrite(tmp
     assert "PROJECT STRUCTURE CAPSULE" in prompt
     assert "- frontend/src/App.tsx" in prompt
     assert "Use these paths as workspace facts." in prompt
-    assert "`replace_in_file` is only for exact old text" in prompt
+    assert "{op,path,target_id,new}" in prompt
     assert "src/index.js -> index.html" not in prompt
     assert "frontend/src/frontend/src" not in prompt
 
@@ -100,7 +100,7 @@ def test_minimal_planning_prompt_uses_capped_capsule(tmp_path):
 
     assert "PROJECT STRUCTURE CAPSULE" in prompt
     assert "... " in prompt
-    assert "`replace_in_file` is only for exact old text" in prompt
+    assert "{op,path,target_id,new}" in prompt
     assert len(prompt) < 12000
 
 
@@ -126,7 +126,7 @@ def test_repair_prompt_includes_capsule_without_exceeding_budget(tmp_path):
     assert "PROJECT STRUCTURE CAPSULE" in prompt
     assert "- src/ledger_app/summary.py" in prompt
     assert "Use these paths as workspace facts." in prompt
-    assert "`replace_in_file` is only for exact old text" in prompt
+    assert "{op,path,target_id,new}" in prompt
     assert "Do not invent helper variables" in prompt
     assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
 

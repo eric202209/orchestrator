@@ -628,7 +628,7 @@ def test_hard_budget_compact_fallback_drops_knowledge_before_minimal_capsule(
     )
 
 
-def test_stale_replace_over_budget_fallback_retains_compact_source_api_contract(
+def test_stale_replace_over_budget_fallback_preserves_provider_safe_budget(
     tmp_path,
     monkeypatch,
 ):
@@ -659,18 +659,11 @@ def test_stale_replace_over_budget_fallback_retains_compact_source_api_contract(
 
     assert len(result.prompt) <= repair_prompts.PLANNING_REPAIR_PROMPT_MAX_CHARS
     assert "Stale replace repair mode" in result.prompt
-    assert "## SOURCE/API CONTRACT CAPSULE" in result.prompt
-    assert "Minimal hard-budget repair contract." in result.prompt
-    assert "No physical src.<package> imports inside package code" in result.prompt
-    assert "forbid click.*, typer.*, @cli.command, @app.command" in result.prompt
-    assert (
-        result.metadata["source_api_contract_included_reason"]
-        == "hard_budget_minimal_capsule"
-    )
+    assert "## SOURCE/API CONTRACT CAPSULE" not in result.prompt
+    assert result.metadata["source_api_contract_omitted_reason"] == "over_budget"
     assert result.metadata["source_api_contract_available"] is True
-    assert result.metadata["source_api_contract_included"] is True
-    assert result.metadata["source_api_contract_compacted"] is True
-    assert result.metadata["source_api_contract_omitted_reason"] is None
+    assert result.metadata["source_api_contract_included"] is False
+    assert result.metadata["source_api_contract_compacted"] is False
 
 
 def test_bounded_debug_repair_prompt_includes_source_api_contract_for_python_failure(

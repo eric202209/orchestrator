@@ -902,7 +902,9 @@ def assemble_planning_prompt(
     )
     if source_stub_context:
         raw_prompt = raw_prompt + "\n\n" + source_stub_context
-    source_materialization_context = planner_source_materialization.to_prompt_block()
+    source_materialization_context = planner_source_materialization.to_prompt_block(
+        provider_safe=True
+    )
     if source_materialization_context:
         raw_prompt = raw_prompt + "\n\n" + source_materialization_context
     knowledge_block = _render_knowledge_block(knowledge_context)

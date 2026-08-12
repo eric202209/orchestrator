@@ -221,8 +221,8 @@ class PlannerSourceMaterialization:
             ],
         }
 
-    def to_prompt_block(self) -> str:
-        return render_planner_source_materialization(self)
+    def to_prompt_block(self, *, provider_safe: bool = False) -> str:
+        return render_planner_source_materialization(self, provider_safe=provider_safe)
 
 
 def _safe_relative_path(value: Any) -> str:
@@ -1254,7 +1254,11 @@ def _visible_span_lines(item: MaterializedSourceFile) -> list[str]:
 
 def render_planner_source_materialization(
     materialization: PlannerSourceMaterialization | None,
+    *,
+    provider_safe: bool = False,
 ) -> str:
+    if provider_safe:
+        return _render_provider_planner_source_materialization(materialization)
     if materialization is None or not materialization.files:
         return ""
     lines = [
@@ -1312,11 +1316,73 @@ def render_planner_source_materialization(
     return "\n".join(lines)
 
 
+def _render_provider_planner_source_materialization(
+    materialization: PlannerSourceMaterialization | None,
+) -> str:
+    """Render only provider-safe source facts and opaque target handles."""
+
+    if materialization is None or not materialization.files:
+        return ""
+    from app.services.orchestration.planning.semantic_target_inventory import (
+        build_semantic_target_inventory,
+    )
+
+    inventory = build_semantic_target_inventory(materialization)
+    handles = {handle.path: handle for handle in inventory.handles}
+    lines = [
+        "## CURRENT SOURCE MATERIALIZATION",
+        "The following bounded current workspace source is planning evidence.",
+        "Use only the supplied visible source and the Orchestrator-issued target handles.",
+        "A future read_file command is not planning-time evidence.",
+        "When a target_id is listed for a path, it may be used for replace_in_file.",
+        "Do not invent target IDs or emit selector internals, offsets, versions, or hashes.",
+        "When no target_id is listed, legacy replace_in_file uses exact old/new source evidence.",
+        "Omitted or truncated source does not authorize fabricated exact replacement.",
+        "Never reconstruct a whole file from a partial excerpt.",
+        (
+            "Bounds: "
+            f"maximum files={materialization.maximum_files}, "
+            f"maximum bytes per file={materialization.maximum_bytes_per_file}, "
+            f"maximum total source bytes={materialization.maximum_total_source_bytes}."
+        ),
+    ]
+    for item in materialization.files:
+        handle = handles.get(item.relative_path)
+        record_lines = [
+            f"### {item.relative_path}",
+            f"status: {item.status}",
+            f"expected: {str(item.expected).lower()}",
+            f"creation_authorized: {str(item.creation_authorized).lower()}",
+            f"truncated: {str(item.truncated).lower()}",
+            f"omission_reason: {item.omission_reason or '(none)'}",
+        ]
+        if handle is not None:
+            record_lines.extend(
+                [
+                    f"target_id: {handle.target_id}",
+                    f"target_label: {handle.label}",
+                    f"target_context: {handle.context}",
+                ]
+            )
+        lines.extend(record_lines)
+        if item.content is not None:
+            lines.extend(["content:", item.content])
+        else:
+            lines.append("content: (not supplied)")
+    if materialization.unavailable_reasons:
+        lines.append(
+            "planning_source_materialization_unavailable: "
+            + ", ".join(materialization.unavailable_reasons)
+        )
+    return "\n".join(lines)
+
+
 def render_repair_source_materialization(
     materialization: PlannerSourceMaterialization | None,
     *,
     rejected_paths: Collection[str] = (),
     compaction_level: int = 0,
+    provider_safe: bool = False,
 ) -> str:
     """Render a repair-only bounded projection of existing source evidence.
 
@@ -1328,6 +1394,12 @@ def render_repair_source_materialization(
 
     if materialization is None or not materialization.files:
         return ""
+    if provider_safe:
+        return _render_provider_repair_source_materialization(
+            materialization,
+            rejected_paths=rejected_paths,
+            compaction_level=compaction_level,
+        )
     if compaction_level == 0:
         return render_planner_source_materialization(materialization)
     rejected = set(_ordered_unique_paths(rejected_paths))
@@ -1403,6 +1475,84 @@ def render_repair_source_materialization(
             ]
         )
         lines.extend(["content:", content or "(not supplied)"])
+    if omitted and compaction_level < 4:
+        lines.append(
+            f"{omitted} lower-priority supporting source records omitted to preserve bounded target evidence."
+        )
+    return "\n".join(lines)
+
+
+def _render_provider_repair_source_materialization(
+    materialization: PlannerSourceMaterialization,
+    *,
+    rejected_paths: Collection[str],
+    compaction_level: int,
+) -> str:
+    """Compact repair projection with the same provider-safe field boundary."""
+
+    from app.services.orchestration.planning.semantic_target_inventory import (
+        build_semantic_target_inventory,
+    )
+
+    inventory = build_semantic_target_inventory(materialization)
+    handles = {handle.path: handle for handle in inventory.handles}
+    rejected = set(_ordered_unique_paths(rejected_paths))
+    omitted = 0
+    lines = [
+        "## CURRENT SOURCE MATERIALIZATION",
+        "Current bounded workspace source below is authoritative planning evidence.",
+        "Use listed Orchestrator-issued target IDs only; selector internals are not provider data.",
+        "Legacy old/new remains available when no target ID is listed.",
+    ]
+    for item in materialization.files:
+        priority = _repair_projection_priority(item, rejected)
+        if compaction_level >= 4 and priority not in {"R0", "R1"}:
+            continue
+        if compaction_level >= 3 and priority == "R5":
+            omitted += 1
+            continue
+        metadata_only = compaction_level >= 1 and priority in {"R4", "R5"}
+        if compaction_level >= 2 and priority == "R2" and not item.target_hint:
+            metadata_only = True
+        content = item.content
+        reduced = False
+        if compaction_level >= 2 and priority in {"R2", "R4"} and content:
+            content = _repair_projection_excerpt(content, item.target_hint, 560)
+            reduced = content != item.content
+        handle = handles.get(item.relative_path)
+        record_lines = [
+            f"### {item.relative_path}",
+            f"status: {item.status}",
+            f"expected: {str(item.expected).lower()}",
+            f"truncated: {str(item.truncated).lower()}",
+        ]
+        if handle is not None:
+            record_lines.extend(
+                [
+                    f"target_id: {handle.target_id}",
+                    f"target_label: {handle.label}",
+                    f"target_context: {handle.context}",
+                ]
+            )
+        lines.extend(record_lines)
+        if metadata_only:
+            lines.append("repair_projection: metadata_only")
+            continue
+        lines.extend(
+            [
+                (
+                    "repair_projection: repair_evidence_centered"
+                    if reduced and priority == "R2"
+                    else (
+                        "repair_projection: reduced_excerpt"
+                        if reduced
+                        else "repair_projection: full_excerpt"
+                    )
+                ),
+                "content:",
+                content or "(not supplied)",
+            ]
+        )
     if omitted and compaction_level < 4:
         lines.append(
             f"{omitted} lower-priority supporting source records omitted to preserve bounded target evidence."

@@ -89,7 +89,7 @@ def collect_repair_guidance_block(ctx: Any) -> str:
     )
     source_materialization = getattr(ctx, "planner_source_materialization", None)
     source_block = (
-        source_materialization.to_prompt_block()
+        source_materialization.to_prompt_block(provider_safe=True)
         if source_materialization is not None
         else ""
     )

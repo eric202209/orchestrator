@@ -35,6 +35,12 @@ from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
     repair_removed_source_materialization as _repair_removed_source_materialization,
 )
+from app.services.orchestration.planning.semantic_target_inventory import (
+    SemanticTargetContractError,
+    SemanticTargetInventoryError,
+    build_semantic_target_inventory,
+    normalize_provider_semantic_intents,
+)
 from app.services.orchestration.planning.normalization import (
     normalize_existing_file_target_plan,
     normalize_stale_replace_ops_to_small_file_writes,
@@ -248,6 +254,27 @@ def execute_planning_phase(
             "status": "failed",
             "reason": "planning_source_materialization_unavailable",
         }
+    try:
+        semantic_target_inventory = build_semantic_target_inventory(
+            ctx.planner_source_materialization
+        )
+    except SemanticTargetInventoryError as exc:
+        failure_type = "planning_semantic_target_inventory_invalid"
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = str(exc)
+        _emit_planning_diagnostics_contract_violation(
+            ctx,
+            reason=failure_type,
+            contract_violations=[str(exc)],
+            output_text="",
+            strategy_info=failure_type,
+        )
+        _finalize_planning_terminal_failure(
+            ctx=ctx,
+            failure_type=failure_type,
+            failure_reason=str(exc),
+        )
+        return {"status": "failed", "reason": failure_type}
     if len(ctx.orchestration_state.project_context or "") > 3500:
         compressed_context = _compress_project_context_for_planning(
             ctx.orchestration_state
@@ -332,6 +359,7 @@ def execute_planning_phase(
                 planner_prompt=planning_prompt,
             ),
             "source_materialization": ctx.planner_source_materialization.to_metadata(),
+            "semantic_target_handle_count": len(semantic_target_inventory.handles),
             "model_capability_label": model_capability_label,
             "context_budget_status": (
                 "dense" if planning_prompt_tokens > 8000 else "normal"
@@ -1202,6 +1230,40 @@ def execute_planning_phase(
                     "Planning result is not a recognized list of steps "
                     f"(type={plan_shape}, keys={plan_keys}, preview={str(plan_data)[:240]})"
                 )
+
+            try:
+                extracted_plan = normalize_provider_semantic_intents(
+                    extracted_plan,
+                    inventory=semantic_target_inventory,
+                    project_dir=Path(ctx.orchestration_state.project_dir),
+                    source_materialization=ctx.planner_source_materialization,
+                )
+            except SemanticTargetContractError as exc:
+                # A provider-selected semantic target has no safe legacy
+                # interpretation.  Reject this response before normalization,
+                # Plan Repair, APA, or Execution; the next attempt must be a
+                # separately authorized provider response using the same
+                # bounded inventory.
+                failure_type = "planning_semantic_target_contract_violation"
+                ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+                ctx.orchestration_state.abort_reason = str(exc)
+                _emit_planning_diagnostics_contract_violation(
+                    ctx,
+                    reason=failure_type,
+                    contract_violations=[str(exc)],
+                    output_text=output_text,
+                    strategy_info=failure_type,
+                )
+                _finalize_planning_terminal_failure(
+                    ctx=ctx,
+                    failure_type=failure_type,
+                    failure_reason=str(exc),
+                )
+                return {
+                    "status": "failed",
+                    "reason": failure_type,
+                    "semantic_target_error": exc.code,
+                }
 
             previous_plan_for_repair_arbitration = (
                 list(ctx.orchestration_state.plan or [])

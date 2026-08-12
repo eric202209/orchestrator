@@ -12,7 +12,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Collection, Literal
 
 from app.services.orchestration.operations.source_region_identity import (
     SourceRegionIdentity,
@@ -178,7 +178,8 @@ def construct_source_region_identity(
     canonical_path: CanonicalPath | str,
     semantic_target: SemanticTargetIntent,
     accepted_source_materialization: PlannerSourceMaterialization,
-    accepted_path_authority: AcceptedPathAuthority,
+    accepted_path_authority: AcceptedPathAuthority | None = None,
+    eligible_existing_mutable_paths: Collection[CanonicalPath | str] = (),
     operation_intent: Literal["replace_in_file"] = "replace_in_file",
 ) -> SelectorConstructionResult:
     """Construct one exact selector from accepted materialization evidence.
@@ -213,7 +214,9 @@ def construct_source_region_identity(
             diagnostic_code="source_materialization_invalid",
             diagnostic_message="accepted source evidence is malformed",
         )
-    if not isinstance(accepted_path_authority, AcceptedPathAuthority):
+    if accepted_path_authority is not None and not isinstance(
+        accepted_path_authority, AcceptedPathAuthority
+    ):
         return _failure(
             INVALID_AUTHORITY,
             diagnostic_code="accepted_path_authority_invalid",
@@ -236,21 +239,40 @@ def construct_source_region_identity(
             diagnostic_message="only the Orchestrator primary target region is supported",
         )
 
-    try:
-        grant = accepted_path_authority.grant_for(declared_path)
-    except (AttributeError, PathAuthorityError) as exc:
-        return _failure(
-            INVALID_AUTHORITY,
-            canonical_path=declared_path,
-            diagnostic_code="accepted_path_authority_invalid",
-            diagnostic_message=str(exc),
+    if accepted_path_authority is not None:
+        try:
+            grant = accepted_path_authority.grant_for(declared_path)
+        except (AttributeError, PathAuthorityError) as exc:
+            return _failure(
+                INVALID_AUTHORITY,
+                canonical_path=declared_path,
+                diagnostic_code="accepted_path_authority_invalid",
+                diagnostic_message=str(exc),
+            )
+        has_existing_mutable = (
+            grant is not None and grant.grant_class is GrantClass.EXISTING_MUTABLE
         )
-    if grant is None or grant.grant_class is not GrantClass.EXISTING_MUTABLE:
+    else:
+        eligible_paths: set[str] = set()
+        for value in eligible_existing_mutable_paths or ():
+            eligible = _canonical_path(value)
+            if eligible is not None:
+                eligible_paths.add(eligible.value)
+        has_existing_mutable = declared_path.value in eligible_paths
+    if not has_existing_mutable:
         return _failure(
             INVALID_AUTHORITY,
             canonical_path=declared_path,
-            diagnostic_code="existing_mutable_grant_required",
-            diagnostic_message="replace construction requires an exact existing_mutable grant",
+            diagnostic_code=(
+                "existing_mutable_grant_required"
+                if accepted_path_authority is not None
+                else "existing_mutable_eligibility_required"
+            ),
+            diagnostic_message=(
+                "replace construction requires an exact existing_mutable grant"
+                if accepted_path_authority is not None
+                else "pre-acceptance construction requires an exact eligible existing path"
+            ),
         )
 
     workspace_root = Path(root).resolve()

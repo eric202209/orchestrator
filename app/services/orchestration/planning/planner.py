@@ -1257,7 +1257,9 @@ class PlannerService:
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
         if source_materialization is not None:
-            prompt += "\n\n" + source_materialization.to_prompt_block()
+            prompt += "\n\n" + source_materialization.to_prompt_block(
+                provider_safe=True
+            )
         return prompt
 
     @staticmethod
@@ -1288,7 +1290,9 @@ class PlannerService:
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
         if source_materialization is not None:
-            prompt += "\n\n" + source_materialization.to_prompt_block()
+            prompt += "\n\n" + source_materialization.to_prompt_block(
+                provider_safe=True
+            )
         return prompt
 
     @staticmethod
@@ -2298,7 +2302,7 @@ class PlannerService:
             timeout_seconds, reason
         )
         if source_materialization is not None:
-            source_block = source_materialization.to_prompt_block()
+            source_block = source_materialization.to_prompt_block(provider_safe=True)
             if (
                 source_block
                 and "## CURRENT SOURCE MATERIALIZATION" not in guidance_block
