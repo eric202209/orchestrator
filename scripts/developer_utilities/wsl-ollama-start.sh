@@ -68,6 +68,27 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+require_tool() {
+    local name="$1"
+    command_exists "$name" || fail "Required tool not found: $name"
+}
+
+check_docker_daemon() {
+    docker info >/dev/null 2>&1
+}
+
+pnpm_command() {
+    local pnpm_path
+    pnpm_path="$(command -v pnpm 2>/dev/null || true)"
+    if [ -z "$pnpm_path" ]; then
+        return 1
+    fi
+    if [[ "$pnpm_path" == /mnt/* ]]; then
+        return 1
+    fi
+    printf '%s' "$pnpm_path"
+}
+
 env_file_value() {
     local key="$1"
     local default_value="${2:-}"
@@ -87,6 +108,26 @@ env_file_value() {
     else
         printf '%s' "$default_value"
     fi
+}
+
+load_env_file() {
+    local env_file="$ORCHESTRATOR_DIR/.env"
+    local line key value
+    [ -f "$env_file" ] || fail ".env not found at $env_file"
+    while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ "$line" =~ ^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+        key="${line%%=*}"
+        key="${key//[[:space:]]/}"
+        value="${line#*=}"
+        value="${value%\"}"
+        value="${value#\"}"
+        value="${value%\'}"
+        value="${value#\'}"
+        export "$key=$value"
+    done < "$env_file"
 }
 
 resolve_windows_host() {
@@ -252,8 +293,15 @@ run_preflight_check() {
     step "Host tools"
     command_exists curl && check_ok "curl available" || check_fail "curl not found"
     command_exists docker && check_ok "docker available" || check_fail "docker not found"
+    if command_exists docker; then
+        check_docker_daemon && check_ok "Docker daemon reachable" || check_fail "Docker daemon not reachable"
+    fi
     if [ "$NO_FRONTEND" = false ]; then
-        command_exists pnpm && check_ok "pnpm available" || check_fail "pnpm not found"
+        if pnpm_path="$(pnpm_command)"; then
+            check_ok "pnpm available at $pnpm_path"
+        else
+            check_warn "WSL-local pnpm not found; frontend can be started manually after installing pnpm in WSL"
+        fi
     else
         check_ok "frontend skipped"
     fi
@@ -314,6 +362,8 @@ run_preflight_check() {
     [ "$failures" -eq 0 ] || exit 1
 }
 
+load_env_file
+
 WINDOWS_HOST_RESOLVED="$(resolve_windows_host)"
 WORKSPACE_ROOT_VALUE="$(workspace_root_value)"
 
@@ -322,9 +372,11 @@ if [ "$CHECK_ONLY" = true ]; then
     exit 0
 fi
 
-[ -f "$ORCHESTRATOR_DIR/.env" ] || fail ".env not found at $ORCHESTRATOR_DIR/.env"
 [ -f "$ORCHESTRATOR_DIR/$COMPOSE_FILE" ] || fail "$COMPOSE_FILE not found at $ORCHESTRATOR_DIR/$COMPOSE_FILE"
 [ -n "$WINDOWS_HOST_RESOLVED" ] || fail "Could not determine Windows host IP. Set WINDOWS_HOST manually."
+require_tool curl
+require_tool docker
+check_docker_daemon || fail "Docker daemon is not reachable. Start Docker Desktop with WSL2 integration enabled."
 
 validate_workspace_root "$WORKSPACE_ROOT_VALUE"
 ensure_runtime_files
@@ -373,12 +425,13 @@ if [ "$NO_FRONTEND" = false ]; then
                 warn "Frontend may still be starting. Check logs/frontend.log."
             fi
         fi
-    elif ! command_exists pnpm; then
-        warn "pnpm is not installed; skipping frontend"
+    elif ! pnpm_path="$(pnpm_command)"; then
+        warn "WSL-local pnpm is not installed; skipping frontend"
+        warn "Run after installing pnpm in WSL: cd frontend && VITE_API_URL=http://localhost:${BACKEND_PORT}/api/v1 pnpm dev"
     elif curl -fsS --connect-timeout 2 "http://localhost:${FRONTEND_PORT}" >/dev/null 2>&1; then
         ok "Frontend already reachable on port $FRONTEND_PORT"
     else
-        nohup env VITE_API_URL="http://localhost:${BACKEND_PORT}/api/v1" pnpm dev \
+        nohup env VITE_API_URL="http://localhost:${BACKEND_PORT}/api/v1" "$pnpm_path" dev \
             > "$ORCHESTRATOR_DIR/logs/frontend.log" 2>&1 &
         frontend_pid="$!"
         echo "$frontend_pid" > "$ORCHESTRATOR_DIR/logs/frontend.pid"

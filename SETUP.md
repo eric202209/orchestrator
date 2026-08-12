@@ -597,6 +597,8 @@ For backend-only validation, add `--no-frontend`.
 For validation records, capture authenticated `/api/v1/ops/build-identity`
 after startup and require `stale_container_check` to be `ok` when commit
 freshness matters.
+The helper uses WSL-local frontend tooling only; if `pnpm` is not installed in
+WSL, it starts the backend and prints the manual dashboard command.
 
 To ingest local `knowledge/` into the active Docker runtime during startup,
 use:

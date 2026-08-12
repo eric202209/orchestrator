@@ -30,7 +30,8 @@ handled by `../start.sh`; service logs are written directly to `../logs/`.
 
 ## Developer Utilities
 
-- `wsl-ollama-start.sh` - compact WSL2 Docker/Ollama startup helper.
+- `../wsl-start.sh --ollama` dispatches to `wsl-ollama-start.sh` for the compact WSL2 Docker/Ollama startup path.
+- `developer_utilities/wsl-ollama-start.sh` - implementation used by the public Ollama startup helper.
 - `windows_health_check.ps1` - Windows-side Docker/Ollama/backend health checks.
 - `format-python.sh` - format backend Python files with Black.
 - `security_check.sh` - scan tracked source-like files for likely secret exposure.

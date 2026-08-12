@@ -22,14 +22,17 @@ from typing import Optional
 
 import yaml
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from app.config import settings
-from app.database import SessionLocal
-from app.models import KnowledgeItem
-from app.services.knowledge.knowledge_service import KnowledgeService
+def _runtime_dependencies():
+    from app.config import settings
+    from app.database import SessionLocal
+    from app.models import KnowledgeItem
+    from app.services.knowledge.knowledge_service import KnowledgeService
+
+    return settings, SessionLocal, KnowledgeItem, KnowledgeService
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +160,7 @@ def _process_json(path: Path, source_dir: Path) -> Optional[dict]:
 
 
 def run(source_dir: Path, db_url: str, qdrant_url: str) -> None:
+    settings, SessionLocal, KnowledgeItem, KnowledgeService = _runtime_dependencies()
     svc = KnowledgeService(
         qdrant_url=qdrant_url,
         collection_name=settings.QDRANT_COLLECTION_NAME,
@@ -241,16 +245,21 @@ def main() -> None:
     )
     parser.add_argument(
         "--db-url",
-        default=settings.DATABASE_URL,
+        default=None,
         help="SQLAlchemy DB URL (default: from config)",
     )
     parser.add_argument(
         "--qdrant-url",
-        default=settings.QDRANT_URL,
+        default=None,
         help="Qdrant URL or ':memory:' (default: from config)",
     )
     args = parser.parse_args()
-    run(source_dir=args.source_dir, db_url=args.db_url, qdrant_url=args.qdrant_url)
+    settings, _, _, _ = _runtime_dependencies()
+    run(
+        source_dir=args.source_dir,
+        db_url=args.db_url or settings.DATABASE_URL,
+        qdrant_url=args.qdrant_url or settings.QDRANT_URL,
+    )
 
 
 if __name__ == "__main__":
