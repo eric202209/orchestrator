@@ -31,6 +31,8 @@ from ..policy import (
 from app.config import settings
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.orchestration.operations.file_ops_contract import (
+    ReplaceOperationMode,
+    classify_replace_operation,
     operation_has_file_op_path,
 )
 from app.services.orchestration.planning.planning_prompts import (
@@ -851,7 +853,10 @@ class PlannerService:
                 continue
             if str(operation.get("op") or "").strip() != "replace_in_file":
                 continue
-            if "selector" in operation:
+            if (
+                classify_replace_operation(operation)
+                is not ReplaceOperationMode.LEGACY_REPLACE
+            ):
                 continue
             old_present = "old" in operation or "old_text" in operation
             old_value = (
@@ -878,7 +883,10 @@ class PlannerService:
                 continue
             if str(operation.get("op") or "").strip() != "replace_in_file":
                 continue
-            if "selector" in operation:
+            if (
+                classify_replace_operation(operation)
+                is not ReplaceOperationMode.LEGACY_REPLACE
+            ):
                 continue
             rel_path = str(operation.get("path") or "").strip().lstrip("./")
             old_text = operation.get("old")
@@ -1031,6 +1039,11 @@ class PlannerService:
                     break
                 if str(operation.get("op") or "").strip() != "replace_in_file":
                     continue
+                if (
+                    classify_replace_operation(operation)
+                    is not ReplaceOperationMode.LEGACY_REPLACE
+                ):
+                    continue
                 rel_path = str(operation.get("path") or "").strip().lstrip("./")
                 old_text = operation.get("old")
                 if not rel_path or not isinstance(old_text, str) or not old_text:
@@ -1088,6 +1101,11 @@ class PlannerService:
                 if len(hints) >= max_hints or not isinstance(operation, dict):
                     break
                 if str(operation.get("op") or "").strip() != "replace_in_file":
+                    continue
+                if (
+                    classify_replace_operation(operation)
+                    is not ReplaceOperationMode.LEGACY_REPLACE
+                ):
                     continue
                 rel_path = str(operation.get("path") or "").strip().lstrip("./")
                 old_text = operation.get("old")

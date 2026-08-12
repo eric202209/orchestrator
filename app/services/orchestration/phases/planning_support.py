@@ -17,6 +17,10 @@ from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairNoOutputTimeout,
 )
+from app.services.orchestration.operations.file_ops_contract import (
+    ReplaceOperationMode,
+    classify_replace_operation,
+)
 from app.services.orchestration.planning.source_materialization import (
     plan_has_concrete_source_materialization,
     repair_context_requires_source_materialization,
@@ -1788,7 +1792,12 @@ def _extract_stale_old_text_from_plan(
         if step.get("step_number") not in stale_set:
             continue
         for op in step.get("ops") or []:
-            if op.get("op") == "replace_in_file" and "old" in op:
+            if (
+                isinstance(op, dict)
+                and classify_replace_operation(op)
+                is ReplaceOperationMode.LEGACY_REPLACE
+                and "old" in op
+            ):
                 texts.append(op["old"])
     return texts
 

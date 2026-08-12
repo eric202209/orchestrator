@@ -7,6 +7,11 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Tuple
 
+from app.services.orchestration.operations.file_ops_contract import (
+    ReplaceOperationMode,
+    classify_replace_operation,
+)
+
 
 _WORKSPACE_TARGET_EXCLUDE_DIRS = {
     ".git",
@@ -145,6 +150,10 @@ def normalize_existing_file_target_plan(
                 requested_paths.append(normalized)
         for op in step.get("ops") or []:
             if not isinstance(op, dict):
+                continue
+            if classify_replace_operation(op) is ReplaceOperationMode.SEMANTIC_REPLACE:
+                # A version-bound selector is already an explicit target. Do
+                # not rewrite its path using basename heuristics.
                 continue
             if str(op.get("op") or "") not in {
                 "append_file",
@@ -387,6 +396,14 @@ def normalize_stale_replace_ops_to_small_file_writes(
                 continue
             rewritten_op = dict(op)
             if str(rewritten_op.get("op") or "") != "replace_in_file":
+                ops.append(rewritten_op)
+                continue
+            if (
+                classify_replace_operation(rewritten_op)
+                is not ReplaceOperationMode.LEGACY_REPLACE
+            ):
+                # Semantic and mixed replace operations never enter the
+                # stale-old-to-write compatibility normalizer.
                 ops.append(rewritten_op)
                 continue
             path_text = _path_text(rewritten_op.get("path"))

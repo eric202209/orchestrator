@@ -10,6 +10,10 @@ from typing import Annotated, Any, Callable, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
 
+from app.services.orchestration.operations.file_ops_contract import (
+    ReplaceOperationMode,
+    classify_replace_operation,
+)
 from app.services.orchestration.planning.operation_repair_anchors import (
     MAX_ANCHORS_PER_OPERATION,
     SourceAnchor,
@@ -263,6 +267,13 @@ def build_operation_anchor_registry(
         if operation.get("op") != "replace_in_file":
             by_identity[identity] = ()
             continue
+        if (
+            classify_replace_operation(operation)
+            is not ReplaceOperationMode.LEGACY_REPLACE
+        ):
+            raise OperationRepairError(
+                "semantic or mixed replace cannot enter old-anchor operation repair"
+            )
         resolved = resolve_version_fenced_source(
             source_materialization, path, Path(project_dir)
         )
@@ -481,6 +492,13 @@ def merge_operation_repairs(
         original_path = original_operation.get("path")
         anchor: SourceAnchor | None = None
         if original_operation.get("op") == "replace_in_file":
+            if (
+                classify_replace_operation(original_operation)
+                is not ReplaceOperationMode.LEGACY_REPLACE
+            ):
+                raise OperationRepairError(
+                    "semantic or mixed replace cannot enter old-anchor operation repair"
+                )
             if not isinstance(entry, AnchoredRepairEntry):
                 raise OperationRepairError(
                     "replace_in_file repair must cite an authorized anchor_id"

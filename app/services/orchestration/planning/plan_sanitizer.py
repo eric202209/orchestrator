@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from app.services.orchestration.operations.file_ops_contract import (
     REPLACE_IN_FILE_NEW_ALIASES,
     REPLACE_IN_FILE_OLD_ALIASES,
+    normalize_file_op_shape,
     validate_file_op_shape,
 )
 
@@ -218,7 +219,7 @@ def _normalize_nested_file_operation(
             normalized["old"] = payload.get("old")
 
     if validate_file_op_shape(normalized):
-        return normalized
+        return normalize_file_op_shape(normalized)
     return dict(operation)
 
 
@@ -252,7 +253,7 @@ def _extract_top_level_named_file_ops(step: Dict[str, Any]) -> List[Dict[str, An
                 if key in payload:
                     normalized[key] = payload[key]
         if validate_file_op_shape(normalized):
-            operations.append(normalized)
+            operations.append(normalize_file_op_shape(normalized))
     return operations
 
 
@@ -275,7 +276,7 @@ def _normalize_file_op_key_alias(
     normalized.pop("o", None)
     normalized["op"] = alias_name
     if validate_file_op_shape(normalized):
-        return normalized
+        return normalize_file_op_shape(normalized)
     return dict(operation)
 
 
@@ -315,7 +316,7 @@ def _normalize_file_operation(
         for key in ("content", "regex"):
             if key in source:
                 operation[key] = source[key]
-    return operation
+    return normalize_file_op_shape(operation)
 
 
 def _extract_top_level_file_verification(step: Dict[str, Any]) -> Optional[str]:

@@ -32,6 +32,12 @@ from app.services.orchestration.planning.repair_arbitration import (
     classify_planning_repair_candidate,
 )
 from app.services.orchestration.planning.planner import PlannerService
+from app.services.orchestration.planning.planner import (
+    PlanningRepairOutputContractViolation,
+)
+from app.services.orchestration.operations.file_ops_contract import (
+    replace_mode_transitions,
+)
 from app.services.orchestration.phases.planning_support import (
     BLOCKING_IMMEDIATE_REPAIR_ISSUE_KEYS,
 )
@@ -81,6 +87,17 @@ def arbitrate_planning_repair_candidate(
         source_api_capsule=source_api_capsule,
         immediate_repair_issues=immediate_repair_issues,
     )
+    mode_transitions = replace_mode_transitions(
+        previous_plan, ctx.orchestration_state.plan
+    )
+    if mode_transitions:
+        # A full-plan repair may fix structural/verification failures, but it
+        # is not an implicit contract migration.  Keep legacy and semantic
+        # replace operations on their original side of the dual-read seam.
+        raise PlanningRepairOutputContractViolation(
+            "planning repair changed replace operation mode: "
+            + str(list(mode_transitions)[:8])
+        )
     arbitration["repair_reason"] = retry_state.last_repair_reason
     arbitration["repair_attempts"] = retry_state.consecutive_failures
     invalid_python_repair_candidate = "invalid_output" in arbitration.get(

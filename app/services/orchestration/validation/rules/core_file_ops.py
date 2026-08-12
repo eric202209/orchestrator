@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.services.orchestration.operations.file_ops_contract import (
+    ReplaceOperationMode,
+    classify_replace_operation,
     normalize_file_op_shape,
     operation_has_file_op_path,
 )
@@ -46,10 +48,16 @@ def _file_op_alias_issue(operation: Any) -> Optional[str]:
         "append_file": {"path", "content"},
         "replace_in_file": {"path", "old", "new"},
     }[alias_name]
+    if alias_name == "replace_in_file" and "selector" in operation:
+        required_fields = {"path", "selector", "new"}
     missing = sorted(
         field
         for field in required_fields
-        if not isinstance(operation.get(field), str)
+        if (
+            not isinstance(operation.get(field), dict)
+            if field == "selector"
+            else not isinstance(operation.get(field), str)
+        )
         or (field == "path" and not operation.get(field).strip())
     )
     if missing:
@@ -83,7 +91,11 @@ def _nested_file_op_issue(operation: Any) -> Optional[str]:
     missing = sorted(
         field
         for field in required_fields
-        if not isinstance(payload.get(field), str)
+        if (
+            not isinstance(payload.get(field), dict)
+            if field == "selector"
+            else not isinstance(payload.get(field), str)
+        )
         or (field == "path" and not payload.get(field).strip())
     )
     if missing:
@@ -149,7 +161,7 @@ def _replace_in_file_has_repairable_old_text_issue(operation: Any) -> bool:
         return False
     if str(operation.get("op") or "").strip() != "replace_in_file":
         return False
-    if "selector" in operation:
+    if classify_replace_operation(operation) is not ReplaceOperationMode.LEGACY_REPLACE:
         return False
     path = operation.get("path")
     if not isinstance(path, str) or not path.strip():
