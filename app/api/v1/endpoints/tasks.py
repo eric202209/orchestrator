@@ -48,6 +48,7 @@ from app.services.workspace.system_settings import (
     get_effective_workspace_review_policy,
 )
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
+from app.services.orchestration.validation.path_authority import PathAuthorityError
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -1321,12 +1322,19 @@ def accept_latest_task_change_set(
             lock_path=exc.lock_path,
             task_execution_id=task_execution_id,
         ):
-            baseline_result = task_service.promote_change_set_into_baseline(
-                project, task, change_set
-            )
+            try:
+                baseline_result = task_service.promote_change_set_into_baseline(
+                    project, task, change_set
+                )
+            except PathAuthorityError as authority_exc:
+                raise HTTPException(
+                    status_code=409, detail=str(authority_exc)
+                ) from authority_exc
         else:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     except FileNotFoundError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PathAuthorityError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     disposition_record = task_service.mark_task_execution_change_set_disposition(
@@ -1648,10 +1656,6 @@ def accept_task_workspace(
                 },
             )
 
-    task.workspace_status = "promoted"
-    task.promoted_at = datetime.now(timezone.utc)
-    task.promotion_note = (payload.note or "").strip() or None
-    task.updated_at = datetime.now(timezone.utc)
     try:
         if accepted_change_set:
             baseline_result = task_service.promote_change_set_into_baseline(
@@ -1666,16 +1670,29 @@ def accept_task_workspace(
             lock_path=exc.lock_path,
             task_execution_id=payload.task_execution_id,
         ):
-            if accepted_change_set:
-                baseline_result = task_service.promote_change_set_into_baseline(
-                    project, task, accepted_change_set
-                )
-            else:
-                baseline_result = task_service.promote_task_into_baseline(project, task)
+            try:
+                if accepted_change_set:
+                    baseline_result = task_service.promote_change_set_into_baseline(
+                        project, task, accepted_change_set
+                    )
+                else:
+                    baseline_result = task_service.promote_task_into_baseline(
+                        project, task
+                    )
+            except PathAuthorityError as authority_exc:
+                raise HTTPException(
+                    status_code=409, detail=str(authority_exc)
+                ) from authority_exc
         else:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except PathAuthorityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    task.workspace_status = "promoted"
+    task.promoted_at = datetime.now(timezone.utc)
+    task.promotion_note = (payload.note or "").strip() or None
+    task.updated_at = datetime.now(timezone.utc)
     if accepted_change_set:
         baseline_result["accepted_change_set"] = accepted_change_set
         disposition_record = task_service.mark_task_execution_change_set_disposition(

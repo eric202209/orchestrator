@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import re
 import shutil
 from datetime import UTC, datetime
@@ -11,7 +12,15 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models import Project, Task, TaskStatus
+from app.models import Project, Task, TaskCheckpoint, TaskExecution, TaskStatus
+from app.services.orchestration.state.persistence import load_accepted_path_authority
+from app.services.orchestration.validation.candidate_checks import (
+    candidate_delta_identity,
+)
+from app.services.orchestration.validation.path_authority import (
+    PathAuthorityError,
+    publication_scope_violations,
+)
 from app.services.workspace.canonical_mutation_service import CanonicalMutationService
 from app.services.workspace.workspace_paths import (
     HYDRATION_EXCLUDED_NAMES,
@@ -158,20 +167,16 @@ class BaselinePromotionService:
         }
         return existing_rules
 
-    def _copy_tree_into_target(
-        self,
-        project: Project,
-        source_dir: Path,
-        target_dir: Path,
-        overwrite: bool,
-    ) -> int:
-        copied = 0
+    def _iter_copy_candidates(
+        self, project: Project, source_dir: Path
+    ) -> list[tuple[Path, Path]]:
         project_root = self.get_project_root(project).resolve()
         task_subfolders = {
             task.task_subfolder
             for task in self.get_project_tasks(project.id)
             if getattr(task, "task_subfolder", None)
         }
+        candidates: list[tuple[Path, Path]] = []
         for source_path in source_dir.rglob("*"):
             if source_path.is_dir():
                 continue
@@ -188,6 +193,26 @@ class BaselinePromotionService:
                 continue
             if TASK_REPORT_RE.match(source_path.name):
                 continue
+            candidates.append((relative, source_path))
+        return candidates
+
+    def _copy_tree_into_target(
+        self,
+        project: Project,
+        source_dir: Path,
+        target_dir: Path,
+        overwrite: bool,
+    ) -> int:
+        candidates = self._iter_copy_candidates(project, source_dir)
+        for relative, _source_path in candidates:
+            if not self._destination_is_containable(target_dir, relative):
+                raise PathAuthorityError(
+                    "publication_destination_symlink",
+                    f"unsafe destination contains a symlink: {relative.as_posix()}",
+                )
+
+        copied = 0
+        for relative, source_path in candidates:
             destination = target_dir / relative
             if destination.exists() and not overwrite:
                 continue
@@ -240,6 +265,254 @@ class BaselinePromotionService:
                 return False
         return True
 
+    def _load_publication_authority(
+        self,
+        *,
+        project: Project,
+        task: Task,
+        change_set: dict[str, Any],
+        source_dir: Path,
+        require_candidate_identity: bool = True,
+    ) -> dict[str, Any] | None:
+        """Bind a Change Set to the persisted APA before any baseline write.
+
+        Publication consumes the generic task/session/TaskExecution/Plan-fenced
+        loader.  It does not compare the physical staging path to
+        ``workspace_identity``: the Change Set artifact is the existing durable
+        snapshot-transfer boundary, and candidate identity plus the exact
+        execution lineage are the continuity proof after Runtime Workspace
+        disposal.
+
+        ``db is None`` is retained only for provider-free lower-level service
+        tests that exercise copy mechanics without an orchestration graph.  All
+        production TaskService instances have a database session and fail closed
+        when the authority or validation lineage is absent.
+        """
+
+        if self.db is None:
+            return None
+        task_execution_id = change_set.get("task_execution_id")
+        try:
+            task_execution_id = int(task_execution_id)
+        except (TypeError, ValueError) as exc:
+            raise PathAuthorityError(
+                "publication_execution_identity_missing",
+                "publication Change Set has no valid task_execution_id",
+            ) from exc
+        execution = (
+            self.db.query(TaskExecution)
+            .filter(TaskExecution.id == task_execution_id)
+            .one_or_none()
+        )
+        if execution is None:
+            raise PathAuthorityError(
+                "publication_execution_missing",
+                f"TaskExecution {task_execution_id} does not exist",
+            )
+        if execution.task_id != task.id:
+            raise PathAuthorityError(
+                "publication_task_identity_mismatch",
+                f"TaskExecution {task_execution_id} belongs to task {execution.task_id}",
+            )
+        if change_set.get("task_id") not in {None, task.id}:
+            raise PathAuthorityError(
+                "publication_change_set_task_mismatch",
+                f"Change Set belongs to task {change_set.get('task_id')}",
+            )
+        if change_set.get("project_id") not in {None, project.id}:
+            raise PathAuthorityError(
+                "publication_change_set_project_mismatch",
+                f"Change Set belongs to project {change_set.get('project_id')}",
+            )
+        session_id = change_set.get("session_id")
+        if session_id is None:
+            session_id = execution.session_id
+        if int(session_id) != int(execution.session_id):
+            raise PathAuthorityError(
+                "publication_session_identity_mismatch",
+                f"Change Set session {session_id} does not match execution session {execution.session_id}",
+            )
+        raw_plan = getattr(task, "steps", None)
+        try:
+            plan = json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
+        except (TypeError, ValueError) as exc:
+            raise PathAuthorityError(
+                "publication_plan_invalid",
+                "Task plan cannot be decoded for publication binding",
+            ) from exc
+        if not isinstance(plan, list):
+            raise PathAuthorityError(
+                "publication_plan_missing",
+                "Task has no accepted executable Plan for publication binding",
+            )
+        authority = load_accepted_path_authority(
+            self.db,
+            task_id=task.id,
+            session_id=int(execution.session_id),
+            task_execution_id=task_execution_id,
+            plan=plan,
+            workspace_identity=None,
+        )
+        violations = publication_scope_violations(
+            authority,
+            added_paths=change_set.get("added_files") or [],
+            modified_paths=change_set.get("modified_files") or [],
+            deleted_paths=change_set.get("deleted_files") or [],
+        )
+        if violations:
+            raise PathAuthorityError(
+                "publication_scope_violation",
+                json.dumps(
+                    {
+                        "authority_identity": authority.authority_identity,
+                        "violations": list(violations)[:20],
+                    },
+                    sort_keys=True,
+                ),
+            )
+
+        if not require_candidate_identity:
+            return {
+                "_authority": authority,
+                "authority_identity": authority.authority_identity,
+                "accepted_plan_identity": authority.accepted_plan_identity,
+                "task_execution_id": task_execution_id,
+                "session_id": int(execution.session_id),
+            }
+
+        candidate_identity = candidate_delta_identity(
+            change_set, project_dir=source_dir
+        )
+        checkpoints = (
+            self.db.query(TaskCheckpoint)
+            .filter(
+                TaskCheckpoint.task_id == task.id,
+                TaskCheckpoint.session_id == int(execution.session_id),
+                TaskCheckpoint.checkpoint_type == "validation_task_completion",
+            )
+            .order_by(TaskCheckpoint.id.asc())
+            .all()
+        )
+        validated = False
+        for checkpoint in checkpoints:
+            if (
+                execution.created_at is not None
+                and checkpoint.created_at is not None
+                and checkpoint.created_at < execution.created_at
+            ):
+                continue
+            try:
+                verdict = json.loads(checkpoint.state_snapshot or "")
+            except (TypeError, ValueError):
+                continue
+            if (
+                isinstance(verdict, dict)
+                and verdict.get("status") in {"accepted", "warning"}
+                and verdict.get("candidate_identity") == candidate_identity
+            ):
+                validated = True
+                break
+        if not validated:
+            raise PathAuthorityError(
+                "publication_candidate_identity_unvalidated",
+                json.dumps(
+                    {
+                        "authority_identity": authority.authority_identity,
+                        "candidate_delta_identity": candidate_identity,
+                        "stage": "candidate_validation",
+                    },
+                    sort_keys=True,
+                ),
+            )
+        return {
+            "_authority": authority,
+            "authority_identity": authority.authority_identity,
+            "accepted_plan_identity": authority.accepted_plan_identity,
+            "candidate_delta_identity": candidate_identity,
+            "task_execution_id": task_execution_id,
+            "session_id": int(execution.session_id),
+        }
+
+    def _load_task_workspace_publication_authority(
+        self,
+        *,
+        project: Project,
+        task: Task,
+        source_dir: Path,
+        target_dir: Path,
+    ) -> dict[str, Any] | None:
+        """Bind legacy whole-task publication to one unambiguous execution.
+
+        Whole-task promotion predates the captured Change Set route and has no
+        candidate-delta identity.  Its durable continuity proof is therefore
+        the sole TaskExecution for the task, its accepted Plan, and the APA;
+        multiple or missing executions fail closed rather than selecting an
+        unfenced latest record.  Baseline rebuilds intentionally bypass this
+        candidate gate because they reconstitute already-promoted workspaces.
+        """
+
+        if self.db is None:
+            return None
+        executions = (
+            self.db.query(TaskExecution)
+            .filter(TaskExecution.task_id == task.id)
+            .order_by(TaskExecution.id.asc())
+            .all()
+        )
+        if len(executions) != 1:
+            raise PathAuthorityError(
+                "publication_execution_ambiguous",
+                f"whole-task publication requires exactly one TaskExecution; found {len(executions)}",
+            )
+        execution = executions[0]
+        authority_metadata = self._load_publication_authority(
+            project=project,
+            task=task,
+            change_set={
+                "project_id": project.id,
+                "task_id": task.id,
+                "session_id": execution.session_id,
+                "task_execution_id": execution.id,
+                "added_files": [],
+                "modified_files": [],
+                "deleted_files": [],
+            },
+            source_dir=source_dir,
+            require_candidate_identity=False,
+        )
+        authority = authority_metadata["_authority"]
+        added: list[str] = []
+        modified: list[str] = []
+        for relative, _source_path in self._iter_copy_candidates(project, source_dir):
+            if not self._destination_is_containable(target_dir, relative):
+                raise PathAuthorityError(
+                    "publication_destination_symlink",
+                    f"unsafe destination contains a symlink: {relative.as_posix()}",
+                )
+            if (target_dir / relative).exists():
+                modified.append(relative.as_posix())
+            else:
+                added.append(relative.as_posix())
+        violations = publication_scope_violations(
+            # The loader always returns a publication authority for production
+            # calls; the conditional keeps the db-free unit seam typed.
+            authority=authority,
+            added_paths=added,
+            modified_paths=modified,
+        )
+        if violations:
+            raise PathAuthorityError(
+                "publication_scope_violation",
+                json.dumps(
+                    {
+                        "authority_identity": authority.authority_identity,
+                        "violations": list(violations)[:20],
+                    },
+                    sort_keys=True,
+                ),
+            )
+        return authority_metadata
+
     def promote_change_set_into_baseline(
         self,
         project: Project,
@@ -278,8 +551,6 @@ class BaselinePromotionService:
         task: Task,
         change_set: dict[str, Any],
     ) -> dict[str, Any]:
-        baseline_dir = self.get_project_baseline_dir(project)
-        baseline_dir.mkdir(parents=True, exist_ok=True)
         task_execution_id = int(change_set["task_execution_id"])
         source_dir = self._change_set_artifact_files_root(project, task_execution_id)
         if not source_dir.exists():
@@ -292,6 +563,32 @@ class BaselinePromotionService:
             raise FileNotFoundError(
                 f"No durable change-set artifact found for task_execution_id={task_execution_id}"
             )
+        publication_authority = self._load_publication_authority(
+            project=project,
+            task=task,
+            change_set=change_set,
+            source_dir=source_dir,
+        )
+        baseline_dir = self.get_project_baseline_dir(project)
+
+        # Preflight every destination before the first copy/delete so one
+        # unsafe path cannot leave a partially applied publication behind.
+        for relative_path in sorted(
+            set(change_set.get("added_files") or [])
+            | set(change_set.get("modified_files") or [])
+            | set(change_set.get("deleted_files") or [])
+        ):
+            relative = self._safe_change_set_relative_path(relative_path)
+            if relative is not None and not self._destination_is_containable(
+                baseline_dir, relative
+            ):
+                if self.db is None:
+                    continue
+                raise PathAuthorityError(
+                    "publication_destination_symlink",
+                    f"unsafe destination contains a symlink: {relative.as_posix()}",
+                )
+        baseline_dir.mkdir(parents=True, exist_ok=True)
 
         files_copied = 0
         files_deleted = 0
@@ -315,7 +612,12 @@ class BaselinePromotionService:
             if is_executor_runtime_scaffold(source_path):
                 continue
             if not self._destination_is_containable(baseline_dir, relative):
-                continue
+                if self.db is None:
+                    continue
+                raise PathAuthorityError(
+                    "publication_destination_symlink",
+                    f"unsafe destination contains a symlink: {relative.as_posix()}",
+                )
             destination = baseline_dir / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, destination)
@@ -325,11 +627,14 @@ class BaselinePromotionService:
             relative = self._safe_change_set_relative_path(relative_path)
             if relative is None:
                 continue
-            destination = (baseline_dir / relative).resolve()
-            try:
-                destination.relative_to(baseline_dir.resolve())
-            except ValueError:
-                continue
+            if not self._destination_is_containable(baseline_dir, relative):
+                if self.db is None:
+                    continue
+                raise PathAuthorityError(
+                    "publication_destination_symlink",
+                    f"unsafe destination contains a symlink: {relative.as_posix()}",
+                )
+            destination = baseline_dir / relative
             if destination.exists() and destination.is_file():
                 destination.unlink()
                 files_deleted += 1
@@ -341,6 +646,17 @@ class BaselinePromotionService:
             "source": "change_set_artifact",
             "artifact_path": str(source_dir),
             "task_execution_id": task_execution_id,
+            **(
+                {
+                    "publication_authority": {
+                        key: value
+                        for key, value in publication_authority.items()
+                        if key != "_authority"
+                    }
+                }
+                if publication_authority is not None
+                else {}
+            ),
         }
 
     def promote_task_into_baseline(
@@ -381,10 +697,13 @@ class BaselinePromotionService:
             )
 
     def promote_task_into_baseline_unlocked(
-        self, project: Project, task: Task
+        self,
+        project: Project,
+        task: Task,
+        *,
+        enforce_publication_authority: bool = True,
     ) -> dict[str, Any]:
         baseline_dir = self.get_project_baseline_dir(project)
-        baseline_dir.mkdir(parents=True, exist_ok=True)
         if not task.task_subfolder:
             return {"baseline_path": str(baseline_dir), "files_copied": 0}
 
@@ -393,13 +712,30 @@ class BaselinePromotionService:
         if not source_dir.exists():
             return {"baseline_path": str(baseline_dir), "files_copied": 0}
 
+        publication_authority = None
+        if enforce_publication_authority:
+            publication_authority = self._load_task_workspace_publication_authority(
+                project=project,
+                task=task,
+                source_dir=source_dir,
+                target_dir=baseline_dir,
+            )
+        baseline_dir.mkdir(parents=True, exist_ok=True)
+
         files_copied = self._copy_tree_into_target(
             project=project,
             source_dir=source_dir,
             target_dir=baseline_dir,
             overwrite=True,
         )
-        return {"baseline_path": str(baseline_dir), "files_copied": files_copied}
+        result = {"baseline_path": str(baseline_dir), "files_copied": files_copied}
+        if publication_authority is not None:
+            result["publication_authority"] = {
+                key: value
+                for key, value in publication_authority.items()
+                if key != "_authority"
+            }
+        return result
 
     def rebuild_project_baseline(self, project: Project) -> dict[str, Any]:
         project_root = self.get_project_root(project)
@@ -427,7 +763,9 @@ class BaselinePromotionService:
         applied_tasks = []
         total_files = 0
         for task in merged_tasks:
-            result = self.promote_task_into_baseline_unlocked(project, task)
+            result = self.promote_task_into_baseline_unlocked(
+                project, task, enforce_publication_authority=False
+            )
             applied_tasks.append(
                 {
                     "task_id": task.id,

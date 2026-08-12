@@ -1075,7 +1075,7 @@ def load_accepted_path_authority(
     session_id: int,
     task_execution_id: int | None,
     plan: Any,
-    workspace_identity: str,
+    workspace_identity: str | None,
 ):
     """Load the one accepted authority bound to a task's accepted Plan.
 
@@ -1188,7 +1188,9 @@ def load_accepted_path_authority(
         )
 
     authority = matching[0]
-    if authority.workspace_identity != str(workspace_identity):
+    if workspace_identity is not None and authority.workspace_identity != str(
+        workspace_identity
+    ):
         raise PathAuthorityError(
             "authority_workspace_mismatch",
             "accepted authority belongs to a different logical workspace",

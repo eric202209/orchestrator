@@ -14,6 +14,7 @@ from app.models import (
     Project,
     Session as SessionModel,
     Task,
+    TaskCheckpoint,
     TaskExecution,
     TaskExecutionChangeSet,
     TaskStatus,
@@ -22,6 +23,19 @@ from app.services.orchestration.execution.runtime import (
     restore_workspace_after_abort,
     snapshot_workspace_before_run,
     workspace_snapshot_key,
+)
+from app.services.orchestration.validation.accepted_path_authority import (
+    accepted_plan_identity,
+)
+from app.services.orchestration.validation.candidate_checks import (
+    candidate_delta_identity,
+)
+from app.services.orchestration.validation.path_authority import (
+    AcceptedPathAuthority,
+    GrantClass,
+    GrantProvenance,
+    PathGrant,
+    declare,
 )
 from app.services.tasks.service import TASK_CHANGE_SET_LOG_MESSAGE, TaskService
 from app.services.workspace.baseline_promotion_service import BaselinePromotionService
@@ -36,6 +50,154 @@ from app.services.workspace.workspace_paths import (
     resolve_project_root,
 )
 from app.services.workspace.workspace_snapshot_service import WorkspaceSnapshotService
+
+
+def _seed_publication_evidence(
+    db_session,
+    project: Project,
+    task: Task,
+    execution: TaskExecution,
+    change_set: dict,
+) -> None:
+    """Give legacy promotion fixtures explicit accepted-plan evidence."""
+
+    added = list(change_set.get("added_files") or [])
+    modified = list(change_set.get("modified_files") or [])
+    deleted = list(change_set.get("deleted_files") or [])
+    paths = added + modified + deleted
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Publish the captured candidate",
+            "commands": ["true"],
+            "verification": "true",
+            "rollback": None,
+            "expected_files": [],
+            "ops": [{"op": "write_file", "path": path} for path in paths],
+        }
+    ]
+    task.steps = json.dumps(plan)
+    grant_classes = {
+        **{path: GrantClass.CREATION_AUTHORIZED for path in added},
+        **{path: GrantClass.EXISTING_MUTABLE for path in modified},
+        **{path: GrantClass.DELETION_AUTHORIZED for path in deleted},
+    }
+    authority = AcceptedPathAuthority.create(
+        accepted_plan_identity=accepted_plan_identity(plan),
+        workspace_identity=str(Path(project.workspace_path).resolve()),
+        maximum_scope_digest="0" * 64,
+        grants=[
+            PathGrant(
+                path=declare(path),
+                grant_class=grant_class,
+                provenance=GrantProvenance.ACCEPTED_PLAN,
+                baseline_content_hash=(
+                    None if grant_class is GrantClass.CREATION_AUTHORIZED else "0" * 64
+                ),
+            )
+            for path, grant_class in grant_classes.items()
+        ],
+    )
+    db_session.add(
+        TaskCheckpoint(
+            task_id=task.id,
+            session_id=execution.session_id,
+            checkpoint_type="validation_plan",
+            state_snapshot=json.dumps(
+                {
+                    "stage": "plan",
+                    "status": "accepted",
+                    "details": {"accepted_path_authority": authority.to_dict()},
+                }
+            ),
+        )
+    )
+    candidate_identity = candidate_delta_identity(
+        change_set, project_dir=Path(change_set["artifact_path"])
+    )
+    db_session.add(
+        TaskCheckpoint(
+            task_id=task.id,
+            session_id=execution.session_id,
+            checkpoint_type="validation_task_completion",
+            state_snapshot=json.dumps(
+                {
+                    "stage": "task_completion",
+                    "status": "accepted",
+                    "candidate_identity": candidate_identity,
+                }
+            ),
+        )
+    )
+    db_session.commit()
+
+
+def _seed_whole_workspace_evidence(
+    db_session,
+    project: Project,
+    task: Task,
+    paths: list[str],
+) -> None:
+    """Give legacy whole-workspace fixtures one execution and APA."""
+
+    session = SessionModel(project_id=project.id, name=f"publication-{task.id}")
+    db_session.add(session)
+    db_session.flush()
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(execution)
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Publish the task workspace",
+            "commands": ["true"],
+            "verification": "true",
+            "rollback": None,
+            "expected_files": [],
+            "ops": [{"op": "write_file", "path": path} for path in paths],
+        }
+    ]
+    task.steps = json.dumps(plan)
+    project_root = Path(project.workspace_path)
+    authority = AcceptedPathAuthority.create(
+        accepted_plan_identity=accepted_plan_identity(plan),
+        workspace_identity=str(Path(project.workspace_path).resolve()),
+        maximum_scope_digest="0" * 64,
+        grants=[
+            PathGrant(
+                path=declare(path),
+                grant_class=(
+                    GrantClass.EXISTING_MUTABLE
+                    if (project_root / path).exists()
+                    else GrantClass.CREATION_AUTHORIZED
+                ),
+                provenance=GrantProvenance.ACCEPTED_PLAN,
+                baseline_content_hash=(
+                    "0" * 64 if (project_root / path).exists() else None
+                ),
+            )
+            for path in paths
+        ],
+    )
+    db_session.add(
+        TaskCheckpoint(
+            task_id=task.id,
+            session_id=session.id,
+            checkpoint_type="validation_plan",
+            state_snapshot=json.dumps(
+                {
+                    "stage": "plan",
+                    "status": "accepted",
+                    "details": {"accepted_path_authority": authority.to_dict()},
+                }
+            ),
+        )
+    )
+    db_session.commit()
 
 
 def test_rebuild_project_baseline_uses_only_promoted_workspaces(
@@ -622,6 +784,7 @@ def test_runtime_change_set_accept_promotes_from_durable_artifact(
     assert change_set["modified_files"] == ["README.md"]
     assert change_set["added_files"] == ["new.txt"]
     assert artifact_path.exists()
+    _seed_publication_evidence(db_session, project, task, execution, change_set)
     shutil.rmtree(runtime_root)
 
     response = authenticated_client.post(
@@ -919,6 +1082,13 @@ def test_change_set_accept_endpoint_records_operator_acceptance(
         "outcome": "auto_promote",
     }
     db_session.commit()
+    _seed_publication_evidence(
+        db_session,
+        project,
+        task,
+        execution,
+        task_service.get_task_execution_change_set(task_execution_id=execution.id),
+    )
 
     needs_review_response = authenticated_client.get(
         "/api/v1/tasks?page=1&needs_review=true"
@@ -1088,6 +1258,13 @@ def test_review_and_manual_accept_share_one_physical_promotion_call_each(
             target_dir=project_root,
         )
         (project_root / "README.md").unlink()
+        _seed_publication_evidence(
+            db_session,
+            project,
+            task,
+            execution,
+            task_service.get_task_execution_change_set(task_execution_id=execution.id),
+        )
         return project_root, task, execution, snapshot_key
 
     review_root, review_task, review_execution, review_snapshot = seed_case(
@@ -1231,6 +1408,7 @@ def test_promoted_workspace_archive_removes_visible_task_folder_but_preserves_re
     db_session.commit()
     db_session.refresh(task)
 
+    _seed_whole_workspace_evidence(db_session, project, task, ["README.md"])
     task_service = TaskService(db_session)
     task_service.promote_task_into_baseline(project, task)
     archive_result = task_service.archive_promoted_task_workspace(project, task)
@@ -1300,7 +1478,7 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
     db_session.commit()
     db_session.refresh(execution)
     task_service = TaskService(db_session)
-    task_service.persist_task_execution_change_set(
+    change_set = task_service.persist_task_execution_change_set(
         project,
         task,
         session_id=session.id,
@@ -1308,6 +1486,7 @@ def test_manual_promote_endpoint_archives_visible_task_workspace(
         snapshot_key=workspace_snapshot_key(task.id, execution.id),
         target_dir=task_dir,
     )
+    _seed_publication_evidence(db_session, project, task, execution, change_set)
 
     response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/accept",
@@ -1486,7 +1665,8 @@ def test_manual_promote_rejects_active_project_mutation_lock(
     db_session.add(execution)
     db_session.commit()
     db_session.refresh(execution)
-    TaskService(db_session).persist_task_execution_change_set(
+    task_service = TaskService(db_session)
+    change_set = task_service.persist_task_execution_change_set(
         project,
         task,
         session_id=session.id,
@@ -1494,6 +1674,7 @@ def test_manual_promote_rejects_active_project_mutation_lock(
         snapshot_key=workspace_snapshot_key(task.id, execution.id),
         target_dir=task_dir,
     )
+    _seed_publication_evidence(db_session, project, task, execution, change_set)
 
     with project_mutation_lock(
         project_id=project.id,
@@ -1681,7 +1862,8 @@ def test_manual_promote_clears_terminal_execution_mutation_lock(
     db_session.add(execution)
     db_session.commit()
     db_session.refresh(execution)
-    TaskService(db_session).persist_task_execution_change_set(
+    task_service = TaskService(db_session)
+    change_set = task_service.persist_task_execution_change_set(
         project,
         task,
         session_id=session.id,
@@ -1689,6 +1871,7 @@ def test_manual_promote_clears_terminal_execution_mutation_lock(
         snapshot_key=workspace_snapshot_key(task.id, execution.id),
         target_dir=task_dir,
     )
+    _seed_publication_evidence(db_session, project, task, execution, change_set)
     lock_dir = project_root / ".agent" / "locks"
     lock_dir.mkdir(parents=True)
     lock_path = _lock_path_for_project_root(project_root)
@@ -2038,6 +2221,9 @@ def test_workspace_shape_audit_distinguishes_baseline_from_retained_sandboxes(
 
     task_service = TaskService(db_session)
     promoted_task = db_session.query(Task).filter_by(title="Promoted task").one()
+    _seed_whole_workspace_evidence(
+        db_session, project, promoted_task, ["README.md", "package.json"]
+    )
     task_service.promote_task_into_baseline(project, promoted_task)
 
     audit = task_service.audit_project_workspace_shape(project)

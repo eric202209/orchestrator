@@ -4,7 +4,8 @@ This module implements the value types and pure/security primitives designed in
 Phase 33B (`docs/roadmap/done/phase33/phase33b-single-path-authority-contract-design-20260810.md`).
 Plan acceptance constructs the immutable value and Phase 33C-4 consumes it at
 Execution's mutation and observed-scope gates. Candidate Validation, Candidate
-Repair, the Change Set, and Publication remain outside this authority boundary.
+Repair, the Change Set, and Publication consume this authority without
+constructing or mutating it.
 
 The module keeps three concerns permanently separate, because collapsing them is
 the Attempt-16 category error (``observed path`` silently became ``authorized
@@ -910,3 +911,117 @@ def _grant_from_payload(payload: Any) -> PathGrant:
         provenance=provenance,
         baseline_content_hash=baseline_hash,
     )
+
+
+def publication_scope_violations(
+    authority: AcceptedPathAuthority,
+    *,
+    added_paths: Iterable[Any] = (),
+    modified_paths: Iterable[Any] = (),
+    deleted_paths: Iterable[Any] = (),
+) -> tuple[dict[str, str], ...]:
+    """Check an observed candidate against an already persisted authority.
+
+    Publication is a consumer of the accepted grant set, never a grant
+    producer.  This is deliberately a pure declaration/grant lookup: it does
+    not inspect the filesystem, infer a grant from a Change Set, or follow a
+    symlink.  Trusted/orchestration-owned roots are rejected after declaration
+    so ownership filtering cannot turn them into product publication.
+
+    The operation class is part of the check.  An observed modification must
+    have ``existing_mutable`` authority, an addition must have
+    ``creation_authorized`` authority, and a deletion must have
+    ``deletion_authorized`` authority.  Case-folded aliases are reported even
+    on case-sensitive hosts.
+    """
+
+    violations: list[dict[str, str]] = []
+    seen: dict[str, tuple[str, str]] = {}
+    operations = (
+        ("added", GrantClass.CREATION_AUTHORIZED, added_paths),
+        ("modified", GrantClass.EXISTING_MUTABLE, modified_paths),
+        ("deleted", GrantClass.DELETION_AUTHORIZED, deleted_paths),
+    )
+    for operation, required_class, raw_paths in operations:
+        for raw_path in raw_paths or ():
+            raw_text = str(raw_path)
+            try:
+                declared = declare(raw_text)
+            except PathDeclarationError as exc:
+                violations.append(
+                    {
+                        "code": "publication_declaration_invalid",
+                        "operation": operation,
+                        "path": raw_text,
+                        "detail": exc.code,
+                    }
+                )
+                continue
+
+            prior = seen.get(declared.fold_key)
+            if prior is not None:
+                prior_operation, prior_path = prior
+                violations.append(
+                    {
+                        "code": (
+                            "publication_path_duplicate"
+                            if prior_path == declared.value
+                            else "publication_path_case_alias"
+                        ),
+                        "operation": operation,
+                        "path": declared.value,
+                        "detail": f"already observed as {prior_operation}:{prior_path}",
+                    }
+                )
+                continue
+            seen[declared.fold_key] = (operation, declared.value)
+
+            trust_class = classify_trust(declared)
+            if trust_class is not TrustClass.PRODUCT:
+                violations.append(
+                    {
+                        "code": "publication_non_product_path",
+                        "operation": operation,
+                        "path": declared.value,
+                        "detail": trust_class.value,
+                    }
+                )
+                continue
+
+            grant = authority.grant_for(declared)
+            if grant is None:
+                alias = next(
+                    (
+                        item.path.value
+                        for item in authority.grants
+                        if item.path.fold_key == declared.fold_key
+                    ),
+                    None,
+                )
+                violations.append(
+                    {
+                        "code": (
+                            "publication_path_case_alias"
+                            if alias is not None
+                            else "publication_path_unauthorized"
+                        ),
+                        "operation": operation,
+                        "path": declared.value,
+                        "detail": alias or "no matching accepted grant",
+                    }
+                )
+                continue
+            if grant.grant_class is not required_class:
+                violations.append(
+                    {
+                        "code": "publication_grant_class_mismatch",
+                        "operation": operation,
+                        "path": declared.value,
+                        "detail": (
+                            f"required={required_class.value};"
+                            f"actual={grant.grant_class.value}"
+                        ),
+                    }
+                )
+
+    return tuple(violations)

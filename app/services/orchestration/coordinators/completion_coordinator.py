@@ -1158,6 +1158,14 @@ class CompletionCoordinator:
                             candidate_change_set=(
                                 task_change_set if publish_captured_change_set else None
                             ),
+                            accepted_path_authority=candidate_authority,
+                            accepted_path_authority_error=candidate_authority_error,
+                            require_accepted_path_authority=True,
+                            validated_candidate_identity=(
+                                completion_validation.candidate_identity
+                                if publish_captured_change_set
+                                else None
+                            ),
                         ),
                     )
                 except Exception as preflight_error:
@@ -1290,6 +1298,9 @@ class CompletionCoordinator:
                         consistency_details=baseline_materialization.get("consistency"),
                         relaxed_mode=orchestration_state.relaxed_mode,
                         validation_severity=ctx.validation_severity,
+                        accepted_path_authority=candidate_authority,
+                        accepted_path_authority_error=candidate_authority_error,
+                        require_accepted_path_authority=True,
                     ),
                 )
                 record_validation_verdict(

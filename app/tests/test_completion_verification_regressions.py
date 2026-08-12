@@ -14,6 +14,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskCheckpoint,
     TaskExecution,
     TaskExecutionChangeSet,
     TaskStatus,
@@ -30,6 +31,19 @@ from app.services.orchestration.phases.completion_workspace import (
     _stack_set_for_paths,
 )
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
+from app.services.orchestration.validation.accepted_path_authority import (
+    accepted_plan_identity,
+)
+from app.services.orchestration.validation.candidate_checks import (
+    candidate_delta_identity,
+)
+from app.services.orchestration.validation.path_authority import (
+    AcceptedPathAuthority,
+    GrantClass,
+    GrantProvenance,
+    PathGrant,
+    declare,
+)
 from app.services.orchestration.execution.execution_flow import (
     execute_verification_command,
     patch_python_verification_imports,
@@ -1302,6 +1316,47 @@ def _seed_legacy_finalize_ctx(db_session, tmp_path, *, task_subfolder="task-work
             files_changed=[],
         )
     ]
+    # These legacy-finalize tests exercise the real publication service without
+    # running the planner. Give that test-only execution the same durable APA
+    # evidence that a production planner/executor pair would persist.
+    publication_paths = [
+        "src/app.py",
+        "README.md",
+        "old.md",
+    ]
+    state.plan = json.loads(json.dumps(state.plan))
+    state.plan[0]["ops"] = [
+        {"op": "write_file", "path": path} for path in publication_paths
+    ]
+    task.steps = json.dumps(state.plan)
+    authority = AcceptedPathAuthority.create(
+        accepted_plan_identity=accepted_plan_identity(state.plan),
+        workspace_identity=str(workspace_dir.resolve()),
+        maximum_scope_digest="0" * 64,
+        grants=[
+            PathGrant(
+                path=declare(path),
+                grant_class=GrantClass.CREATION_AUTHORIZED,
+                provenance=GrantProvenance.ACCEPTED_PLAN,
+            )
+            for path in publication_paths
+        ],
+    )
+    db_session.add(
+        TaskCheckpoint(
+            task_id=task.id,
+            session_id=session.id,
+            checkpoint_type="validation_plan",
+            state_snapshot=json.dumps(
+                {
+                    "stage": "plan",
+                    "status": "accepted",
+                    "details": {"accepted_path_authority": authority.to_dict()},
+                }
+            ),
+        )
+    )
+    db_session.flush()
     task_service = TaskService(db_session)
     ctx = OrchestrationRunContext(
         db=db_session,
@@ -1380,7 +1435,7 @@ def test_removed_final_verification_gate_cannot_override_candidate_acceptance(
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result["status"] == "completed", result
+    assert result["status"] == "completed"
     assert repair_calls == []
     assert ctx.orchestration_state.debug_repair_task_execution_ids == []
     assert ctx.task.status == TaskStatus.DONE
@@ -1423,7 +1478,7 @@ def test_finalize_reuses_workspace_consistency_across_completion_validations(
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result["status"] == "completed", result
+    assert result["status"] == "completed"
     assert counting_service.analyze_calls == 1
     assert len(validations) >= 2
     assert all(consistency is validations[0] for consistency in validations)
@@ -1869,6 +1924,14 @@ def test_runtime_sandboxed_auto_promote_materializes_change_set(
         preserve_project_root_rules=True,
     )
     (workspace_dir / "README.md").write_text("captured\n", encoding="utf-8")
+    validated_candidate_identity = candidate_delta_identity(
+        {
+            "added_files": ["README.md"],
+            "modified_files": [],
+            "deleted_files": [],
+        },
+        project_dir=workspace_dir,
+    )
 
     monkeypatch.setattr(
         "app.services.orchestration.phases.completion_flow.ValidatorService.validate_task_completion",
@@ -1878,6 +1941,7 @@ def test_runtime_sandboxed_auto_promote_materializes_change_set(
             profile="mutation",
             reasons=[],
             details={"expected_core_files": ["README.md"]},
+            candidate_identity=validated_candidate_identity,
         ),
     )
     monkeypatch.setattr(
@@ -1891,7 +1955,7 @@ def test_runtime_sandboxed_auto_promote_materializes_change_set(
         save_orchestration_checkpoint_fn=lambda *args, **kwargs: None,
     )
 
-    assert result["status"] == "completed"
+    assert result["status"] == "completed", result
     db_session.refresh(ctx.task)
     change_set = (
         db_session.query(TaskExecutionChangeSet)

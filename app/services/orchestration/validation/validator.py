@@ -6,7 +6,7 @@ import copy
 import re
 import shlex
 import stat
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 from ..policy import apply_validation_policy
 from ..types import (
@@ -47,7 +47,13 @@ from .accepted_path_authority import (
     accepted_plan_identity,
     build_accepted_path_authority,
 )
-from .path_authority import GrantClass, PathAuthorityError
+from .path_authority import (
+    GrantClass,
+    PathAuthorityError,
+    PathDeclarationError,
+    publication_scope_violations,
+    declare,
+)
 from .candidate_checks import (
     candidate_observed_paths,
     candidate_delta_identity,
@@ -262,47 +268,23 @@ def _trusted_baseline_inventory(baseline_dir: Path) -> tuple[set[str], set[str]]
     return product_paths, excluded_paths
 
 
-def _declared_candidate_relative_path(path_text: str) -> str:
-    """Validate a candidate-declared product path lexically, without the filesystem.
-
-    Phase 33C-1: candidate/Change Set path strings are untrusted *declarations*.
-    Deciding whether a declaration is acceptable is a syntax question, so it must
-    not depend on `.resolve()`, on symlink following, or on the path existing.
-    The unsafe declaration classes previously rejected by
-    `normalize_path_reference` in this flow (empty, `~`, absolute, `..`
-    traversal) stay rejected, and drive-letter declarations — which the resolving
-    primitive silently accepted as relative filenames on POSIX — are now rejected
-    too.  Orchestration-owned and hydration-excluded roots continue to be filtered
-    by `_product_baseline_paths`, the existing ownership authority.
-
-    Phase 33C-2 supersedes this helper with the shared `declare()` primitive in
-    `validation/path_authority.py`; it is deliberately private and local to
-    publication until then.
-    """
-
-    raw = (path_text or "").strip().strip("\"'")
-    if not raw:
-        raise TaskWorkspaceViolationError("Empty path reference is not allowed")
-    if raw.startswith("~"):
-        raise TaskWorkspaceViolationError(
-            f"Home-directory path is not allowed in task workspace: {raw}"
-        )
-    if raw.startswith("/") or re.match(r"^[A-Za-z]:([\\/]|$)", raw):
-        raise TaskWorkspaceViolationError(
-            f"Absolute path is not allowed in task workspace: {raw}"
-        )
-    segments = [part for part in PurePosixPath(raw).parts if part != "."]
-    if any(part == ".." for part in segments):
-        raise TaskWorkspaceViolationError(f"Path escapes task workspace: {raw}")
-    if not segments:
-        raise TaskWorkspaceViolationError("Empty path reference is not allowed")
-    return PurePosixPath(*segments).as_posix()
-
-
 def _declared_candidate_paths(paths: Any) -> set[str]:
-    return _product_baseline_paths(
-        {_declared_candidate_relative_path(str(path)) for path in paths or []}
-    )
+    declared: set[str] = set()
+    for path in paths or []:
+        raw_path = str(path)
+        # Ownership/exclusion is distinct from declaration syntax. Internal
+        # capture metadata and trusted toolchain paths remain ignorable
+        # observations; product declarations use the canonical lexical
+        # contract below.
+        if is_orchestration_internal_path(raw_path):
+            continue
+        try:
+            declared.add(declare(raw_path).value)
+        except PathDeclarationError as exc:
+            raise TaskWorkspaceViolationError(
+                f"Invalid candidate path declaration ({exc.code}): {raw_path}"
+            ) from exc
+    return _product_baseline_paths(declared)
 
 
 MIXED_LANGUAGE_WORKSPACE_ISSUE = (
@@ -3237,6 +3219,10 @@ class ValidatorService:
         candidate_change_set: Optional[Dict[str, Any]] = None,
         prior_expected_files: Optional[List[Dict[str, Any]]] = None,
         current_expected_files: Optional[List[str]] = None,
+        accepted_path_authority: Any = None,
+        accepted_path_authority_error: Optional[Dict[str, str]] = None,
+        require_accepted_path_authority: bool = False,
+        validated_candidate_identity: Optional[str] = None,
     ) -> ValidationVerdict:
         warnings: List[str] = []
         repairable: List[str] = []
@@ -3263,6 +3249,48 @@ class ValidatorService:
         deleted_paths = _declared_candidate_paths(
             (candidate_change_set or {}).get("deleted_files")
         )
+        if require_accepted_path_authority:
+            if accepted_path_authority is None:
+                authority_error = accepted_path_authority_error or {
+                    "code": "authority_record_missing",
+                    "message": "accepted path authority was not supplied",
+                }
+                rejected.append(
+                    "Publication Accepted Path Authority unavailable: "
+                    + str(authority_error.get("code") or "authority_loader_failure")
+                )
+                details["accepted_path_authority_error"] = authority_error
+            else:
+                details["accepted_path_authority"] = {
+                    "authority_identity": accepted_path_authority.authority_identity,
+                    "accepted_plan_identity": accepted_path_authority.accepted_plan_identity,
+                }
+                violations = publication_scope_violations(
+                    accepted_path_authority,
+                    added_paths=(candidate_change_set or {}).get("added_files") or [],
+                    modified_paths=(candidate_change_set or {}).get("modified_files")
+                    or [],
+                    deleted_paths=(candidate_change_set or {}).get("deleted_files")
+                    or [],
+                )
+                if violations:
+                    rejected.append(
+                        "Publication observed scope is outside the accepted path authority"
+                    )
+                    details["publication_authority_violations"] = list(violations)[:20]
+                if candidate_change_set is not None:
+                    candidate_identity = candidate_delta_identity(candidate_change_set)
+                    if (
+                        not validated_candidate_identity
+                        or validated_candidate_identity != candidate_identity
+                    ):
+                        rejected.append(
+                            "Publication candidate identity does not match the validated candidate"
+                        )
+                        details["publication_candidate_identity"] = {
+                            "validated": validated_candidate_identity,
+                            "observed": candidate_identity,
+                        }
         projected_paths = canonical_paths | added_paths | modified_paths
         projected_paths.difference_update(deleted_paths)
         projected_file_count = len(projected_paths)

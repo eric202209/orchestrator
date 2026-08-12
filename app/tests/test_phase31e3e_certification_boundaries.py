@@ -11,12 +11,26 @@ from app.models import (
     Project,
     Session,
     Task,
+    TaskCheckpoint,
     TaskExecution,
     TaskExecutionChangeSet,
     TaskStatus,
 )
 from app.services.orchestration.coordinators.completion_coordinator import (
     CompletionCoordinator,
+)
+from app.services.orchestration.validation.accepted_path_authority import (
+    accepted_plan_identity,
+)
+from app.services.orchestration.validation.candidate_checks import (
+    candidate_delta_identity,
+)
+from app.services.orchestration.validation.path_authority import (
+    AcceptedPathAuthority,
+    GrantClass,
+    GrantProvenance,
+    PathGrant,
+    declare,
 )
 from scripts.maintenance.phase31_certification_boundaries import (
     AggregateCertificationClassification,
@@ -54,7 +68,20 @@ def _seed_successful_boundary(db_session, tmp_path):
         name="phase31e3e-session",
         status="completed",
     )
-    task_steps = [{"step": 1, "description": "accepted implementation"}]
+    task_steps = [
+        {
+            "step_number": 1,
+            "description": "Publish the accepted implementation",
+            "commands": ["true"],
+            "verification": "true",
+            "rollback": None,
+            "expected_files": [],
+            "ops": [
+                {"op": "write_file", "path": "app/main.py"},
+                {"op": "write_file", "path": "tests/test_certification.py"},
+            ],
+        }
+    ]
     task = Task(
         project_id=project.id,
         title="S1-2 accepted task",
@@ -95,6 +122,55 @@ def _seed_successful_boundary(db_session, tmp_path):
         status="done",
     )
     db_session.add(change_set)
+    db_session.commit()
+    authority = AcceptedPathAuthority.create(
+        accepted_plan_identity=accepted_plan_identity(task_steps),
+        workspace_identity=str(root.resolve()),
+        maximum_scope_digest="0" * 64,
+        grants=[
+            PathGrant(
+                path=declare(path),
+                grant_class=GrantClass.CREATION_AUTHORIZED,
+                provenance=GrantProvenance.ACCEPTED_PLAN,
+            )
+            for path in change_set.added_files
+        ],
+    )
+    db_session.add(
+        TaskCheckpoint(
+            task_id=task.id,
+            session_id=session.id,
+            checkpoint_type="validation_plan",
+            state_snapshot=json.dumps(
+                {
+                    "stage": "plan",
+                    "status": "accepted",
+                    "details": {"accepted_path_authority": authority.to_dict()},
+                }
+            ),
+        )
+    )
+    publication_change_set = {
+        "added_files": list(change_set.added_files),
+        "modified_files": list(change_set.modified_files),
+        "deleted_files": list(change_set.deleted_files),
+    }
+    db_session.add(
+        TaskCheckpoint(
+            task_id=task.id,
+            session_id=session.id,
+            checkpoint_type="validation_task_completion",
+            state_snapshot=json.dumps(
+                {
+                    "stage": "task_completion",
+                    "status": "accepted",
+                    "candidate_identity": candidate_delta_identity(
+                        publication_change_set, project_dir=artifact_root
+                    ),
+                }
+            ),
+        )
+    )
     db_session.commit()
     fixture = build_deterministic_s1_2_fixture(
         project_id=project.id,
