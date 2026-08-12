@@ -23,6 +23,10 @@ from app.services.orchestration.operations.file_ops_contract import (
     operation_has_file_op_path,
     validate_file_op_shape,
 )
+from app.services.orchestration.operations.source_region_identity import (
+    SourceRegionIdentity,
+    SourceRegionIdentityError,
+)
 from app.services.orchestration.workflow_profiles import (
     get_implementation_intent_markers,
     get_mutation_build_intent_markers,
@@ -508,6 +512,8 @@ def _source_operation_contract_issues(
         "source_operation_verdicts": [],
         "accepted_creation_paths": [],
         "accepted_existing_mutation_paths": [],
+        "semantic_replace_contract_issues": [],
+        "semantic_replace_version_mismatches": [],
     }
     unavailable = list(getattr(source_materialization, "unavailable_reasons", ()) or ())
     if unavailable:
@@ -610,6 +616,35 @@ def _source_operation_contract_issues(
                 if isinstance(content, str):
                     current_content[relative_path] = (
                         current_content.get(relative_path, "") + content
+                    )
+                continue
+
+            if "selector" in operation:
+                if record is None or record.status != SOURCE_STATUS_EXISTING:
+                    details["semantic_replace_contract_issues"].append(
+                        f"{label}: semantic replace requires existing source materialization"
+                    )
+                    continue
+                try:
+                    selector = SourceRegionIdentity.from_dict(operation.get("selector"))
+                    operation_path = declare(relative_path)
+                except (SourceRegionIdentityError, PathAuthorityError) as exc:
+                    details["semantic_replace_contract_issues"].append(
+                        f"{label}: {getattr(exc, 'code', 'selector_invalid')}"
+                    )
+                    continue
+                if selector.canonical_path != operation_path:
+                    details["semantic_replace_contract_issues"].append(
+                        f"{label}: selector_path_mismatch"
+                    )
+                    continue
+                if selector.expected_source_version != record.version_identity:
+                    details["semantic_replace_version_mismatches"].append(
+                        {
+                            "label": label,
+                            "expected_source_version": selector.expected_source_version,
+                            "accepted_source_version": record.version_identity,
+                        }
                     )
                 continue
 
@@ -1666,6 +1701,20 @@ class ValidatorService:
                 )
                 details["stale_replace_materialization"] = source_contract_issues[
                     "stale_replace_materialization"
+                ]
+            if source_contract_issues["semantic_replace_contract_issues"]:
+                rejected.append(
+                    "semantic_replace_contract_invalid: selector must bind the exact accepted path and existing source"
+                )
+                details["semantic_replace_contract_issues"] = source_contract_issues[
+                    "semantic_replace_contract_issues"
+                ]
+            if source_contract_issues["semantic_replace_version_mismatches"]:
+                rejected.append(
+                    "semantic_replace_version_mismatch: selector version does not match accepted source evidence"
+                )
+                details["semantic_replace_version_mismatches"] = source_contract_issues[
+                    "semantic_replace_version_mismatches"
                 ]
             structured_operation_findings = [
                 {

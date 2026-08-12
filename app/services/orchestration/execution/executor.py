@@ -17,6 +17,22 @@ from app.services.orchestration.operations.file_ops_contract import (
     SUPPORTED_FILE_OPS,
 )
 from app.services.orchestration.operations.patch_python import try_deterministic_patch
+from app.services.orchestration.operations.source_region_identity import (
+    SourceRegionIdentity,
+    SourceRegionIdentityError,
+)
+from app.services.orchestration.execution.anchor_resolver import (
+    INVALID_AUTHORITY,
+    RESOLVED_UNIQUE,
+    UNSAFE_TARGET,
+    UNSUPPORTED_SELECTOR,
+    VERSION_MISMATCH,
+    build_execution_mutation_artifact,
+    resolve_mutation_target,
+)
+from app.services.orchestration.planning.source_materialization import (
+    current_source_version_identity,
+)
 from app.services.workspace.permissions import (
     ensure_shared_path_to_root,
     ensure_shared_permissions,
@@ -558,6 +574,7 @@ class ExecutorService:
 
         files_changed: List[str] = []
         output_lines: List[str] = []
+        semantic_artifacts: List[Dict[str, Any]] = []
         normalized_project_dir = project_dir.resolve()
 
         for index, operation in enumerate(ops, start=1):
@@ -573,6 +590,21 @@ class ExecutorService:
                     "success": False,
                     "files_changed": files_changed,
                     "output": f"op {index} unsupported op: {op_name}",
+                }
+            if "selector" in operation and op_name != "replace_in_file":
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": (
+                        f"{op_name} cannot consume a replace_in_file semantic selector"
+                    ),
+                    "failure_category": "validation_failure",
+                    "resolver_status": UNSUPPORTED_SELECTOR,
+                    "authority_identity": (
+                        accepted_path_authority.authority_identity
+                        if accepted_path_authority is not None
+                        else None
+                    ),
                 }
             declared_relative = None
             try:
@@ -601,7 +633,7 @@ class ExecutorService:
                     accepted_path_authority,
                 )
             except PathAuthorityError as exc:
-                return {
+                failure = {
                     "success": False,
                     "files_changed": files_changed,
                     "output": str(exc),
@@ -617,6 +649,36 @@ class ExecutorService:
                         else None
                     ),
                 }
+                if "selector" in operation and op_name == "replace_in_file":
+                    try:
+                        selector = SourceRegionIdentity.from_dict(
+                            operation.get("selector")
+                        )
+                        selector_identity = selector.selector_identity
+                        expected_version = selector.expected_source_version
+                    except (SourceRegionIdentityError, PathAuthorityError):
+                        selector_identity = None
+                        expected_version = None
+                    unsafe_codes = {
+                        "path_symlink_rejected",
+                        "path_target_missing",
+                        "path_target_type_invalid",
+                    }
+                    resolver_status = (
+                        UNSAFE_TARGET if exc.code in unsafe_codes else INVALID_AUTHORITY
+                    )
+                    failure["resolver_status"] = resolver_status
+                    failure["semantic_resolution"] = {
+                        "status": resolver_status,
+                        "canonical_path": locals().get("declared_relative"),
+                        "operation": "replace_in_file",
+                        "selector_identity": selector_identity,
+                        "expected_source_version": expected_version,
+                        "current_source_version": None,
+                        "diagnostic_code": exc.code,
+                        "diagnostic_message": exc.message,
+                    }
+                return failure
             except ValueError as exc:
                 return {
                     "success": False,
@@ -696,6 +758,183 @@ class ExecutorService:
                         f"append_file {relative} ({len(content)} chars)"
                     )
                 files_changed.append(relative)
+                continue
+
+            if "selector" in operation:
+                if "old" in operation:
+                    return ExecutorService._semantic_resolution_failure(
+                        files_changed,
+                        relative,
+                        accepted_path_authority,
+                        status=UNSUPPORTED_SELECTOR,
+                        selector_identity=None,
+                        diagnostic_code="legacy_and_semantic_fields_mixed",
+                        diagnostic_message="replace_in_file cannot contain both old and selector",
+                    )
+                new = operation.get("new")
+                if not isinstance(new, str):
+                    return ExecutorService._semantic_resolution_failure(
+                        files_changed,
+                        relative,
+                        accepted_path_authority,
+                        status=UNSUPPORTED_SELECTOR,
+                        selector_identity=None,
+                        diagnostic_code="replacement_payload_invalid",
+                        diagnostic_message="semantic replace requires a string new payload",
+                    )
+                try:
+                    selector = SourceRegionIdentity.from_dict(operation.get("selector"))
+                    canonical_path = declare(operation.get("path"))
+                except (SourceRegionIdentityError, PathAuthorityError) as exc:
+                    return ExecutorService._semantic_resolution_failure(
+                        files_changed,
+                        relative,
+                        accepted_path_authority,
+                        status=UNSUPPORTED_SELECTOR,
+                        selector_identity=None,
+                        diagnostic_code=getattr(exc, "code", "selector_invalid"),
+                        diagnostic_message=str(exc),
+                        expected_source_version=None,
+                    )
+                resolution = resolve_mutation_target(
+                    root=normalized_project_dir,
+                    canonical_path=canonical_path,
+                    operation_intent="replace_in_file",
+                    selector=selector,
+                    expected_source_version=selector.expected_source_version,
+                    accepted_path_authority=accepted_path_authority,
+                )
+                if resolution.status != RESOLVED_UNIQUE:
+                    return ExecutorService._semantic_resolution_failure(
+                        files_changed,
+                        relative,
+                        accepted_path_authority,
+                        status=resolution.status,
+                        selector_identity=resolution.selector_identity,
+                        diagnostic_code=resolution.diagnostic_code,
+                        diagnostic_message=resolution.diagnostic_message,
+                        current_source_version=resolution.source_version_before,
+                        expected_source_version=selector.expected_source_version,
+                    )
+                target = resolution.target_path
+                source_bytes = resolution.source_bytes
+                if target is None or source_bytes is None or resolution.region is None:
+                    return ExecutorService._semantic_resolution_failure(
+                        files_changed,
+                        relative,
+                        accepted_path_authority,
+                        status=UNSAFE_TARGET,
+                        selector_identity=resolution.selector_identity,
+                        diagnostic_code="resolution_payload_missing",
+                        diagnostic_message="unique resolution did not carry a complete target",
+                        current_source_version=resolution.source_version_before,
+                        expected_source_version=selector.expected_source_version,
+                    )
+                try:
+                    ExecutorService._authorize_file_op(
+                        normalized_project_dir,
+                        operation,
+                        accepted_path_authority,
+                    )
+                    if (
+                        current_source_version_identity(target)
+                        != selector.expected_source_version
+                    ):
+                        return ExecutorService._semantic_resolution_failure(
+                            files_changed,
+                            relative,
+                            accepted_path_authority,
+                            status=VERSION_MISMATCH,
+                            selector_identity=resolution.selector_identity,
+                            diagnostic_code="source_changed_before_write",
+                            diagnostic_message="source version changed before semantic write",
+                            current_source_version=current_source_version_identity(
+                                target
+                            ),
+                            expected_source_version=selector.expected_source_version,
+                        )
+                    if target.read_bytes() != source_bytes:
+                        return ExecutorService._semantic_resolution_failure(
+                            files_changed,
+                            relative,
+                            accepted_path_authority,
+                            status=VERSION_MISMATCH,
+                            selector_identity=resolution.selector_identity,
+                            diagnostic_code="source_bytes_changed_before_write",
+                            diagnostic_message="source bytes changed before semantic write",
+                            current_source_version=current_source_version_identity(
+                                target
+                            ),
+                            expected_source_version=selector.expected_source_version,
+                        )
+                    # Final APA, containment, and symlink recheck immediately
+                    # before the one shared write boundary.
+                    ExecutorService._authorize_file_op(
+                        normalized_project_dir,
+                        operation,
+                        accepted_path_authority,
+                    )
+                    if (
+                        current_source_version_identity(target)
+                        != selector.expected_source_version
+                    ):
+                        return ExecutorService._semantic_resolution_failure(
+                            files_changed,
+                            relative,
+                            accepted_path_authority,
+                            status=VERSION_MISMATCH,
+                            selector_identity=resolution.selector_identity,
+                            diagnostic_code="source_changed_at_final_check",
+                            diagnostic_message="source version changed at final semantic check",
+                            current_source_version=current_source_version_identity(
+                                target
+                            ),
+                            expected_source_version=selector.expected_source_version,
+                        )
+                    replacement_bytes = new.encode("utf-8")
+                    start = resolution.region.start_byte
+                    end = resolution.region.end_byte
+                    updated_bytes = (
+                        source_bytes[:start] + replacement_bytes + source_bytes[end:]
+                    )
+                    target.write_bytes(updated_bytes)
+                except PathAuthorityError as exc:
+                    return ExecutorService._semantic_resolution_failure(
+                        files_changed,
+                        relative,
+                        accepted_path_authority,
+                        status=INVALID_AUTHORITY,
+                        selector_identity=resolution.selector_identity,
+                        diagnostic_code=exc.code,
+                        diagnostic_message=exc.message,
+                        current_source_version=current_source_version_identity(target),
+                        expected_source_version=selector.expected_source_version,
+                    )
+                except OSError as exc:
+                    return ExecutorService._semantic_resolution_failure(
+                        files_changed,
+                        relative,
+                        accepted_path_authority,
+                        status=UNSAFE_TARGET,
+                        selector_identity=resolution.selector_identity,
+                        diagnostic_code="target_read_or_write_failed",
+                        diagnostic_message=str(exc),
+                        current_source_version=current_source_version_identity(target),
+                        expected_source_version=selector.expected_source_version,
+                    )
+                ensure_shared_permissions(target)
+                source_version_after = current_source_version_identity(target)
+                artifact = build_execution_mutation_artifact(
+                    accepted_path_authority=accepted_path_authority,
+                    resolution=resolution,
+                    replacement=new,
+                    source_version_after=source_version_after,
+                )
+                files_changed.append(relative)
+                output_lines.append(
+                    f"replace_in_file {relative} (semantic region replacement)"
+                )
+                semantic_artifacts.append(artifact.to_dict())
                 continue
 
             old = operation.get("old")
@@ -814,10 +1053,52 @@ class ExecutorService:
             files_changed.append(relative)
             output_lines.append(f"replace_in_file {relative} (1 replacement)")
 
-        return {
+        result = {
             "success": True,
             "files_changed": files_changed,
             "output": "\n".join(output_lines),
+        }
+        if semantic_artifacts:
+            result["execution_mutation_artifacts"] = semantic_artifacts
+        return result
+
+    @staticmethod
+    def _semantic_resolution_failure(
+        files_changed: List[str],
+        relative: str,
+        accepted_path_authority: AcceptedPathAuthority,
+        *,
+        status: str,
+        selector_identity: str | None,
+        diagnostic_code: str | None,
+        diagnostic_message: str | None,
+        current_source_version: str | None = None,
+        expected_source_version: str | None = None,
+    ) -> Dict[str, Any]:
+        message = diagnostic_message or "semantic target resolution failed"
+        evidence = {
+            "status": status,
+            "canonical_path": relative,
+            "operation": "replace_in_file",
+            "selector_identity": selector_identity,
+            "expected_source_version": expected_source_version,
+            "current_source_version": current_source_version,
+            "diagnostic_code": diagnostic_code,
+            "diagnostic_message": message,
+        }
+        return {
+            "success": False,
+            "files_changed": files_changed,
+            "output": f"replace_in_file semantic resolver {status} for {relative}: {message}",
+            "failure_category": "validation_failure",
+            "authority_identity": accepted_path_authority.authority_identity,
+            "resolver_status": status,
+            "semantic_resolution": evidence,
+            "authority_error": {
+                "code": f"semantic_resolver_{status.lower()}",
+                "message": message,
+                "path": relative,
+            },
         }
 
     @staticmethod

@@ -604,7 +604,13 @@ def normalize_file_ops(
                 f"{step_label} op {op_index} has unsupported op: {op_name or '<empty>'}"
             )
         expected_keys = expected_file_op_keys(op_name)
-        if set(operation.keys()) != expected_keys:
+        semantic_replace = op_name == "replace_in_file" and set(operation.keys()) == {
+            "op",
+            "path",
+            "selector",
+            "new",
+        }
+        if not semantic_replace and set(operation.keys()) != expected_keys:
             raise TaskOperationContractViolation(
                 f"{step_label} op {op_index} must contain keys: "
                 f"{sorted(expected_keys)}, got raw keys: {raw_op_keys}"
@@ -626,15 +632,20 @@ def normalize_file_ops(
                 )
             normalized_operation["content"] = content
         elif op_name == "replace_in_file":
-            old = operation.get("old")
             new = operation.get("new")
-            if not isinstance(old, str):
-                raise TaskOperationContractViolation(
-                    f"{step_label} op {op_index} old must be a string"
-                )
             if not isinstance(new, str):
                 raise TaskOperationContractViolation(
                     f"{step_label} op {op_index} new must be a string"
+                )
+            if semantic_replace:
+                normalized_operation["selector"] = operation["selector"]
+                normalized_operation["new"] = new
+                normalized_ops.append(normalized_operation)
+                continue
+            old = operation.get("old")
+            if not isinstance(old, str):
+                raise TaskOperationContractViolation(
+                    f"{step_label} op {op_index} old must be a string"
                 )
             target_path = (project_dir / normalized_operation["path"]).resolve()
             target_is_missing_or_empty = not target_path.exists() or (

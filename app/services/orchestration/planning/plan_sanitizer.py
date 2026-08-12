@@ -210,9 +210,12 @@ def _normalize_nested_file_operation(
         normalized = {
             "op": op_name,
             "path": payload.get("path"),
-            "old": payload.get("old"),
             "new": payload.get("new"),
         }
+        if "selector" in payload:
+            normalized["selector"] = payload.get("selector")
+        else:
+            normalized["old"] = payload.get("old")
 
     if validate_file_op_shape(normalized):
         return normalized
@@ -236,9 +239,12 @@ def _extract_top_level_named_file_ops(step: Dict[str, Any]) -> List[Dict[str, An
             normalized = {
                 "op": op_name,
                 "path": payload.get("path"),
-                "old": payload.get("old"),
                 "new": payload.get("new"),
             }
+            if "selector" in payload:
+                normalized["selector"] = payload.get("selector")
+            else:
+                normalized["old"] = payload.get("old")
             for key in (
                 *REPLACE_IN_FILE_OLD_ALIASES,
                 *REPLACE_IN_FILE_NEW_ALIASES,
@@ -298,6 +304,7 @@ def _normalize_file_operation(
     if op_name == "replace_in_file":
         for key in (
             "old",
+            "selector",
             "new",
             *REPLACE_IN_FILE_OLD_ALIASES,
             *REPLACE_IN_FILE_NEW_ALIASES,

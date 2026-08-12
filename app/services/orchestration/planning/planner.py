@@ -851,6 +851,8 @@ class PlannerService:
                 continue
             if str(operation.get("op") or "").strip() != "replace_in_file":
                 continue
+            if "selector" in operation:
+                continue
             old_present = "old" in operation or "old_text" in operation
             old_value = (
                 operation.get("old")
@@ -875,6 +877,8 @@ class PlannerService:
             if not isinstance(operation, dict):
                 continue
             if str(operation.get("op") or "").strip() != "replace_in_file":
+                continue
+            if "selector" in operation:
                 continue
             rel_path = str(operation.get("path") or "").strip().lstrip("./")
             old_text = operation.get("old")

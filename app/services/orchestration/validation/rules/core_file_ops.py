@@ -78,6 +78,8 @@ def _nested_file_op_issue(operation: Any) -> Optional[str]:
         "append_file": {"path", "content"},
         "replace_in_file": {"path", "old", "new"},
     }[op_name]
+    if op_name == "replace_in_file" and "selector" in payload:
+        required_fields = {"path", "selector", "new"}
     missing = sorted(
         field
         for field in required_fields
@@ -146,6 +148,8 @@ def _replace_in_file_has_repairable_old_text_issue(operation: Any) -> bool:
     if not isinstance(operation, dict):
         return False
     if str(operation.get("op") or "").strip() != "replace_in_file":
+        return False
+    if "selector" in operation:
         return False
     path = operation.get("path")
     if not isinstance(path, str) or not path.strip():

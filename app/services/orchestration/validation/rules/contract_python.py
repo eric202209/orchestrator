@@ -102,6 +102,8 @@ def _plan_python_source_syntax_issues(
             elif op_name == "append_file":
                 candidate_content = current + str(operation.get("content") or "")
             else:
+                if "selector" in operation:
+                    continue
                 old = operation.get("old")
                 new = operation.get("new")
                 if not isinstance(old, str) or not isinstance(new, str) or not old:

@@ -11,6 +11,12 @@ FILE_OP_FIELD_SETS: Mapping[str, Set[str]] = {
     "append_file": {"op", "path", "content"},
     "replace_in_file": {"op", "path", "old", "new"},
 }
+SEMANTIC_REPLACE_IN_FILE_FIELD_SET = {
+    "op",
+    "path",
+    "selector",
+    "new",
+}
 SUPPORTED_FILE_OPS = frozenset(FILE_OP_FIELD_SETS)
 CONTENT_FILE_OPS = frozenset({"write_file", "append_file"})
 REPLACE_IN_FILE_OLD_ALIASES = (
@@ -52,6 +58,12 @@ def validate_file_op_shape(operation: Any) -> bool:
     op_name = str(operation.get("op") or "")
     expected_keys = FILE_OP_FIELD_SETS.get(op_name)
     if expected_keys is None or set(operation.keys()) != expected_keys:
+        if op_name == "replace_in_file" and set(operation.keys()) == (
+            SEMANTIC_REPLACE_IN_FILE_FIELD_SET
+        ):
+            return isinstance(operation.get("new"), str) and _valid_selector(
+                operation.get("selector")
+            )
         return False
 
     if not isinstance(operation.get("path"), str):
@@ -62,6 +74,18 @@ def validate_file_op_shape(operation: Any) -> bool:
         return isinstance(operation.get("old"), str) and isinstance(
             operation.get("new"), str
         )
+    return True
+
+
+def _valid_selector(selector: Any) -> bool:
+    from app.services.orchestration.operations.source_region_identity import (
+        SourceRegionIdentity,
+    )
+
+    try:
+        SourceRegionIdentity.from_dict(selector)
+    except (TypeError, ValueError):
+        return False
     return True
 
 
@@ -91,7 +115,9 @@ def normalize_replace_in_file_aliases(operation: Mapping[str, Any]) -> Dict[str,
     """Coerce common replace op aliases and drop unrelated metadata keys."""
 
     normalized: Dict[str, Any] = {
-        key: operation[key] for key in ("op", "path", "old", "new") if key in operation
+        key: operation[key]
+        for key in ("op", "path", "old", "selector", "new")
+        if key in operation
     }
     old_aliases = [key for key in REPLACE_IN_FILE_OLD_ALIASES if key in operation]
     new_aliases = [key for key in REPLACE_IN_FILE_NEW_ALIASES if key in operation]
