@@ -7,7 +7,7 @@ import os
 import re
 import shlex
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Collection, Dict, Optional
 
 from app.services.orchestration.context.assembly import (
     collect_workspace_inventory_paths,
@@ -17,6 +17,12 @@ from app.services.orchestration.phases.completion_repair_capsule import (
     completion_repair_finding_signature,
 )
 from app.services.orchestration.validation.validator import ValidatorService
+from app.services.orchestration.validation.path_authority import (
+    AcceptedPathAuthority,
+    GrantClass,
+    PathDeclarationError,
+    declare,
+)
 from app.services.orchestration.validation.workspace_guard import (
     TaskWorkspaceViolationError,
     normalize_path_reference,
@@ -125,27 +131,54 @@ def _completion_repair_invalid_paths(
     *,
     repair_step: Dict[str, Any],
     project_dir: Path,
-    completion_validation: Any,
+    repair_authorized_scope: Optional[Collection[str]],
 ) -> list[str]:
-    authorized_paths = set(
-        list(
-            (completion_validation.details or {}).get("candidate_authorized_paths", [])
-            or []
-        )
-    )
+    if repair_authorized_scope is None:
+        # Direct helper callers in legacy unit tests do not execute through the
+        # production CompletionCoordinator.  The production path always passes
+        # the APA-derived projection before this gate is reached.
+        return []
+    authorized_paths = set(repair_authorized_scope or ())
     invalid: list[str] = []
     for operation in repair_step.get("ops") or []:
         raw_path = (
             str(operation.get("path") or "") if isinstance(operation, dict) else ""
         )
         try:
-            path = normalize_path_reference(raw_path, project_dir.resolve())
-        except TaskWorkspaceViolationError:
+            path = declare(raw_path).value
+        except PathDeclarationError:
             invalid.append(raw_path or "<missing>")
+            continue
+        try:
+            path = normalize_path_reference(path, project_dir.resolve())
+        except TaskWorkspaceViolationError:
+            invalid.append(path)
             continue
         if path not in authorized_paths:
             invalid.append(path)
     return invalid
+
+
+def repair_authorized_scope(
+    accepted_path_authority: AcceptedPathAuthority,
+) -> frozenset[str]:
+    """Project the APA's mutation grant classes for Candidate Repair.
+
+    This is an immutable projection, not a second authority.  Candidate Repair
+    receives the APA at its flow boundary, and this projection is derived once
+    from that frozen record.  Read-only grants are intentionally absent.
+    """
+
+    return frozenset(
+        str(grant.path)
+        for grant in accepted_path_authority.grants
+        if grant.grant_class
+        in {
+            GrantClass.EXISTING_MUTABLE,
+            GrantClass.CREATION_AUTHORIZED,
+            GrantClass.DELETION_AUTHORIZED,
+        }
+    )
 
 
 def _extract_reported_changed_files(output_text: str, project_dir: Path) -> list[str]:
@@ -175,22 +208,20 @@ def _apply_completion_repair_ops_direct(
     ops: list[Dict[str, Any]],
     project_dir: Path,
     *,
-    authorized_paths: Optional[set[str]] = None,
+    repair_authorized_scope: Optional[Collection[str]] = None,
 ) -> Dict[str, Any]:
-    """Validate and atomically apply one candidate-authorized repair batch."""
+    """Validate and atomically apply one APA-scoped repair batch."""
 
     errors: list[str] = []
     project_root = project_dir.resolve()
     normalized_authority = None
-    if authorized_paths is not None:
+    if repair_authorized_scope is not None:
         normalized_authority = set()
-        for path in authorized_paths:
+        for path in repair_authorized_scope:
             try:
-                normalized_authority.add(
-                    normalize_path_reference(str(path), project_root)
-                )
-            except TaskWorkspaceViolationError as exc:
-                errors.append(f"invalid candidate-authorized path {path}: {exc}")
+                normalized_authority.add(declare(str(path)).value)
+            except PathDeclarationError as exc:
+                errors.append(f"invalid repair-authorized path {path}: {exc}")
 
     prepared: list[tuple[str, str, Path, Dict[str, Any]]] = []
     seen_paths: set[str] = set()
@@ -199,15 +230,17 @@ def _apply_completion_repair_ops_direct(
             errors.append(f"repair operation must be an object: {op!r}")
             continue
         op_name = str(op.get("op") or "").strip()
-        raw_path = str(op.get("path") or "").strip().replace("\\", "/")
+        raw_path = str(op.get("path") or "").strip()
         if not raw_path or not op_name:
             errors.append(f"op missing 'op' or 'path': {op}")
             continue
-        if Path(raw_path).is_absolute() or raw_path.startswith("~"):
-            errors.append(f"absolute/home path not allowed: {raw_path}")
+        try:
+            declared_path = declare(raw_path).value
+        except PathDeclarationError as exc:
+            errors.append(f"invalid repair path {raw_path}: {exc}")
             continue
         try:
-            path_str = normalize_path_reference(raw_path, project_root)
+            path_str = normalize_path_reference(declared_path, project_root)
         except TaskWorkspaceViolationError as exc:
             errors.append(str(exc))
             continue
@@ -215,7 +248,7 @@ def _apply_completion_repair_ops_direct(
             errors.append(f"path resolves to workspace root: {raw_path}")
             continue
         if normalized_authority is not None and path_str not in normalized_authority:
-            errors.append(f"path is not candidate-authorized: {path_str}")
+            errors.append(f"path is outside repair_authorized_scope: {path_str}")
             continue
         if path_str in seen_paths:
             errors.append(f"duplicate/conflicting repair operation: {path_str}")

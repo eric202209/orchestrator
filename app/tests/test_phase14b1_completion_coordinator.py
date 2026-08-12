@@ -213,7 +213,7 @@ def _patch_coordinator_delegates(
     if repair_result is not None:
         monkeypatch.setattr(
             "app.services.orchestration.phases.completion_flow._attempt_completion_repair",
-            lambda ctx, completion_validation, save_orchestration_checkpoint_fn: repair_result,
+            lambda ctx, completion_validation, save_orchestration_checkpoint_fn, **kwargs: repair_result,
         )
 
 
@@ -707,7 +707,7 @@ def _q6_verdict(
         profile="implementation",
         findings=findings,
         candidate_identity=identity,
-        details={"candidate_authorized_paths": authorized_paths},
+        details={"authorized_scope": authorized_paths},
     )
 
 

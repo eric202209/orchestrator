@@ -77,7 +77,7 @@ def _completion_validation(src_file="src/formatting.py"):
         reasons=["pytest failure: format_task_line missing include_status parameter"],
         details={
             "expected_core_files": [src_file],
-            "candidate_authorized_paths": [src_file],
+            "authorized_scope": [src_file],
             "failure_class": "completion_verification:pytest_failure",
             "completion_repair_source": "final_completion_verification",
         },

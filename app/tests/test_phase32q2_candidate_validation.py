@@ -248,12 +248,12 @@ def test_candidate_repair_rejects_undeclared_fourth_path_before_mutation(
     result = _apply_completion_repair_ops_direct(
         [{"op": "write_file", "path": "app/fourth.py", "content": "bad = 1\n"}],
         tmp_path,
-        authorized_paths={"app/owned.py"},
+        repair_authorized_scope={"app/owned.py"},
     )
 
     assert result["success"] is False
     assert result["applied"] == []
-    assert any("not candidate-authorized" in error for error in result["errors"])
+    assert any("outside repair_authorized_scope" in error for error in result["errors"])
     assert not (tmp_path / "app" / "fourth.py").exists()
 
 
@@ -279,7 +279,7 @@ def test_candidate_repair_batch_rolls_back_byte_identically(tmp_path: Path) -> N
             },
         ],
         tmp_path,
-        authorized_paths={"app/owned.py", "app/missing.py"},
+        repair_authorized_scope={"app/owned.py", "app/missing.py"},
     )
 
     assert result["success"] is False
@@ -381,7 +381,7 @@ def test_candidate_repair_rolls_back_when_second_write_raises(
             },
         ],
         tmp_path,
-        authorized_paths={"app/first.py", "app/second.py"},
+        repair_authorized_scope={"app/first.py", "app/second.py"},
     )
 
     assert result["success"] is False

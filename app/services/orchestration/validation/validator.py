@@ -2674,10 +2674,6 @@ class ValidatorService:
                 )
                 details["authorized_scope"] = list(authorized_scope)
                 details["verification_scope"] = list(verification_scope)
-                # Temporary 33C-5 bridge: this legacy diagnostic key now carries
-                # only APA authority.  Candidate Repair remains unchanged and
-                # will be re-sourced explicitly in 33C-6.
-                details["candidate_authorized_paths"] = list(authorized_scope)
                 details["missing_authorized_paths"] = sorted(
                     set(authorized_scope).difference(observed_scope)
                 )
@@ -2776,7 +2772,6 @@ class ValidatorService:
             )
             details["authorized_scope"] = list(authorized_scope)
             details["verification_scope"] = list(verification_scope)
-            details["candidate_authorized_paths"] = list(authorized_scope)
         pre_existing_tests = pre_existing_python_test_files(project_dir, change_set)
         pre_existing_sources = pre_existing_source_files(project_dir, change_set)
         behavior_baseline = completion_evidence.get("behavior_baseline")

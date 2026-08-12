@@ -922,6 +922,10 @@ def test_no_downstream_stage_reads_the_authority():
             "orchestration/execution/executor.py",
             "orchestration/phases/execution_loop.py",
             "orchestration/validation/workspace_guard.py",
+            # Phase 33C-6A intentionally makes Candidate Repair an explicit
+            # APA consumer; its immutable repair scope is derived from the
+            # same authority and is not a new authority abstraction.
+            "orchestration/phases/completion_repair.py",
         }:
             continue
         text = sources[relative]

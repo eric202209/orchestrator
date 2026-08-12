@@ -101,6 +101,7 @@ from app.services.orchestration.phases.completion_repair import (
     _canonicalize_completion_repair_envelope,
     _extract_completion_repair_step,
     _extract_reported_changed_files,
+    repair_authorized_scope,
     _repeats_prior_completion_failure,
     _salvage_completion_repair_json_text,
 )
@@ -240,6 +241,7 @@ def _attempt_completion_repair(
     ctx: OrchestrationRunContext,
     completion_validation: Any,
     save_orchestration_checkpoint_fn: Callable[..., None],
+    accepted_path_authority: Any = None,
 ) -> Dict[str, Any]:
     repairable_findings = list(
         getattr(completion_validation, "repairable_findings", []) or []
@@ -695,7 +697,11 @@ def _attempt_completion_repair(
     invalid_paths = _completion_repair_invalid_paths(
         repair_step=repair_step,
         project_dir=Path(orchestration_state.project_dir),
-        completion_validation=completion_validation,
+        repair_authorized_scope=(
+            repair_authorized_scope(accepted_path_authority)
+            if accepted_path_authority is not None
+            else None
+        ),
     )
     if invalid_paths:
         logger.warning(
@@ -815,10 +821,10 @@ def _attempt_completion_repair(
         _ops_result = _apply_completion_repair_ops_direct(
             repair_step["ops"],
             Path(orchestration_state.project_dir),
-            authorized_paths=set(
-                (getattr(completion_validation, "details", {}) or {}).get(
-                    "candidate_authorized_paths", []
-                )
+            repair_authorized_scope=(
+                repair_authorized_scope(accepted_path_authority)
+                if accepted_path_authority is not None
+                else None
             ),
         )
         if not repair_step.get("expected_files"):

@@ -523,9 +523,7 @@ def test_q6v_partial_progress_makes_provider_free_second_iteration_eligible_and_
         accepted_plan_identity=json.dumps(
             ctx.orchestration_state.plan, sort_keys=True, separators=(",", ":")
         ),
-        accepted_candidate_scope=tuple(
-            sorted(partial.details["candidate_authorized_paths"])
-        ),
+        accepted_candidate_scope=tuple(sorted(partial.details["authorized_scope"])),
     )
 
     assert first_repair["provider_verification"]["verification_passed"] is False

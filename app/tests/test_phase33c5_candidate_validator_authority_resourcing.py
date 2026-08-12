@@ -112,9 +112,8 @@ def test_change_set_is_observation_only_and_cannot_widen_authority(
     assert candidate_observed_paths(
         {"added_files": [], "modified_files": ["app/invented.py"], "deleted_files": []}
     ) == ("app/invented.py",)
-    assert result.details["authorized_scope"] == ["app/allowed.py"]
     assert result.details["observed_scope"] == ["app/invented.py"]
-    assert result.details["candidate_authorized_paths"] == ["app/allowed.py"]
+    assert result.details["authorized_scope"] == ["app/allowed.py"]
     assert result.status == "rejected"
     assert result.repairable is False
     assert any(
@@ -142,9 +141,9 @@ def test_attempt_16_invented_tsx_path_fails_closed_and_is_not_repairable(
 
     assert result.status == "rejected"
     assert result.repairable is False
-    assert result.details["candidate_authorized_paths"] == [accepted]
+    assert result.details["authorized_scope"] == [accepted]
     assert result.details["observed_scope"] == [invented]
-    assert invented not in result.details["candidate_authorized_paths"]
+    assert invented not in result.details["authorized_scope"]
     assert result.details["candidate_authority_invariant_failed"] is True
     assert not any(
         finding.repairable
@@ -202,7 +201,7 @@ def test_read_only_grant_is_not_mutation_authority_or_expectation(
     assert result.status in {"accepted", "warning"}
     assert result.details["authorized_scope"] == [mutable]
     assert result.details["verification_scope"] == [mutable]
-    assert readonly not in result.details["candidate_authorized_paths"]
+    assert readonly not in result.details["authorized_scope"]
     assert readonly not in result.details["missing_authorized_paths"]
 
 
@@ -230,7 +229,7 @@ def test_expected_files_cannot_widen_authorized_scope(tmp_path: Path) -> None:
 
     assert result.details["authorized_scope"] == [mutable]
     assert result.details["verification_scope"] == [mutable]
-    assert expected_context not in result.details["candidate_authorized_paths"]
+    assert expected_context not in result.details["authorized_scope"]
 
 
 def test_creation_and_mixed_mutations_use_only_apa_grants(tmp_path: Path) -> None:

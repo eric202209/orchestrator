@@ -86,9 +86,7 @@ def _completion_plan_identity(plan: Any) -> str:
 
 def _completion_candidate_scope(validation: Any) -> tuple[str, ...]:
     details = getattr(validation, "details", {}) or {}
-    return tuple(
-        sorted(str(path) for path in details.get("candidate_authorized_paths", []))
-    )
+    return tuple(sorted(str(path) for path in details.get("authorized_scope", [])))
 
 
 def _retain_completion_repair_verification_evidence(
@@ -597,6 +595,7 @@ class CompletionCoordinator:
                     ctx=ctx,
                     completion_validation=completion_validation,
                     save_orchestration_checkpoint_fn=save_orchestration_checkpoint_fn,
+                    accepted_path_authority=candidate_authority,
                 )
                 if repair_result.get("status") != "success":
                     break
