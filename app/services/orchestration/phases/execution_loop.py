@@ -8,6 +8,7 @@ import logging
 import subprocess
 import time
 import uuid
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -178,6 +179,38 @@ from app.services.orchestration.recovery.recovery_strategy_registry import (
 )
 
 _DEBUG_KNOWLEDGE_MIN_CONFIDENCE = 0.85
+
+
+def _restore_authority_bound_step(
+    plan: list[dict[str, Any]],
+    accepted_plan: list[dict[str, Any]],
+    *,
+    step_index: int,
+) -> bool:
+    """Restore one execution-retried step to the accepted Plan projection.
+
+    Debug retries may need a transient command/verification/operation shape to
+    rerun a step.  Those fields must not remain in the Plan that Candidate
+    validation uses to reload the APA.  The accepted Plan remains the one
+    authority-bound projection; the retry mutation is disposable execution
+    state and is restored after the step succeeds.
+    """
+
+    if not (0 <= step_index < len(plan) and step_index < len(accepted_plan)):
+        return False
+    plan[step_index] = deepcopy(accepted_plan[step_index])
+    return True
+
+
+def _plan_has_semantic_region_selector(plan: list[dict[str, Any]]) -> bool:
+    """Return whether a Plan carries the D8R semantic replacement contract."""
+
+    return any(
+        isinstance(operation, dict) and isinstance(operation.get("selector"), dict)
+        for step in plan
+        if isinstance(step, dict)
+        for operation in (step.get("ops") or [])
+    )
 
 
 def _debug_knowledge_ref_allowed(item: Any, retrieval_reason: str) -> bool:
@@ -378,6 +411,14 @@ def execute_step_loop(
             "failure_category": "validation_failure",
             "authority_error": {"code": exc.code, "message": exc.message},
         }
+
+    # Keep the exact Plan projection that admitted the APA.  Execution/debug
+    # retries may temporarily rewrite a step to rerun a command, but Candidate
+    # must receive this same accepted projection after the step succeeds.
+    accepted_plan_snapshot = deepcopy(orchestration_state.plan)
+    accepted_plan_is_semantic = _plan_has_semantic_region_selector(
+        accepted_plan_snapshot
+    )
 
     # Synthesize a minimal artifact when resuming from an old checkpoint that
     # predates the reasoning_artifact field (stored None).
@@ -1316,6 +1357,16 @@ def execute_step_loop(
                         "cove_changes": cove_changes[:20],
                     },
                 )
+            if (
+                accepted_plan_is_semantic
+                and plan_revision_count == 0
+                and _restore_authority_bound_step(
+                    orchestration_state.plan,
+                    accepted_plan_snapshot,
+                    step_index=step_index,
+                )
+            ):
+                task.steps = json.dumps(orchestration_state.plan)
             orchestration_state.record_success(step_record)
             tool_events = [
                 event
@@ -1763,6 +1814,16 @@ def execute_step_loop(
                 _patch_path = _step_recovery_result.get("patch_path")
                 if _patch_path and _patch_path not in _recovery_changed:
                     _recovery_changed.append(_patch_path)
+                if (
+                    accepted_plan_is_semantic
+                    and plan_revision_count == 0
+                    and _restore_authority_bound_step(
+                        orchestration_state.plan,
+                        accepted_plan_snapshot,
+                        step_index=step_index,
+                    )
+                ):
+                    task.steps = json.dumps(orchestration_state.plan)
                 orchestration_state.record_success(
                     StepResult(
                         step_number=step_index + 1,
@@ -2548,6 +2609,16 @@ def execute_step_loop(
                     )
                 except Exception:
                     pass
+                if (
+                    accepted_plan_is_semantic
+                    and plan_revision_count == 0
+                    and _restore_authority_bound_step(
+                        orchestration_state.plan,
+                        accepted_plan_snapshot,
+                        step_index=step_index,
+                    )
+                ):
+                    task.steps = json.dumps(orchestration_state.plan)
                 orchestration_state.record_success(
                     StepResult(
                         step_number=step_index + 1,
