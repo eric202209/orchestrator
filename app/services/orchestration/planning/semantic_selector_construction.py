@@ -18,8 +18,11 @@ from app.services.orchestration.operations.source_region_identity import (
     SourceRegionIdentity,
 )
 from app.services.orchestration.planning.source_materialization import (
+    HINT_TYPE_EXACT_CALL,
+    HINT_TYPE_QUOTED_SNIPPET,
     SOURCE_STATUS_EXISTING,
     SPAN_PRIMARY_TARGET,
+    SPAN_TARGET_MATCH,
     MaterializedSourceSpan,
     PlannerSourceMaterialization,
     current_source_version_identity,
@@ -48,7 +51,7 @@ UNSAFE_SOURCE = "UNSAFE_SOURCE"
 class MaterializedRegionReference:
     """A closed reference to one Orchestrator-issued materialization region."""
 
-    region_kind: Literal["primary_target_region"] = SPAN_PRIMARY_TARGET
+    region_kind: Literal["target_match_region"] = SPAN_TARGET_MATCH
 
 
 @dataclass(frozen=True)
@@ -136,6 +139,21 @@ def _primary_target_spans(record: Any) -> tuple[MaterializedSourceSpan, ...]:
         for span in spans
         if isinstance(span, MaterializedSourceSpan) and span.kind == SPAN_PRIMARY_TARGET
     )
+
+
+def _target_match_bounds(record: Any) -> tuple[int, int] | None:
+    start_byte = getattr(record, "target_match_start", None)
+    end_byte = getattr(record, "target_match_end", None)
+    if (
+        isinstance(start_byte, bool)
+        or not isinstance(start_byte, int)
+        or isinstance(end_byte, bool)
+        or not isinstance(end_byte, int)
+        or start_byte < 0
+        or end_byte <= start_byte
+    ):
+        return None
+    return start_byte, end_byte
 
 
 def _raw_line_spans(source_bytes: bytes) -> tuple[tuple[int, int], ...]:
@@ -231,12 +249,12 @@ def construct_source_region_identity(
             diagnostic_message="operation path is not a safe canonical path",
         )
 
-    if semantic_target.region_reference.region_kind != SPAN_PRIMARY_TARGET:
+    if semantic_target.region_reference.region_kind != SPAN_TARGET_MATCH:
         return _failure(
             UNSUPPORTED_INTENT,
             canonical_path=declared_path,
             diagnostic_code="materialized_region_kind_unsupported",
-            diagnostic_message="only the Orchestrator primary target region is supported",
+            diagnostic_message="only the Orchestrator exact target-match region is supported",
         )
 
     if accepted_path_authority is not None:
@@ -339,6 +357,17 @@ def construct_source_region_identity(
             diagnostic_code="materialized_target_insufficient",
             diagnostic_message="materialization does not prove one visible target region",
         )
+    if getattr(record, "target_hint_type", None) not in {
+        HINT_TYPE_EXACT_CALL,
+        HINT_TYPE_QUOTED_SNIPPET,
+    }:
+        return _failure(
+            UNSUPPORTED_INTENT,
+            canonical_path=declared_path,
+            target_path=target_path,
+            diagnostic_code="target_match_is_locator_not_replacement_region",
+            diagnostic_message="definition/symbol evidence has no exact replacement region",
+        )
 
     matching_spans = _primary_target_spans(record)
     if len(matching_spans) > 1:
@@ -349,19 +378,29 @@ def construct_source_region_identity(
             diagnostic_code="materialized_region_ambiguous",
             diagnostic_message="multiple primary target spans match the intent",
         )
-    bounds = _span_bounds(
+    primary_bounds = _span_bounds(
         matching_spans[0] if matching_spans else None,
         record=record,
     )
-    if bounds is None:
+    bounds = _target_match_bounds(record)
+    if primary_bounds is None or bounds is None:
         return _failure(
             NOT_FOUND,
             canonical_path=declared_path,
             target_path=target_path,
             diagnostic_code="materialized_region_bounds_missing",
-            diagnostic_message="materialization has insufficient authoritative region bounds",
+            diagnostic_message="materialization has insufficient target-match bounds",
         )
     start_byte, end_byte = bounds
+    primary_start, primary_end = primary_bounds
+    if start_byte < primary_start or end_byte > primary_end:
+        return _failure(
+            NOT_FOUND,
+            canonical_path=declared_path,
+            target_path=target_path,
+            diagnostic_code="target_match_outside_materialized_region",
+            diagnostic_message="target-match bounds are outside the materialized source span",
+        )
 
     try:
         observation = observe(workspace_root, declared_path)
@@ -419,9 +458,6 @@ def construct_source_region_identity(
             diagnostic_code="source_changed_during_construction",
             diagnostic_message="source changed while the authoritative region was read",
         )
-    line_bounds = _authoritative_line_bounds(record, source_bytes)
-    if line_bounds is not None:
-        start_byte, end_byte = line_bounds
     if end_byte > len(source_bytes) or start_byte >= end_byte:
         return _failure(
             NOT_FOUND,
@@ -430,15 +466,22 @@ def construct_source_region_identity(
             diagnostic_code="materialized_region_out_of_bounds",
             diagnostic_message="authoritative region is outside the current full source",
         )
-    if (start_byte > 0 and source_bytes[start_byte - 1 : start_byte] != b"\n") or (
-        end_byte < len(source_bytes) and source_bytes[end_byte - 1 : end_byte] != b"\n"
-    ):
+    target_hint = getattr(record, "target_hint", None)
+    if not isinstance(target_hint, str) or not target_hint:
         return _failure(
             NOT_FOUND,
             canonical_path=declared_path,
             target_path=target_path,
-            diagnostic_code="materialized_region_not_line_aligned",
-            diagnostic_message="authoritative region boundaries are not source line boundaries",
+            diagnostic_code="target_match_text_missing",
+            diagnostic_message="materialization has no exact target-match text",
+        )
+    if source_bytes[start_byte:end_byte] != target_hint.encode("utf-8"):
+        return _failure(
+            NOT_FOUND,
+            canonical_path=declared_path,
+            target_path=target_path,
+            diagnostic_code="target_match_text_mismatch",
+            diagnostic_message="target-match bytes do not equal authoritative hint evidence",
         )
     try:
         source_bytes[:start_byte].decode("utf-8")

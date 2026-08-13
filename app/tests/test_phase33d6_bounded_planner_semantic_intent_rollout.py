@@ -62,7 +62,7 @@ def _semantic_provider_response(target_id: str, *, path: str = "target.txt"):
             "op": "replace_in_file",
             "path": path,
             "target_id": target_id,
-            "new": "changed()\n",
+            "new": "changed()",
         }
     )
 

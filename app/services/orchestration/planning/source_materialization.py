@@ -35,7 +35,10 @@ def _read_source_text(
     if cached is not None:
         return cached
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        # Keep CRLF/LF bytes stable: semantic target-match offsets are byte
+        # coordinates consumed later by the UTF-8 region resolver.
+        with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+            text = handle.read()
     except OSError:
         return None
     cache[relative_path] = text
@@ -76,6 +79,7 @@ SELECTION_TARGET_WITH_STRUCTURAL_HEAD = "target_centered_with_structural_head"
 
 SPAN_PRIMARY_TARGET = "primary_target_region"
 SPAN_STRUCTURAL_HEAD = "structural_head_region"
+SPAN_TARGET_MATCH = "target_match_region"
 
 # A second span never adds budget: it is carved out of the same per-file
 # allocation, and only enough of it to carry a module head/import region.
@@ -418,17 +422,19 @@ def extract_source_target_hints(
         candidates: list[tuple[int, str, str]] = []
         for match in _HINT_BACKTICK_RE.finditer(body):
             candidate = match.group(1).strip()
-            hint_type = (
-                HINT_TYPE_EXACT_CALL if "(" in candidate else HINT_TYPE_QUOTED_SNIPPET
-            )
+            hint_type = _literal_hint_type(candidate)
             candidates.append((match.start(1), candidate, hint_type))
         for match in _HINT_QUOTED_RE.finditer(body):
             candidate = (match.group(1) or match.group(2) or "").strip()
-            hint_type = (
-                HINT_TYPE_EXACT_CALL if "(" in candidate else HINT_TYPE_QUOTED_SNIPPET
-            )
+            hint_type = _literal_hint_type(candidate)
             candidates.append((match.start(), candidate, hint_type))
         for match in _HINT_CALL_RE.finditer(body):
+            # Do not reinterpret ``def foo()`` as the call-shaped literal
+            # ``foo()``. A definition remains a locator until a future
+            # structural resolver can establish its body boundary.
+            prefix = body[max(0, match.start(1) - 24) : match.start(1)]
+            if re.search(r"\b(?:def|class|function|method)\s+$", prefix):
+                continue
             candidates.append(
                 (match.start(1), match.group(1).strip(), HINT_TYPE_EXACT_CALL)
             )
@@ -455,6 +461,14 @@ def extract_source_target_hints(
             if len(hints) >= _MAXIMUM_TARGET_HINTS:
                 return tuple(hints)
     return tuple(hints)
+
+
+def _literal_hint_type(candidate: str) -> str:
+    """Keep a definition locator out of the exact replacement-span families."""
+
+    if re.match(r"^(?:async\s+)?(?:def|class|function|method)\b", candidate):
+        return HINT_TYPE_SYMBOL
+    return HINT_TYPE_EXACT_CALL if "(" in candidate else HINT_TYPE_QUOTED_SNIPPET
 
 
 def _line_spans(encoded: bytes) -> list[tuple[int, int]]:

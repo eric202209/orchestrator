@@ -260,7 +260,7 @@ def test_unicode_and_newline_bytes_are_derived_from_authoritative_source(
     )
     assert b"needle()" in selected
     if newline == "\r\n":
-        assert b"\r\n" in selected
+        assert raw[result.selector.end_byte :].startswith(b"\r\n")
     assert result.selector.end_byte <= len(raw)
 
 

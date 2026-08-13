@@ -22,6 +22,8 @@ from app.services.orchestration.planning.semantic_selector_construction import (
     construct_source_region_identity,
 )
 from app.services.orchestration.planning.source_materialization import (
+    HINT_TYPE_EXACT_CALL,
+    HINT_TYPE_QUOTED_SNIPPET,
     SOURCE_STATUS_EXISTING,
     SPAN_PRIMARY_TARGET,
     MaterializedSourceSpan,
@@ -184,6 +186,13 @@ def _record_is_eligible(
         getattr(item, "target_included", False)
     ):
         return None
+    if getattr(item, "target_hint_type", None) not in {
+        HINT_TYPE_EXACT_CALL,
+        HINT_TYPE_QUOTED_SNIPPET,
+    }:
+        # A definition/symbol is a locator. Current materialization records no
+        # structural body end, so it cannot safely become a replacement region.
+        return None
     primary_spans = _primary_spans(item)
     if len(primary_spans) > 1:
         return None
@@ -199,6 +208,17 @@ def _record_is_eligible(
             or end_byte <= start_byte
         ):
             return None
+    target_start = getattr(item, "target_match_start", None)
+    target_end = getattr(item, "target_match_end", None)
+    if (
+        isinstance(target_start, bool)
+        or not isinstance(target_start, int)
+        or isinstance(target_end, bool)
+        or not isinstance(target_end, int)
+        or target_start < 0
+        or target_end <= target_start
+    ):
+        return None
     try:
         observation = observe(workspace_root, path)
     except PathAuthorityError:

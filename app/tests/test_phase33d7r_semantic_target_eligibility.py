@@ -33,8 +33,7 @@ ATTEMPT_17_TASK = (
     "Make billing/invoice_total become billing invoice total in " f"{RELATIVE_PATH}."
 )
 SUPPORTED_TASK = (
-    "Replace the bounded implementation of `humanize_display_name` in "
-    f"{RELATIVE_PATH}."
+    'Replace the exact snippet `if "-" in text or "_" in text:` in ' f"{RELATIVE_PATH}."
 )
 SOURCE = '''"""Helpers for keeping display names human-readable."""
 
@@ -106,7 +105,7 @@ def _semantic_response(target_id: str, *, path: str = RELATIVE_PATH) -> list[dic
             "op": "replace_in_file",
             "path": path,
             "target_id": target_id,
-            "new": REPLACED_SOURCE,
+            "new": 'if "-" in text or "_" in text or "/" in text:',
         },
         path=path,
     )
@@ -226,7 +225,10 @@ def test_target_eligibility_negative_controls_fail_closed(tmp_path):
     assert build_semantic_target_inventory(zero_target).handles == ()
 
     ambiguous_source = (
-        SOURCE + "\n\ndef humanize_display_name(value: str) -> str:\n    return value\n"
+        SOURCE
+        + "\n\ndef another_name(value: str) -> str:\n"
+        + '    if "-" in text or "_" in text:\n'
+        + "        return value\n"
     )
     ambiguous = _materialize(tmp_path, source=ambiguous_source)
     assert build_semantic_target_inventory(ambiguous).handles == ()
