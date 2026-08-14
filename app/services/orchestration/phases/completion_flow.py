@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -11,7 +12,6 @@ from typing import Any, Callable, Dict, Optional
 
 from app.models import TaskExecution, TaskStatus
 from app.config import settings
-from app.services.orchestration.error_handler import error_handler
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.diagnostics.debug_feedback import (
@@ -103,7 +103,6 @@ from app.services.orchestration.phases.completion_repair import (
     _extract_reported_changed_files,
     repair_authorized_scope,
     _repeats_prior_completion_failure,
-    _salvage_completion_repair_json_text,
 )
 from app.services.orchestration.phases.completion_summary import (
     _deterministic_task_summary,
@@ -211,29 +210,86 @@ def _resolve_template_review_policy(task: Any) -> Optional[dict]:
 
 
 def _extract_completion_repair_json_text(value: Any) -> str:
-    """Preserve direct repair JSON while still unwrapping OpenClaw payloads."""
+    """Extract exactly one complete JSON value from a repair response.
 
-    if not isinstance(value, str):
-        return extract_structured_text(value)
+    Completion Repair is an executable, APA-scoped contract.  The shared
+    error handler intentionally performs broad recovery for planning and
+    other model responses, but that recovery can select the first object from
+    conflicting output or reinterpret a nested object from a truncated outer
+    envelope.  Here we only accept one complete, balanced JSON value and keep
+    prose/fence handling deterministic.
+    """
 
-    stripped = value.strip()
+    source = value if isinstance(value, str) else extract_structured_text(value)
+    stripped = str(source or "").strip()
     if not stripped:
         return ""
 
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError:
-        return extract_structured_text(value)
+        parsed = None
+    if isinstance(parsed, dict) and (
+        _VISIBLE_TEXT_KEYS.intersection(parsed.keys())
+        or _OPENCLAW_DIAGNOSTIC_KEYS.intersection(parsed.keys())
+    ):
+        visible = extract_structured_text(value)
+        if visible and visible != stripped:
+            stripped = visible.strip()
 
-    if isinstance(parsed, (dict, list)):
-        if isinstance(parsed, dict) and (
-            _VISIBLE_TEXT_KEYS.intersection(parsed.keys())
-            or _OPENCLAW_DIAGNOSTIC_KEYS.intersection(parsed.keys())
-        ):
-            return extract_structured_text(value)
-        return stripped
+    fenced = re.findall(
+        r"```(?:json)?\s*(.*?)```", stripped, flags=re.DOTALL | re.IGNORECASE
+    )
+    if "```" in stripped:
+        if len(fenced) != 1:
+            return ""
+        stripped = fenced[0].strip()
+    if not stripped:
+        return ""
 
-    return extract_structured_text(value)
+    decoder = json.JSONDecoder()
+    candidates: list[tuple[int, int]] = []
+    for index, char in enumerate(stripped):
+        if char not in "[{":
+            continue
+        try:
+            _parsed, end = decoder.raw_decode(stripped[index:])
+        except json.JSONDecodeError:
+            continue
+        candidates.append((index, index + end))
+
+    if not candidates:
+        return ""
+
+    outermost = [
+        candidate
+        for candidate in candidates
+        if not any(
+            other != candidate and other[0] <= candidate[0] and other[1] >= candidate[1]
+            for other in candidates
+        )
+    ]
+    if len(outermost) != 1:
+        return ""
+
+    start, end = outermost[0]
+    # A complete nested value inside an incomplete outer object is not a
+    # repair envelope.  Reject any JSON delimiter outside the selected value
+    # so malformed/truncated wrappers cannot be reinterpreted as a step.
+    if any(char in "[{" for char in stripped[:start] + stripped[end:]):
+        return ""
+    return stripped[start:end]
+
+
+def _parse_completion_repair_json(text: str) -> tuple[bool, Any, str]:
+    """Parse the extractor's one-value result without fuzzy JSON repair."""
+
+    if not text:
+        return False, None, "repair_output_parse_failure"
+    try:
+        return True, json.loads(text), "repair_output_json"
+    except json.JSONDecodeError:
+        return False, None, "repair_output_parse_failure"
 
 
 def _attempt_completion_repair(
@@ -622,16 +678,12 @@ def _attempt_completion_repair(
     repair_output = _extract_completion_repair_json_text(
         repair_plan_result.get("output", "{}")
     )
-    repair_output = _salvage_completion_repair_json_text(repair_output)
-    success, repair_data, strategy_info = error_handler.attempt_json_parsing(
-        repair_output, context="completion_repair"
-    )
+    success, repair_data, strategy_info = _parse_completion_repair_json(repair_output)
     if not success:
-        fallback_output = extract_structured_text(repair_plan_result)
+        fallback_output = _extract_completion_repair_json_text(repair_plan_result)
         if fallback_output and fallback_output != repair_output:
-            fallback_output = _salvage_completion_repair_json_text(fallback_output)
-            success, repair_data, strategy_info = error_handler.attempt_json_parsing(
-                fallback_output, context="completion_repair"
+            success, repair_data, strategy_info = _parse_completion_repair_json(
+                fallback_output
             )
 
     append_orchestration_event(
