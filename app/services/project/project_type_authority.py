@@ -57,7 +57,7 @@ def resolve_project_type(
     back to derivation; falls back to ``"unknown"`` when derivation cannot
     determine a known type.
     """
-    normalized_override = (override or "").strip()
+    normalized_override = str(override).strip() if override else ""
     if normalized_override:
         return normalized_override
     return derive_project_type(project_dir)

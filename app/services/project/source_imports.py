@@ -69,7 +69,7 @@ def _truncate(text: str, limit: int) -> str:
 
 
 def _truncate_block(text: str, limit: int) -> str:
-    cleaned = str(text or "").strip()
+    cleaned = str(text).strip() if text else ""
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 3].rstrip() + "..."
