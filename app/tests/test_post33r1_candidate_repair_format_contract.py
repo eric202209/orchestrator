@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.services.orchestration.phases.completion_flow import (
+    _completion_repair_contract_summary,
     _extract_completion_repair_json_text,
 )
 from app.services.orchestration.phases.completion_repair import (
@@ -16,6 +17,8 @@ from app.services.orchestration.phases.completion_repair import (
     _repeats_prior_completion_failure,
 )
 from app.services.orchestration.phases.completion_repair_capsule import (
+    CompletionRepairCapsule,
+    build_bounded_completion_repair_prompt,
     classify_completion_repair_progress,
 )
 from app.services.orchestration.phases.execution_local_steps import (
@@ -190,6 +193,84 @@ def test_unsafe_and_out_of_contract_verification_commands_fail_closed() -> None:
     assert not _is_simple_verification_command("pytest; rm -rf app")
     assert not _is_simple_verification_command('python -c \'open("x", "w")\'')
     assert _is_simple_verification_command("python -m pytest -q")
+
+
+def test_verification_command_matrix_matches_existing_safety_grammar(
+    tmp_path: Path,
+) -> None:
+    authorized = tmp_path / "app/formatting.py"
+    authorized.parent.mkdir(parents=True)
+    authorized.write_text("value = 1\n", encoding="utf-8")
+    unrelated = tmp_path / "app/other.py"
+    unrelated.write_text("other = 1\n", encoding="utf-8")
+    valid = [
+        "python -m compileall app/formatting.py",
+        "python3 -m compileall app/formatting.py",
+        "pytest app/tests/test_example.py",
+        "python -m pytest app/tests/test_example.py",
+        "npm run build",
+        "python -m compileall app/other.py",
+    ]
+    invalid = [
+        "black --check app/formatting.py",
+        "python -m black --check app/formatting.py",
+        "flake8 app/formatting.py",
+        "python -m flake8 app/formatting.py",
+        "python -m compileall app/formatting.py && true",
+        "python -m compileall app/formatting.py; true",
+        "python -m compileall app/formatting.py | tee output.txt",
+        "python -m compileall app/formatting.py > output.txt",
+        f"python -m compileall {authorized.resolve()}",
+        "python -m compileall ../app/formatting.py",
+        "",
+    ]
+    assert all(
+        _is_simple_verification_command(command, project_dir=tmp_path)
+        for command in valid
+    )
+    assert not any(
+        _is_simple_verification_command(command, project_dir=tmp_path)
+        for command in invalid
+    )
+
+
+def test_active_repair_prompt_names_the_existing_verification_contract() -> None:
+    prompt = build_bounded_completion_repair_prompt(
+        CompletionRepairCapsule(
+            validation_reasons=["Candidate-scoped black failed"],
+            relevant_files=["app/formatting.py"],
+            last_step_summary="Step 1 completed.",
+            workspace_path="/tmp/project",
+            task_prompt_excerpt="Format the candidate.",
+        ),
+        2,
+    )
+    assert "python[3] -m compileall <.py/dir>" in prompt
+    assert "Avoid `black`/`flake8`" in prompt
+    assert "metacharacters" in prompt
+
+
+def test_repair_contract_summary_is_bounded_and_sanitized() -> None:
+    summary = _completion_repair_contract_summary(
+        extraction_status="present",
+        parse_status="accepted",
+        canonical_contract_status="accepted",
+        verification_command="black --check app/formatting.py",
+        verification_safety_status="rejected",
+        verification_safety_reason="completion_repair_verification_command_unsafe",
+        repair_step={"ops": [{"op": "replace_in_file", "path": "app/formatting.py"}]},
+    )
+    assert summary["extraction_status"] == "present"
+    assert summary["parse_status"] == "accepted"
+    assert summary["canonical_contract_status"] == "accepted"
+    assert summary["verification_command_family"] == "black"
+    assert summary["verification_safety_status"] == "rejected"
+    assert summary["verification_safety_reason"] == (
+        "completion_repair_verification_command_unsafe"
+    )
+    assert len(summary["verification_command_hash"]) == 64
+    assert "verification_command" not in summary
+    assert summary["repair_op_paths"] == ["app/formatting.py"]
 
 
 def test_wrong_repair_signature_fails_before_application(tmp_path: Path) -> None:

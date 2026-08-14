@@ -1,6 +1,7 @@
 """Task completion and finalization flow."""
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -290,6 +291,69 @@ def _parse_completion_repair_json(text: str) -> tuple[bool, Any, str]:
         return True, json.loads(text), "repair_output_json"
     except json.JSONDecodeError:
         return False, None, "repair_output_parse_failure"
+
+
+def _completion_repair_verification_family(command: Any) -> str:
+    normalized = " ".join(str(command or "").strip().split())
+    if not normalized:
+        return "empty"
+    if re.search(r";|\||>|<|&|`|\$\(", normalized):
+        return "shell_composition"
+    if re.match(r"^(?:python|python3) -m compileall(?:\s|$)", normalized):
+        return "python_compileall"
+    if re.match(r"^(?:python|python3) -m pytest(?:\s|$)", normalized):
+        return "python_pytest"
+    if re.match(r"^pytest(?:\s|$)", normalized):
+        return "pytest"
+    if re.match(r"^(?:python|python3) -m py_compile(?:\s|$)", normalized):
+        return "python_py_compile"
+    if re.match(r"^(?:python|python3) -m unittest(?:\s|$)", normalized):
+        return "python_unittest"
+    if normalized.startswith(("python -c ", "python3 -c ")):
+        return "python_read_only_inline"
+    if normalized.startswith("node -e "):
+        return "node_inline"
+    if normalized.startswith(("black ", "python -m black", "python3 -m black")):
+        return "black"
+    if normalized.startswith(("flake8 ", "python -m flake8", "python3 -m flake8")):
+        return "flake8"
+    if normalized == "npm run build":
+        return "npm_build"
+    return "other"
+
+
+def _completion_repair_contract_summary(
+    *,
+    extraction_status: str,
+    parse_status: str,
+    canonical_contract_status: str,
+    verification_command: Any = "",
+    verification_safety_status: str = "not_reached",
+    verification_safety_reason: str | None = None,
+    repair_step: Any = None,
+) -> dict[str, Any]:
+    command = str(verification_command or "").strip()
+    op_paths = []
+    if isinstance(repair_step, dict):
+        for operation in repair_step.get("ops") or []:
+            if not isinstance(operation, dict):
+                continue
+            path = str(operation.get("path") or "").strip()
+            if path:
+                op_paths.append(path[:240])
+    summary = {
+        "extraction_status": extraction_status,
+        "parse_status": parse_status,
+        "canonical_contract_status": canonical_contract_status,
+        "verification_safety_status": verification_safety_status,
+        "verification_command_hash": (
+            hashlib.sha256(command.encode("utf-8")).hexdigest() if command else None
+        ),
+        "verification_command_family": _completion_repair_verification_family(command),
+        "verification_safety_reason": verification_safety_reason,
+        "repair_op_paths": op_paths[:20],
+    }
+    return summary
 
 
 def _attempt_completion_repair(
@@ -682,19 +746,27 @@ def _attempt_completion_repair(
     if not success:
         fallback_output = _extract_completion_repair_json_text(repair_plan_result)
         if fallback_output and fallback_output != repair_output:
+            repair_output = fallback_output
             success, repair_data, strategy_info = _parse_completion_repair_json(
                 fallback_output
             )
 
-    append_orchestration_event(
-        project_dir=orchestration_state.project_dir,
-        session_id=ctx.session_id,
-        task_id=ctx.task_id,
-        event_type=EventType.REPAIR_GENERATED,
-        details=repair_generated_details,
-    )
-
     if not success:
+        repair_generated_details["repair_contract_summary"] = (
+            _completion_repair_contract_summary(
+                extraction_status="present" if repair_output else "empty",
+                parse_status="failed",
+                canonical_contract_status="not_reached",
+                verification_safety_reason=strategy_info,
+            )
+        )
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.REPAIR_GENERATED,
+            details=repair_generated_details,
+        )
         logger.warning(
             "[ORCHESTRATION] Completion repair step generation failed to parse: %s",
             strategy_info,
@@ -713,6 +785,21 @@ def _attempt_completion_repair(
         else None
     )
     if repair_step is None:
+        repair_generated_details["repair_contract_summary"] = (
+            _completion_repair_contract_summary(
+                extraction_status="present" if repair_output else "empty",
+                parse_status="accepted",
+                canonical_contract_status="rejected",
+                verification_safety_reason="repair_step_invalid_contract",
+            )
+        )
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.REPAIR_GENERATED,
+            details=repair_generated_details,
+        )
         logger.warning(
             "[ORCHESTRATION] Completion repair JSON failed canonical envelope validation"
         )
@@ -722,13 +809,54 @@ def _attempt_completion_repair(
         }
 
     if not repair_step.get("commands") and not repair_step.get("ops"):
+        repair_generated_details["repair_contract_summary"] = (
+            _completion_repair_contract_summary(
+                extraction_status="present" if repair_output else "empty",
+                parse_status="accepted",
+                canonical_contract_status="accepted",
+                verification_safety_reason="repair_step_missing_commands_or_ops",
+                repair_step=repair_step,
+            )
+        )
+        append_orchestration_event(
+            project_dir=orchestration_state.project_dir,
+            session_id=ctx.session_id,
+            task_id=ctx.task_id,
+            event_type=EventType.REPAIR_GENERATED,
+            details=repair_generated_details,
+        )
         return {"status": "failed", "reason": "repair_step_missing_commands_or_ops"}
 
     verification_command = str(repair_step.get("verification") or "").strip()
-    if not _is_simple_verification_command(
+    verification_is_safe = _is_simple_verification_command(
         verification_command,
         project_dir=Path(orchestration_state.project_dir),
-    ):
+    )
+    repair_generated_details["repair_contract_summary"] = (
+        _completion_repair_contract_summary(
+            extraction_status="present" if repair_output else "empty",
+            parse_status="accepted",
+            canonical_contract_status="accepted",
+            verification_command=verification_command,
+            verification_safety_status=(
+                "accepted" if verification_is_safe else "rejected"
+            ),
+            verification_safety_reason=(
+                None
+                if verification_is_safe
+                else "completion_repair_verification_command_unsafe"
+            ),
+            repair_step=repair_step,
+        )
+    )
+    append_orchestration_event(
+        project_dir=orchestration_state.project_dir,
+        session_id=ctx.session_id,
+        task_id=ctx.task_id,
+        event_type=EventType.REPAIR_GENERATED,
+        details=repair_generated_details,
+    )
+    if not verification_is_safe:
         append_orchestration_event(
             project_dir=orchestration_state.project_dir,
             session_id=ctx.session_id,
@@ -739,6 +867,9 @@ def _attempt_completion_repair(
                 "reason": "completion_repair_verification_command_unsafe",
                 "verification_command_valid": False,
                 "verification_command": verification_command[:1000],
+                "repair_contract_summary": repair_generated_details[
+                    "repair_contract_summary"
+                ],
             },
         )
         return {

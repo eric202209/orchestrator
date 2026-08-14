@@ -542,7 +542,7 @@ Rules:
 2. Inside repair_step, set repair_type to "ops_fix" and step_number to {next_step_number}.
 3. description must be non-empty. "ops" must be a non-empty JSON array of structured file operations.
 4. Each op must have "op" (write_file, append_file, or replace_in_file), "path" (relative to workspace root), and op-specific fields: "content" for write_file/append_file; "old" and "new" for replace_in_file.
-5. "verification" must be one non-empty top-level shell command string. No shell metacharacters.
+5. "verification" must be safe: `python[3] -m compileall <.py/dir>`, `pytest`/`python[3] -m pytest <test>`, or `npm run build`. Relative; forbid `..`, `~`, absolute paths, flags, and metacharacters. Avoid `black`/`flake8`; Candidate reruns.
 6. Do not use a "commands" key. Use ops only. The repair_step wrapper is canonical.
 7. Prefer replace_in_file for targeted in-place edits in files marked [COMPLETE]; use write_file only to create a new file or fully overwrite a file marked [COMPLETE].
 8. Use relative paths only; no absolute paths, "..", or "~". Do not return prose, markdown, comments, lists, plans, or fenced code.
