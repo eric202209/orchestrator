@@ -10,6 +10,14 @@ from typing import Any, Dict
 
 from app.services.orchestration.validation.parsing import extract_structured_text
 
+_PARTIAL_VISIBLE_TEXT_KEYS = (
+    "finalAssistantVisibleText",
+    "final_assistant_visible_text",
+    "text",
+    "output_text",
+    "content_text",
+)
+
 
 def stream_diagnostics_summary(diagnostics: Dict[str, Any]) -> str:
     first_output_after = diagnostics.get("first_output_after_seconds")
@@ -62,6 +70,11 @@ def stream_diagnostics_summary(diagnostics: Dict[str, Any]) -> str:
             f"{diagnostics.get('stderr_contains_model_content')}",
             f"stderr_contains_only_logs={diagnostics.get('stderr_contains_only_logs')}",
             f"stream_stalled={diagnostics.get('stream_stalled')}",
+            f"activity_state={diagnostics.get('activity_state')}",
+            f"activity_classification={diagnostics.get('activity_classification')}",
+            f"terminal_reason={diagnostics.get('terminal_reason')}",
+            f"partial_response_seen={diagnostics.get('partial_response_seen')}",
+            f"cleanup_status={diagnostics.get('cleanup_status')}",
             f"truncated={diagnostics.get('truncated')}",
             f"contract_violation_type={diagnostics.get('contract_violation_type')}",
         ]
@@ -118,6 +131,41 @@ def text_contains_model_content(text: str) -> bool:
         return payload_contains_model_content(json.loads(candidate))
     except json.JSONDecodeError:
         return False
+
+
+def partial_model_content_seen(stdout_text: str, stderr_text: str) -> bool:
+    """Return whether bounded stream text contains a model-content fragment.
+
+    This deliberately reuses the response extractor's documented visible-text
+    keys.  Plain text is eligible only on stdout, matching the legacy response
+    parser; stderr requires a documented model envelope or visible-text
+    fragment so diagnostic-only stderr never becomes partial model content.
+    """
+
+    for text, allow_plain_text in ((stdout_text, True), (stderr_text, False)):
+        candidate = (text or "").strip()
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict) and looks_like_openclaw_diagnostic_payload(parsed):
+            continue
+        if text_contains_model_content(candidate):
+            return True
+        if allow_plain_text and not candidate.startswith(("{", "[")):
+            return True
+        if not any(f'"{key}"' in candidate for key in _PARTIAL_VISIBLE_TEXT_KEYS):
+            continue
+        fragment_text = extract_structured_text(candidate)
+        if (
+            fragment_text
+            and fragment_text.strip()
+            and fragment_text.strip() != candidate
+        ):
+            return True
+    return False
 
 
 def extract_payloads_text(payloads: list[Any]) -> str:

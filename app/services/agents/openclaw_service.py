@@ -114,6 +114,7 @@ from app.services.agents.openclaw_response import (
     looks_like_openclaw_diagnostic_payload as _looks_like_openclaw_diagnostic_payload,
     parse_openclaw_response as _parse_openclaw_cli_response,
     payload_contains_model_content as _payload_contains_model_content,
+    partial_model_content_seen as _partial_model_content_seen,
     recover_json_like_output_from_stderr as _recover_json_like_output_from_stderr,
     stream_diagnostics_summary as _stream_diagnostics_summary,
     summarize_cli_error as _summarize_cli_error,
@@ -229,7 +230,50 @@ class OpenClawSessionService:
     _recover_json_like_output_from_stderr = staticmethod(
         _recover_json_like_output_from_stderr
     )
+    _partial_model_content_seen = staticmethod(_partial_model_content_seen)
     _summarize_cli_error = staticmethod(_summarize_cli_error)
+
+    @staticmethod
+    def _classify_activity(
+        *,
+        timed_out: bool,
+        cancelled: bool,
+        timeout_boundary: Optional[str],
+        no_output_timeout: bool,
+        output_started: bool,
+        response_ready: bool,
+        partial_response_seen: bool,
+        return_code: Optional[int],
+    ) -> str:
+        """Return the one canonical terminal classification for an invocation."""
+
+        if timeout_boundary == "caller_cancelled" or (cancelled and not timed_out):
+            return "caller_cancelled"
+        if timed_out:
+            if no_output_timeout or not output_started:
+                return "no_output_timeout"
+            if partial_response_seen:
+                return "partial_stream_stall"
+            return "provider_process_timeout"
+        if response_ready:
+            return "completed"
+        if return_code not in {None, 0}:
+            return "provider_process_failure"
+        return "missing_result"
+
+    @staticmethod
+    def _activity_state_for_classification(
+        classification: str, *, output_started: bool
+    ) -> str:
+        if classification == "completed":
+            return "terminal_response"
+        if classification == "partial_stream_stall":
+            return "stream_stalled"
+        if classification == "caller_cancelled":
+            return "caller_cancelled"
+        if classification == "no_output_timeout":
+            return "startup_wait"
+        return "active_output" if output_started else "startup_wait"
 
     def _parse_openclaw_response(
         self,
@@ -1508,6 +1552,8 @@ class OpenClawSessionService:
         previous_output_at: Optional[float] = None
         max_silent_gap: Optional[float] = None
         first_output_logged = False
+        activity_state = "startup_wait"
+        partial_response_seen = False
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
         first_output_event = asyncio.Event()
@@ -1533,6 +1579,13 @@ class OpenClawSessionService:
             "cancelled": False,
             "return_code": None,
             "stream_stalled": None,
+            "activity_state": activity_state,
+            "activity_classification": None,
+            "terminal_reason": None,
+            "partial_response_seen": False,
+            "first_output_delay_seconds": None,
+            "response_channel": "none",
+            "cleanup_status": "not_started",
             "truncated": False,
             "timeout_boundary": None,
             "response_boundary_reached": False,
@@ -1593,10 +1646,14 @@ class OpenClawSessionService:
                 time.monotonic() - cleanup_started_at, 3
             )
             diagnostics["cleanup_timed_out"] = cleanup_timed_out
+            diagnostics["cleanup_status"] = (
+                "completed" if process.returncode is not None else "timed_out"
+            )
 
         async def collect_stream(stream, chunks: List[str], stream_name: str) -> None:
             nonlocal first_output_at, last_output_at, previous_output_at
-            nonlocal max_silent_gap, first_output_logged
+            nonlocal max_silent_gap, first_output_logged, activity_state
+            nonlocal partial_response_seen
             while True:
                 line = await stream.readline()
                 if not line:
@@ -1648,6 +1705,9 @@ class OpenClawSessionService:
                 # process-group cleanup instead of waiting for EOF.
                 stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
                 stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+                partial_response_seen = self._partial_model_content_seen(
+                    stdout_text, stderr_text
+                )
                 if strict_provider_result:
                     response_received = has_verified_openclaw_provider_result(
                         stdout_text, stderr_text
@@ -1659,7 +1719,12 @@ class OpenClawSessionService:
                             self._recover_json_like_output_from_stderr(stderr_text)
                         )
                 if response_received:
+                    activity_state = "terminal_response"
                     response_ready_event.set()
+                elif partial_response_seen:
+                    activity_state = "partial_response_wait"
+                else:
+                    activity_state = "active_output"
 
                 if (
                     stream_name == "stderr"
@@ -1747,6 +1812,7 @@ class OpenClawSessionService:
                             else timeout_seconds + 30
                         ),
                     )
+                    diagnostics["cleanup_status"] = "completed"
                 return_code = process.returncode
             finally:
                 response_ready_task.cancel()
@@ -1770,8 +1836,10 @@ class OpenClawSessionService:
                 kill_process_group(process.pid)
                 await process.wait()
             diagnostics["return_code"] = process.returncode
-            raise
-        except asyncio.CancelledError:
+            timeout_error = asyncio.TimeoutError()
+            timeout_error.runtime_diagnostics = diagnostics
+            raise timeout_error
+        except asyncio.CancelledError as exc:
             diagnostics["cancelled"] = True
             diagnostics["timeout_boundary"] = (
                 diagnostics.get("timeout_boundary") or "caller_cancelled"
@@ -1782,6 +1850,7 @@ class OpenClawSessionService:
                 kill_process_group(process.pid)
                 await process.wait()
             diagnostics["return_code"] = process.returncode
+            exc.runtime_diagnostics = diagnostics
             raise
         finally:
             unregister_process_group(process.pid)
@@ -1789,6 +1858,30 @@ class OpenClawSessionService:
             stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
             duration_seconds = time.monotonic() - started_at
             channel_metadata = self._channel_metadata(stdout_text, stderr_text)
+            partial_response_seen = self._partial_model_content_seen(
+                stdout_text, stderr_text
+            )
+            response_ready = (
+                response_boundary_reached
+                or has_verified_openclaw_provider_result(stdout_text, stderr_text)
+            )
+            activity_classification = self._classify_activity(
+                timed_out=bool(diagnostics.get("timed_out")),
+                cancelled=bool(diagnostics.get("cancelled")),
+                timeout_boundary=diagnostics.get("timeout_boundary"),
+                no_output_timeout=bool(diagnostics.get("no_output_timeout")),
+                output_started=first_output_at is not None,
+                response_ready=response_ready,
+                partial_response_seen=partial_response_seen,
+                return_code=diagnostics.get("return_code"),
+            )
+            activity_state = self._activity_state_for_classification(
+                activity_classification,
+                output_started=first_output_at is not None,
+            )
+            output_channel = channel_metadata.get("output_channel_used") or "none"
+            if output_channel == "none" and partial_response_seen:
+                output_channel = "stderr" if stderr_text else "stdout"
             diagnostics.update(
                 {
                     "duration_seconds": round(duration_seconds, 3),
@@ -1805,6 +1898,11 @@ class OpenClawSessionService:
                     "max_silent_gap_seconds": (
                         None if max_silent_gap is None else round(max_silent_gap, 3)
                     ),
+                    "first_output_delay_seconds": (
+                        None
+                        if first_output_at is None
+                        else round(first_output_at - started_at, 3)
+                    ),
                     "stdout_chars": len(stdout_text),
                     "stderr_chars": len(stderr_text),
                     "stdout_lines": len([line for line in stdout_chunks if line]),
@@ -1813,14 +1911,18 @@ class OpenClawSessionService:
                     "output_token_estimate": self._estimate_token_count(
                         f"{stdout_text}\n{stderr_text}".strip()
                     ),
-                    "stream_stalled": bool(
-                        first_output_at is not None
-                        and last_output_at is not None
-                        and (time.monotonic() - last_output_at) >= 10
-                    ),
+                    "stream_stalled": activity_classification == "partial_stream_stall",
+                    "activity_state": activity_state,
+                    "activity_classification": activity_classification,
+                    "terminal_reason": activity_classification,
+                    "partial_response_seen": partial_response_seen,
+                    "response_channel": output_channel,
+                    "cleanup_status": diagnostics.get("cleanup_status") or "completed",
                     "truncated": "truncated" in f"{stdout_text}\n{stderr_text}".lower(),
                 }
             )
+            if activity_classification == "caller_cancelled":
+                diagnostics["diagnostic_category"] = "caller_cancelled"
             if diagnostics.get("diagnostic_category") is None:
                 if diagnostics.get("no_output_timeout"):
                     diagnostics["diagnostic_category"] = "silent_inference"
@@ -2608,6 +2710,10 @@ class OpenClawSessionService:
             process_pid: Optional[int] = None
             subprocess_start_seconds: Optional[float] = None
             subprocess_started_after_seconds: Optional[float] = None
+            activity_state = "startup_wait"
+            partial_response_seen = False
+            cleanup_status = "not_started"
+            stream_diagnostics: Dict[str, Any] = {}
 
             stdout_chunks: List[str] = []
             stderr_chunks: List[str] = []
@@ -2622,6 +2728,7 @@ class OpenClawSessionService:
             ) -> None:
                 nonlocal first_output_at, last_output_at
                 nonlocal previous_output_at, max_silent_gap
+                nonlocal activity_state, partial_response_seen
                 while True:
                     line = await stream.readline()
                     if not line:
@@ -2640,6 +2747,15 @@ class OpenClawSessionService:
 
                     line_text = line.decode("utf-8", errors="replace").strip()
                     chunks.append(line_text)
+                    partial_response_seen = self._partial_model_content_seen(
+                        "\n".join(filter(None, stdout_chunks)).strip(),
+                        "\n".join(filter(None, stderr_chunks)).strip(),
+                    )
+                    activity_state = (
+                        "partial_response_wait"
+                        if partial_response_seen
+                        else "active_output"
+                    )
 
                     if line_text:
                         if emit_live_logs:
@@ -2705,6 +2821,7 @@ class OpenClawSessionService:
                     return_code = await asyncio.wait_for(
                         process.wait(), timeout=timeout_seconds + 30
                     )
+                    cleanup_status = "completed"
                     unregister_process_group(process.pid)
                     stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
                     stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
@@ -2759,6 +2876,7 @@ class OpenClawSessionService:
                         kill_process_group(process.pid)
                         await process.wait()
                         return_code = process.returncode
+                        cleanup_status = "completed"
                 except Exception as exc:
                     logger.debug(
                         "[OPENCLAW] Failed to terminate timed out process cleanly: %s",
@@ -2769,39 +2887,42 @@ class OpenClawSessionService:
                 timeout_error = OpenClawSessionError(
                     f"Task timed out after {timeout_seconds}s"
                 )
-                timeout_error.runtime_diagnostics = {
-                    **(diagnostic_metadata or {}),
-                    "diagnostic_label": diagnostic_label,
-                    "diagnostic_label_architecture": (
-                        self._diagnostic_label_architecture(diagnostic_label)
-                    ),
-                    "timeout_seconds": timeout_seconds,
-                    "timeout_with_cleanup_seconds": timeout_seconds + 30,
-                    "duration_seconds": round(time.monotonic() - started_at, 3),
-                    "stdout_chars": len(stdout_text),
-                    "stderr_chars": len(stderr_text),
-                    "stdout_lines": len([line for line in stdout_chunks if line]),
-                    "stderr_lines": len([line for line in stderr_chunks if line]),
-                    "stdout_tail": self._diagnostic_text_tail(stdout_text),
-                    "stderr_tail": self._diagnostic_text_tail(stderr_text),
-                    **self._channel_metadata(stdout_text, stderr_text),
-                    **cli_lock_diagnostics,
-                    "timed_out": True,
-                    "cancelled": False,
-                    "return_code": return_code,
-                    "process_pid": process_pid,
-                    "subprocess_start_seconds": (
-                        None
-                        if subprocess_start_seconds is None
-                        else round(subprocess_start_seconds, 3)
-                    ),
-                    "subprocess_started_after_seconds": (
-                        None
-                        if subprocess_started_after_seconds is None
-                        else round(subprocess_started_after_seconds, 3)
-                    ),
-                    "timeout_boundary": timeout_boundary,
-                }
+                stream_diagnostics.update(
+                    {
+                        **(diagnostic_metadata or {}),
+                        "diagnostic_label": diagnostic_label,
+                        "diagnostic_label_architecture": (
+                            self._diagnostic_label_architecture(diagnostic_label)
+                        ),
+                        "timeout_seconds": timeout_seconds,
+                        "timeout_with_cleanup_seconds": timeout_seconds + 30,
+                        "duration_seconds": round(time.monotonic() - started_at, 3),
+                        "stdout_chars": len(stdout_text),
+                        "stderr_chars": len(stderr_text),
+                        "stdout_lines": len([line for line in stdout_chunks if line]),
+                        "stderr_lines": len([line for line in stderr_chunks if line]),
+                        "stdout_tail": self._diagnostic_text_tail(stdout_text),
+                        "stderr_tail": self._diagnostic_text_tail(stderr_text),
+                        **self._channel_metadata(stdout_text, stderr_text),
+                        **cli_lock_diagnostics,
+                        "timed_out": True,
+                        "cancelled": False,
+                        "return_code": return_code,
+                        "process_pid": process_pid,
+                        "subprocess_start_seconds": (
+                            None
+                            if subprocess_start_seconds is None
+                            else round(subprocess_start_seconds, 3)
+                        ),
+                        "subprocess_started_after_seconds": (
+                            None
+                            if subprocess_started_after_seconds is None
+                            else round(subprocess_started_after_seconds, 3)
+                        ),
+                        "timeout_boundary": timeout_boundary,
+                    }
+                )
+                timeout_error.runtime_diagnostics = stream_diagnostics
                 raise timeout_error
             except asyncio.CancelledError:
                 cancelled = True
@@ -2811,6 +2932,7 @@ class OpenClawSessionService:
                         kill_process_group(process.pid)
                         await process.wait()
                         return_code = process.returncode
+                        cleanup_status = "completed"
                 except Exception as exc:
                     logger.debug(
                         "[OPENCLAW] Failed to terminate cancelled process cleanly: %s",
@@ -2818,13 +2940,34 @@ class OpenClawSessionService:
                     )
                 raise
             finally:
-                if diagnostic_label:
-                    stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
-                    stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
-                    duration_seconds = time.monotonic() - started_at
-                    truncated = "truncated" in (f"{stdout_text}\n{stderr_text}".lower())
-                    channel_metadata = self._channel_metadata(stdout_text, stderr_text)
-                    diagnostics: Dict[str, Any] = {
+                stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
+                stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
+                duration_seconds = time.monotonic() - started_at
+                truncated = "truncated" in (f"{stdout_text}\n{stderr_text}".lower())
+                channel_metadata = self._channel_metadata(stdout_text, stderr_text)
+                partial_response_seen = self._partial_model_content_seen(
+                    stdout_text, stderr_text
+                )
+                response_ready = bool(return_code == 0 and partial_response_seen)
+                activity_classification = self._classify_activity(
+                    timed_out=timed_out,
+                    cancelled=cancelled,
+                    timeout_boundary=timeout_boundary,
+                    no_output_timeout=False,
+                    output_started=first_output_at is not None,
+                    response_ready=response_ready,
+                    partial_response_seen=partial_response_seen,
+                    return_code=return_code,
+                )
+                activity_state = self._activity_state_for_classification(
+                    activity_classification,
+                    output_started=first_output_at is not None,
+                )
+                output_channel = channel_metadata.get("output_channel_used") or "none"
+                if output_channel == "none" and partial_response_seen:
+                    output_channel = "stderr" if stderr_text else "stdout"
+                stream_diagnostics.update(
+                    {
                         **(diagnostic_metadata or {}),
                         "diagnostic_label": diagnostic_label,
                         "diagnostic_label_architecture": (
@@ -2848,6 +2991,11 @@ class OpenClawSessionService:
                         "max_silent_gap_seconds": (
                             None if max_silent_gap is None else round(max_silent_gap, 3)
                         ),
+                        "first_output_delay_seconds": (
+                            None
+                            if first_output_at is None
+                            else round(first_output_at - started_at, 3)
+                        ),
                         "stdout_chars": len(stdout_text),
                         "stderr_chars": len(stderr_text),
                         "stdout_lines": len([line for line in stdout_chunks if line]),
@@ -2859,11 +3007,14 @@ class OpenClawSessionService:
                         "output_token_estimate": self._estimate_token_count(
                             f"{stdout_text}\n{stderr_text}".strip()
                         ),
-                        "stream_stalled": bool(
-                            first_output_at is not None
-                            and last_output_at is not None
-                            and (time.monotonic() - last_output_at) >= 10
-                        ),
+                        "stream_stalled": activity_classification
+                        == "partial_stream_stall",
+                        "activity_state": activity_state,
+                        "activity_classification": activity_classification,
+                        "terminal_reason": activity_classification,
+                        "partial_response_seen": partial_response_seen,
+                        "response_channel": output_channel,
+                        "cleanup_status": cleanup_status or "completed",
                         "truncated": truncated,
                         "truncated_output_detected": truncated,
                         "timed_out": timed_out,
@@ -2895,11 +3046,15 @@ class OpenClawSessionService:
                             git_containment_active=git_guard_shim_dir is not None,
                         ),
                     }
+                )
+                if activity_classification == "caller_cancelled":
+                    stream_diagnostics["diagnostic_category"] = "caller_cancelled"
+                if diagnostic_label:
                     self._log_entry(
                         "INFO",
                         f"[OPENCLAW][{diagnostic_label}_DIAGNOSTICS] "
-                        + self._stream_diagnostics_summary(diagnostics),
-                        metadata=json.dumps(diagnostics),
+                        + self._stream_diagnostics_summary(stream_diagnostics),
+                        metadata=json.dumps(stream_diagnostics),
                         commit=True,
                     )
             stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
@@ -2918,6 +3073,11 @@ class OpenClawSessionService:
                 stderr=stderr_text,
             )
             result = self._parse_openclaw_response(completed)
+            if stream_diagnostics:
+                result["runtime_diagnostics"] = {
+                    **stream_diagnostics,
+                    **dict(result.pop("provider_result_diagnostics", {}) or {}),
+                }
             result["openclaw_version"] = openclaw_version
             result["selected_openclaw_agent"] = self._last_selected_openclaw_agent_id
             result["runtime_result"] = {
@@ -3207,6 +3367,7 @@ class OpenClawSessionService:
                 f"Prompt invocation timed out after {timeout_seconds}s"
             )
             error.provider_failure_classification = "provider_timeout"
+            error.runtime_diagnostics = getattr(exc, "runtime_diagnostics", None)
             raise error from exc
         except OpenClawNoOutputTimeoutError:
             raise

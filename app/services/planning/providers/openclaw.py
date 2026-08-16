@@ -115,6 +115,9 @@ class OpenClawPlanningProvider:
             classification = getattr(
                 exc, "provider_failure_classification", None
             ) or getattr(exc, "classification", None)
+            invocation_diagnostics = _normalized_diagnostics(
+                getattr(exc, "runtime_diagnostics", None)
+            )
             raise PlanningProviderExecutionError(
                 classification=(
                     classification
@@ -123,6 +126,15 @@ class OpenClawPlanningProvider:
                 ),
                 detail=str(exc),
                 origin=ProviderFailureOrigin.INVOCATION,
+                diagnostics=ProviderDiagnostics(
+                    category=str(
+                        invocation_diagnostics.get("activity_classification")
+                        or invocation_diagnostics.get("diagnostic_category")
+                        or classification
+                        or "transport_failure"
+                    ),
+                    details=invocation_diagnostics,
+                ),
             ) from exc
 
         if not isinstance(result, Mapping) or result.get("status") == "failed":
@@ -191,16 +203,25 @@ def _normalized_diagnostics(value: Any) -> dict[str, Any]:
         return {}
     supported_fields = (
         "diagnostic_category",
+        "activity_state",
+        "activity_classification",
+        "terminal_reason",
+        "partial_response_seen",
         "timed_out",
         "cancelled",
         "duration_seconds",
         "first_output_after_seconds",
+        "first_output_delay_seconds",
         "last_output_after_seconds",
         "max_silent_gap_seconds",
         "stdout_chars",
         "stderr_chars",
         "output_token_estimate",
         "truncated",
+        "stream_stalled",
+        "response_channel",
+        "cleanup_status",
+        "no_output_timeout",
         "return_code",
         "role",
         "backend",
