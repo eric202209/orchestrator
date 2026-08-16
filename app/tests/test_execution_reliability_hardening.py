@@ -46,6 +46,15 @@ from app.tasks.worker import _find_queued_event_for_dispatch
 from app.tasks.worker import _should_reject_stale_dispatch_claim
 
 
+def _bypass_project_openclaw_binding_admission(monkeypatch):
+    """Keep queue-state tests provider-free; admission has dedicated coverage."""
+
+    monkeypatch.setattr(
+        "app.services.session.session_runtime_service.admit_project_openclaw_binding_for_dispatch",
+        lambda *args, **kwargs: None,
+    )
+
+
 def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
     db_session, db_session_factory, monkeypatch, tmp_path
 ):
@@ -90,6 +99,7 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
         "app.tasks.worker.execute_orchestration_task",
         _FakeWorkerTask,
     )
+    _bypass_project_openclaw_binding_admission(monkeypatch)
 
     project = Project(
         name="Queue Reliability",
@@ -169,6 +179,7 @@ def test_queue_task_for_session_forwards_planning_lane_override(
         "app.tasks.worker.execute_orchestration_task",
         _FakeWorkerTask,
     )
+    _bypass_project_openclaw_binding_admission(monkeypatch)
 
     project = Project(
         name="Queue Escalation",
@@ -239,6 +250,7 @@ def test_stronger_planning_retry_records_bounded_evidence_and_queues_override(
         "app.tasks.worker.execute_orchestration_task",
         _FakeWorkerTask,
     )
+    _bypass_project_openclaw_binding_admission(monkeypatch)
 
     project = Project(
         name="Governed Escalation Gate",
