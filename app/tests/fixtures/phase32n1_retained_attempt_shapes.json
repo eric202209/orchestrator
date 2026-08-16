@@ -104,8 +104,8 @@
         {
           "content_hash": "b01f25331fea9b540f938dad5d9e4c66eb7b7b0d74bb6a9ad269e531b08c0f30",
           "creation_authorized": false,
-          "end_byte": 105577,
-          "end_line": 2514,
+          "end_byte": 110301,
+          "end_line": 2616,
           "expected": false,
           "full_source_bytes": 150026,
           "included_prompt_length": 1971,
@@ -116,8 +116,8 @@
           "selection_strategy": "target_centered_exact_match",
           "source_length": 150026,
           "source_length_chars": 150016,
-          "start_byte": 103638,
-          "start_line": 2454,
+          "start_byte": 108362,
+          "start_line": 2556,
           "status": "existing_file_with_materialized_source",
           "target_hint": "isoformat()",
           "target_hint_authority": "task_description",
@@ -499,8 +499,8 @@
         {
           "content_hash": "b01f25331fea9b540f938dad5d9e4c66eb7b7b0d74bb6a9ad269e531b08c0f30",
           "creation_authorized": false,
-          "end_byte": 105577,
-          "end_line": 2514,
+          "end_byte": 110301,
+          "end_line": 2616,
           "expected": false,
           "full_source_bytes": 150026,
           "included_prompt_length": 1971,
@@ -513,16 +513,16 @@
           "source_length_chars": 150016,
           "spans": [
             {
-              "end_byte": 105577,
-              "end_line": 2514,
+              "end_byte": 110301,
+              "end_line": 2616,
               "included_source_bytes": 1939,
               "kind": "primary_target_region",
-              "start_byte": 103638,
-              "start_line": 2454
+              "start_byte": 108362,
+              "start_line": 2556
             }
           ],
-          "start_byte": 103638,
-          "start_line": 2454,
+          "start_byte": 108362,
+          "start_line": 2556,
           "status": "existing_file_with_materialized_source",
           "target_hint": "isoformat()",
           "target_hint_authority": "task_description",
