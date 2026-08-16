@@ -44,6 +44,10 @@ from app.services.agents.agent_backends import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.workspace_admission import (
+    WorkspaceAdmissionError,
+    admit_project_openclaw_binding_for_dispatch,
+)
 from app.services.orchestration.prompt_templates import OrchestrationState
 from app.services.tasks.service import TaskService
 from app.services.tasks.execution import create_task_execution
@@ -488,6 +492,19 @@ def queue_task_for_session(
                 f"Finish these first: {blocking_summary}"
             ),
         )
+
+    project = db.query(Project).filter(Project.id == task.project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    try:
+        admit_project_openclaw_binding_for_dispatch(
+            db,
+            project,
+            admission_stage="session_task_dispatch",
+            planning_backend_override=planning_backend_override,
+        )
+    except WorkspaceAdmissionError as exc:
+        raise HTTPException(status_code=409, detail=exc.payload()) from exc
 
     task_workspace = ensure_task_workspace(db, session, task.id)
     session_task_link = (

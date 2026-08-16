@@ -40,6 +40,7 @@ from typing import Any, Dict, Optional
 from app.services.orchestration.execution.runtime_context import (
     RuntimeExecutorContext,
 )
+from app.services.workspace.workspace_admission import matching_openclaw_agent_ids
 
 logger = logging.getLogger(__name__)
 
@@ -74,27 +75,8 @@ class ExecutorWorkspaceBinding:
             )
 
 
-def _paths_match(left: str, right: str) -> bool:
-    try:
-        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
-    except Exception:
-        return False
-
-
 def _find_template_agent_id(config: Dict[str, Any], workspace: Path) -> Optional[str]:
-    agents = (config.get("agents") or {}).get("list") or []
-    matches: list[str] = []
-    for agent in agents:
-        if not isinstance(agent, dict):
-            continue
-        agent_id = str(agent.get("id") or "").strip()
-        agent_workspace = str(agent.get("workspace") or "").strip()
-        if (
-            agent_id
-            and agent_workspace
-            and _paths_match(agent_workspace, str(workspace))
-        ):
-            matches.append(agent_id)
+    matches = matching_openclaw_agent_ids(config, workspace)
     if len(matches) > 1:
         raise ExecutorWorkspaceBindingError(
             "Multiple OpenClaw agents are configured with a workspace matching "

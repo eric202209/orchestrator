@@ -18,10 +18,10 @@ agent identity invented.
 
 Reuses, does not duplicate: `resolve_project_workspace_path` (workspace
 path resolution, same as F10's `workspace_collision_audit`) and
-`executor_workspace_binding._find_template_agent_id` /
-`_paths_match` (the exact match semantics the real dispatch path uses --
-importing them, not reimplementing them, is the only way this check can
-guarantee it detects precisely what dispatch will hit).
+`executor_workspace_binding._find_template_agent_id`, which delegates to the
+shared canonical OpenClaw workspace matcher used by the real dispatch path.
+Importing the matcher rather than reimplementing it is the only way this check
+can guarantee it detects precisely what dispatch will hit.
 
 Exit code 0: every declared target project resolves to a workspace path
 with a matching `openclaw.json` agent entry.

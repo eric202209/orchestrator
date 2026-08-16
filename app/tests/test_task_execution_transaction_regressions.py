@@ -25,7 +25,12 @@ class _FakeAsyncResult:
     id = "celery-123"
 
 
-def _stub_retry_dispatch(monkeypatch, captured_kwargs: dict | None = None):
+def _stub_retry_dispatch(
+    monkeypatch,
+    captured_kwargs: dict | None = None,
+    *,
+    bypass_binding_admission: bool = True,
+):
     from app.tasks import worker as worker_module
 
     monkeypatch.setattr(
@@ -45,6 +50,15 @@ def _stub_retry_dispatch(monkeypatch, captured_kwargs: dict | None = None):
         return _FakeAsyncResult()
 
     monkeypatch.setattr(worker_module.execute_orchestration_task, "delay", _fake_delay)
+    if bypass_binding_admission:
+        monkeypatch.setattr(
+            "app.api.v1.endpoints.tasks.admit_project_openclaw_binding_for_dispatch",
+            lambda *args, **kwargs: None,
+        )
+        monkeypatch.setattr(
+            "app.services.session.session_runtime_service.admit_project_openclaw_binding_for_dispatch",
+            lambda *args, **kwargs: None,
+        )
 
 
 def test_sync_task_execution_uses_terminal_task_state_over_stale_running_link(
@@ -118,6 +132,7 @@ def test_task_retry_marks_attempt_failed_when_post_commit_dispatch_fails(
     db_session.commit()
     db_session.refresh(task)
 
+    _stub_retry_dispatch(monkeypatch)
     from app.tasks import worker as worker_module
 
     monkeypatch.setattr(
@@ -169,6 +184,7 @@ def test_task_retry_commits_records_before_worker_dispatch(
     db_session.commit()
     db_session.refresh(task)
 
+    _stub_retry_dispatch(monkeypatch)
     monkeypatch.setattr(
         "app.api.v1.endpoints.tasks.ensure_task_workspace",
         lambda *a, **kw: {
@@ -404,6 +420,87 @@ def test_task_retry_explicit_new_session_preserves_legacy_isolated_session_creat
     assert new_session.name == "Retry isolated session"
 
 
+def test_task_retry_rejects_unbound_openclaw_project_before_task_execution(
+    authenticated_client, db_session, monkeypatch, tmp_path
+):
+    project_workspace = tmp_path / "unbound-project"
+    project_workspace.mkdir()
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(json.dumps({"agents": {"list": []}}), encoding="utf-8")
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+
+    project = Project(
+        name="Unbound OpenClaw Project",
+        workspace_path=str(project_workspace),
+    )
+    task = Task(
+        project=project,
+        title="Reject before runtime",
+        description="must fail closed",
+        status=TaskStatus.FAILED,
+    )
+    db_session.add_all([project, task])
+    db_session.commit()
+    db_session.refresh(task)
+
+    _stub_retry_dispatch(monkeypatch, bypass_binding_admission=False)
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/retry",
+        json={"execution_scope": "new_session"},
+    )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["category"] == "openclaw_workspace_binding_unavailable"
+    assert detail["project_id"] == project.id
+    assert detail["matching_agent_count"] == 0
+    assert detail["admission_stage"] == "task_retry_dispatch"
+    assert db_session.query(TaskExecution).count() == 0
+    assert db_session.query(SessionModel).count() == 0
+
+
+def test_task_retry_reaches_dispatch_with_valid_openclaw_binding(
+    authenticated_client, db_session, monkeypatch, tmp_path
+):
+    project_workspace = tmp_path / "bound-project"
+    project_workspace.mkdir()
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "list": [{"id": "bound-agent", "workspace": str(project_workspace)}]
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+
+    project = Project(
+        name="Bound OpenClaw Project",
+        workspace_path=str(project_workspace),
+    )
+    task = Task(
+        project=project,
+        title="Reach dispatch",
+        description="provider-free dispatch reachability",
+        status=TaskStatus.FAILED,
+    )
+    db_session.add_all([project, task])
+    db_session.commit()
+    db_session.refresh(task)
+
+    _stub_retry_dispatch(monkeypatch, bypass_binding_admission=False)
+    response = authenticated_client.post(
+        f"/api/v1/tasks/{task.id}/retry",
+        json={"execution_scope": "new_session"},
+    )
+
+    assert response.status_code == 200
+    assert db_session.query(TaskExecution).count() == 1
+
+
 def test_task_retry_new_session_isolates_historical_ordered_tasks(
     authenticated_client, db_session, monkeypatch
 ):
@@ -623,6 +720,10 @@ def test_admitted_dogfood_session_isolates_legacy_project_queue(
     )
     monkeypatch.setattr(
         "app.services.session.session_runtime_service._maybe_compact_checkpoint_before_dispatch",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "app.services.session.session_runtime_service.admit_project_openclaw_binding_for_dispatch",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(

@@ -286,6 +286,10 @@ def test_task_queued_path_projects_the_new_task_execution_identity(
             "configuration_fingerprint": "d" * 64,
         },
     )
+    monkeypatch.setattr(
+        "app.services.session.session_runtime_service.admit_project_openclaw_binding_for_dispatch",
+        lambda *args, **kwargs: None,
+    )
     event_workspace = Path(tmp_path) / "event-workspace"
     event_workspace.mkdir()
     monkeypatch.setattr(
