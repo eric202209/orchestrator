@@ -5,7 +5,7 @@ import re
 
 def humanize_display_name(value: str) -> str:
     """Convert slug-like display names into space-separated names."""
-    text = (value or "").strip()
+    text = (value or "").strip()  # normalize outer whitespace
     if not text:
         return text
 
