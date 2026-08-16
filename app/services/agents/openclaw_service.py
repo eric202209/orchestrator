@@ -275,6 +275,37 @@ class OpenClawSessionService:
             return "startup_wait"
         return "active_output" if output_started else "startup_wait"
 
+    @staticmethod
+    async def _terminate_process_with_bounded_reap(
+        process: asyncio.subprocess.Process,
+        diagnostics: Dict[str, Any],
+    ) -> None:
+        """Terminate a provider process group and reap its child boundedly."""
+
+        cleanup_started_at = time.monotonic()
+        kill_process_group(process.pid)
+        cleanup_timed_out = False
+        cleanup_reap_attempts = 1
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            cleanup_timed_out = True
+            cleanup_reap_attempts = 2
+            with contextlib.suppress(ProcessLookupError):
+                getattr(process, "kill")()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=5)
+        diagnostics.update(
+            {
+                "cleanup_seconds": round(time.monotonic() - cleanup_started_at, 3),
+                "cleanup_timed_out": cleanup_timed_out,
+                "cleanup_reap_attempts": cleanup_reap_attempts,
+                "cleanup_status": (
+                    "completed" if process.returncode is not None else "timed_out"
+                ),
+            }
+        )
+
     def _parse_openclaw_response(
         self,
         result: Any,
@@ -1631,24 +1662,7 @@ class OpenClawSessionService:
         )
 
         async def cleanup_process() -> None:
-            cleanup_started_at = time.monotonic()
-            kill_process_group(process.pid)
-            cleanup_timed_out = False
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                cleanup_timed_out = True
-                with contextlib.suppress(ProcessLookupError):
-                    getattr(process, "kill")()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(process.wait(), timeout=5)
-            diagnostics["cleanup_seconds"] = round(
-                time.monotonic() - cleanup_started_at, 3
-            )
-            diagnostics["cleanup_timed_out"] = cleanup_timed_out
-            diagnostics["cleanup_status"] = (
-                "completed" if process.returncode is not None else "timed_out"
-            )
+            await self._terminate_process_with_bounded_reap(process, diagnostics)
 
         async def collect_stream(stream, chunks: List[str], stream_name: str) -> None:
             nonlocal first_output_at, last_output_at, previous_output_at
@@ -1761,8 +1775,9 @@ class OpenClawSessionService:
                         if strict_provider_result:
                             await cleanup_process()
                         else:
-                            kill_process_group(process.pid)
-                            await process.wait()
+                            await self._terminate_process_with_bounded_reap(
+                                process, diagnostics
+                            )
                         diagnostics["return_code"] = process.returncode
                         stream_task.cancel()
                         with contextlib.suppress(asyncio.CancelledError):
@@ -1833,8 +1848,7 @@ class OpenClawSessionService:
             if strict_provider_result:
                 await cleanup_process()
             else:
-                kill_process_group(process.pid)
-                await process.wait()
+                await self._terminate_process_with_bounded_reap(process, diagnostics)
             diagnostics["return_code"] = process.returncode
             timeout_error = asyncio.TimeoutError()
             timeout_error.runtime_diagnostics = diagnostics
@@ -1847,8 +1861,7 @@ class OpenClawSessionService:
             if strict_provider_result:
                 await cleanup_process()
             else:
-                kill_process_group(process.pid)
-                await process.wait()
+                await self._terminate_process_with_bounded_reap(process, diagnostics)
             diagnostics["return_code"] = process.returncode
             exc.runtime_diagnostics = diagnostics
             raise
@@ -2873,10 +2886,13 @@ class OpenClawSessionService:
                 timeout_boundary = self._diagnostic_timeout_boundary(diagnostic_label)
                 try:
                     if process is not None:
-                        kill_process_group(process.pid)
-                        await process.wait()
+                        await self._terminate_process_with_bounded_reap(
+                            process, stream_diagnostics
+                        )
                         return_code = process.returncode
-                        cleanup_status = "completed"
+                        cleanup_status = stream_diagnostics.get(
+                            "cleanup_status", "completed"
+                        )
                 except Exception as exc:
                     logger.debug(
                         "[OPENCLAW] Failed to terminate timed out process cleanly: %s",
@@ -2924,20 +2940,24 @@ class OpenClawSessionService:
                 )
                 timeout_error.runtime_diagnostics = stream_diagnostics
                 raise timeout_error
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as exc:
                 cancelled = True
                 timeout_boundary = "caller_cancelled"
                 try:
                     if process is not None:
-                        kill_process_group(process.pid)
-                        await process.wait()
+                        await self._terminate_process_with_bounded_reap(
+                            process, stream_diagnostics
+                        )
                         return_code = process.returncode
-                        cleanup_status = "completed"
-                except Exception as exc:
+                        cleanup_status = stream_diagnostics.get(
+                            "cleanup_status", "completed"
+                        )
+                except Exception as cleanup_exc:
                     logger.debug(
                         "[OPENCLAW] Failed to terminate cancelled process cleanly: %s",
-                        exc,
+                        cleanup_exc,
                     )
+                exc.runtime_diagnostics = stream_diagnostics
                 raise
             finally:
                 stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
@@ -3104,8 +3124,9 @@ class OpenClawSessionService:
         except asyncio.TimeoutError:
             try:
                 if process is not None:
-                    kill_process_group(process.pid)
-                    await process.wait()
+                    await self._terminate_process_with_bounded_reap(
+                        process, stream_diagnostics
+                    )
             except Exception as exc:
                 logger.debug(
                     "[OPENCLAW] Failed to terminate timed out process cleanly: %s",
