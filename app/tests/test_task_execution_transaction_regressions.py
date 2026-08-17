@@ -321,14 +321,14 @@ def test_task_retry_default_reuses_latest_project_session_without_duplicates(
     second = authenticated_client.post(f"/api/v1/tasks/{task.id}/retry")
 
     assert first.status_code == 200
-    assert second.status_code == 200
+    assert second.status_code == 409
+    assert "project_execution_serialization_conflict" in second.json()["detail"]
     assert first.json()["session_id"] == workflow_session.id
-    assert second.json()["session_id"] == workflow_session.id
     assert db_session.query(SessionModel).count() == 3
     assert db_session.query(SessionTask).count() == 1
-    assert db_session.query(TaskExecution).count() == 2
+    assert db_session.query(TaskExecution).count() == 1
     assert captured_kwargs["session_id"] == workflow_session.id
-    assert captured_kwargs["task_execution_id"] == second.json()["task_execution_id"]
+    assert captured_kwargs["task_execution_id"] == first.json()["task_execution_id"]
 
 
 def test_task_retry_uses_requested_session_when_valid(

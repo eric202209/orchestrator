@@ -1,14 +1,122 @@
 """Helpers for task execution attempts and their immutable identity evidence."""
 
+from contextlib import contextmanager
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Iterator
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.models import PlanningSession, Task, TaskExecution, TaskStatus
+from app.models import Project, PlanningSession, Task, TaskExecution, TaskStatus
 from app.services.observability.planning_identity import active_execution_identity
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
+from app.services.workspace.project_mutation_lock import (
+    ProjectMutationLockError,
+    project_mutation_lock,
+)
+
+
+class ProjectExecutionSerializationConflict(RuntimeError):
+    """A canonical project cannot admit another incompatible execution."""
+
+    reason = "project_execution_serialization_conflict"
+
+    def __init__(
+        self,
+        *,
+        project_id: int,
+        active_execution_id: int | None = None,
+        lock_path: str | None = None,
+    ):
+        self.project_id = project_id
+        self.active_execution_id = active_execution_id
+        self.lock_path = lock_path
+        details = [self.reason, f"project_id={project_id}"]
+        if active_execution_id is not None:
+            details.append(f"active_task_execution_id={active_execution_id}")
+        if lock_path:
+            details.append(f"lock_path={lock_path}")
+        super().__init__(" ".join(details))
+
+
+@contextmanager
+def project_execution_serialization_admission(
+    db: Session,
+    *,
+    session_id: int,
+    task_id: int,
+) -> Iterator[None]:
+    """Atomically admit one canonical project execution before row creation.
+
+    The existing project mutation lock is the admission mutex. The active
+    TaskExecution query runs while that lock is held, and callers must commit
+    the newly-created row before leaving this context. This keeps concurrent
+    queue callers from both observing an empty active set while retaining the
+    worker's later lock acquisition as defense in depth.
+    """
+
+    task = db.query(Task).filter(Task.id == task_id).first()
+    project = (
+        db.query(Project).filter(Project.id == task.project_id).first()
+        if task is not None
+        else None
+    )
+    if task is None or project is None:
+        yield
+        return
+
+    # Keep the domain decision at the existing helper so a future profile
+    # change does not globalize the gate.
+    from app.services.orchestration.task_rules import (
+        should_execute_in_canonical_project_root,
+    )
+
+    if not should_execute_in_canonical_project_root(
+        task,
+        getattr(task, "execution_profile", None),
+        task.title,
+        task.description,
+    ):
+        yield
+        return
+
+    project_root = resolve_project_workspace_path(
+        project.workspace_path,
+        project.name,
+        db=db,
+    )
+    owner = f"session:{session_id}:task:{task_id}:execution:pending"
+    try:
+        with project_mutation_lock(
+            project_id=project.id,
+            project_root=project_root,
+            operation="pre_dispatch_execution_admission",
+            owner=owner,
+        ):
+            active_execution = (
+                db.query(TaskExecution)
+                .join(Task, Task.id == TaskExecution.task_id)
+                .filter(
+                    Task.project_id == project.id,
+                    TaskExecution.status.in_([TaskStatus.PENDING, TaskStatus.RUNNING]),
+                )
+                .order_by(TaskExecution.id.desc())
+                .first()
+            )
+            if active_execution is not None:
+                raise ProjectExecutionSerializationConflict(
+                    project_id=project.id,
+                    active_execution_id=active_execution.id,
+                )
+            yield
+    except ProjectMutationLockError as exc:
+        raise ProjectExecutionSerializationConflict(
+            project_id=project.id,
+            lock_path=str(exc.lock_path),
+        ) from exc
 
 
 def create_task_execution(

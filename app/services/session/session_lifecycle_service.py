@@ -62,7 +62,11 @@ from app.services.orchestration.state.session_state import (
     SessionStatus,
 )
 from app.services.tasks.service import TaskService
-from app.services.tasks.execution import create_task_execution
+from app.services.tasks.execution import (
+    ProjectExecutionSerializationConflict,
+    create_task_execution,
+    project_execution_serialization_admission,
+)
 from app.services.session.orphan_ownership import evaluate_execution_ownership
 from app.services.session.recovery_coordinator import (
     RECOVERY_SOURCE_PERIODIC,
@@ -1122,11 +1126,21 @@ def _maybe_resume_manual_session_work(
 
     if allow_checkpoint_resume and resume_has_progress and resolved_checkpoint_name:
         prompt = task.description or task.title
-        task_execution = create_task_execution(
-            db,
-            session_id=session.id,
-            task_id=task.id,
-        )
+        try:
+            with project_execution_serialization_admission(
+                db,
+                session_id=session.id,
+                task_id=task.id,
+            ):
+                task_execution = create_task_execution(
+                    db,
+                    session_id=session.id,
+                    task_id=task.id,
+                )
+                db.commit()
+        except ProjectExecutionSerializationConflict as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         result = execute_orchestration_task.delay(
             session_id=session.id,
             task_id=task.id,
@@ -1975,11 +1989,21 @@ async def resume_session_lifecycle(
         resume_has_progress = _checkpoint_has_execution_progress(checkpoint_data)
 
         if resume_has_progress:
-            task_execution = create_task_execution(
-                db,
-                session_id=session_id,
-                task_id=task.id,
-            )
+            try:
+                with project_execution_serialization_admission(
+                    db,
+                    session_id=session_id,
+                    task_id=task.id,
+                ):
+                    task_execution = create_task_execution(
+                        db,
+                        session_id=session_id,
+                        task_id=task.id,
+                    )
+                    db.commit()
+            except ProjectExecutionSerializationConflict as exc:
+                db.rollback()
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
             result = execute_orchestration_task.delay(
                 session_id=session_id,
                 task_id=task.id,

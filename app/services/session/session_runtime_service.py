@@ -50,7 +50,11 @@ from app.services.workspace.workspace_admission import (
 )
 from app.services.orchestration.prompt_templates import OrchestrationState
 from app.services.tasks.service import TaskService
-from app.services.tasks.execution import create_task_execution
+from app.services.tasks.execution import (
+    ProjectExecutionSerializationConflict,
+    create_task_execution,
+    project_execution_serialization_admission,
+)
 from app.services.observability.runtime_identity import (
     build_runtime_identity_projection,
 )
@@ -506,31 +510,51 @@ def queue_task_for_session(
     except WorkspaceAdmissionError as exc:
         raise HTTPException(status_code=409, detail=exc.payload()) from exc
 
-    task_workspace = ensure_task_workspace(db, session, task.id)
-    session_task_link = (
-        db.query(SessionTask)
-        .filter(SessionTask.session_id == session.id, SessionTask.task_id == task.id)
-        .first()
-    )
-    if not session_task_link:
-        session_task_link = SessionTask(
+    try:
+        # Acquire the existing canonical mutation lock before workspace
+        # hydration and keep it through the active-execution check plus the
+        # durable TaskExecution commit. The worker acquires the same lock
+        # again later, so this is admission serialization, not ownership.
+        with project_execution_serialization_admission(
+            db,
             session_id=session.id,
             task_id=task.id,
-            status=TaskStatus.PENDING,
-            started_at=None,
-        )
-        db.add(session_task_link)
-    else:
-        mark_task_attempt_pending(
-            task=None,
-            session_task_link=session_task_link,
-            reset_started_at=True,
-        )
-    task_execution = create_task_execution(
-        db,
-        session_id=session.id,
-        task_id=task.id,
-    )
+        ):
+            task_workspace = ensure_task_workspace(db, session, task.id)
+            session_task_link = (
+                db.query(SessionTask)
+                .filter(
+                    SessionTask.session_id == session.id,
+                    SessionTask.task_id == task.id,
+                )
+                .first()
+            )
+            if not session_task_link:
+                session_task_link = SessionTask(
+                    session_id=session.id,
+                    task_id=task.id,
+                    status=TaskStatus.PENDING,
+                    started_at=None,
+                )
+                db.add(session_task_link)
+            else:
+                mark_task_attempt_pending(
+                    task=None,
+                    session_task_link=session_task_link,
+                    reset_started_at=True,
+                )
+            task_execution = create_task_execution(
+                db,
+                session_id=session.id,
+                task_id=task.id,
+            )
+            # The admission lock must not be released while this row is still
+            # uncommitted; otherwise a concurrent caller can pass the same
+            # active-execution query.
+            db.commit()
+    except ProjectExecutionSerializationConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     prior_status = task.status
     should_clear_saved_plan = prior_status in (

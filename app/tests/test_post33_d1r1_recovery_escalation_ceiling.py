@@ -50,10 +50,14 @@ from app.services.session.execution_policy import (
 # worker re-raises it as RuntimeError(reason).
 D1_FAILURE_REASON = "planning_semantic_target_contract_violation"
 WINDOW4_POST_REPAIR_FAILURE_REASON = "planning_validation_failed_after_repair"
+WINDOW4_MISSING_SOURCE_MATERIALIZATION_REASON = (
+    "planning_repair_missing_source_materialization"
+)
 
 DETERMINISTIC_REASONS = [
     D1_FAILURE_REASON,
     WINDOW4_POST_REPAIR_FAILURE_REASON,
+    WINDOW4_MISSING_SOURCE_MATERIALIZATION_REASON,
     "unknown_target_id: target_id is not present in the current inventory",
     "provider_plan_shape_invalid: provider plan must be a list",
     "provider_selector_internals_forbidden: provider replace operation ...",
@@ -334,6 +338,34 @@ def test_window4_post_repair_validation_failure_does_not_schedule_celery_retry(
         db_session.query(TaskExecution).filter(TaskExecution.task_id == task.id).count()
         == 1
     )
+
+
+def test_window4_missing_source_materialization_does_not_schedule_celery_retry(
+    db_session,
+):
+    """Attempt 4 shape: completed Plan Repair with no concrete source edit is terminal."""
+
+    project, session, task = _make_episode(db_session)
+    ctx = _make_ctx(db_session, project, session, task)
+    queued: list[int] = []
+
+    raised = _run_failure(
+        db_session,
+        ctx,
+        self_task=_FirstAttemptSelfTask(),
+        reason=WINDOW4_MISSING_SOURCE_MATERIALIZATION_REASON,
+        queued=queued,
+    )
+
+    execution = (
+        db_session.query(TaskExecution).filter(TaskExecution.task_id == task.id).one()
+    )
+    assert not isinstance(raised, _FirstAttemptSelfTask.RetrySignal)
+    assert isinstance(raised, RuntimeError)
+    assert str(raised) == WINDOW4_MISSING_SOURCE_MATERIALIZATION_REASON
+    assert queued == []
+    assert execution.failure_category == "planning_contract_violation"
+    assert execution.status == TaskStatus.FAILED
 
 
 def test_f_deterministic_exhaustion_queues_no_automatic_recovery(db_session):

@@ -38,7 +38,9 @@ from app.services.auth.authorization import project_access_filter
 from app.services.project.lifecycle import assert_project_launch_eligible
 from app.services.session.session_runtime_service import ensure_task_workspace
 from app.services.tasks.execution import (
+    ProjectExecutionSerializationConflict,
     create_task_execution,
+    project_execution_serialization_admission,
 )
 from app.services.tasks.service import TaskService
 from app.services.tasks.task_deletion import delete_task_owned_graph
@@ -615,11 +617,21 @@ def _queue_task_retry(
             reset_started_at=True,
         )
 
-    task_execution = create_task_execution(
-        db,
-        session_id=selected_session.id,
-        task_id=task.id,
-    )
+    try:
+        with project_execution_serialization_admission(
+            db,
+            session_id=selected_session.id,
+            task_id=task.id,
+        ):
+            task_execution = create_task_execution(
+                db,
+                session_id=selected_session.id,
+                task_id=task.id,
+            )
+            db.commit()
+    except ProjectExecutionSerializationConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     should_clear_saved_plan = task.status in (
         TaskStatus.DONE,

@@ -40,6 +40,7 @@ from app.services.session.session_runtime_service import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.project_mutation_lock import project_mutation_lock
 from app.tasks import worker as worker_module
 from app.tasks.worker import _claim_queued_task_for_worker
 from app.tasks.worker import _find_queued_event_for_dispatch
@@ -392,6 +393,104 @@ def test_queue_task_for_session_rejects_active_task_execution(db_session, tmp_pa
 
     assert exc_info.value.status_code == 409
     assert "active execution is in progress" in exc_info.value.detail
+
+
+def test_queue_task_for_session_rejects_active_project_execution_and_lock_before_creation(
+    db_session, monkeypatch, tmp_path
+):
+    """Window 4 Attempt 5 shape: another canonical writer blocks before TE/workspace."""
+
+    _bypass_project_openclaw_binding_admission(monkeypatch)
+
+    class _UnexpectedDelay:
+        @staticmethod
+        def delay(**_kwargs):  # pragma: no cover - conflict must precede dispatch
+            raise AssertionError("serialization conflict must not dispatch")
+
+    monkeypatch.setattr("app.tasks.worker.execute_orchestration_task", _UnexpectedDelay)
+
+    project = Project(
+        name="Project Serialization Gate",
+        workspace_path=str(tmp_path / "workspace-root"),
+    )
+    db_session.add(project)
+    db_session.commit()
+    db_session.refresh(project)
+
+    owner_session = SessionModel(
+        project_id=project.id,
+        name="Owner Session",
+        status="running",
+        is_active=True,
+        instance_id="owner-instance",
+    )
+    requesting_session = SessionModel(
+        project_id=project.id,
+        name="Requesting Session",
+        status="stopped",
+        is_active=False,
+        instance_id="requesting-instance",
+    )
+    owner_task = Task(
+        project_id=project.id,
+        title="Owner task",
+        description="Own the canonical writer",
+        status=TaskStatus.RUNNING,
+        task_subfolder="task-owner",
+        plan_position=2,
+    )
+    requesting_task = Task(
+        project_id=project.id,
+        title="Requesting task",
+        description="Must be rejected before dispatch",
+        status=TaskStatus.PENDING,
+        plan_position=1,
+    )
+    db_session.add_all([owner_session, requesting_session, owner_task, requesting_task])
+    db_session.commit()
+    db_session.refresh(owner_session)
+    db_session.refresh(requesting_session)
+    db_session.refresh(owner_task)
+    db_session.refresh(requesting_task)
+    db_session.add_all(
+        [
+            SessionTask(
+                session_id=owner_session.id,
+                task_id=owner_task.id,
+                status=TaskStatus.RUNNING,
+                started_at=datetime.now(timezone.utc),
+            ),
+            TaskExecution(
+                session_id=owner_session.id,
+                task_id=owner_task.id,
+                attempt_number=1,
+                status=TaskStatus.RUNNING,
+            ),
+        ]
+    )
+    db_session.commit()
+    before_count = db_session.query(TaskExecution).count()
+    project_root = resolve_project_workspace_path(
+        project.workspace_path, project.name, db=db_session
+    )
+
+    with project_mutation_lock(
+        project_id=project.id,
+        project_root=project_root,
+        operation="execute_canonical_root_task",
+        owner=f"session:{owner_session.id}:task:{owner_task.id}:execution:1",
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            queue_task_for_session(
+                db=db_session,
+                session=requesting_session,
+                task_id=requesting_task.id,
+            )
+
+    assert exc_info.value.status_code == 409
+    assert "project_execution_serialization_conflict" in str(exc_info.value.detail)
+    assert db_session.query(TaskExecution).count() == before_count
+    assert not (project_root / "task-requesting-task").exists()
 
 
 def test_worker_uses_provided_queued_event_id_for_exact_lookup(tmp_path):
