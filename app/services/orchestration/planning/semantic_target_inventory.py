@@ -186,6 +186,8 @@ def _record_is_eligible(
         getattr(item, "target_included", False)
     ):
         return None
+    if getattr(item, "target_region_eligibility_reason", None):
+        return None
     if getattr(item, "target_hint_type", None) not in {
         HINT_TYPE_EXACT_CALL,
         HINT_TYPE_QUOTED_SNIPPET,

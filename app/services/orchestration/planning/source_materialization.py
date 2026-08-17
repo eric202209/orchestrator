@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import io
 import json
 import re
+import tokenize
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Collection, Iterable, Mapping
@@ -173,6 +176,7 @@ class MaterializedSourceFile:
     target_match_count: int = 0
     target_match_start: int | None = None
     target_match_end: int | None = None
+    target_region_eligibility_reason: str | None = None
     target_included: bool = False
     spans: tuple[MaterializedSourceSpan, ...] = field(default_factory=tuple)
 
@@ -469,6 +473,141 @@ def _literal_hint_type(candidate: str) -> str:
     if re.match(r"^(?:async\s+)?(?:def|class|function|method)\b", candidate):
         return HINT_TYPE_SYMBOL
     return HINT_TYPE_EXACT_CALL if "(" in candidate else HINT_TYPE_QUOTED_SNIPPET
+
+
+def _line_start_bytes(text: str) -> tuple[int, ...]:
+    starts: list[int] = []
+    offset = 0
+    for line in text.splitlines(keepends=True):
+        starts.append(offset)
+        offset += len(line.encode("utf-8"))
+    if not starts:
+        starts.append(0)
+    return tuple(starts)
+
+
+def _text_position_byte_offset(
+    text: str, starts: tuple[int, ...], position: tuple[int, int]
+) -> int | None:
+    line_number, column = position
+    lines = text.splitlines(keepends=True)
+    if (
+        line_number < 1
+        or line_number > len(lines)
+        or column < 0
+        or column > len(lines[line_number - 1])
+    ):
+        return None
+    return starts[line_number - 1] + len(
+        lines[line_number - 1][:column].encode("utf-8")
+    )
+
+
+def _python_docstring_spans(
+    text: str, starts: tuple[int, ...]
+) -> tuple[tuple[int, int, str], ...]:
+    tree = ast.parse(text)
+    owners: list[tuple[Any, str]] = [(tree, "python_module_docstring")]
+    owners.extend(
+        (
+            node,
+            (
+                "python_class_docstring"
+                if isinstance(node, ast.ClassDef)
+                else "python_function_docstring"
+            ),
+        )
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    )
+    spans: list[tuple[int, int, str]] = []
+    for owner, reason in owners:
+        body = getattr(owner, "body", ())
+        if not body:
+            continue
+        statement = body[0]
+        value = getattr(statement, "value", None)
+        if (
+            not isinstance(statement, ast.Expr)
+            or not isinstance(value, ast.Constant)
+            or not isinstance(value.value, str)
+        ):
+            continue
+        start_line = getattr(statement, "lineno", None)
+        start_column = getattr(statement, "col_offset", None)
+        end_line = getattr(statement, "end_lineno", None)
+        end_column = getattr(statement, "end_col_offset", None)
+        if (
+            not isinstance(start_line, int)
+            or not isinstance(start_column, int)
+            or not isinstance(end_line, int)
+            or not isinstance(end_column, int)
+            or start_line < 1
+            or end_line < start_line
+            or start_line > len(starts)
+            or end_line > len(starts)
+        ):
+            continue
+        start = starts[start_line - 1] + start_column
+        end = starts[end_line - 1] + end_column
+        if end > start:
+            spans.append((start, end, reason))
+    return tuple(spans)
+
+
+def _python_target_region_eligibility_reason(
+    text: str, start: int, end: int
+) -> str | None:
+    """Reject selected Python comments/docstrings without rejecting strings."""
+
+    starts = _line_start_bytes(text)
+    try:
+        tokens = tokenize.generate_tokens(io.StringIO(text).readline)
+        token_spans: list[tuple[int, int, int]] = []
+        for token in tokens:
+            if token.type not in {tokenize.COMMENT, tokenize.STRING}:
+                continue
+            token_start = _text_position_byte_offset(text, starts, token.start)
+            token_end = _text_position_byte_offset(text, starts, token.end)
+            if token_start is not None and token_end is not None:
+                token_spans.append((token_start, token_end, token.type))
+    except (tokenize.TokenError, ValueError):
+        return "python_region_classification_unavailable"
+
+    for token_start, token_end, token_type in token_spans:
+        if token_start <= start and end <= token_end:
+            if token_type == tokenize.COMMENT:
+                return "python_comment"
+    try:
+        docstring_spans = _python_docstring_spans(text, starts)
+    except (IndentationError, SyntaxError, ValueError):
+        for token_start, token_end, token_type in token_spans:
+            if (
+                token_type == tokenize.STRING
+                and token_start <= start
+                and end <= token_end
+            ):
+                return "python_string_region_classification_unavailable"
+        return None
+    for doc_start, doc_end, reason in docstring_spans:
+        if doc_start <= start and end <= doc_end:
+            return reason
+    return None
+
+
+def _target_region_eligibility_reason(
+    relative_path: str,
+    text: str,
+    start: int,
+    end: int,
+    hint_type: str | None,
+) -> str | None:
+    suffix = Path(relative_path).suffix.lower()
+    if suffix == ".py":
+        return _python_target_region_eligibility_reason(text, start, end)
+    if suffix in {".md", ".markdown"} and hint_type == HINT_TYPE_EXACT_CALL:
+        return "documentation_prose_materialization"
+    return None
 
 
 def _line_spans(encoded: bytes) -> list[tuple[int, int]]:
@@ -1067,6 +1206,7 @@ def materialize_planner_source_context(
         selected_hint: SourceTargetHint | None = None
         match_span: tuple[int, int] | None = None
         match_count = 0
+        target_region_eligibility_reason: str | None = None
         strategy: str | None = None
         hint_status = TARGET_HINT_ABSENT
 
@@ -1085,6 +1225,13 @@ def materialize_planner_source_context(
                 selected_hint, match_start, match_end, match_count = selection
                 match_span = (match_start, match_end)
                 hint_status = TARGET_HINT_MATCHED
+                target_region_eligibility_reason = _target_region_eligibility_reason(
+                    relative_path,
+                    text,
+                    match_start,
+                    match_end,
+                    selected_hint.hint_type,
+                )
             elif target_hints:
                 hint_status = TARGET_HINT_NOT_FOUND
             remaining = maximum_total_source_bytes - total_bytes
@@ -1200,6 +1347,7 @@ def materialize_planner_source_context(
                 target_match_count=match_count,
                 target_match_start=match_span[0] if match_span else None,
                 target_match_end=match_span[1] if match_span else None,
+                target_region_eligibility_reason=target_region_eligibility_reason,
                 target_included=target_included,
                 spans=_source_spans(regions) if regions else (),
             )
