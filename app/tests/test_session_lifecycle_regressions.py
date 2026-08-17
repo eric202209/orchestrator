@@ -1684,6 +1684,7 @@ def test_resume_session_requeues_fresh_when_checkpoint_has_no_execution_progress
         def load_resume_checkpoint(self, session_id, checkpoint_name=None):
             captured["requested_checkpoint_name"] = checkpoint_name
             return {
+                "session_id": session_id,
                 "_requested_checkpoint_name": checkpoint_name,
                 "_resolved_checkpoint_name": checkpoint_name or "paused_latest",
                 "checkpoint_name": checkpoint_name or "paused_latest",
@@ -1749,6 +1750,124 @@ def test_resume_session_requeues_fresh_when_checkpoint_has_no_execution_progress
     )
     assert session_task.task_id == task.id
     assert session_task.status == TaskStatus.PENDING
+
+
+def test_resume_rejects_stale_checkpoint_task_before_task_execution_creation(
+    db_session, monkeypatch
+):
+    """A Session 156-shaped stale checkpoint must not select its historical task."""
+
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=True)
+    historical_task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    current_task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    db_session.add_all(
+        [
+            SessionTask(
+                session_id=session.id,
+                task_id=historical_task.id,
+                status=TaskStatus.FAILED,
+                started_at=datetime(2026, 8, 17, 17, 0, 0),
+            ),
+            SessionTask(
+                session_id=session.id,
+                task_id=current_task.id,
+                status=TaskStatus.FAILED,
+                started_at=datetime(2026, 8, 17, 17, 1, 0),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    class _FakeCheckpointService:
+        def __init__(self, db):
+            self.db = db
+
+        def load_resume_checkpoint(self, session_id, checkpoint_name=None):
+            return {
+                "session_id": session_id,
+                "checkpoint_name": "autosave_latest",
+                "_requested_checkpoint_name": checkpoint_name,
+                "_resolved_checkpoint_name": "autosave_latest",
+                "context": {
+                    "task_id": historical_task.id,
+                    "task_description": "historical task checkpoint",
+                },
+                "orchestration_state": {
+                    "plan": [{"step_number": 1, "description": "resume"}],
+                    "current_step_index": 1,
+                },
+                "step_results": [{"step_number": 1, "status": "success"}],
+            }
+
+        def _checkpoint_restore_fidelity(self, _data):
+            return {"score": 80, "status": "high", "warnings": []}
+
+    monkeypatch.setattr(
+        "app.services.session.session_lifecycle_service.CheckpointService",
+        _FakeCheckpointService,
+    )
+
+    before_count = db_session.query(TaskExecution).count()
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(resume_session_lifecycle(db_session, session.id))
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "resume_checkpoint_identity_mismatch"
+    assert db_session.query(TaskExecution).count() == before_count
+    db_session.refresh(session)
+    assert session.status == "paused"
+    assert session.is_active is True
+
+
+@pytest.mark.parametrize(
+    ("checkpoint_session_id", "checkpoint_task_id", "checkpoint_project_id"),
+    [
+        (999999, "current", None),
+        ("current", "historical", None),
+        ("current", "current", 999999),
+        ("current", 999999, None),
+        (None, "current", None),
+        ("current", None, None),
+    ],
+)
+def test_resume_checkpoint_identity_matrix_fails_closed(
+    db_session,
+    checkpoint_session_id,
+    checkpoint_task_id,
+    checkpoint_project_id,
+):
+    project = _make_project(db_session)
+    session = _make_session(db_session, project, status="paused", is_active=True)
+    current_task = _make_task(db_session, project, status=TaskStatus.PENDING)
+    historical_task = _make_task(db_session, project, status=TaskStatus.PENDING)
+
+    resolved_session_id = (
+        session.id if checkpoint_session_id == "current" else checkpoint_session_id
+    )
+    resolved_task_id = (
+        current_task.id
+        if checkpoint_task_id == "current"
+        else (
+            historical_task.id
+            if checkpoint_task_id == "historical"
+            else checkpoint_task_id
+        )
+    )
+    context = {"task_id": resolved_task_id}
+    if checkpoint_project_id is not None:
+        context["project_id"] = checkpoint_project_id
+
+    with pytest.raises(HTTPException) as exc_info:
+        session_lifecycle_service._assert_resume_checkpoint_compatible(
+            db_session,
+            session=session,
+            checkpoint_data={"session_id": resolved_session_id, "context": context},
+            current_task_id=current_task.id,
+        )
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "resume_checkpoint_identity_mismatch"
 
 
 def test_resume_stopped_session_returns_400(db_session):
@@ -1967,6 +2086,7 @@ def test_resume_rotates_session_instance_id_before_checkpoint_resume(
 
         def load_resume_checkpoint(self, session_id, checkpoint_name=None):
             return {
+                "session_id": session_id,
                 "_requested_checkpoint_name": checkpoint_name,
                 "_resolved_checkpoint_name": checkpoint_name or "autosave_latest",
                 "checkpoint_name": checkpoint_name or "autosave_latest",
@@ -2049,6 +2169,7 @@ def test_resume_marks_session_running_before_checkpoint_dispatch(
 
         def load_resume_checkpoint(self, session_id, checkpoint_name=None):
             return {
+                "session_id": session_id,
                 "_requested_checkpoint_name": checkpoint_name,
                 "_resolved_checkpoint_name": "autosave_latest",
                 "checkpoint_name": "autosave_latest",
@@ -2248,13 +2369,13 @@ def test_session_reconciliation_audit_explains_paused_session(db_session):
     assert audit["pending_task_count"] == 1
 
 
-def test_resume_skips_done_task(db_session, monkeypatch):
+def test_resume_rejects_terminal_checkpoint_task_without_selecting_pending_work(
+    db_session, monkeypatch
+):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="paused", is_active=True)
     done_task = _make_task(db_session, project, status=TaskStatus.DONE)
-    pending_task = _make_task(db_session, project, status=TaskStatus.PENDING)
     done_task.plan_position = 1
-    pending_task.plan_position = 2
     db_session.add(
         SessionTask(
             session_id=session.id,
@@ -2272,6 +2393,7 @@ def test_resume_skips_done_task(db_session, monkeypatch):
 
         def load_resume_checkpoint(self, session_id, checkpoint_name=None):
             return {
+                "session_id": session_id,
                 "_requested_checkpoint_name": checkpoint_name,
                 "_resolved_checkpoint_name": checkpoint_name or "autosave_latest",
                 "checkpoint_name": checkpoint_name or "autosave_latest",
@@ -2322,19 +2444,21 @@ def test_resume_skips_done_task(db_session, monkeypatch):
         _FakeWorkerTask,
     )
 
-    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(resume_session_lifecycle(db_session, session.id))
 
-    assert result["status"] == "resumed"
-    assert captured["task_id"] == pending_task.id
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "resume_checkpoint_task_not_resumable"
+    assert captured == {}
 
 
-def test_resume_continues_next_pending_task(db_session, monkeypatch):
+def test_resume_does_not_fallback_to_another_pending_task_from_terminal_checkpoint(
+    db_session, monkeypatch
+):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="paused", is_active=True)
     first_task = _make_task(db_session, project, status=TaskStatus.DONE)
-    pending_task = _make_task(db_session, project, status=TaskStatus.PENDING)
     first_task.plan_position = 1
-    pending_task.plan_position = 2
     db_session.add(
         SessionTask(
             session_id=session.id,
@@ -2352,6 +2476,7 @@ def test_resume_continues_next_pending_task(db_session, monkeypatch):
 
         def load_resume_checkpoint(self, session_id, checkpoint_name=None):
             return {
+                "session_id": session_id,
                 "_requested_checkpoint_name": checkpoint_name,
                 "_resolved_checkpoint_name": checkpoint_name or "autosave_latest",
                 "checkpoint_name": checkpoint_name or "autosave_latest",
@@ -2402,10 +2527,12 @@ def test_resume_continues_next_pending_task(db_session, monkeypatch):
         _FakeWorkerTask,
     )
 
-    result = asyncio.run(resume_session_lifecycle(db_session, session.id))
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(resume_session_lifecycle(db_session, session.id))
 
-    assert result["status"] == "resumed"
-    assert captured["task_id"] == pending_task.id
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail == "resume_checkpoint_task_not_resumable"
+    assert captured == {}
 
 
 def test_resume_after_pause_keeps_session_running_and_dispatches(

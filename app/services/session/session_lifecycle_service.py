@@ -1014,6 +1014,65 @@ def _resolve_resume_task(
     return task
 
 
+def _resume_checkpoint_identity_value(value: Any) -> int | None:
+    """Return a durable checkpoint identity value only when it is an integer."""
+
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _assert_resume_checkpoint_compatible(
+    db: Session,
+    *,
+    session: SessionModel,
+    checkpoint_data: Dict[str, Any],
+    current_task_id: int | None,
+) -> int:
+    """Fail closed before dispatch when a checkpoint is not this resume context."""
+
+    context = checkpoint_data.get("context", {}) or {}
+    checkpoint_session_id = _resume_checkpoint_identity_value(
+        checkpoint_data.get("session_id")
+    )
+    checkpoint_task_id = _resume_checkpoint_identity_value(context.get("task_id"))
+    checkpoint_project_id = _resume_checkpoint_identity_value(
+        context.get("project_id", checkpoint_data.get("project_id"))
+    )
+
+    if checkpoint_session_id != session.id or checkpoint_task_id is None:
+        raise HTTPException(
+            status_code=409, detail="resume_checkpoint_identity_mismatch"
+        )
+    if (
+        checkpoint_project_id is not None
+        and checkpoint_project_id != session.project_id
+    ):
+        raise HTTPException(
+            status_code=409, detail="resume_checkpoint_identity_mismatch"
+        )
+    if current_task_id is not None and checkpoint_task_id != current_task_id:
+        raise HTTPException(
+            status_code=409, detail="resume_checkpoint_identity_mismatch"
+        )
+
+    checkpoint_task = db.query(Task).filter(Task.id == checkpoint_task_id).first()
+    if checkpoint_task is None or checkpoint_task.project_id != session.project_id:
+        raise HTTPException(
+            status_code=409, detail="resume_checkpoint_identity_mismatch"
+        )
+    if checkpoint_task.status in {
+        TaskStatus.DONE,
+        TaskStatus.FAILED,
+        TaskStatus.CANCELLED,
+    }:
+        raise HTTPException(
+            status_code=409, detail="resume_checkpoint_task_not_resumable"
+        )
+    return checkpoint_task_id
+
+
 def _maybe_resume_manual_session_work(
     db: Session,
     *,
@@ -1831,6 +1890,12 @@ async def resume_session_lifecycle(
         task_id = latest_session_task.task_id if latest_session_task else None
 
         if checkpoint_data is not None:
+            checkpoint_task_id = _assert_resume_checkpoint_compatible(
+                db,
+                session=session,
+                checkpoint_data=checkpoint_data,
+                current_task_id=task_id,
+            )
             requested_checkpoint_name = checkpoint_data.get(
                 "_requested_checkpoint_name"
             )
@@ -1841,7 +1906,7 @@ async def resume_session_lifecycle(
                 checkpoint_data
             )
             context_data = checkpoint_data.get("context", {})
-            task_id = context_data.get("task_id") or task_id
+            task_id = task_id or checkpoint_task_id
         elif checkpoint_name:
             raise HTTPException(
                 status_code=404,
