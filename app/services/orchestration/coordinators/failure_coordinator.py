@@ -43,6 +43,12 @@ from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 
+# A session that already reached a terminal state must never be re-armed by an
+# automatic recovery rerun queued from a late failure of its last execution.
+_TERMINAL_SESSION_STATUSES = frozenset(
+    {"stopped", "completed", "cancelled", "failed", "archived"}
+)
+
 
 class FailureCoordinator:
     """Single orchestration boundary for task failure handling.
@@ -261,6 +267,7 @@ class FailureCoordinator:
         # backend capability rejections, planning failures, governance holds)
         # must not be re-executed either.
         from app.services.session.execution_policy import (
+            automatic_recovery_rerun_allowed as _automatic_recovery_rerun_allowed,
             classify_failure as _classify_failure_category,
             is_retry_exempt_category as _is_retry_exempt_category,
         )
@@ -279,15 +286,28 @@ class FailureCoordinator:
                 ),
             },
         )
+        # The episode ceiling is derived from the persisted TaskExecution rows,
+        # not from ``task.workspace_status``. Every automatic recovery rerun
+        # dispatches a fresh TaskExecution, while the Celery retry path reuses
+        # the current one and resets workspace_status back to
+        # not_created/in_progress — so workspace_status alone cannot bound the
+        # episode (POST33-D1: executions 281 → 282 → 283 → 284).
         auto_recovery_eligible = bool(
             session
             and task
             and session.execution_mode == "automatic"
+            and status_value(getattr(session, "status", None))
+            not in _TERMINAL_SESSION_STATUSES
+            and status_value(getattr(task, "status", None))
+            != TaskStatus.CANCELLED.value
             and getattr(task, "plan_position", None) is not None
             and not is_timeout
             and not is_project_mutation_lock_conflict
             and not _is_retry_exempt_category(failure_category_for_retry)
             and getattr(task, "workspace_status", None) != "changes_requested"
+            and _automatic_recovery_rerun_allowed(
+                db, session_id=session_id, task_id=task_id
+            )
         )
 
         # Capture the current attempt before any failure transition or early

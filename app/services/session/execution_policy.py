@@ -10,15 +10,71 @@ _RETRY_EXEMPT_CATEGORIES = {
     "planning_failure",
     "governance_hold",
     "backend_transport_error",
+    "planning_contract_violation",
 }
 
 _MAX_RETRIES = 2
+
+# One automatic recovery rerun per failure episode. Every rerun dispatches a
+# fresh TaskExecution, so the persisted attempt rows are the durable episode
+# generation counter.
+_MAX_AUTOMATIC_RECOVERY_RERUNS = 1
+
+# Deterministic planning/plan contract rejections. The provider response is
+# refused before normalization, Plan Repair, APA, or Execution, so an identical
+# request is refused identically — a retry only re-spends provider time.
+_DETERMINISTIC_PLANNING_CONTRACT_MARKERS = (
+    "planning_semantic_target_contract_violation",
+    "planning_semantic_target_inventory_invalid",
+    "repair_output_contract_violation",
+    "op_contract_violation",
+    "unknown_target_id",
+    "target_id_path_mismatch",
+    "target_id_operation_forbidden",
+    "target_path_invalid",
+    "provider_plan_shape_invalid",
+    "provider_semantic_shape_invalid",
+    "provider_semantic_new_invalid",
+    "provider_mixed_old_target_id",
+    "provider_selector_internals_forbidden",
+    "semantic_target_construction_",
+)
+
+
+def is_deterministic_planning_contract_failure(reason: str) -> bool:
+    """True when the failure is a deterministic planning/plan contract rejection."""
+
+    text = (reason or "").lower()
+    return any(marker in text for marker in _DETERMINISTIC_PLANNING_CONTRACT_MARKERS)
 
 
 def is_retry_exempt_category(failure_category: str) -> bool:
     """True when persisted policy forbids creating a new attempt for this category."""
 
     return failure_category in _RETRY_EXEMPT_CATEGORIES
+
+
+def automatic_recovery_rerun_allowed(
+    db: Session, *, session_id: int | None, task_id: int | None
+) -> bool:
+    """True while this failure episode still has its one automatic recovery rerun.
+
+    The rerun dispatches a fresh TaskExecution, so the persisted attempt rows are
+    the durable episode ceiling. Celery retries reuse the same TaskExecution and
+    reset the mutable ``task.workspace_status``, so neither can re-arm this guard.
+    """
+
+    if db is None or session_id is None or task_id is None:
+        return True
+    attempts = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+            TaskExecution.task_id == task_id,
+        )
+        .count()
+    )
+    return attempts <= _MAX_AUTOMATIC_RECOVERY_RERUNS
 
 
 def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
@@ -39,6 +95,8 @@ def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
         )
     ):
         return "runtime_safety_stop"
+    if is_deterministic_planning_contract_failure(reason):
+        return "planning_contract_violation"
     if provider_classification == "provider_timeout":
         return "provider_timeout"
     if context.get("failure_phase") == "planning" and (

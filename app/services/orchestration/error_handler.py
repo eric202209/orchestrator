@@ -524,6 +524,22 @@ class EnhancedErrorHandler:
         """Determine if an error should be retried."""
         error_str = str(error).lower()
 
+        # Deterministic planning/plan contract rejections are refused before the
+        # response is ever normalized, so an identical request is refused
+        # identically. Retrying only re-spends provider time.
+        # Deferred import: app.services.session.__init__ imports agent runtime,
+        # which imports this module during package initialization.
+        from app.services.session.execution_policy import (
+            is_deterministic_planning_contract_failure,
+        )
+
+        if is_deterministic_planning_contract_failure(error_str):
+            logger.warning(
+                "[RETRY] Deterministic contract rejection is retry-exempt for %s",
+                step_name,
+            )
+            return False
+
         # Don't retry certain errors
         no_retry_errors = [
             "timeout",
