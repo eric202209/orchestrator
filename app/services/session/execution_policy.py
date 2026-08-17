@@ -26,6 +26,7 @@ _MAX_AUTOMATIC_RECOVERY_RERUNS = 1
 _DETERMINISTIC_PLANNING_CONTRACT_MARKERS = (
     "planning_semantic_target_contract_violation",
     "planning_semantic_target_inventory_invalid",
+    "planning_validation_failed_after_repair",
     "repair_output_contract_violation",
     "op_contract_violation",
     "unknown_target_id",

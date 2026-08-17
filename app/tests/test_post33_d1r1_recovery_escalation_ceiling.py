@@ -49,9 +49,11 @@ from app.services.session.execution_policy import (
 # planning_flow returns {"status": "failed", "reason": failure_type} and the
 # worker re-raises it as RuntimeError(reason).
 D1_FAILURE_REASON = "planning_semantic_target_contract_violation"
+WINDOW4_POST_REPAIR_FAILURE_REASON = "planning_validation_failed_after_repair"
 
 DETERMINISTIC_REASONS = [
     D1_FAILURE_REASON,
+    WINDOW4_POST_REPAIR_FAILURE_REASON,
     "unknown_target_id: target_id is not present in the current inventory",
     "provider_plan_shape_invalid: provider plan must be a list",
     "provider_selector_internals_forbidden: provider replace operation ...",
@@ -292,6 +294,42 @@ def test_d1_failure_does_not_consume_a_provider_retry(db_session):
     assert isinstance(raised, RuntimeError)
     assert str(raised) == D1_FAILURE_REASON
     assert queued == []
+    assert (
+        db_session.query(TaskExecution).filter(TaskExecution.task_id == task.id).count()
+        == 1
+    )
+
+
+def test_window4_post_repair_validation_failure_does_not_schedule_celery_retry(
+    db_session,
+):
+    """Task 213 shape: exhausted Plan Repair validation is terminal, not transient."""
+
+    project, session, task = _make_episode(db_session)
+    ctx = _make_ctx(db_session, project, session, task)
+    queued: list[int] = []
+
+    raised = _run_failure(
+        db_session,
+        ctx,
+        self_task=_FirstAttemptSelfTask(),
+        reason=WINDOW4_POST_REPAIR_FAILURE_REASON,
+        queued=queued,
+    )
+
+    db_session.refresh(task)
+    db_session.refresh(session)
+    execution = (
+        db_session.query(TaskExecution).filter(TaskExecution.task_id == task.id).one()
+    )
+    assert not isinstance(raised, _FirstAttemptSelfTask.RetrySignal)
+    assert isinstance(raised, RuntimeError)
+    assert str(raised) == WINDOW4_POST_REPAIR_FAILURE_REASON
+    assert queued == []
+    assert execution.failure_category == "planning_contract_violation"
+    assert execution.status == TaskStatus.FAILED
+    assert task.status == TaskStatus.FAILED
+    assert session.status == "paused"
     assert (
         db_session.query(TaskExecution).filter(TaskExecution.task_id == task.id).count()
         == 1
