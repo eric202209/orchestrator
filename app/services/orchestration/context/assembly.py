@@ -888,6 +888,7 @@ def assemble_planning_prompt(
         ),
         workspace_identity=planner_workspace_identity,
         planner_contract=getattr(ctx, "planner_contract", None),
+        source_materialization=planner_source_materialization,
     )
     artifact_supplement = getattr(ctx.orchestration_state, "artifact_supplement", None)
     if artifact_supplement:

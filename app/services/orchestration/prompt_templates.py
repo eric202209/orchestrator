@@ -917,6 +917,7 @@ Examples:
         project_structure_capsule: Optional[str] = None,
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
+        source_materialization: Any = None,
     ) -> str:
         """
         Build a prompt for task planning phase.
@@ -969,6 +970,17 @@ Examples:
                 "Frontend+backend: use subdirs (frontend/, backend/) inside task root. No ../backend or sibling folders."
             )
 
+        semantic_mode_available = True
+        legacy_replace_available = True
+        if source_materialization is not None:
+            from app.services.orchestration.planning.source_materialization import (
+                provider_planning_contract_capabilities,
+            )
+
+            semantic_mode_available, legacy_replace_available = (
+                provider_planning_contract_capabilities(source_materialization)
+            )
+
         context = {
             "task_description": compact_task_description,
             "execution_profile": execution_profile,
@@ -994,7 +1006,10 @@ Examples:
             ),
             "workflow_guidance": workflow_guidance,
             "supported_file_ops": render_supported_file_ops(),
-            "operation_choice_contract": render_operation_choice_contract(),
+            "operation_choice_contract": render_operation_choice_contract(
+                semantic_mode_available=semantic_mode_available,
+                legacy_replace_available=legacy_replace_available,
+            ),
         }
 
         prompt = cls.render("task_planning", **context)

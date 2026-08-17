@@ -1254,6 +1254,7 @@ class PlannerService:
             project_context=project_context,
             workspace_identity=workspace_identity,
             planner_contract=planner_contract,
+            source_materialization=source_materialization,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
         if source_materialization is not None:
@@ -1287,6 +1288,7 @@ class PlannerService:
             project_context=project_context,
             workspace_identity=workspace_identity,
             planner_contract=planner_contract,
+            source_materialization=source_materialization,
             apply_prompt_profile=PlannerService.apply_prompt_profile,
         )
         if source_materialization is not None:

@@ -1478,6 +1478,36 @@ def render_planner_source_materialization(
     return "\n".join(lines)
 
 
+def provider_planning_contract_capabilities(
+    materialization: PlannerSourceMaterialization | None,
+) -> tuple[bool, bool]:
+    """Return ``(semantic_available, grounded_legacy_available)``.
+
+    Semantic availability is derived from the same filtered inventory that
+    renders provider-visible target handles.  Legacy replacement is available
+    only when an existing, non-truncated source body is actually materialized;
+    new-file and omitted-source records therefore cannot invite fabricated
+    ``old`` text.
+    """
+
+    if not isinstance(materialization, PlannerSourceMaterialization):
+        return False, False
+    from app.services.orchestration.planning.semantic_target_inventory import (
+        build_semantic_target_inventory,
+    )
+
+    inventory = build_semantic_target_inventory(materialization)
+    grounded_legacy = any(
+        item.status == SOURCE_STATUS_EXISTING
+        and item.expected
+        and item.content is not None
+        and not item.truncated
+        and int(item.included_source_bytes or 0) > 0
+        for item in materialization.files
+    )
+    return bool(inventory.handles), grounded_legacy
+
+
 def _render_provider_planner_source_materialization(
     materialization: PlannerSourceMaterialization | None,
 ) -> str:
@@ -1490,15 +1520,20 @@ def _render_provider_planner_source_materialization(
     )
 
     inventory = build_semantic_target_inventory(materialization)
+    grounded_legacy = any(
+        item.status == SOURCE_STATUS_EXISTING
+        and item.expected
+        and item.content is not None
+        and not item.truncated
+        and int(item.included_source_bytes or 0) > 0
+        for item in materialization.files
+    )
     handles = {handle.path: handle for handle in inventory.handles}
     lines = [
         "## CURRENT SOURCE MATERIALIZATION",
         "The following bounded current workspace source is planning evidence.",
         "Use only the supplied visible source and the Orchestrator-issued target handles.",
         "A future read_file command is not planning-time evidence.",
-        "When a target_id is listed for a path, it may be used for replace_in_file.",
-        "Do not invent target IDs or emit selector internals, offsets, versions, or hashes.",
-        "When no target_id is listed, legacy replace_in_file uses exact old/new source evidence.",
         "Omitted or truncated source does not authorize fabricated exact replacement.",
         "Never reconstruct a whole file from a partial excerpt.",
         (
@@ -1508,6 +1543,23 @@ def _render_provider_planner_source_materialization(
             f"maximum total source bytes={materialization.maximum_total_source_bytes}."
         ),
     ]
+    if inventory.handles:
+        lines[4:4] = [
+            "When a target_id is listed for a path, it may be used for replace_in_file.",
+            "Do not invent target IDs or emit selector internals, offsets, versions, or hashes.",
+            "When no target_id is listed, legacy replace_in_file uses exact old/new source evidence.",
+        ]
+    elif grounded_legacy:
+        lines[4:4] = [
+            "Semantic target mode is unavailable for this task. Do not emit target_id.",
+            "Legacy replace_in_file may use exact old/new from the supplied current source evidence.",
+        ]
+    else:
+        lines[4:4] = [
+            "Semantic target mode is unavailable for this task. Do not emit target_id.",
+            "Legacy replace_in_file is unavailable because no exact current source evidence is supplied.",
+            "Use only non-replace operations that do not require fabricated existing-file content.",
+        ]
     for item in materialization.files:
         handle = handles.get(item.relative_path)
         record_lines = [

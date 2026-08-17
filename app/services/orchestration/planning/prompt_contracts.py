@@ -39,22 +39,69 @@ def render_operator_guidance_precedence(project_context: str | None) -> str:
     return ""
 
 
-def render_ops_first_contract() -> str:
+def render_ops_first_contract(
+    *,
+    semantic_mode_available: bool = True,
+    legacy_replace_available: bool = True,
+) -> str:
+    if semantic_mode_available:
+        replace_shapes = (
+            "replace legacy {op,path,old,new} or semantic {op,path,target_id,new}; "
+            "replace forms are exclusive."
+        )
+    elif legacy_replace_available:
+        replace_shapes = (
+            "replace legacy {op,path,old,new}; semantic target mode is unavailable "
+            "and must not be emitted."
+        )
+    else:
+        replace_shapes = (
+            "no replace operation; semantic target mode and legacy replace mode are "
+            "unavailable without grounded current source."
+        )
     return (
         "Use `ops` for file writes; put source in write_file/append_file/replace_in_file, not shell. "
         f"Supported ops: {render_supported_file_ops()}. "
-        "Shapes: write/append {op,path,content}; replace legacy {op,path,old,new} "
-        "or semantic {op,path,target_id,new}; mkdir/delete {op,path}; replace forms are exclusive."
+        "Shapes: write/append {op,path,content}; "
+        f"{replace_shapes} mkdir/delete {{op,path}}."
     )
 
 
-def render_operation_choice_contract() -> str:
+def render_operation_choice_contract(
+    *,
+    semantic_mode_available: bool = True,
+    legacy_replace_available: bool = True,
+) -> str:
+    """Render only the replace modes available to the current Planning task.
+
+    The default preserves the existing contract for callers that do not yet
+    have a provider-safe source projection.  Production Planning passes the
+    filtered materialization capabilities so unavailable replace syntax is not
+    advertised to the provider.
+    """
+
+    if semantic_mode_available:
+        return (
+            "Accepted replace shapes are `{op,path,old,new}` or `{op,path,target_id,new}`. "
+            "For replace_in_file, use a listed Orchestrator `target_id` for the exact path; "
+            "otherwise use exact `old` plus `new` from current evidence. Never mix `old` "
+            "with `target_id`, invent IDs, or emit selector internals (offsets, versions, "
+            "hashes, or derivation data)."
+        )
+
+    if legacy_replace_available:
+        return (
+            "Semantic target mode is unavailable for this task. Do not emit `target_id`. "
+            "The only supported replace shape is `{op,path,old,new}`; use exact `old` "
+            "plus `new` from the supplied current source evidence. Do not emit selector "
+            "internals or fabricate replacement text."
+        )
+
     return (
-        "Accepted replace shapes are `{op,path,old,new}` or `{op,path,target_id,new}`. "
-        "For replace_in_file, use a listed Orchestrator `target_id` for the exact path; "
-        "otherwise use exact `old` plus `new` from current evidence. Never mix `old` "
-        "with `target_id`, invent IDs, or emit selector internals (offsets, versions, "
-        "hashes, or derivation data)."
+        "Semantic target mode is unavailable for this task. Do not emit `target_id`. "
+        "Legacy replace mode is unavailable because no exact current source evidence "
+        "is supplied. Do not fabricate `old` text; use only non-replace operations "
+        "such as authorized `write_file`, `append_file`, `mkdir`, or `delete_file`."
     )
 
 

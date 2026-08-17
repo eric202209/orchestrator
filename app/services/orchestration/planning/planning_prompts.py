@@ -32,6 +32,9 @@ from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
     render_planner_workspace_identity,
 )
+from app.services.orchestration.planning.source_materialization import (
+    provider_planning_contract_capabilities,
+)
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
@@ -163,6 +166,7 @@ def build_minimal_planning_prompt(
     project_context: Optional[str] = None,
     workspace_identity: PlannerWorkspaceIdentity | None = None,
     planner_contract: dict[str, Any] | None = None,
+    source_materialization: Any = None,
     apply_prompt_profile: Any = None,
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:1200]
@@ -174,8 +178,20 @@ def build_minimal_planning_prompt(
         workflow_phases=workflow_phases,
         workspace_has_existing_files=workspace_has_existing_files,
     )
-    ops_contract = _render_ops_first_contract()
-    operation_choice_contract = _render_operation_choice_contract()
+    semantic_mode_available = True
+    legacy_replace_available = True
+    if source_materialization is not None:
+        semantic_mode_available, legacy_replace_available = (
+            provider_planning_contract_capabilities(source_materialization)
+        )
+    ops_contract = _render_ops_first_contract(
+        semantic_mode_available=semantic_mode_available,
+        legacy_replace_available=legacy_replace_available,
+    )
+    operation_choice_contract = _render_operation_choice_contract(
+        semantic_mode_available=semantic_mode_available,
+        legacy_replace_available=legacy_replace_available,
+    )
     shell_fallback_limits = _render_shell_fallback_limits()
     verification_contract = _render_verification_contract()
     test_scaffold_contract = _render_test_scaffold_contract()
@@ -272,6 +288,7 @@ def build_ultra_minimal_planning_prompt(
     project_context: Optional[str] = None,
     workspace_identity: PlannerWorkspaceIdentity | None = None,
     planner_contract: dict[str, Any] | None = None,
+    source_materialization: Any = None,
     apply_prompt_profile: Any = None,
 ) -> str:
     concise_task = " ".join((task_description or "").split())[:700]
@@ -283,8 +300,20 @@ def build_ultra_minimal_planning_prompt(
         workflow_phases=workflow_phases,
         workspace_has_existing_files=workspace_has_existing_files,
     )
-    ops_contract = _render_ops_first_contract()
-    operation_choice_contract = _render_operation_choice_contract()
+    semantic_mode_available = True
+    legacy_replace_available = True
+    if source_materialization is not None:
+        semantic_mode_available, legacy_replace_available = (
+            provider_planning_contract_capabilities(source_materialization)
+        )
+    ops_contract = _render_ops_first_contract(
+        semantic_mode_available=semantic_mode_available,
+        legacy_replace_available=legacy_replace_available,
+    )
+    operation_choice_contract = _render_operation_choice_contract(
+        semantic_mode_available=semantic_mode_available,
+        legacy_replace_available=legacy_replace_available,
+    )
     shell_fallback_limits = _render_shell_fallback_limits()
     verification_contract = _render_verification_contract()
     test_scaffold_contract = _render_test_scaffold_contract()
