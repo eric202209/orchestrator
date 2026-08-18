@@ -208,7 +208,6 @@ def build_minimal_planning_prompt(
     )
     prompt = f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
-Do not implement anything.
 
 {operator_guidance_block}\
 Task:

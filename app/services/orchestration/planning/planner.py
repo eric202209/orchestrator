@@ -633,19 +633,22 @@ class PlannerService:
         }:
             return prompt
 
+        # Rendered as bullets, not numbers: this block is appended to prompts
+        # whose own rule lists already use 1..N, and numbered entries here
+        # collided with different rules carrying the same numbers.
         profiled = (
             f"{prompt.rstrip()}\n\n"
             "Output discipline for this model:\n"
-            "11. Return only a JSON array of steps. Do not wrap it in an object.\n"
-            "12. Do not include `payloads`, `text`, `finalAssistantVisibleText`, markdown prose, or commentary.\n"
-            "13. The first non-whitespace character must be `[` and the last must be `]`.\n"
-            "14. Do not describe the file contents outside the JSON fields for each step.\n"
+            "- Return only a JSON array of steps. Do not wrap it in an object.\n"
+            "- Do not include `payloads`, `text`, `finalAssistantVisibleText`, markdown prose, or commentary.\n"
+            "- The first non-whitespace character must be `[` and the last must be `]`.\n"
+            "- Do not describe the file contents outside the JSON fields for each step.\n"
         )
         if prompt_profile == "local_qwen_small_json_array":
             profiled += (
-                "15. Use the smallest valid plan shape for the workflow profile; prefer 2-3 concrete steps over broad multi-step choreography.\n"
-                "16. Prefer typed `ops` for file writes and one bounded Python verification command per implementation step.\n"
-                "17. Do not include speculative future files in `expected_files`; list only files materialized by typed ops or already present in the workspace.\n"
+                "- Use the smallest valid plan shape for the workflow profile; prefer 2-3 concrete steps over broad multi-step choreography.\n"
+                "- Prefer typed `ops` for file writes and one bounded Python verification command per implementation step.\n"
+                "- Do not include speculative future files in `expected_files`; list only files materialized by typed ops or already present in the workspace.\n"
             )
         return profiled
 
@@ -2079,6 +2082,14 @@ class PlannerService:
             > MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD
         )
         minimal_prompt_diagnostics = {
+            # Provenance of the prompt actually sent on this path; the
+            # assembled-prompt ref emitted by planning_flow describes a prompt
+            # that is not sent once the minimal path is selected.
+            "planning_prompt_builder": "minimal_planning_prompt",
+            "planning_prompt_profile": prompt_profile,
+            "planning_prompt_sha256": hashlib.sha256(
+                minimal_prompt.encode("utf-8")
+            ).hexdigest(),
             "minimal_prompt_chars": minimal_prompt_chars,
             "minimal_prompt_estimated_tokens": minimal_prompt_estimated_tokens,
             "minimal_prompt_token_threshold": (
@@ -2198,6 +2209,14 @@ class PlannerService:
                 planner_contract=planner_contract,
                 source_materialization=source_materialization,
             )
+            ultra_minimal_prompt_diagnostics = {
+                "planning_prompt_builder": "ultra_minimal_planning_prompt",
+                "planning_prompt_profile": prompt_profile,
+                "planning_prompt_sha256": hashlib.sha256(
+                    ultra_minimal_prompt.encode("utf-8")
+                ).hexdigest(),
+                "ultra_minimal_prompt_chars": len(ultra_minimal_prompt),
+            }
             logger.warning(
                 "[ORCHESTRATION] Minimal planning prompt timed out; retrying with ultra-minimal prompt"
             )
@@ -2212,6 +2231,7 @@ class PlannerService:
                     "retry": "ultra_minimal_prompt",
                     "reason": str(exc)[:240],
                     "timeout_seconds": ultra_minimal_timeout,
+                    **ultra_minimal_prompt_diagnostics,
                     "planner_grounding": planner_grounding_evidence(
                         planner_contract,
                         runtime_context={
@@ -2237,6 +2257,7 @@ class PlannerService:
                     "attempt": 3,
                     "strategy": "ultra_minimal_prompt",
                     "timeout_seconds": ultra_minimal_timeout,
+                    **ultra_minimal_prompt_diagnostics,
                     "planner_grounding": planner_grounding_evidence(
                         planner_contract,
                         runtime_context={

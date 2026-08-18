@@ -287,7 +287,6 @@ class PromptTemplates:
 
     TASK_PLANNING = """Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose. No markdown fences. No plan.json. No explanation.
-Do not implement anything.
 
 {operator_guidance_precedence}\
 **Task:** {task_description}

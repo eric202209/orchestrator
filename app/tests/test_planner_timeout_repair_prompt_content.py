@@ -611,7 +611,7 @@ def test_profiled_planning_repair_prompt_over_budget_falls_back_to_compact(
 
     assert "Repair this invalid plan into 3 to 4 executable steps." in prompt
     assert "Output discipline for this model:" in prompt
-    assert "15. Use the smallest valid plan shape" in prompt
+    assert "- Use the smallest valid plan shape" in prompt
     assert len(prompt) <= prompt_cap
 
 

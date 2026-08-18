@@ -78,6 +78,52 @@ def _planner_workspace_identity(
     return planner_workspace_identity_for_context(ctx)
 
 
+# Qwen3.5-35B has a 128 k context window; 2200 tokens is far too conservative.
+# Use 8000 tokens (~6000 words) as the boundary so normal project contexts get
+# the full planning prompt.
+MINIMAL_PROMPT_TOKEN_THRESHOLD = 8000
+
+
+def select_minimal_prompt_first_strategy(
+    *,
+    ctx: OrchestrationRunContext,
+    workspace_review: dict,
+    planning_prompt_tokens: int,
+    compress_project_context: Any,
+) -> tuple[bool, str | None]:
+    """Decide whether Planning starts on the minimal prompt, and say why.
+
+    ``retry_with_minimal_prompt`` takes a fixed ``dense_planning_context``
+    reason because that value also selects the minimal timeout limit, so the
+    condition that actually selected the minimal prompt has to be reported
+    separately or the evidence reads as a density decision it usually is not.
+    """
+
+    start = PlannerService.should_start_with_minimal_prompt(
+        ctx.prompt,
+        ctx.orchestration_state.project_context,
+    )
+    trigger = "planner_heuristic" if start else None
+    if workspace_review.get("has_existing_files"):
+        start = True
+        trigger = trigger or "workspace_has_existing_files"
+    if planning_prompt_tokens > MINIMAL_PROMPT_TOKEN_THRESHOLD:
+        start = True
+        trigger = "dense_planning_context"
+        # Always compress project_context when the prompt is dense.  Later
+        # tasks in a session accumulate workspace files that inflate the
+        # project_context even when no debug/completed steps exist, causing
+        # dense_planning_context failures for beta-python and gamma-docs tasks.
+        compressed = compress_project_context(ctx.orchestration_state)
+        if compressed:
+            ctx.orchestration_state.project_context = compressed
+            ctx.logger.info(
+                "[ORCHESTRATION] Context compressed for dense planning (%d chars)",
+                len(compressed),
+            )
+    return start, trigger
+
+
 def _retry_with_minimal_prompt(
     *,
     ctx: OrchestrationRunContext,

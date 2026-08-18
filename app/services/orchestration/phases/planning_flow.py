@@ -140,6 +140,7 @@ from app.services.orchestration.phases.planning_support import (
     _repair_root_cause_from_plan_verdict,
     _repair_planning_output as __repair_planning_output,
     _retry_with_minimal_prompt as __retry_with_minimal_prompt,
+    select_minimal_prompt_first_strategy as __select_minimal_prompt_first_strategy,
     _semantic_codes_for_immediate_repair_issues,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
@@ -368,31 +369,14 @@ def execute_planning_phase(
     )
 
     planning_timeout_seconds = clamp_planning_timeout(ctx.timeout_seconds)
-    start_with_minimal_planning_prompt = (
-        PlannerService.should_start_with_minimal_prompt(
-            ctx.prompt,
-            ctx.orchestration_state.project_context,
+    start_with_minimal_planning_prompt, minimal_prompt_first_trigger = (
+        __select_minimal_prompt_first_strategy(
+            ctx=ctx,
+            workspace_review=workspace_review,
+            planning_prompt_tokens=planning_prompt_tokens,
+            compress_project_context=_compress_project_context_for_planning,
         )
     )
-    if workspace_review.get("has_existing_files"):
-        start_with_minimal_planning_prompt = True
-    # Qwen3.5-35B has a 128 k context window; 2200 tokens is far too
-    # conservative.  Use 8000 tokens (~6000 words) as the boundary
-    # so normal project contexts get the full planning prompt.
-    MINIMAL_PROMPT_TOKEN_THRESHOLD = 8000
-    if planning_prompt_tokens > MINIMAL_PROMPT_TOKEN_THRESHOLD:
-        start_with_minimal_planning_prompt = True
-        # Always compress project_context when the prompt is dense.
-        # Later tasks in a session accumulate workspace files that inflate the
-        # project_context even when no debug/completed steps exist, causing
-        # dense_planning_context failures for beta-python and gamma-docs tasks.
-        _compressed = _compress_project_context_for_planning(ctx.orchestration_state)
-        if _compressed:
-            ctx.orchestration_state.project_context = _compressed
-            ctx.logger.info(
-                "[ORCHESTRATION] Context compressed for dense planning (%d chars)",
-                len(_compressed),
-            )
     used_minimal_planning_prompt = start_with_minimal_planning_prompt
 
     if start_with_minimal_planning_prompt:
@@ -401,13 +385,25 @@ def execute_planning_phase(
             ctx.emit_live,
             level="WARN",
             phase="planning",
-            message="[ORCHESTRATION] Planning context is dense; starting with minimal prompt",
+            message=(
+                "[ORCHESTRATION] Planning context is dense; starting with minimal prompt"
+                if minimal_prompt_first_trigger == "dense_planning_context"
+                else (
+                    "[ORCHESTRATION] Starting with the minimal planning prompt "
+                    f"({minimal_prompt_first_trigger})"
+                )
+            ),
             details={
                 "strategy": "minimal_prompt_first",
+                "minimal_prompt_first_trigger": minimal_prompt_first_trigger,
                 "project_context_length": len(
                     ctx.orchestration_state.project_context or ""
                 ),
                 "estimated_prompt_tokens": planning_prompt_tokens,
+                # ``planning_prompt_ref`` above describes the assembled prompt,
+                # which is not sent on this path; the ref for the prompt that is
+                # actually sent is emitted by the minimal-prompt retry helper.
+                "assembled_planning_prompt_sent": False,
             },
         )
         planning_result = __retry_with_minimal_prompt(

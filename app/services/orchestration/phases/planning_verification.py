@@ -83,6 +83,37 @@ def _commands_are_weak_expected_file_verification(commands: Any) -> bool:
     )
 
 
+def _write_file_content_verification_target(
+    step: dict[str, Any], expected_files: list[str]
+) -> tuple[str, str] | None:
+    """Derive a (path, needle) content check from a step's own `write_file` op.
+
+    The planner already carries the exact bytes it intends to write, so the
+    content proof does not need to be authored by the model.  Returns None when
+    no declared `write_file` op has content usable as a distinctive needle.
+    """
+
+    for operation in step.get("ops") or []:
+        if not isinstance(operation, dict):
+            continue
+        if str(operation.get("op") or "").strip() != "write_file":
+            continue
+        path = str(operation.get("path") or "").strip().lstrip("./")
+        if not path or path not in expected_files:
+            continue
+        content = operation.get("content")
+        if not isinstance(content, str):
+            continue
+        candidates = [line.strip() for line in content.splitlines() if line.strip()]
+        if not candidates:
+            continue
+        needle = max(candidates, key=len)
+        if len(needle) < 8:
+            continue
+        return path, needle[:120]
+    return None
+
+
 def _strengthen_weak_expected_file_verifications(
     plan: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -113,6 +144,17 @@ def _strengthen_weak_expected_file_verifications(
                     grep_target[0],
                     grep_target[1],
                 )
+            if ValidatorService._verification_is_weak(updated.get("verification")):
+                content_target = _write_file_content_verification_target(
+                    updated, expected_files
+                )
+                if content_target:
+                    updated["verification"] = (
+                        _python_file_contains_verification_command(
+                            content_target[0],
+                            content_target[1],
+                        )
+                    )
         if (
             expected_files
             and _commands_are_weak_expected_file_verification(updated.get("commands"))
