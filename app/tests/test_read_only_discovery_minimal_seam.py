@@ -180,6 +180,22 @@ def test_empty_search_is_bounded_no_result_evidence():
     assert "result_count: 0" in render_discovery_observation(observation)
 
 
+def test_search_falls_back_without_ripgrep(monkeypatch):
+    sentinel = REPO_ROOT / "app/tasks/maintenance.py"
+    before = sentinel.read_bytes()
+    monkeypatch.setattr(
+        "app.services.orchestration.planning.read_only_discovery.shutil.which",
+        lambda _executable: None,
+    )
+    monkeypatch.setenv("PATH", "")
+
+    _request, observation = _search()
+
+    assert observation.result_count <= MAX_SEARCH_RESULTS
+    assert "app/tasks/maintenance.py" in set(observation.materialization_paths())
+    assert sentinel.read_bytes() == before
+
+
 def test_search_uses_shell_false_and_caps_many_results(monkeypatch):
     calls = []
     output = "\n".join(
@@ -194,6 +210,10 @@ def test_search_uses_shell_false_and_caps_many_results(monkeypatch):
     monkeypatch.setattr(
         "app.services.orchestration.planning.read_only_discovery.subprocess.run",
         fake_run,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.planning.read_only_discovery.shutil.which",
+        lambda _executable: "/usr/bin/rg",
     )
     request = parse_discovery_request(
         '{"action":"search_text","query":"scheduled_task_execution","paths":["app/tasks"]}'
@@ -222,6 +242,10 @@ def test_invented_search_result_fails_closed_without_materialization(monkeypatch
     monkeypatch.setattr(
         "app.services.orchestration.planning.read_only_discovery.subprocess.run",
         fake_run,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.planning.read_only_discovery.shutil.which",
+        lambda _executable: "/usr/bin/rg",
     )
     request = parse_discovery_request(
         '{"action":"search_text","query":"x","paths":["app/tasks"]}'

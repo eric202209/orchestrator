@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 from typing import Any, Callable
 
 from app.config import settings
@@ -354,7 +355,9 @@ def _execute_search(root: Path, request: DiscoveryRequest) -> DiscoveryObservati
     assert request.query is not None
     for relative_path in request.paths:
         _observe_entry(root, relative_path)
-    executable = shutil.which("rg") or "rg"
+    executable = shutil.which("rg")
+    if executable is None:
+        return _execute_python_search(root, request)
     argv = [
         executable,
         "-n",
@@ -413,6 +416,92 @@ def _execute_search(root: Path, request: DiscoveryRequest) -> DiscoveryObservati
         if len(hits) >= MAX_SEARCH_RESULTS:
             truncated = True
             break
+    return DiscoveryObservation(
+        action="search_text",
+        status="completed",
+        paths=tuple(request.paths),
+        hits=tuple(hits),
+        truncated=truncated,
+        reason="no_matches" if not hits else None,
+    )
+
+
+def _execute_python_search(
+    root: Path, request: DiscoveryRequest
+) -> DiscoveryObservation:
+    """Search with the standard library when the optional rg binary is absent."""
+    assert request.query is not None
+    import app.services.orchestration.validation.path_authority as path_authority
+
+    try:
+        pattern = re.compile(request.query)
+    except re.error as exc:
+        raise DiscoveryContractError("discovery_search_failed") from exc
+
+    deadline = time.monotonic() + settings.READ_ONLY_INSPECTION_TIMEOUT_SECONDS
+    hits: list[SearchHit] = []
+    output_bytes = 0
+    truncated = False
+    stop = False
+
+    def candidate_files():
+        for relative_path in request.paths:
+            evidence = _observe_entry(root, relative_path)
+            full_path = root.joinpath(*relative_path.split("/"))
+            if evidence.entry_type == path_authority.EntryType.REGULAR_FILE:
+                yield full_path, relative_path
+                continue
+            for directory, dir_names, file_names in os.walk(
+                full_path, topdown=True, followlinks=False
+            ):
+                dir_path = Path(directory)
+                dir_names[:] = sorted(
+                    name for name in dir_names if not (dir_path / name).is_symlink()
+                )
+                for file_name in sorted(file_names):
+                    candidate = dir_path / file_name
+                    if candidate.is_symlink():
+                        continue
+                    yield candidate, candidate.relative_to(root).as_posix()
+
+    for full_path, relative_path in candidate_files():
+        if time.monotonic() > deadline:
+            raise DiscoveryContractError("discovery_search_execution_failed")
+        _observe_entry(root, relative_path, require_file=True)
+        try:
+            handle = full_path.open("rb")
+        except OSError as exc:
+            raise DiscoveryContractError("discovery_search_execution_failed") from exc
+        with handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                if time.monotonic() > deadline:
+                    raise DiscoveryContractError("discovery_search_execution_failed")
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not pattern.search(line):
+                    continue
+                snippet = _bounded_text(line, MAX_SNIPPET_CHARS)
+                rendered = f"{relative_path}:{line_number}:{snippet}\n".encode(
+                    "utf-8", errors="replace"
+                )
+                if output_bytes + len(rendered) > MAX_OBSERVATION_BYTES:
+                    truncated = True
+                    stop = True
+                    break
+                output_bytes += len(rendered)
+                hits.append(
+                    SearchHit(
+                        path=relative_path,
+                        line_number=line_number,
+                        snippet=snippet,
+                    )
+                )
+                if len(hits) >= MAX_SEARCH_RESULTS:
+                    truncated = True
+                    stop = True
+                    break
+        if stop:
+            break
+
     return DiscoveryObservation(
         action="search_text",
         status="completed",
