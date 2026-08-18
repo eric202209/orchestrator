@@ -145,14 +145,6 @@ from app.services.workspace.system_settings import get_effective_policy_profile
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
 )
-from app.services.orchestration.grounded_execution import (
-    GROUNDED_EXECUTION_PROFILE,
-    GroundedExecutionError,
-    GroundedRuntimeService,
-    admit_grounded_submission,
-    complete_grounded_task,
-    grounded_failure_result,
-)
 from app.services.session.session_execution_service import (
     mark_execution_cancelled,
     mark_execution_failed,
@@ -315,7 +307,6 @@ def execute_orchestration_task(
     queued_event_id: Optional[str] = None,
     planning_backend_override: Optional[str] = None,
     planning_escalation_metadata: Optional[Dict[str, Any]] = None,
-    grounded_submission: Optional[Dict[str, Any]] = None,
 ):
     """
     Execute an orchestration task with multi-step runtime coordination
@@ -369,7 +360,6 @@ def execute_orchestration_task(
     # one; only non-canonical task-subfolder dispatch leaves it None.
     _runtime_context: Optional[RuntimeExecutorContext] = None
     runtime_service = None
-    grounded_lane = isinstance(grounded_submission, dict)
 
     # Phase 23D-3: if this worker process is force-terminated (SIGTERM, e.g.
     # via the intervention/pause path's `revoke_session_celery_tasks
@@ -417,87 +407,54 @@ def execute_orchestration_task(
         if not session or not task:
             raise ValueError("Session or task not found")
 
-        # The grounded lane is detected before runtime configuration is
-        # resolved.  A resumed envelope is loaded only to identify the lane;
-        # the normal checkpoint restore below remains authoritative for state.
-        grounded_lane = isinstance(grounded_submission, dict)
-        if not grounded_lane and resume_checkpoint_name:
-            try:
-                _resume_probe = CheckpointService(db).load_resume_checkpoint(
-                    session_id=session_id,
-                    checkpoint_name=resume_checkpoint_name,
-                )
-                _resume_state = _resume_probe.get("orchestration_state") or {}
-                if isinstance(_resume_state.get("grounded_execution_envelope"), dict):
-                    grounded_submission = dict(
-                        _resume_state["grounded_execution_envelope"]
-                    )
-                    grounded_lane = True
-            except Exception:
-                # The authoritative load below reports the normal checkpoint
-                # error.  A probe must never change legacy dispatch behavior.
-                pass
-
         planner_contract = None
         if isinstance(context, dict) and isinstance(
             context.get("planner_contract"), dict
         ):
             planner_contract = dict(context["planner_contract"])
 
-        if grounded_lane:
-            execution_configuration = None
-            planning_configuration = None
-            resolved_planning_backend = None
-            _resolved_execution_backend = "provider_free_grounded"
-            runtime_selection = {
-                "execution_kind": "grounded_external_submission",
-                "provider_free": True,
-            }
-        else:
-            execution_configuration = resolve_runtime_configuration(
-                db,
-                BackendRole.EXECUTION,
-            )
-            planning_configuration = resolve_runtime_configuration(
-                db,
-                BackendRole.PLANNING,
-            )
-            validate_runtime_provider_contract(
-                db,
-                BackendRole.EXECUTION,
-                runtime_configuration=execution_configuration,
-            )
-            validate_runtime_provider_contract(db, BackendRole.DEBUG_REPAIR)
-            _resolved_execution_backend = execution_configuration.backend_name
-            resolved_planning_backend = planning_configuration.backend_name
+        execution_configuration = resolve_runtime_configuration(
+            db,
+            BackendRole.EXECUTION,
+        )
+        planning_configuration = resolve_runtime_configuration(
+            db,
+            BackendRole.PLANNING,
+        )
+        validate_runtime_provider_contract(
+            db,
+            BackendRole.EXECUTION,
+            runtime_configuration=execution_configuration,
+        )
+        validate_runtime_provider_contract(db, BackendRole.DEBUG_REPAIR)
+        _resolved_execution_backend = execution_configuration.backend_name
+        resolved_planning_backend = planning_configuration.backend_name
 
         if task_execution_id is None:
             task_execution = create_task_execution(
                 db,
                 session_id=session_id,
                 task_id=task_id,
-                grounded_execution=grounded_lane,
             )
             task_execution_id = task_execution.id
         else:
             task_execution = get_task_execution(db, task_execution_id)
 
-        if not grounded_lane:
-            identity_projection = build_runtime_identity_projection(
-                db,
-                task_execution=task_execution,
-                task_execution_id=task_execution_id,
-                planning_configuration=planning_configuration,
-                execution_configuration=execution_configuration,
-            )
-            runtime_selection = _runtime_selection_details(
-                db,
-                task_execution=task_execution,
-                task_execution_id=task_execution_id,
-                planning_configuration=planning_configuration,
-                execution_configuration=execution_configuration,
-                identity_projection=identity_projection,
-            )
+        identity_projection = build_runtime_identity_projection(
+            db,
+            task_execution=task_execution,
+            task_execution_id=task_execution_id,
+            planning_configuration=planning_configuration,
+            execution_configuration=execution_configuration,
+        )
+        runtime_selection = _runtime_selection_details(
+            db,
+            task_execution=task_execution,
+            task_execution_id=task_execution_id,
+            planning_configuration=planning_configuration,
+            execution_configuration=execution_configuration,
+            identity_projection=identity_projection,
+        )
 
         def emit_live(
             level: str, message: str, metadata: Optional[Dict[str, Any]] = None
@@ -566,17 +523,13 @@ def execute_orchestration_task(
                 )
 
         execution_profile = (
-            GROUNDED_EXECUTION_PROFILE
-            if grounded_lane
-            else (
-                getattr(task, "execution_profile", None)
-                or getattr(session, "default_execution_profile", None)
-                or "full_lifecycle"
-            )
+            getattr(task, "execution_profile", None)
+            or getattr(session, "default_execution_profile", None)
+            or "full_lifecycle"
         )
         persisted_execution_profile = execution_profile
         execution_profile_source = _EXECUTION_PROFILE_SOURCE_TASK_ROW
-        if not grounded_lane and _should_force_review_execution_profile(
+        if _should_force_review_execution_profile(
             execution_profile,
             task.description if task else None,
             task.title if task else None,
@@ -602,8 +555,7 @@ def execute_orchestration_task(
             else None
         )
         runs_in_canonical_baseline = bool(
-            not grounded_lane
-            and project
+            project
             and task
             and _should_execute_in_canonical_project_root(
                 task,
@@ -780,9 +732,6 @@ def execute_orchestration_task(
             project_context=context.get("project_context", "") if context else "",
             task_id=task_id,  # Pass task ID for subfolder generation
             planner_contract=planner_contract,
-            grounded_execution_envelope=(
-                dict(grounded_submission) if grounded_lane else None
-            ),
         )
 
         # If project has workspace_path configured, use it
@@ -1175,8 +1124,8 @@ def execute_orchestration_task(
 
         # --- Backend concurrency slot acquisition ---
         _eff_backend = _resolved_execution_backend
-        _bd = None if grounded_lane else get_backend_descriptor(_eff_backend)
-        if _bd is not None and _bd.capabilities.max_parallel_sessions is not None:
+        _bd = get_backend_descriptor(_eff_backend)
+        if _bd.capabilities.max_parallel_sessions is not None:
             try:
                 from app.services.agents.backend_concurrency import (
                     acquire_backend_slot,
@@ -1296,11 +1245,7 @@ def execute_orchestration_task(
                 claim_started_at or task.started_at or datetime.now(timezone.utc)
             ),
         )
-        if (
-            not grounded_lane
-            and task_execution is not None
-            and hasattr(task_execution, "backend_id")
-        ):
+        if task_execution is not None and hasattr(task_execution, "backend_id"):
             task_execution.backend_id = _resolved_execution_backend
         if task_execution is not None:
             try:
@@ -1347,12 +1292,8 @@ def execute_orchestration_task(
             )
 
         # Initialize the active runtime service
-        runtime_service = (
-            GroundedRuntimeService(session_id=session_id, task_id=task_id)
-            if grounded_lane
-            else create_agent_runtime(
-                db, session_id, task_id, role=BackendRole.EXECUTION
-            )
+        runtime_service = create_agent_runtime(
+            db, session_id, task_id, role=BackendRole.EXECUTION
         )
         if hasattr(runtime_service, "task_execution_id"):
             runtime_service.task_execution_id = task_execution_id
@@ -1373,16 +1314,12 @@ def execute_orchestration_task(
             else {}
         )
         planning_runtime_metadata = None
-        use_configured_planning_runtime = (
-            False
-            if grounded_lane
-            else should_use_configured_planning_runtime(
-                planning_backend_override=planning_backend_override,
-                planning_config=planning_configuration,
-                execution_config=execution_configuration,
-                resolved_planning_backend=resolved_planning_backend,
-                resolved_execution_backend=_resolved_execution_backend,
-            )
+        use_configured_planning_runtime = should_use_configured_planning_runtime(
+            planning_backend_override=planning_backend_override,
+            planning_config=planning_configuration,
+            execution_config=execution_configuration,
+            resolved_planning_backend=resolved_planning_backend,
+            resolved_execution_backend=_resolved_execution_backend,
         )
         if use_configured_planning_runtime:
             planning_runtime_service = create_agent_runtime(
@@ -1433,29 +1370,22 @@ def execute_orchestration_task(
                     },
                 )
         effective_guidance_planning_backend = (
-            "provider_free_grounded"
-            if grounded_lane
-            else (planning_backend_override or resolved_planning_backend)
+            planning_backend_override or resolved_planning_backend
         )
         guidance_runtime_metadata = (
             planning_runtime_metadata
             if planning_runtime_metadata is not None
             else runtime_metadata
         )
-        if grounded_lane:
-            guidance_backend = "provider_free_grounded"
-            guidance_model_name = None
-            guidance_model_family = None
-        else:
-            guidance_target = resolve_guidance_runtime_target(
-                backend=effective_guidance_planning_backend,
-                runtime_metadata=guidance_runtime_metadata,
-                planning_backend=effective_guidance_planning_backend,
-                execution_backend=_resolved_execution_backend,
-            )
-            guidance_backend = guidance_target["backend"]
-            guidance_model_name = guidance_target["model_name"]
-            guidance_model_family = guidance_target["model_family"]
+        guidance_target = resolve_guidance_runtime_target(
+            backend=effective_guidance_planning_backend,
+            runtime_metadata=guidance_runtime_metadata,
+            planning_backend=effective_guidance_planning_backend,
+            execution_backend=_resolved_execution_backend,
+        )
+        guidance_backend = guidance_target["backend"]
+        guidance_model_name = guidance_target["model_name"]
+        guidance_model_family = guidance_target["model_family"]
         logger.info(
             "[HG_BACKEND] planning_backend=%s execution_backend=%s guidance_backend=%s model_name=%s model_family=%s",
             effective_guidance_planning_backend,
@@ -1464,33 +1394,32 @@ def execute_orchestration_task(
             guidance_model_name,
             guidance_model_family,
         )
-        if not grounded_lane:
-            trace_context_manager = start_langfuse_observation(
-                name="orchestrator-task-run",
-                as_type="agent",
-                input=build_text_trace_payload(prompt),
-                metadata={
-                    "project_id": project.id if project else None,
-                    "project_name": project.name if project else None,
-                    "session_id": session_id,
-                    "task_id": task_id,
-                    "task_execution_id": task_execution_id,
-                    "execution_profile": execution_profile,
-                    "resume_checkpoint_name": resume_checkpoint_name,
-                    "backend": runtime_metadata.get("backend"),
-                    "model_family": runtime_metadata.get("model_family"),
-                    "adaptation_profile": runtime_metadata.get("adaptation_profile"),
-                },
-            )
-            trace_observation = trace_context_manager.__enter__()
-        if not grounded_lane and trace_observation is not None:
+        trace_context_manager = start_langfuse_observation(
+            name="orchestrator-task-run",
+            as_type="agent",
+            input=build_text_trace_payload(prompt),
+            metadata={
+                "project_id": project.id if project else None,
+                "project_name": project.name if project else None,
+                "session_id": session_id,
+                "task_id": task_id,
+                "task_execution_id": task_execution_id,
+                "execution_profile": execution_profile,
+                "resume_checkpoint_name": resume_checkpoint_name,
+                "backend": runtime_metadata.get("backend"),
+                "model_family": runtime_metadata.get("model_family"),
+                "adaptation_profile": runtime_metadata.get("adaptation_profile"),
+            },
+        )
+        trace_observation = trace_context_manager.__enter__()
+        if trace_observation is not None:
             logger.info(
                 "[LANGFUSE] Started orchestration trace for session=%s task=%s backend=%s",
                 session_id,
                 task_id,
                 runtime_metadata.get("backend") or "unknown",
             )
-        elif not grounded_lane and langfuse_tracing_enabled():
+        elif langfuse_tracing_enabled():
             logger.warning(
                 "[LANGFUSE] Tracing enabled but orchestration trace did not start for session=%s task=%s",
                 session_id,
@@ -1629,21 +1558,8 @@ def execute_orchestration_task(
                 prompt=prompt,
                 emit_live=emit_live,
             )
-            if (
-                grounded_lane
-                and orchestration_state.plan
-                and not resume_workspace_compatibility.get("compatible", True)
-            ):
-                raise GroundedExecutionError(
-                    "STALE_GROUNDING",
-                    "grounded_checkpoint_workspace_drift",
-                    "Grounded resume workspace no longer matches the checkpoint",
-                    partial_work=bool(orchestration_state.changed_files),
-                )
-            if (
-                not grounded_lane
-                and orchestration_state.plan
-                and not resume_workspace_compatibility.get("compatible", True)
+            if orchestration_state.plan and not resume_workspace_compatibility.get(
+                "compatible", True
             ):
                 if not explicit_resume_request:
                     fallback_checkpoint_names = [
@@ -1779,7 +1695,7 @@ def execute_orchestration_task(
                     )
                     _clear_resume_execution_state(compatibility_error)
 
-            if not grounded_lane and orchestration_state.plan:
+            if orchestration_state.plan:
                 orchestration_state.plan = _normalize_plan_with_live_logging(
                     db,
                     session_id,
@@ -1916,99 +1832,41 @@ def execute_orchestration_task(
             planner_contract=planner_contract,
         )
 
-        if grounded_lane:
-            if resume_checkpoint_name:
-                envelope = getattr(
-                    orchestration_state, "grounded_execution_envelope", None
-                )
-                if not isinstance(envelope, dict) or not orchestration_state.plan:
-                    raise GroundedExecutionError(
-                        "VALIDATION_FAILED",
-                        "grounded_checkpoint_envelope_missing",
-                        "Grounded resume requires the checkpointed execution envelope",
-                    )
-                # A resumed worker attempt may own a new TaskExecution row;
-                # the accepted Plan identity, APA, envelope operations, and
-                # completed StepResults remain checkpoint-authoritative.
-                envelope["task_execution_id"] = task_execution_id
-                envelope["attempt_number"] = int(
-                    getattr(task_execution, "attempt_number", 1) or 1
-                )
-            else:
-                envelope, grounded_verdict = admit_grounded_submission(
-                    grounded_submission or {},
-                    project_dir=Path(orchestration_state.project_dir),
-                    project_id=project.id if project else 0,
-                    task_id=task_id,
-                    session_id=session_id,
-                    task_execution_id=task_execution_id,
-                    attempt_number=int(
-                        getattr(task_execution, "attempt_number", 1) or 1
-                    ),
-                    session_instance_id=session.instance_id,
-                    prompt=prompt,
-                    title=getattr(task, "title", None),
-                    description=getattr(task, "description", None),
-                    validation_severity=active_policy.validation_severity,
-                )
-                orchestration_state.grounded_execution_envelope = envelope
-                orchestration_state.plan = list(envelope["normalized_plan"])
-                task.steps = json.dumps(orchestration_state.plan)
-                _record_validation_verdict(
-                    db,
-                    session_id,
-                    task_id,
-                    orchestration_state,
-                    grounded_verdict,
-                )
-                db.commit()
+        from app.services.orchestration.planning.planner_contract_registry import (
+            planner_grounding_evidence,
+        )
 
-        if grounded_lane:
+        emit_live(
+            "INFO",
+            "[ORCHESTRATION] Planner contract grounding propagated",
+            metadata={
+                "event_type": "planner_contract_grounding_propagated",
+                "phase": "planning",
+                "planner_grounding": planner_grounding_evidence(
+                    planner_contract,
+                    runtime_context={
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "task_execution_id": task_execution_id,
+                        "project_context_available": bool(
+                            orchestration_state.project_context
+                        ),
+                        "execution_profile": execution_profile,
+                        "workflow_stage": getattr(task, "workflow_stage", None),
+                        "planning_backend": resolved_planning_backend,
+                        "project_dir": str(orchestration_state.project_dir),
+                    },
+                ),
+            },
+        )
 
-            def planner_grounding_evidence(*_args, **_kwargs):
-                return {"status": "skipped", "reason": "grounded_execution_lane"}
-
-        else:
-            from app.services.orchestration.planning.planner_contract_registry import (
-                planner_grounding_evidence,
-            )
-
-        if not grounded_lane:
-            emit_live(
-                "INFO",
-                "[ORCHESTRATION] Planner contract grounding propagated",
-                metadata={
-                    "event_type": "planner_contract_grounding_propagated",
-                    "phase": "planning",
-                    "planner_grounding": planner_grounding_evidence(
-                        planner_contract,
-                        runtime_context={
-                            "session_id": session_id,
-                            "task_id": task_id,
-                            "task_execution_id": task_execution_id,
-                            "project_context_available": bool(
-                                orchestration_state.project_context
-                            ),
-                            "execution_profile": execution_profile,
-                            "workflow_stage": getattr(task, "workflow_stage", None),
-                            "planning_backend": resolved_planning_backend,
-                            "project_dir": str(orchestration_state.project_dir),
-                        },
-                    ),
-                },
-            )
-
-        gate_error = (
-            None
-            if grounded_lane
-            else _run_virtual_merge_gate(
-                db=db,
-                project=project,
-                current_task=task,
-                execution_profile=execution_profile,
-                get_state_manager_path_fn=_get_state_manager_path,
-                profile_source=execution_profile_source,
-            )
+        gate_error = _run_virtual_merge_gate(
+            db=db,
+            project=project,
+            current_task=task,
+            execution_profile=execution_profile,
+            get_state_manager_path_fn=_get_state_manager_path,
+            profile_source=execution_profile_source,
         )
         if gate_error:
             admission_metadata = getattr(gate_error, "admission_metadata", {})
@@ -2469,56 +2327,50 @@ def execute_orchestration_task(
                 status_message=str(step_loop_result.get("reason") or "")[:500] or None,
             )
         if step_loop_result.get("status") == "completed":
-            if grounded_lane:
-                step_loop_result = complete_grounded_task(ctx=run_ctx)
-            else:
-                with start_langfuse_observation(
-                    name="task-summary-phase",
-                    as_type="span",
-                    input={
-                        "completed_steps": len(
-                            getattr(orchestration_state, "completed_steps", []) or []
-                        ),
-                        "execution_results": len(
-                            orchestration_state.execution_results or []
-                        ),
-                    },
-                    metadata={
-                        "session_id": session_id,
-                        "task_id": task_id,
-                        "phase": "task_summary",
-                        "execution_profile": execution_profile,
-                    },
-                ) as task_summary_observation:
-                    step_loop_result = _CompletionCoordinator().complete_task(
-                        ctx=run_ctx,
-                        write_project_state_snapshot_fn=_write_project_state_snapshot,
-                        get_next_pending_project_task_fn=_get_next_pending_project_task,
-                        get_latest_session_task_link_fn=_get_latest_session_task_link,
-                        execute_orchestration_task_delay_fn=execute_orchestration_task.delay,
-                        build_task_report_payload_fn=_build_task_report_payload,
-                        render_task_report_fn=_render_task_report,
-                    )
-                    update_langfuse_observation(
-                        task_summary_observation,
-                        output=step_loop_result,
-                        metadata={"phase": "task_summary"},
-                        level=(
-                            "ERROR"
-                            if step_loop_result.get("status") == "failed"
-                            else None
-                        ),
-                        status_message=str(step_loop_result.get("reason") or "")[:500]
-                        or None,
-                    )
-        if trace_observation is not None:
-            update_langfuse_observation(
-                trace_observation,
-                output=step_loop_result,
-                level="ERROR" if step_loop_result.get("status") == "failed" else None,
-                status_message=str(step_loop_result.get("reason") or "")[:500] or None,
-            )
-        if step_loop_result.get("status") == "failed" and not grounded_lane:
+            with start_langfuse_observation(
+                name="task-summary-phase",
+                as_type="span",
+                input={
+                    "completed_steps": len(
+                        getattr(orchestration_state, "completed_steps", []) or []
+                    ),
+                    "execution_results": len(
+                        orchestration_state.execution_results or []
+                    ),
+                },
+                metadata={
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "phase": "task_summary",
+                    "execution_profile": execution_profile,
+                },
+            ) as task_summary_observation:
+                step_loop_result = _CompletionCoordinator().complete_task(
+                    ctx=run_ctx,
+                    write_project_state_snapshot_fn=_write_project_state_snapshot,
+                    get_next_pending_project_task_fn=_get_next_pending_project_task,
+                    get_latest_session_task_link_fn=_get_latest_session_task_link,
+                    execute_orchestration_task_delay_fn=execute_orchestration_task.delay,
+                    build_task_report_payload_fn=_build_task_report_payload,
+                    render_task_report_fn=_render_task_report,
+                )
+                update_langfuse_observation(
+                    task_summary_observation,
+                    output=step_loop_result,
+                    metadata={"phase": "task_summary"},
+                    level=(
+                        "ERROR" if step_loop_result.get("status") == "failed" else None
+                    ),
+                    status_message=str(step_loop_result.get("reason") or "")[:500]
+                    or None,
+                )
+        update_langfuse_observation(
+            trace_observation,
+            output=step_loop_result,
+            level="ERROR" if step_loop_result.get("status") == "failed" else None,
+            status_message=str(step_loop_result.get("reason") or "")[:500] or None,
+        )
+        if step_loop_result.get("status") == "failed":
             _emit_task1_product_event(
                 "task1_execution_failed",
                 reason=str(step_loop_result.get("reason") or "task_failed"),
@@ -2585,43 +2437,6 @@ def execute_orchestration_task(
 
         if isinstance(exc, _CeleryRetry):
             raise
-        if grounded_lane:
-            grounded_error = (
-                exc
-                if isinstance(exc, GroundedExecutionError)
-                else GroundedExecutionError(
-                    "EXECUTION_FAILED",
-                    "grounded_worker_failed_closed",
-                    "Grounded execution failed closed",
-                    partial_work=bool(
-                        orchestration_state
-                        and getattr(orchestration_state, "changed_files", [])
-                    ),
-                )
-            )
-            if run_ctx is not None:
-                return grounded_failure_result(ctx=run_ctx, error=grounded_error)
-            task_execution = get_task_execution(db, task_execution_id)
-            if task_execution is not None:
-                mark_execution_failed(
-                    task=task,
-                    session_task_link=session_task_link,
-                    task_execution=task_execution,
-                    error_message=f"{grounded_error.family}:{grounded_error.subcode}",
-                    completed_at=datetime.now(timezone.utc),
-                    workspace_status=(
-                        "blocked" if grounded_error.partial_work else "isolated"
-                    ),
-                )
-            if session is not None:
-                mark_session_failed(
-                    session,
-                    failed_at=datetime.now(timezone.utc),
-                    alert_level="error",
-                    alert_message=f"{grounded_error.family}:{grounded_error.subcode}",
-                )
-            db.commit()
-            return grounded_error.to_result()
         try:
             _fail_cat = classify_failure(
                 str(exc),

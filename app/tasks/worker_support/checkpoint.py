@@ -52,9 +52,6 @@ def _apply_checkpoint_payload(
         )
 
     orchestration_state.plan = checkpoint_state.get("plan", []) or []
-    orchestration_state.grounded_execution_envelope = checkpoint_state.get(
-        "grounded_execution_envelope"
-    )
     orchestration_state.reasoning_artifact = checkpoint_state.get("reasoning_artifact")
     orchestration_state.current_step_index = (
         checkpoint_state.get(

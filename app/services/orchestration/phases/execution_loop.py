@@ -135,12 +135,6 @@ from app.services.orchestration.validation.workspace_guard import (
     detect_scope_violations,
     summarize_step_changes,
 )
-from app.services.orchestration.grounded_execution import (
-    GROUNDED_EXECUTION_PROFILE,
-    GroundedExecutionError,
-    grounded_failure_result,
-    revalidate_grounded_step,
-)
 from app.services.orchestration.context.hitl_sentinel import (
     parse as _parse_hitl_sentinel,
 )
@@ -372,12 +366,6 @@ def execute_step_loop(
     emit_live = ctx.emit_live
     error_handler = ctx.error_handler
     restore_workspace_snapshot_if_needed = ctx.restore_workspace_snapshot_if_needed
-    grounded_execution = (
-        ctx.execution_profile == GROUNDED_EXECUTION_PROFILE
-        and isinstance(
-            getattr(orchestration_state, "grounded_execution_envelope", None), dict
-        )
-    )
 
     try:
         accepted_path_authority = load_accepted_path_authority(
@@ -580,22 +568,6 @@ def execute_step_loop(
         rollback_command = step.get("rollback")
         expected_files = step.get("expected_files", [])
 
-        # Grounded steps are already normalized to one structured operation.
-        # Keeping the existing loop gives them the same session stop,
-        # checkpoint, lease, scope, and StepResult lifecycle while the
-        # command/provider repair branches remain unreachable.
-        if grounded_execution:
-            step_commands = []
-            step["commands"] = []
-            try:
-                revalidate_grounded_step(
-                    orchestration_state.grounded_execution_envelope,
-                    project_dir=Path(orchestration_state.project_dir),
-                    step_index=step_index,
-                )
-            except GroundedExecutionError as grounded_error:
-                return grounded_failure_result(ctx=ctx, error=grounded_error)
-
         if step_needs_command_repair(step):
             repaired_step = None
             for repair_attempt in range(1, 3):
@@ -732,16 +704,6 @@ def execute_step_loop(
             orchestration_state.project_dir, expected_files
         )
 
-        if grounded_execution:
-            try:
-                revalidate_grounded_step(
-                    orchestration_state.grounded_execution_envelope,
-                    project_dir=Path(orchestration_state.project_dir),
-                    step_index=step_index,
-                )
-            except GroundedExecutionError as grounded_error:
-                return grounded_failure_result(ctx=ctx, error=grounded_error)
-
         ops_result = ExecutorService.execute_file_ops(
             Path(orchestration_state.project_dir),
             step_ops,
@@ -807,28 +769,6 @@ def execute_step_loop(
             not ops_result.get("success", False)
             and ops_result.get("failure_category") == "validation_failure"
         ):
-            if grounded_execution:
-                return grounded_failure_result(
-                    ctx=ctx,
-                    error=GroundedExecutionError(
-                        (
-                            "STALE_GROUNDING"
-                            if (ops_result.get("resolver_status") or "")
-                            in {"UNSAFE_TARGET", "INVALID_AUTHORITY"}
-                            else "EXECUTION_FAILED"
-                        ),
-                        str(
-                            (ops_result.get("authority_error") or {}).get("code")
-                            or "executor_authority_rejected"
-                        ),
-                        "Grounded mutation failed closed at the executor boundary",
-                        evidence={
-                            "step_index": step_index + 1,
-                            "status": "rejected",
-                        },
-                        partial_work=step_index > 0,
-                    ),
-                )
             authority_error = ops_result.get("authority_error") or {}
             terminal_message = (
                 f"Structured mutation denied before filesystem mutation on step "
@@ -1428,22 +1368,6 @@ def execute_step_loop(
             ):
                 task.steps = json.dumps(orchestration_state.plan)
             orchestration_state.record_success(step_record)
-            if grounded_execution:
-                grounded_envelope = orchestration_state.grounded_execution_envelope
-                grounded_envelope["current_step_index"] = (
-                    orchestration_state.current_step_index
-                )
-                grounded_envelope["execution_results"] = [
-                    {
-                        "step_number": result.step_number,
-                        "status": result.status,
-                        "files_changed": list(result.files_changed or []),
-                    }
-                    for result in orchestration_state.execution_results
-                ]
-                grounded_envelope["changed_files"] = list(
-                    dict.fromkeys(orchestration_state.changed_files)
-                )
             tool_events = [
                 event
                 for event in (
@@ -1482,18 +1406,6 @@ def execute_step_loop(
                 metadata={"phase": "executing", "step_index": step_index + 1},
             )
             continue
-
-        if grounded_execution:
-            return grounded_failure_result(
-                ctx=ctx,
-                error=GroundedExecutionError(
-                    "EXECUTION_FAILED",
-                    "grounded_step_failed",
-                    "Grounded step failed without an automatic repair path",
-                    evidence={"step_index": step_index + 1},
-                    partial_work=step_index > 0,
-                ),
-            )
 
         if _is_terminal_verification_only_failure(
             step=step,

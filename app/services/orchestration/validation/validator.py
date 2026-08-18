@@ -2057,43 +2057,37 @@ class ValidatorService:
                 )
                 details["python_package_root_contract"] = package_root_violation
 
-            # Grounded V1-B carries a typed verification policy outside the
-            # legacy shell-shaped step field.  Its verification is executed
-            # through the provider-free Candidate subset after mutation, so
-            # requiring a legacy command here would force an unsafe shell
-            # fallback or a fake command into the accepted Plan.
-            if execution_profile != "grounded_external_submission":
-                missing_verification_steps = cls._plan_missing_verification_steps(plan)
-                if missing_verification_steps:
-                    repairable.append(
-                        "Plan is missing verification commands for implementation-heavy work "
-                        f"(steps: {missing_verification_steps[:5]})"
-                    )
-                    details["missing_verification_steps"] = missing_verification_steps
+            missing_verification_steps = cls._plan_missing_verification_steps(plan)
+            if missing_verification_steps:
+                repairable.append(
+                    "Plan is missing verification commands for implementation-heavy work "
+                    f"(steps: {missing_verification_steps[:5]})"
+                )
+                details["missing_verification_steps"] = missing_verification_steps
 
-                weak_verification_steps = [
-                    step.get("step_number")
+            weak_verification_steps = [
+                step.get("step_number")
+                for step in plan
+                if step.get("step_number") not in missing_verification_steps
+                and not cls._step_is_readonly_inspection(step)
+                and cls._verification_is_weak(step.get("verification"))
+            ]
+            if weak_verification_steps:
+                repairable.append(
+                    "Plan uses weak verification for implementation-heavy work "
+                    f"(steps: {weak_verification_steps[:5]})"
+                )
+                details["weak_verification_steps"] = weak_verification_steps
+                details["verification_command_quality"] = [
+                    {
+                        "step_number": step.get("step_number"),
+                        "command_quality": classify_verification_command(
+                            step.get("verification")
+                        ),
+                    }
                     for step in plan
-                    if step.get("step_number") not in missing_verification_steps
-                    and not cls._step_is_readonly_inspection(step)
-                    and cls._verification_is_weak(step.get("verification"))
+                    if step.get("step_number") in weak_verification_steps
                 ]
-                if weak_verification_steps:
-                    repairable.append(
-                        "Plan uses weak verification for implementation-heavy work "
-                        f"(steps: {weak_verification_steps[:5]})"
-                    )
-                    details["weak_verification_steps"] = weak_verification_steps
-                    details["verification_command_quality"] = [
-                        {
-                            "step_number": step.get("step_number"),
-                            "command_quality": classify_verification_command(
-                                step.get("verification")
-                            ),
-                        }
-                        for step in plan
-                        if step.get("step_number") in weak_verification_steps
-                    ]
 
             if cls._plan_contains_placeholder_intent(plan, task_prompt):
                 repairable.append(
