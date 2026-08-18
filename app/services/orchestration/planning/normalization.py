@@ -8,8 +8,16 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Tuple
 
 from app.services.orchestration.operations.file_ops_contract import (
+    REPLACE_IN_FILE_OLD_ALIASES,
     ReplaceOperationMode,
     classify_replace_operation,
+)
+from app.services.orchestration.planning.operation_repair_anchors import (
+    DERIVATION_BLANK_LINE_TOLERANT,
+    derive_operation_anchors,
+)
+from app.services.orchestration.planning.source_operation_verification import (
+    resolve_version_fenced_source,
 )
 
 
@@ -367,6 +375,189 @@ def _synthesize_single_return_file_write(
     current_lines[current_index] = indent + new_line.strip()
     trailing_newline = "\n" if current_content.endswith("\n") else ""
     return "\n".join(current_lines) + trailing_newline
+
+
+MAX_ANCHOR_REALIGNMENT_SOURCE_CHARS = 500_000
+
+
+def _significant_lines(text: str) -> list[str]:
+    return [line for line in text.splitlines() if line.strip()]
+
+
+def _legacy_old_key(operation: dict[str, Any]) -> str | None:
+    """Return the key this operation actually stores its legacy anchor under."""
+
+    if isinstance(operation.get("old"), str):
+        return "old"
+    present = [
+        key
+        for key in REPLACE_IN_FILE_OLD_ALIASES
+        if isinstance(operation.get(key), str)
+    ]
+    return present[0] if len(present) == 1 else None
+
+
+def _blank_line_realigned_anchor(
+    *,
+    step_number: int,
+    operation_index: int,
+    relative_path: str,
+    version_identity: str,
+    old_text: str,
+    new_text: Any,
+    full_source: str,
+) -> str | None:
+    """Return the exact source region that differs from ``old_text`` only by blank lines.
+
+    ``derive_operation_anchors`` is the existing Orchestrator-owned anchor
+    authority, but only its blank-line-tolerant derivation is substitutable
+    here.  The minimal-divergent derivation deliberately returns a *smaller*
+    region than the operation addressed, which is sound only in operation
+    repair, where the model re-authors ``new`` for the chosen anchor.  Injecting
+    it while keeping the model's original ``new`` would replace a trimmed region
+    with the full replacement text and corrupt the file, so it is excluded.
+    """
+
+    anchors = derive_operation_anchors(
+        step_number=step_number,
+        operation_index=operation_index,
+        relative_path=relative_path,
+        version_identity=version_identity,
+        original_old=old_text,
+        original_new=new_text,
+        full_source=full_source,
+    )
+    for anchor in anchors:
+        if anchor.derivation != DERIVATION_BLANK_LINE_TOLERANT:
+            continue
+        # Re-checked here rather than trusted: no non-blank line outside the
+        # model's own ``old`` may enter the anchor, and the anchor must occur
+        # exactly once in the version-fenced source.
+        if _significant_lines(anchor.text) != _significant_lines(old_text):
+            continue
+        if full_source.count(anchor.text) != 1:
+            continue
+        return anchor.text
+    return None
+
+
+def normalize_blank_line_divergent_replace_anchors(
+    plan: list[dict[str, Any]],
+    *,
+    project_dir: Path,
+    source_materialization: Any,
+) -> Tuple[list[dict[str, Any]], Dict[str, Any]]:
+    """Restore the file's own blank lines into legacy ``replace_in_file`` anchors.
+
+    The model is asked for *which* region to change; it is not a reliable
+    serializer of the exact current bytes of that region, and the whitespace
+    between a file's own line groups is the part it most often drops.  Where the
+    version-fenced current source contains exactly one region whose significant
+    lines are precisely the model's ``old``, that region — not the model's
+    reconstruction — is the authoritative anchor, and it is substituted here.
+
+    Everything else fails closed exactly as before: no fuzzy or first match, no
+    path change, no whole-file escalation, no anchor invented when the model
+    supplied none, and no operation touched once an earlier operation in the
+    same plan has already mutated that path, because the in-plan buffer rather
+    than the disk is the authority there.
+    """
+
+    root = Path(project_dir).resolve()
+    changed = False
+    normalized_anchors: list[dict[str, Any]] = []
+    mutated_paths: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+
+    for step_index, step in enumerate(plan, start=1):
+        if not isinstance(step, dict):
+            normalized.append(step)
+            continue
+        step_number = step.get("step_number")
+        if isinstance(step_number, bool) or not isinstance(step_number, int):
+            step_number = step_index
+        updated = dict(step)
+        ops: list[dict[str, Any]] = []
+        for operation_index, op in enumerate(updated.get("ops") or [], start=1):
+            if not isinstance(op, dict):
+                continue
+            rewritten_op = dict(op)
+            ops.append(rewritten_op)
+            path_text = _path_text(rewritten_op.get("path"))
+            op_name = str(rewritten_op.get("op") or "").strip()
+            if op_name != "replace_in_file":
+                if op_name in {"write_file", "append_file"} and path_text:
+                    mutated_paths.add(path_text)
+                continue
+            already_mutated = path_text in mutated_paths
+            if path_text:
+                mutated_paths.add(path_text)
+            if already_mutated:
+                continue
+            if (
+                classify_replace_operation(rewritten_op)
+                is not ReplaceOperationMode.LEGACY_REPLACE
+            ):
+                continue
+            # A stray `target_id` alongside a legacy anchor is a Phase 33
+            # contract failure heading for its own deterministic rejection.
+            # It must never be rescued into a working legacy replace here.
+            if "target_id" in rewritten_op or "selector" in rewritten_op:
+                continue
+            if not _safe_relative_file_path(path_text):
+                continue
+            old_key = _legacy_old_key(rewritten_op)
+            if old_key is None:
+                continue
+            old_text = rewritten_op[old_key]
+            if not old_text:
+                continue
+            resolved = resolve_version_fenced_source(
+                source_materialization, path_text, root
+            )
+            if resolved.failure_code is not None:
+                continue
+            full_source = resolved.full_content
+            if not full_source or len(full_source) > (
+                MAX_ANCHOR_REALIGNMENT_SOURCE_CHARS
+            ):
+                continue
+            if old_text in full_source:
+                continue
+            anchor_text = _blank_line_realigned_anchor(
+                step_number=step_number,
+                operation_index=operation_index,
+                relative_path=path_text,
+                version_identity=resolved.recorded_version_identity or "",
+                old_text=old_text,
+                new_text=rewritten_op.get("new"),
+                full_source=full_source,
+            )
+            if anchor_text is None:
+                continue
+            rewritten_op[old_key] = anchor_text
+            changed = True
+            normalized_anchors.append(
+                {
+                    "step_number": step_number,
+                    "operation_index": operation_index,
+                    "path": path_text,
+                    "derivation": DERIVATION_BLANK_LINE_TOLERANT,
+                    "source_version_identity": resolved.recorded_version_identity,
+                }
+            )
+        _set_ops_preserving_absence(updated, ops)
+        normalized.append(updated)
+
+    return normalized, {
+        "changed": changed,
+        "reason": (
+            "blank_line_divergent_replace_anchor_realigned"
+            if changed
+            else "no_blank_line_divergent_replace_anchor"
+        ),
+        "normalized_anchors": normalized_anchors,
+    }
 
 
 def normalize_stale_replace_ops_to_small_file_writes(

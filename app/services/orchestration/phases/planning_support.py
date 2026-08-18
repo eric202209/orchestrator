@@ -13,6 +13,9 @@ from app.models import TaskExecution, TaskStatus
 from app.services.orchestration.context.assembly import compress_orchestration_context
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
+from app.services.orchestration.planning.normalization import (
+    normalize_blank_line_divergent_replace_anchors,
+)
 from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairNoOutputTimeout,
@@ -82,6 +85,36 @@ def _planner_workspace_identity(
 # Use 8000 tokens (~6000 words) as the boundary so normal project contexts get
 # the full planning prompt.
 MINIMAL_PROMPT_TOKEN_THRESHOLD = 8000
+
+
+def apply_replace_anchor_realignment(
+    ctx: OrchestrationRunContext, plan: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Restore the file's own blank lines into legacy replace anchors, and report it.
+
+    Lives here rather than in ``planning_flow`` only because that module is
+    under a line-count extraction gate.
+    """
+
+    plan, report = normalize_blank_line_divergent_replace_anchors(
+        plan,
+        project_dir=ctx.orchestration_state.project_dir,
+        source_materialization=ctx.planner_source_materialization,
+    )
+    if report.get("changed"):
+        ctx.logger.info(
+            "[ORCHESTRATION] Realigned replace anchors onto current source: %s",
+            report,
+        )
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="INFO",
+            phase="planning",
+            message="[ORCHESTRATION] Realigned replace anchors onto current source",
+            details=report,
+        )
+    return plan
 
 
 def select_minimal_prompt_first_strategy(

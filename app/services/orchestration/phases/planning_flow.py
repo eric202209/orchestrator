@@ -111,6 +111,7 @@ from app.services.orchestration.phases.planning_support import (
     TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
     _PlanningRetryState,
     _abort_missing_source_materialization_repair,
+    apply_replace_anchor_realignment as _apply_replace_anchor_realignment,
     _abort_repeated_physical_src_import_repair,
     _abort_root_cause_oscillation_repair_loop,
     _build_reasoning_artifact,
@@ -1292,6 +1293,7 @@ def execute_planning_phase(
                     message="[ORCHESTRATION] Normalized plan file targets to existing workspace paths",
                     details=file_target_normalization,
                 )
+            sanitized_plan = _apply_replace_anchor_realignment(ctx, sanitized_plan)
             sanitized_plan, stale_replace_normalization = (
                 normalize_stale_replace_ops_to_small_file_writes(
                     sanitized_plan,

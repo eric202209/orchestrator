@@ -28,9 +28,15 @@ REPLACEMENT_NEW = "def value():\n\n    return 2\n"
 MINIMAL_ANCHOR_ID = "anchor-1-1-1"
 MINIMAL_ANCHOR_OLD = "    return 1"
 MINIMAL_ANCHOR_NEW = "    return 2"
+# `STALE_OLD` diverges from the current source only by the file's own blank
+# line, so it is now realigned deterministically before validation and never
+# reaches the operation-repair lane. Routing itself is exercised with an anchor
+# that names a line the file does not contain, which no derivation can realign.
+UNREALIGNABLE_STALE_OLD = "def helper():\n    return 1\n"
+UNREALIGNABLE_NEW = "def helper():\n    return 2\n"
 
 
-def _plan(old: str) -> list[dict]:
+def _plan(old: str, new: str = REPLACEMENT_NEW) -> list[dict]:
     return [
         {
             "step_number": 1,
@@ -41,7 +47,7 @@ def _plan(old: str) -> list[dict]:
                     "op": "replace_in_file",
                     "path": TARGET,
                     "old": old,
-                    "new": REPLACEMENT_NEW,
+                    "new": new,
                 }
             ],
             "verification": "python3 -m py_compile pkg/current.py",
@@ -164,7 +170,8 @@ def _pin_materialization(tmp_path, monkeypatch):
         staticmethod(
             lambda plan, *args, **kwargs: (
                 {"stale_replace_ops_steps": [1]}
-                if plan and plan[0]["ops"][0].get("old") == STALE_OLD
+                if plan
+                and plan[0]["ops"][0].get("old") in {STALE_OLD, UNREALIGNABLE_STALE_OLD}
                 else {}
             )
         ),
@@ -200,12 +207,12 @@ def _isolate_flow(monkeypatch):
 
 
 def test_production_flow_repairs_only_rejected_operation_once(tmp_path, monkeypatch):
-    initial = _plan(STALE_OLD)
+    initial = _plan(UNREALIGNABLE_STALE_OLD, UNREALIGNABLE_NEW)
     accepted = _plan(CURRENT_OLD)
     # The operation lane reconstructs the operation from the Orchestrator-owned
     # anchor, so the repaired step carries the anchor text rather than the
     # model's widened block.
-    anchored = _plan(MINIMAL_ANCHOR_OLD)
+    anchored = _plan(MINIMAL_ANCHOR_OLD, UNREALIGNABLE_NEW)
     anchored[0]["ops"][0]["new"] = MINIMAL_ANCHOR_NEW
     ctx = _context(tmp_path, initial)
     _pin_materialization(tmp_path, monkeypatch)
@@ -235,10 +242,9 @@ def test_production_flow_repairs_only_rejected_operation_once(tmp_path, monkeypa
     rejected = json.loads(prompt)["rejected_operations"][0]
     # The stale anchor is withheld and the exact source anchors are supplied.
     assert "old" not in rejected["original_rejected_operation"]
-    assert STALE_OLD not in prompt
+    assert UNREALIGNABLE_STALE_OLD not in prompt
     assert [anchor["anchor_id"] for anchor in rejected["authorized_anchors"]] == [
-        MINIMAL_ANCHOR_ID,
-        "anchor-1-1-2",
+        MINIMAL_ANCHOR_ID
     ]
     assert rejected["authorized_anchors"][0]["old"] == MINIMAL_ANCHOR_OLD
     assert "pkg/new.py" not in prompt
@@ -247,7 +253,7 @@ def test_production_flow_repairs_only_rejected_operation_once(tmp_path, monkeypa
 def test_invalid_operation_merge_stops_without_complete_plan_second_call(
     tmp_path, monkeypatch
 ):
-    ctx = _context(tmp_path, _plan(STALE_OLD))
+    ctx = _context(tmp_path, _plan(UNREALIGNABLE_STALE_OLD, UNREALIGNABLE_NEW))
     _pin_materialization(tmp_path, monkeypatch)
     operation_calls = []
     complete_plan_calls = []
@@ -273,3 +279,41 @@ def test_invalid_operation_merge_stops_without_complete_plan_second_call(
     }
     assert len(operation_calls) == 1
     assert complete_plan_calls == []
+
+
+def test_blank_line_divergent_anchor_never_reaches_the_operation_repair_lane(
+    tmp_path, monkeypatch
+):
+    """The blank-line case is resolved before validation, so no repair runs.
+
+    `STALE_OLD` reproduces every significant line of the current source and
+    loses only the blank line the file itself carries. Orchestrator owns those
+    bytes, so the anchor is realigned first-path and the operation-repair lane
+    -- and its provider call -- is never entered.
+    """
+
+    ctx = _context(tmp_path, _plan(STALE_OLD))
+    _pin_materialization(tmp_path, monkeypatch)
+    operation_calls = []
+    complete_plan_calls = []
+
+    def repair_operations(cls, **kwargs):
+        operation_calls.append(kwargs)
+        return {"output": _repair_response(), "operation_repair_provider_call_count": 1}
+
+    def repair_output(cls, *args, **kwargs):
+        complete_plan_calls.append(kwargs)
+        return {"output": "[]"}
+
+    monkeypatch.setattr(
+        PlannerService, "repair_operations", classmethod(repair_operations)
+    )
+    monkeypatch.setattr(PlannerService, "repair_output", classmethod(repair_output))
+
+    result = _run(ctx)
+
+    assert result == {"status": "completed"}
+    assert operation_calls == []
+    assert complete_plan_calls == []
+    assert ctx.orchestration_state.plan[0]["ops"][0]["old"] == CURRENT_OLD.rstrip("\n")
+    assert ctx.orchestration_state.plan[0]["ops"][0]["new"] == REPLACEMENT_NEW

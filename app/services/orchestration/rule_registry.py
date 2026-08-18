@@ -96,5 +96,40 @@ RULE_REGISTRY: dict[str, RuntimeRule] = {
             ),
             allowed_to_expand=False,
         ),
+        RuntimeRule(
+            rule_id="blank_line_divergent_replace_anchor_realignment",
+            owner_layer="workload_contract",
+            scope=(
+                "Legacy replace_in_file ops whose model-supplied `old` is absent "
+                "from the version-fenced current source, where that source "
+                "contains exactly one region whose significant lines are exactly "
+                "the supplied `old` -- i.e. only the file's own blank lines "
+                "diverge. The exact source region replaces the model's "
+                "reconstruction. Blank-line-tolerant derivation only; the "
+                "minimal-divergent derivation is excluded because it returns a "
+                "trimmed region that is sound only when the model re-authors "
+                "`new`. Never fires for semantic/mixed replace ops, for a path "
+                "already mutated earlier in the same plan, or for any other "
+                "divergence."
+            ),
+            source_location=(
+                "app/services/orchestration/planning/normalization.py:372 "
+                "(normalize_blank_line_divergent_replace_anchors)"
+            ),
+            negative_tests=[
+                "test_ambiguous_realignment_fails_closed",
+                "test_intra_line_whitespace_divergence_is_not_rescued",
+                "test_elided_interior_line_is_not_rescued",
+                "test_minimal_divergent_anchor_is_never_substituted_first_path",
+                "test_source_version_change_fails_closed",
+                "test_path_already_mutated_earlier_in_plan_is_not_realigned",
+            ],
+            exit_condition=(
+                "Remove when the Planning contract no longer asks the model for "
+                "a byte-exact `old` at all. Do not extend to fuzzy, first-match, "
+                "intra-line whitespace, or non-contiguous matching."
+            ),
+            allowed_to_expand=False,
+        ),
     ]
 }
