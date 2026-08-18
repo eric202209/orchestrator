@@ -98,6 +98,9 @@ class OrchestrationState:
     project_context: str = ""
     task_id: Optional[int] = None  # For generating task subfolder
     planner_contract: Optional[Dict[str, Any]] = None
+    # Provider-free grounded submissions are persisted in existing checkpoint
+    # JSON; this is not a new job/model identity.
+    grounded_execution_envelope: Optional[Dict[str, Any]] = None
     plan: List[Dict[str, Any]] = field(default_factory=list)
     current_step_index: int = 0
     execution_results: List[StepResult] = field(default_factory=list)

@@ -130,6 +130,7 @@ def select_candidate_verification(
     allow_broad_fallback: bool = False,
     observed_scope: Sequence[str] | None = None,
     verification_scope: Sequence[str] | None = None,
+    run_focused_tests: bool = False,
 ) -> CandidateVerificationSelection:
     """Select the smallest deterministic test scope owned by the candidate."""
 
@@ -143,6 +144,18 @@ def select_candidate_verification(
         if verification_scope is None
         else (str(path) for path in verification_scope)
     )
+    if verification_scope is not None and run_focused_tests:
+        explicit_tests = tuple(
+            path
+            for path in scoped_paths
+            if _is_python_test(path) and (project_dir / path).is_file()
+        )
+        if explicit_tests:
+            return _pytest_selection(
+                project_dir,
+                explicit_tests,
+                source="grounded_focused_tests",
+            )
     changed_python_tests = tuple(
         path
         for path in observed_paths
@@ -264,6 +277,7 @@ def validate_candidate_delta(
     timeout_seconds: int = 180,
     observed_scope: Sequence[str] | None = None,
     verification_scope: Sequence[str] | None = None,
+    run_focused_tests: bool = False,
 ) -> CandidateCheckRun:
     """Run candidate-owned checks and return typed, attributed findings."""
 
@@ -275,6 +289,7 @@ def validate_candidate_delta(
         allow_broad_fallback=allow_broad_fallback,
         observed_scope=observed_scope,
         verification_scope=verification_scope,
+        run_focused_tests=run_focused_tests,
     )
     findings: list[CandidateFinding] = []
     commands_run: list[str] = []

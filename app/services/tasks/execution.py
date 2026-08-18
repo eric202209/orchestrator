@@ -126,10 +126,16 @@ def create_task_execution(
     task_id: int,
     status: TaskStatus = TaskStatus.PENDING,
     started_at: datetime | None = None,
+    grounded_execution: bool = False,
 ) -> TaskExecution:
-    identity = active_execution_identity(db)
+    # Grounded V1-B intentionally leaves provider/planning identity columns
+    # null.  It reuses TaskExecution lineage without manufacturing a
+    # PlanningSession, model, or provider configuration snapshot.
+    identity = {} if grounded_execution else active_execution_identity(db)
     identity.pop("execution_adaptation_profile", None)
-    planning_session = _originating_planning_session(db, task_id)
+    planning_session = (
+        None if grounded_execution else _originating_planning_session(db, task_id)
+    )
     if planning_session is not None:
         identity.update(
             {

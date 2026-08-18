@@ -670,6 +670,9 @@ def build_orchestration_state_snapshot(
         "related_event_id": related_event_id,
         "status": orchestration_state.status.value,
         "plan_steps": list(orchestration_state.plan or []),
+        "grounded_execution": bool(
+            getattr(orchestration_state, "grounded_execution_envelope", None)
+        ),
         "reasoning_artifact_present": bool(
             getattr(orchestration_state, "reasoning_artifact", None)
         ),
@@ -913,6 +916,7 @@ def save_orchestration_checkpoint(
         orchestration_state={
             "status": orchestration_state.status.value,
             "plan": orchestration_state.plan,
+            "grounded_execution_envelope": orchestration_state.grounded_execution_envelope,
             "reasoning_artifact": orchestration_state.reasoning_artifact,
             "current_step_index": orchestration_state.current_step_index,
             "debug_attempts": orchestration_state.debug_attempts,
@@ -1196,6 +1200,16 @@ def load_accepted_path_authority(
             "accepted authority belongs to a different logical workspace",
         )
     return authority
+
+
+def accepted_authority_for_verdict(verdict: Any):
+    """Return the existing APA projection through the persistence seam."""
+
+    from app.services.orchestration.validation.accepted_path_authority import (
+        accepted_path_authority_from_verdict,
+    )
+
+    return accepted_path_authority_from_verdict(verdict)
 
 
 def load_accepted_path_authority_for_execution(
