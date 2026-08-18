@@ -38,7 +38,9 @@ AUDITED_LIFECYCLE_FILES = [
 
 EXPECTED_SESSION_CALLS = {
     "app/tasks/worker.py": {
-        "mark_session_failed": 1,
+        # Legacy exception handling plus the provider-free grounded lane's
+        # explicit fail-closed terminal transition.
+        "mark_session_failed": 2,
         "mark_session_paused": 4,
         "mark_session_running": 1,
     },
