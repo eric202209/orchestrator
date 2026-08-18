@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -20,11 +21,8 @@ from app.services.orchestration.planning.planner import (
     PlannerService,
     PlanningRepairNoOutputTimeout,
 )
-from app.services.orchestration.operations.file_ops_contract import (
-    ReplaceOperationMode,
-    classify_replace_operation,
-)
 from app.services.orchestration.planning.source_materialization import (
+    materialized_source_file,
     plan_has_concrete_source_materialization,
     repair_context_requires_source_materialization,
 )
@@ -49,6 +47,8 @@ from app.services.orchestration.validation.validator import (
 from app.services.orchestration.prompt_templates import OrchestrationStatus
 
 MAX_PLANNING_RETRIES = 3
+STALE_REPLACE_TEXT_MAX_CHARS = 4096
+_STALE_REPLACE_TRUNCATION_MARKER = "\n...[truncated]...\n"
 TRUNCATED_PLAN_REPAIR_REJECTION_REASON = (
     "Output was cut off mid-stream. Ignore the broken output above. "
     "Produce a complete new JSON array from scratch."
@@ -877,7 +877,13 @@ def _plan_contract_diagnostics(
     return diagnostics
 
 
-def _terminal_validation_failure_details(plan_verdict: Any) -> dict[str, Any]:
+def _terminal_validation_failure_details(
+    plan_verdict: Any,
+    *,
+    plan: list | None = None,
+    retry_state: Any = None,
+    source_materialization: Any = None,
+) -> dict[str, Any]:
     details = {
         "reason": "planning_validation_failed_after_repair",
         "validation_reasons": list(plan_verdict.reasons or [])[:5],
@@ -886,6 +892,18 @@ def _terminal_validation_failure_details(plan_verdict: Any) -> dict[str, Any]:
     details.update(_brittle_command_diagnostic_details(plan_verdict.details))
     details.update(_truncated_multistep_diagnostic_details(plan_verdict.details))
     details.update(_shadow_warning_details(plan_verdict.details))
+    if plan is not None:
+        evidence = _extract_stale_replace_evidence_from_plan(
+            plan,
+            source_operation_findings=(plan_verdict.details or {}).get(
+                "source_operation_findings"
+            ),
+            source_materialization=source_materialization,
+        )
+        if evidence:
+            details["stale_replace_evidence"] = evidence
+    if retry_state is not None:
+        details["planning_root_cause"] = _terminal_planning_root_cause(retry_state)
     return details
 
 
@@ -1852,6 +1870,155 @@ def _model_lane_limitation_for_invalid_planning_commands(
     }
 
 
+def _bounded_stale_replace_text(value: Any) -> dict[str, Any]:
+    """Return a bounded, hashable representation of submitted operation text."""
+
+    if not isinstance(value, str):
+        return {
+            "text": None,
+            "length": None,
+            "sha256": None,
+            "truncated": False,
+        }
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    if len(value) <= STALE_REPLACE_TEXT_MAX_CHARS:
+        bounded = value
+        truncated = False
+    else:
+        keep = max(
+            0,
+            STALE_REPLACE_TEXT_MAX_CHARS - len(_STALE_REPLACE_TRUNCATION_MARKER),
+        )
+        prefix_length = keep // 2
+        suffix_length = keep - prefix_length
+        bounded = (
+            value[:prefix_length]
+            + _STALE_REPLACE_TRUNCATION_MARKER
+            + value[-suffix_length:]
+        )
+        truncated = True
+    return {
+        "text": bounded,
+        "length": len(value),
+        "sha256": digest,
+        "truncated": truncated,
+    }
+
+
+def _extract_stale_replace_evidence_from_plan(
+    plan: list | None,
+    stale_step_numbers: list[int] | None = None,
+    *,
+    source_operation_findings: list[dict[str, Any]] | None = None,
+    source_materialization: Any = None,
+) -> list[dict[str, Any]]:
+    """Retain bounded operation facts at the stale-old failure boundary."""
+
+    if not plan:
+        return []
+    stale_steps = {str(value) for value in stale_step_numbers or []}
+    findings_by_operation: dict[tuple[int, int], dict[str, Any]] = {}
+    for finding in source_operation_findings or []:
+        if not isinstance(finding, dict):
+            continue
+        if not str(finding.get("failure_code") or "").startswith("stale_old_text"):
+            continue
+        try:
+            key = (int(finding["step_number"]), int(finding["operation_index"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        findings_by_operation[key] = finding
+
+    evidence: list[dict[str, Any]] = []
+    for step_index, step in enumerate(plan, start=1):
+        if not isinstance(step, dict):
+            continue
+        declared_step_number = str(step.get("step_number") or step_index)
+        step_is_stale = declared_step_number in stale_steps
+        for operation_index, operation in enumerate(step.get("ops") or [], start=1):
+            if not isinstance(operation, dict):
+                continue
+            finding = findings_by_operation.get((step_index, operation_index))
+            if finding is None and findings_by_operation:
+                continue
+            if finding is None and not step_is_stale:
+                continue
+            if str(operation.get("op") or "").strip() != "replace_in_file":
+                continue
+
+            old_text = operation.get("old")
+            if old_text is None and "old_text" in operation:
+                old_text = operation.get("old_text")
+            new_text = operation.get("new")
+            if new_text is None and "new_text" in operation:
+                new_text = operation.get("new_text")
+            path = (
+                str(operation.get("path") or "").strip().replace("\\", "/").lstrip("./")
+            )
+            record = materialized_source_file(source_materialization, path)
+            old_fields = _bounded_stale_replace_text(old_text)
+            new_fields = _bounded_stale_replace_text(new_text)
+            evidence.append(
+                {
+                    "operation_index": operation_index,
+                    "step_number": step.get("step_number") or step_index,
+                    "normalized_relative_path": path or None,
+                    "submitted_old": old_fields["text"],
+                    "submitted_new": new_fields["text"],
+                    "submitted_old_length": old_fields["length"],
+                    "submitted_new_length": new_fields["length"],
+                    "submitted_old_sha256": old_fields["sha256"],
+                    "submitted_new_sha256": new_fields["sha256"],
+                    "submitted_old_truncated": old_fields["truncated"],
+                    "submitted_new_truncated": new_fields["truncated"],
+                    "source_version_identity": (
+                        (finding or {}).get("source_version_identity")
+                        or getattr(record, "version_identity", None)
+                    ),
+                    "source_status": getattr(record, "status", None),
+                    "semantic_target_id_present": bool(
+                        str(operation.get("target_id") or "").strip()
+                    ),
+                    "semantic_selector_present": bool(
+                        str(operation.get("selector") or "").strip()
+                    ),
+                    "stale_old_failure_code": "stale_replace_in_file_old_text",
+                }
+            )
+    return evidence
+
+
+def _planning_invalid_commands_after_repair_details(
+    *,
+    plan: list | None,
+    blocking_repair_issues: dict[str, list[int]],
+    blocking_plan_verdict: Any,
+    retry_state: Any,
+    model_lane_limitation: dict[str, Any],
+    source_materialization: Any,
+) -> dict[str, Any]:
+    details = {
+        "reason": "planning_invalid_commands_after_repair",
+        "blocking_repair_issues": blocking_repair_issues,
+        "planning_root_cause": _terminal_planning_root_cause(retry_state),
+        "stale_old_text": _extract_stale_old_text_from_plan(
+            plan, blocking_repair_issues.get("stale_replace_ops_steps")
+        ),
+    }
+    evidence = _extract_stale_replace_evidence_from_plan(
+        plan,
+        blocking_repair_issues.get("stale_replace_ops_steps"),
+        source_operation_findings=(blocking_plan_verdict.details or {}).get(
+            "source_operation_findings"
+        ),
+        source_materialization=source_materialization,
+    )
+    if evidence:
+        details["stale_replace_evidence"] = evidence
+    details.update(model_lane_limitation)
+    return details
+
+
 def _extract_stale_old_text_from_plan(
     plan: list | None,
     stale_step_numbers: list[int] | None,
@@ -1861,24 +2028,13 @@ def _extract_stale_old_text_from_plan(
     Used only to surface operator evidence in the rerun payload.
     Must not be injected into model prompts.
     """
-    if not plan or not stale_step_numbers:
-        return []
-    stale_set = set(stale_step_numbers)
-    texts: list[str] = []
-    for step in plan:
-        if not isinstance(step, dict):
-            continue
-        if step.get("step_number") not in stale_set:
-            continue
-        for op in step.get("ops") or []:
-            if (
-                isinstance(op, dict)
-                and classify_replace_operation(op)
-                is ReplaceOperationMode.LEGACY_REPLACE
-                and "old" in op
-            ):
-                texts.append(op["old"])
-    return texts
+    return [
+        item["submitted_old"]
+        for item in _extract_stale_replace_evidence_from_plan(plan, stale_step_numbers)
+        if item["submitted_old"] is not None
+        and not item["semantic_target_id_present"]
+        and not item["semantic_selector_present"]
+    ]
 
 
 def _is_repairable_malformed_shell_quoting_violation(exc: Exception) -> bool:

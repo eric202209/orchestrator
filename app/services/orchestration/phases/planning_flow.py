@@ -129,7 +129,7 @@ from app.services.orchestration.phases.planning_support import (
     _get_targeted_second_repair_reason,
     _is_repairable_malformed_shell_quoting_violation,
     _last_plan_output_snippet,
-    _extract_stale_old_text_from_plan,
+    _planning_invalid_commands_after_repair_details,
     _model_lane_limitation_for_invalid_planning_commands,
     _plan_contract_diagnostics,
     _planning_root_cause_from_immediate_repair_issues,
@@ -1717,20 +1717,14 @@ def execute_planning_phase(
                             "[ORCHESTRATION] Planning repair repeated stale exact "
                             "patches after bounded repair; recording model-lane limitation"
                         ),
-                        details={
-                            "reason": "planning_invalid_commands_after_repair",
-                            "blocking_repair_issues": blocking_repair_issues,
-                            "planning_root_cause": _terminal_planning_root_cause(
-                                retry_state
-                            ),
-                            "stale_old_text": _extract_stale_old_text_from_plan(
-                                ctx.orchestration_state.plan,
-                                (blocking_repair_issues or {}).get(
-                                    "stale_replace_ops_steps"
-                                ),
-                            ),
-                            **model_lane_limitation,
-                        },
+                        details=_planning_invalid_commands_after_repair_details(
+                            plan=ctx.orchestration_state.plan,
+                            blocking_repair_issues=blocking_repair_issues,
+                            blocking_plan_verdict=blocking_plan_verdict,
+                            retry_state=retry_state,
+                            model_lane_limitation=model_lane_limitation,
+                            source_materialization=ctx.planner_source_materialization,
+                        ),
                     )
                 _finalize_planning_terminal_failure(
                     ctx=ctx,
@@ -2164,12 +2158,12 @@ def execute_planning_phase(
                     level="ERROR",
                     phase="planning",
                     message="[ORCHESTRATION] Plan validation failed after repair",
-                    details={
-                        **_terminal_validation_failure_details(plan_verdict),
-                        "planning_root_cause": _terminal_planning_root_cause(
-                            retry_state
-                        ),
-                    },
+                    details=_terminal_validation_failure_details(
+                        plan_verdict,
+                        plan=ctx.orchestration_state.plan,
+                        retry_state=retry_state,
+                        source_materialization=ctx.planner_source_materialization,
+                    ),
                 )
                 failure_reason = "Plan validation failed after repair: " + "; ".join(
                     plan_verdict.reasons[:4]
