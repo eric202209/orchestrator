@@ -355,6 +355,9 @@ class OrchestrationRunContext:
     runtime_workspace_used: bool = False
     planner_contract: Optional[Dict[str, Any]] = None
     planner_source_materialization: Any = None
+    # Request-local advisory evidence; never persisted as planning authority.
+    read_only_observation: Any = None
+    read_only_discovery_completed: bool = False
 
     @property
     def policy_profile(self) -> PolicyProfile:

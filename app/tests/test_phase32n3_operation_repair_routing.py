@@ -16,13 +16,23 @@ from app.services.orchestration.planning.source_materialization import (
 from app.services.orchestration.validation.parsing import extract_structured_text
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.types import OrchestrationRunContext
-from app.tests.planner_timeout_test_helpers import _patch_planning_flow_external_writes
+from app.tests.planner_timeout_test_helpers import (
+    _patch_planning_flow_external_writes,
+    _stub_read_only_discovery_provider,
+)
 
 
 TARGET = "pkg/current.py"
 # The stale anchor drops a blank line the real file has, reproducing the
 # Phase 32N-3C provider defect the anchored contract exists to remove.
 CURRENT_OLD = "def value():\n\n    return 1\n"
+
+
+@pytest.fixture(autouse=True)
+def _stub_discovery(monkeypatch):
+    _stub_read_only_discovery_provider(monkeypatch)
+
+
 STALE_OLD = "def value():\n    return 1\n"
 REPLACEMENT_NEW = "def value():\n\n    return 2\n"
 MINIMAL_ANCHOR_ID = "anchor-1-1-1"

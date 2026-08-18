@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from app.tests.planner_timeout_test_helpers import _stub_read_only_discovery_provider
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -28,6 +29,13 @@ from app.models import (
     Task,
     TaskStatus,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_discovery(monkeypatch):
+    _stub_read_only_discovery_provider(monkeypatch)
+
+
 from app.schemas.knowledge import (
     KnowledgeContext,
     KnowledgeItemRef,

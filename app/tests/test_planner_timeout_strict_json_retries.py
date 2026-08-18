@@ -22,7 +22,13 @@ from app.services.orchestration.policy import PLANNING_REPAIR_TIMEOUT_SECONDS
 from app.tests.planner_timeout_test_helpers import (
     _valid_three_step_plan,
     _patch_planning_flow_external_writes,
+    _stub_read_only_discovery_provider,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_discovery(monkeypatch):
+    _stub_read_only_discovery_provider(monkeypatch)
 
 
 def test_planning_uses_workspace_plan_json_before_strict_retry(tmp_path, monkeypatch):

@@ -23,6 +23,13 @@ from app.services.orchestration.planning.planner import (
 from app.services.orchestration.types import OrchestrationRunContext
 
 from app.services.orchestration.validation.parsing import extract_structured_text
+from app.tests.planner_timeout_test_helpers import _stub_read_only_discovery_provider
+
+
+@pytest.fixture(autouse=True)
+def _stub_discovery(monkeypatch):
+    _stub_read_only_discovery_provider(monkeypatch)
+
 
 from app.tests.planner_timeout_test_helpers import _patch_planning_flow_external_writes
 

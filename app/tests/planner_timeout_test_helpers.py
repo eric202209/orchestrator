@@ -9,6 +9,25 @@ instead of being duplicated in each split file.
 from app.services.agents.openclaw_service import OpenClawSessionService
 
 
+def _stub_read_only_discovery_provider(monkeypatch):
+    """Keep legacy final-Plan unit scenarios provider-free after staging."""
+
+    from app.services.orchestration.planning.planner import PlannerService
+
+    original = PlannerService._execute_task_with_planning_lock
+
+    async def _wrapped(cls, runtime_service, prompt, **kwargs):
+        if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+            return {"status": "completed", "output": '{"action":"stop"}'}
+        return await original(runtime_service, prompt, **kwargs)
+
+    monkeypatch.setattr(
+        PlannerService,
+        "_execute_task_with_planning_lock",
+        classmethod(_wrapped),
+    )
+
+
 def _valid_three_step_plan():
     return [
         {

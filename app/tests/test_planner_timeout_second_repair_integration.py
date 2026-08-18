@@ -106,6 +106,8 @@ def test_post_repair_weak_verification_gets_one_targeted_second_repair(
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(initial_plan)}
 
     task = MagicMock()
@@ -240,6 +242,8 @@ def test_post_repair_weak_verification_second_repair_is_capped(tmp_path, monkeyp
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(weak_plan)}
 
     task = MagicMock()
@@ -379,6 +383,8 @@ def test_post_repair_python_source_syntax_gets_one_targeted_second_repair(
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(initial_plan)}
 
     task = MagicMock()
@@ -522,6 +528,8 @@ def test_post_repair_python_source_syntax_second_repair_is_capped(
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(broken_plan)}
 
     task = MagicMock()
@@ -754,6 +762,8 @@ def test_post_repair_argparse_framework_mismatch_gets_one_targeted_second_repair
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(initial_plan)}
 
     task = MagicMock()
@@ -903,6 +913,8 @@ def test_post_repair_argparse_framework_mismatch_second_repair_is_capped(
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(bad_plan)}
 
     task = MagicMock()
@@ -1023,6 +1035,8 @@ def test_post_repair_background_process_gets_one_targeted_second_repair(
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(initial_plan)}
 
     task = MagicMock()
@@ -1140,6 +1154,8 @@ def test_post_repair_missing_verification_gets_one_targeted_second_repair(
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(initial_plan)}
 
     task = MagicMock()
@@ -1300,6 +1316,8 @@ def test_post_repair_missing_verification_second_repair_is_capped(
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(missing_plan)}
 
     task = MagicMock()
@@ -1442,6 +1460,8 @@ def test_post_repair_missing_materialization_rejects_inspect_only_plan(
             return {}
 
         async def execute_task(self, *args, **kwargs):
+            if kwargs.get("diagnostic_label") == "PLANNING_DISCOVERY":
+                return {"status": "completed", "output": '{"action":"stop"}'}
             return {"status": "completed", "output": json.dumps(initial_plan)}
 
     task = MagicMock()

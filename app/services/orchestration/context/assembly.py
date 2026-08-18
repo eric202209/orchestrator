@@ -36,6 +36,9 @@ from app.services.orchestration.planning.source_materialization import (
     PlannerSourceMaterialization,
     materialize_planner_source_context,
 )
+from app.services.orchestration.planning.read_only_discovery import (
+    render_discovery_observation,
+)
 from app.services.workspace.system_settings import get_effective_adaptation_profile
 
 logger = logging.getLogger(__name__)
@@ -903,6 +906,11 @@ def assemble_planning_prompt(
     )
     if source_stub_context:
         raw_prompt = raw_prompt + "\n\n" + source_stub_context
+    read_only_observation_context = render_discovery_observation(
+        getattr(ctx, "read_only_observation", None)
+    )
+    if read_only_observation_context:
+        raw_prompt = raw_prompt + "\n\n" + read_only_observation_context
     source_materialization_context = planner_source_materialization.to_prompt_block(
         provider_safe=True
     )

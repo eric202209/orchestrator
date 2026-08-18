@@ -35,6 +35,12 @@ from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
     repair_removed_source_materialization as _repair_removed_source_materialization,
 )
+from app.services.orchestration.planning.read_only_discovery import (
+    DiscoveryContractError,
+    fail_closed_discovery,
+    materialize_observation_source_context,
+    run_discovery_stage,
+)
 from app.services.orchestration.planning.semantic_target_inventory import (
     SemanticTargetContractError,
     SemanticTargetInventoryError,
@@ -212,7 +218,6 @@ def execute_planning_phase(
         getattr(ctx.task, "title", None),
         getattr(ctx.task, "description", None),
     )
-    # Template workflow_profile overrides the heuristic-derived value.
     _tmpl_id = getattr(ctx.task, "template_id", None)
     if _tmpl_id:
         try:
@@ -227,35 +232,42 @@ def execute_planning_phase(
             pass
     ctx.workflow_phases = get_workflow_phases(ctx.workflow_profile)
     ctx.workspace_has_existing_files = bool(workspace_review.get("has_existing_files"))
-    ctx.planner_source_materialization = materialize_planner_source_context(
-        Path(ctx.orchestration_state.project_dir),
-        task_description=ctx.prompt,
+    planning_timeout_seconds = clamp_planning_timeout(ctx.timeout_seconds)
+    try:
+        discovery_observation = run_discovery_stage(
+            ctx=ctx,
+            planning_timeout_seconds=planning_timeout_seconds,
+            extract_structured_text=extract_structured_text,
+            planner_service=PlannerService,
+            emit_phase_event=emit_phase_event,
+        )
+    except (DiscoveryContractError, TimeoutError, OSError) as exc:
+        return fail_closed_discovery(
+            ctx=ctx,
+            reason="read_only_discovery_failed_closed",
+            detail=str(exc),
+            aborted_status=OrchestrationStatus.ABORTED,
+            emit_phase_event=emit_phase_event,
+            finalize_failure=_finalize_planning_terminal_failure,
+        )
+    ctx.planner_source_materialization = materialize_observation_source_context(
+        project_dir=Path(ctx.orchestration_state.project_dir),
+        prompt=ctx.prompt,
         planner_contract=ctx.planner_contract,
+        observation=discovery_observation,
+        materialize=materialize_planner_source_context,
     )
     if not ctx.planner_source_materialization.available:
-        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
-        ctx.orchestration_state.abort_reason = (
-            "Planning source materialization unavailable: "
-            + ", ".join(ctx.planner_source_materialization.unavailable_reasons[:8])
-        )
-        emit_phase_event(
-            ctx.orchestration_state,
-            ctx.emit_live,
-            level="ERROR",
-            phase="planning",
-            message=(
-                "[ORCHESTRATION] Planning source materialization unavailable; "
-                "failing closed before provider invocation"
+        return fail_closed_discovery(
+            ctx=ctx,
+            reason="planning_source_materialization_unavailable",
+            detail=", ".join(
+                ctx.planner_source_materialization.unavailable_reasons[:8]
             ),
-            details={
-                "reason": "planning_source_materialization_unavailable",
-                "source_materialization": ctx.planner_source_materialization.to_metadata(),
-            },
+            aborted_status=OrchestrationStatus.ABORTED,
+            emit_phase_event=emit_phase_event,
+            finalize_failure=_finalize_planning_terminal_failure,
         )
-        return {
-            "status": "failed",
-            "reason": "planning_source_materialization_unavailable",
-        }
     try:
         semantic_target_inventory = build_semantic_target_inventory(
             ctx.planner_source_materialization
@@ -369,7 +381,6 @@ def execute_planning_phase(
         },
     )
 
-    planning_timeout_seconds = clamp_planning_timeout(ctx.timeout_seconds)
     start_with_minimal_planning_prompt, minimal_prompt_first_trigger = (
         __select_minimal_prompt_first_strategy(
             ctx=ctx,
