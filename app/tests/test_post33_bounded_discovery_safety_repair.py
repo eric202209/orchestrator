@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.agents.openclaw_service import OpenClawSessionError
 from app.services.orchestration.execution.executor_workspace_binding import (
     bind_openclaw_workspace,
 )
@@ -168,6 +169,97 @@ def test_discovery_provider_timeout_is_wrapped_without_a_second_call(tmp_path: P
             emit_phase_event=lambda *args, **kwargs: None,
         )
     assert calls == [1]
+
+
+def test_2r_openclaw_timeout_shape_stays_terminal_through_worker_policy(
+    db_session, tmp_path: Path
+):
+    """Reproduce the retained OpenClaw timeout exception, not a generic timeout."""
+
+    calls = []
+    diagnostics = {
+        "stage": "read_only_discovery",
+        "diagnostic_label": "PLANNING_DISCOVERY",
+        "timeout_seconds": 120,
+        "timeout_with_cleanup_seconds": 150,
+        "duration_seconds": 150.323,
+        "timed_out": True,
+        "timeout_boundary": "planning_wait_for",
+        "activity_classification": "provider_process_timeout",
+        "cleanup_status": "completed",
+        "return_code": -9,
+        "stdout_chars": 0,
+    }
+    provider_timeout = OpenClawSessionError(
+        "Task execution failed: Task timed out after 120s"
+    )
+    provider_timeout.runtime_diagnostics = diagnostics
+
+    class _Planner:
+        @staticmethod
+        async def _execute_task_with_planning_lock(*args, **kwargs):
+            calls.append(1)
+            raise provider_timeout
+
+    discovery_ctx = SimpleNamespace(
+        read_only_discovery_completed=False,
+        runtime_service=object(),
+        prompt="inspect the existing defect",
+        orchestration_state=SimpleNamespace(project_context="", project_dir=tmp_path),
+        emit_live=lambda *args, **kwargs: None,
+        session_id=163,
+        task_id=220,
+        task_execution_id=303,
+    )
+    with pytest.raises(DiscoveryContractError) as caught:
+        run_discovery_stage(
+            ctx=discovery_ctx,
+            planning_timeout_seconds=120,
+            extract_structured_text=lambda value: str(value),
+            planner_service=_Planner,
+            emit_phase_event=lambda *args, **kwargs: None,
+        )
+
+    error = caught.value
+    assert calls == [1]
+    assert error.failure_category == "discovery_terminal_failure"
+    assert error.runtime_diagnostics == diagnostics
+
+    ctx, session, task, execution = _seed_ctx(
+        db_session, execution_mode="automatic", plan_position=1
+    )
+    ctx.error_handler = SimpleNamespace(should_retry=lambda _exc, _scope: True)
+    queue = []
+    reflection_calls = []
+    event = FailureClassifier.classify(error, SimpleNamespace())
+    decision = RecoveryStrategyRegistry.route(
+        event,
+        orchestration_state=SimpleNamespace(),
+        llm_callable=lambda _prompt: reflection_calls.append(True),
+    )
+    assert decision.strategy == "terminal"
+    assert reflection_calls == []
+
+    with pytest.raises(DiscoveryContractError):
+        FailureCoordinator().handle_failure(
+            self_task=_RetryCapableSelfTask(),
+            ctx=ctx,
+            exc=error,
+            get_latest_session_task_link_fn=lambda *args, **kwargs: ctx.session_task_link,
+            write_project_state_snapshot_fn=_NOOP,
+            save_orchestration_checkpoint_fn=_NOOP,
+            record_live_log_fn=_NOOP,
+            queue_task_for_session_fn=lambda **kwargs: queue.append(kwargs),
+        )
+
+    db_session.refresh(session)
+    db_session.refresh(task)
+    db_session.refresh(execution)
+    assert queue == []
+    assert session.status == "paused"
+    assert task.status.value == "failed"
+    assert execution.status.value == "failed"
+    assert execution.failure_category == "discovery_terminal_failure"
 
 
 def test_failure_coordinator_cannot_retry_terminal_discovery_failure(db_session):
