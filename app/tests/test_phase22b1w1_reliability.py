@@ -310,6 +310,11 @@ def test_nested_step_debug_repair_keeps_runtime_binding_until_provider_returns(
     assert observed["runtime"]._openclaw_config_path_override is None
     assert observed["runtime"].runtime_executor_context is None
     assert not observed["config_path"].exists()
+    # The primary runtime was bound directly for this seam test rather than
+    # through the worker's terminal finally; release its ephemeral provider
+    # config/state explicitly so the test cannot leave /tmp residue.
+    primary.release_runtime_workspace_binding()
+    assert primary._workspace_binding is None
     disposal = dispose_task_sandbox(
         TaskSandbox(
             path=runtime,

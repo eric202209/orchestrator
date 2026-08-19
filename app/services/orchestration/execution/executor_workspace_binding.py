@@ -129,15 +129,11 @@ def bind_openclaw_workspace(
         if isinstance(agent, dict) and str(agent.get("id") or "").strip() == agent_id:
             agent["workspace"] = str(context.runtime_workspace)
             agent["agentDir"] = str(agent_dir)
-            # The Runtime Workspace is an admitted repository execution
-            # surface, not a provider-owned onboarding surface. OpenClaw's
-            # normal bootstrap writes identity/scaffold files into the agent
-            # workspace on first use; keep that materialization out of the
-            # disposable task workspace while retaining the existing
-            # per-invocation state directory below.
-            agent["skipBootstrap"] = True
 
     defaults = (bound_config.setdefault("agents", {})).setdefault("defaults", {})
+    # OpenClaw 2026.4.10 owns this control at agents.defaults.  Agent entries
+    # are strict and reject the same key, so keep bootstrap suppression in the
+    # defaults object while retaining the per-invocation state directory below.
     defaults["workspace"] = str(context.runtime_workspace)
     defaults["skipBootstrap"] = True
     session = bound_config.setdefault("session", {})

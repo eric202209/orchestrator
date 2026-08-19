@@ -26,6 +26,7 @@ from app.services.orchestration.validation.git_containment_guard import (
 from app.services.orchestration.validation.runtime_pollution_guard import (
     detect_runtime_pollution,
     existing_known_scaffold_entries,
+    snapshot_workspace_entry_evidence,
     snapshot_top_level_entries,
 )
 from app.services.orchestration.validation.workspace_guard import (
@@ -462,6 +463,61 @@ def test_pollution_no_new_entries_is_clean(tmp_path):
     result = detect_runtime_pollution(before=before, after=after)
     assert result["pollution_detected"] is False
     assert result["new_top_level_entries"] == []
+
+
+def test_orchestrator_owned_sqlite_and_log_state_is_not_provider_pollution(
+    tmp_path,
+):
+    """Expected host-owned state must not mask the provider boundary."""
+
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("", encoding="utf-8")
+    (tmp_path / "app" / "celery_app.py").write_text("", encoding="utf-8")
+    (tmp_path / "orchestrator.db").write_bytes(b"db")
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "worker.log").write_text("before\n", encoding="utf-8")
+    (tmp_path / "orchestrator.db-wal").write_bytes(b"before\n")
+    (tmp_path / "orchestrator.db-shm").write_bytes(b"before\n")
+    before = snapshot_workspace_entry_evidence(tmp_path)
+
+    (tmp_path / "logs" / "worker.log").write_text("after\n", encoding="utf-8")
+    (tmp_path / "orchestrator.db-wal").write_bytes(b"after\n")
+    (tmp_path / "orchestrator.db-shm").write_bytes(b"after\n")
+    after = snapshot_workspace_entry_evidence(tmp_path)
+
+    result = detect_runtime_pollution(
+        before=before,
+        after=after,
+        canonical_root=tmp_path,
+        runtime_workspace=tmp_path / "runtime",
+    )
+
+    assert result["pollution_detected"] is False
+    assert result["execution_must_stop"] is False
+    assert sorted(result["expected_orchestrator_runtime_entries"]) == [
+        "logs",
+        "orchestrator.db-shm",
+        "orchestrator.db-wal",
+    ]
+
+
+def test_same_names_remain_pollution_outside_orchestrator_root(tmp_path):
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "orchestrator.db-wal").write_bytes(b"before\n")
+    before = snapshot_workspace_entry_evidence(tmp_path)
+    (tmp_path / "logs" / "provider.log").write_text("provider\n", encoding="utf-8")
+    (tmp_path / "orchestrator.db-wal").write_bytes(b"provider\n")
+    after = snapshot_workspace_entry_evidence(tmp_path)
+
+    result = detect_runtime_pollution(
+        before=before,
+        after=after,
+        canonical_root=tmp_path,
+        runtime_workspace=tmp_path / "runtime",
+    )
+
+    assert result["pollution_detected"] is True
+    assert result["execution_must_stop"] is True
 
 
 def test_existing_scaffold_entries_detected_even_without_a_diff(tmp_path):

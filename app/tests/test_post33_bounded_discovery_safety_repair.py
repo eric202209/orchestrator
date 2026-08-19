@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -81,8 +84,8 @@ def test_runtime_binding_blocks_provider_bootstrap_scaffold(tmp_path: Path):
         # provider creates these files in its configured workspace unless the
         # ephemeral config explicitly disables bootstrap materialization.
         assert defaults["skipBootstrap"] is True
-        assert agent["skipBootstrap"] is True
-        if not (defaults["skipBootstrap"] or agent["skipBootstrap"]):
+        assert "skipBootstrap" not in agent
+        if not defaults["skipBootstrap"]:
             for name in (
                 "HEARTBEAT.md",
                 "IDENTITY.md",
@@ -101,6 +104,62 @@ def test_runtime_binding_blocks_provider_bootstrap_scaffold(tmp_path: Path):
         binding.release()
     assert config_path.read_bytes() == original_config
     assert not state_dir.exists()
+
+
+def test_current_openclaw_parser_accepts_defaults_bootstrap_control(
+    tmp_path: Path,
+):
+    """Exercise the installed parser without starting a provider/model call."""
+
+    openclaw = shutil.which("openclaw")
+    if openclaw is None:
+        pytest.skip("OpenClaw CLI is not installed in this test environment")
+
+    project_workspace = tmp_path / "project"
+    runtime_workspace = tmp_path / "runtime"
+    project_workspace.mkdir()
+    runtime_workspace.mkdir()
+    config_path = tmp_path / "openclaw.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "defaults": {},
+                    "list": [
+                        {"id": "orchestrator", "workspace": str(project_workspace)}
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_config = config_path.read_bytes()
+    binding = bind_openclaw_workspace(
+        _binding_context(project_workspace, runtime_workspace),
+        real_config_path=config_path,
+    )
+    try:
+        env = os.environ.copy()
+        env.update(binding.environment)
+        result = subprocess.run(
+            [openclaw, "config", "validate", "--json"],
+            cwd=runtime_workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert json.loads(result.stdout)["valid"] is True
+        bound = json.loads(binding.config_path.read_text(encoding="utf-8"))
+        assert bound["agents"]["defaults"]["skipBootstrap"] is True
+        assert all("skipBootstrap" not in agent for agent in bound["agents"]["list"])
+        assert not tuple(runtime_workspace.iterdir())
+        assert Path(binding.environment["OPENCLAW_STATE_DIR"]).joinpath("logs").is_dir()
+    finally:
+        binding.release()
+    assert config_path.read_bytes() == original_config
 
 
 def test_discovery_failure_is_terminal_and_not_reflection_retryable():

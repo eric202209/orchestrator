@@ -42,6 +42,53 @@ KNOWN_OPENCLAW_RUNTIME_SCAFFOLD_NAMES = frozenset(
     }
 )
 
+# These are Orchestrator's own runtime files when the Orchestrator repository
+# is itself the admitted Project Baseline. They are not provider artifacts:
+# start.sh owns logs/, while the backend/Celery processes own SQLite's WAL and
+# shared-memory sidecars. Keep the exception structural and exact so unknown
+# provider-created entries and OpenClaw scaffold names remain fail-closed.
+ORCHESTRATOR_RUNTIME_STATE_NAMES = frozenset(
+    {"logs", "orchestrator.db-wal", "orchestrator.db-shm"}
+)
+
+
+def _is_orchestrator_project_root(root: Path | None) -> bool:
+    if root is None:
+        return False
+    try:
+        return (
+            (root / "app" / "main.py").is_file()
+            and (root / "app" / "celery_app.py").is_file()
+            and (root / "orchestrator.db").is_file()
+        )
+    except OSError:
+        return False
+
+
+def _expected_orchestrator_runtime_entries(
+    *,
+    canonical_root: Path | None,
+    new_entries: list[str],
+    after: Set[str] | Dict[str, Dict[str, Any]],
+) -> list[str]:
+    """Return exact host-owned entries, never provider-created repo paths."""
+
+    if not _is_orchestrator_project_root(canonical_root):
+        return []
+    expected: list[str] = []
+    for relative in new_entries:
+        if relative not in ORCHESTRATOR_RUNTIME_STATE_NAMES:
+            continue
+        record = after.get(relative, {}) if isinstance(after, dict) else {}
+        path = Path(record.get("path") or relative)
+        if (
+            canonical_root is not None
+            and path.resolve().parent != canonical_root.resolve()
+        ):
+            continue
+        expected.append(relative)
+    return sorted(expected)
+
 
 def snapshot_top_level_entries(root: Path) -> Set[str]:
     """Return the names of top-level entries in ``root``, or empty if absent."""
@@ -203,6 +250,17 @@ def detect_runtime_pollution(
         }
         new_entries.update(changed_entries)
     new_entries = sorted(new_entries)
+    canonical = canonical_root.resolve() if canonical_root else None
+    expected_orchestrator_runtime_entries = _expected_orchestrator_runtime_entries(
+        canonical_root=canonical,
+        new_entries=new_entries,
+        after=after,
+    )
+    new_entries = [
+        entry
+        for entry in new_entries
+        if entry not in expected_orchestrator_runtime_entries
+    ]
     known_scaffold_matches: List[str] = sorted(
         entry
         for entry in new_entries
@@ -216,7 +274,6 @@ def detect_runtime_pollution(
     entries: List[Dict[str, Any]] = []
     execution_must_stop = False
     category = None
-    canonical = canonical_root.resolve() if canonical_root else None
     runtime = runtime_workspace.resolve() if runtime_workspace else None
     for relative in new_entries:
         path = (
@@ -269,6 +326,7 @@ def detect_runtime_pollution(
         "new_top_level_entries": new_entries,
         "known_scaffold_matches": known_scaffold_matches,
         "unclassified_new_entries": unclassified_new_entries,
+        "expected_orchestrator_runtime_entries": expected_orchestrator_runtime_entries,
         "category": category,
         "entries": entries,
         "execution_must_stop": execution_must_stop,
