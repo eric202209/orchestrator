@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.models import TaskExecution, TaskStatus
 
 _RETRY_EXEMPT_CATEGORIES = {
+    "discovery_terminal_failure",
     "planning_failure",
     "governance_hold",
     "backend_transport_error",
@@ -87,9 +88,13 @@ def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
         context.get("provider_failure_classification") or ""
     ).lower()
     failure_category = str(context.get("failure_category") or "").lower()
+    if failure_category == "discovery_terminal_failure":
+        return "discovery_terminal_failure"
     if failure_category == "runtime_safety_stop" or any(
         marker in reason
         for marker in (
+            "discovery_terminal_failure",
+            "read_only_discovery_failed_closed",
             "runtime pollution",
             "canonical workspace pollution",
             "provider initialization escaped",

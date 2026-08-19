@@ -29,7 +29,10 @@ _SEARCH_LINE_RE = re.compile(r"^(.+?):([0-9]+):(.*)$")
 
 
 class DiscoveryContractError(ValueError):
-    pass
+    """A bounded discovery failure that must terminate the current attempt."""
+
+    failure_category = "discovery_terminal_failure"
+    terminal_failure = True
 
 
 @dataclass(frozen=True)
@@ -181,25 +184,56 @@ def run_discovery_stage(
             "prompt_chars": len(prompt),
         },
     )
-    result = asyncio.run(
-        planner_service._execute_task_with_planning_lock(
-            ctx.runtime_service,
-            prompt,
-            timeout_seconds=min(
-                planning_timeout_seconds, DISCOVERY_PROVIDER_TIMEOUT_SECONDS
-            ),
-            reuse_task_session=False,
-            direct_planning_state={"direct_unavailable": True},
-            diagnostic_label="PLANNING_DISCOVERY",
-            diagnostic_metadata={
-                "session_id": ctx.session_id,
-                "task_id": ctx.task_id,
-                "task_execution_id": ctx.task_execution_id,
-                "stage": "read_only_discovery",
-                "max_discovery_turns": 1,
-            },
+    try:
+        result = asyncio.run(
+            planner_service._execute_task_with_planning_lock(
+                ctx.runtime_service,
+                prompt,
+                timeout_seconds=min(
+                    planning_timeout_seconds, DISCOVERY_PROVIDER_TIMEOUT_SECONDS
+                ),
+                reuse_task_session=False,
+                direct_planning_state={"direct_unavailable": True},
+                diagnostic_label="PLANNING_DISCOVERY",
+                diagnostic_metadata={
+                    "session_id": ctx.session_id,
+                    "task_id": ctx.task_id,
+                    "task_execution_id": ctx.task_execution_id,
+                    "stage": "read_only_discovery",
+                    "max_discovery_turns": 1,
+                },
+            )
         )
-    )
+    except DiscoveryContractError:
+        raise
+    except Exception as exc:
+        error = DiscoveryContractError(f"discovery_provider_failed: {str(exc)[:500]}")
+        diagnostics = getattr(exc, "runtime_diagnostics", None)
+        if isinstance(diagnostics, dict):
+            error.runtime_diagnostics = diagnostics
+        provider_classification = getattr(exc, "provider_failure_classification", None)
+        if provider_classification:
+            error.provider_failure_classification = provider_classification
+        raise error from exc
+    if not isinstance(result, dict) or result.get("status") != "completed":
+        detail = ""
+        if isinstance(result, dict):
+            detail = str(
+                result.get("error")
+                or result.get("failure_category")
+                or "discovery_provider_failed"
+            )
+        else:
+            detail = "discovery_provider_result_invalid"
+        error = DiscoveryContractError(detail[:500])
+        if isinstance(result, dict):
+            diagnostics = result.get("runtime_diagnostics")
+            if isinstance(diagnostics, dict):
+                error.runtime_diagnostics = diagnostics
+            provider_classification = result.get("provider_failure_classification")
+            if provider_classification:
+                error.provider_failure_classification = provider_classification
+        raise error
     request = parse_discovery_request(
         discovery_output_text(result, extract_structured_text)
     )
@@ -238,7 +272,13 @@ def fail_closed_discovery(
     finalize_failure(ctx=ctx, failure_type=reason, failure_reason=detail)
     if ctx.restore_workspace_snapshot_if_needed:
         ctx.restore_workspace_snapshot_if_needed("read-only discovery failed closed")
-    return {"status": "failed", "reason": reason}
+    return {
+        "status": "failed",
+        "reason": reason,
+        "failure_category": "discovery_terminal_failure",
+        "terminal_failure": True,
+        "discovery_turns_used": 1,
+    }
 
 
 def materialize_observation_source_context(

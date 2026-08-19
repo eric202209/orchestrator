@@ -2260,6 +2260,24 @@ def execute_orchestration_task(
                 metadata=terminal_evidence,
             )
             if planning_phase_result.get("status") != "completed":
+                if planning_phase_result.get("terminal_failure") and (
+                    planning_phase_result.get("failure_category")
+                    == "discovery_terminal_failure"
+                ):
+                    # The bounded discovery stage has already persisted the
+                    # terminal Task/Session/TaskExecution projection. Return
+                    # through the normal finally cleanup without converting
+                    # the result into a generic exception, which would enter
+                    # Reflection or an automatic retry/requeue.
+                    if task_execution_id is not None:
+                        update_execution_failure_metadata(
+                            db,
+                            task_execution_id,
+                            failure_category="discovery_terminal_failure",
+                            backend_id=_resolved_execution_backend,
+                        )
+                        db.commit()
+                    return planning_phase_result
                 raise RuntimeError(
                     str(planning_phase_result.get("reason") or "planning_failed")
                 )

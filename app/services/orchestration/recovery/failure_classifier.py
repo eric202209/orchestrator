@@ -81,6 +81,20 @@ class FailureClassifier:
             error_message=exc_str,
         )
 
+        # Bounded read-only discovery owns a single request-local turn. Once
+        # that stage fails, the result is terminal for this execution attempt;
+        # it must not enter the generic reflection policy.
+        if (
+            getattr(exc, "failure_category", None) == "discovery_terminal_failure"
+            or "canonical_workspace_pollution_detected" in exc_str
+            or "read_only_discovery_failed_closed" in exc_str
+        ):
+            return make_failure_event(
+                failure_class="discovery_terminal_failure",
+                source="planning",
+                **common,
+            )
+
         # Rule 1: wrapper_timeout_noise
         # A timeout that fires after the orchestration has already reached DONE.
         # Validated maintenance finding — treat as annotation, not task failure.

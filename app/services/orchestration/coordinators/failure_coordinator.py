@@ -215,6 +215,11 @@ class FailureCoordinator:
         )
         max_retries = int(getattr(self_task, "max_retries", 0) or 0)
         runtime_diagnostics = getattr(exc, "runtime_diagnostics", None) or {}
+        is_discovery_terminal_failure = bool(
+            getattr(exc, "failure_category", None) == "discovery_terminal_failure"
+            or "canonical_workspace_pollution_detected" in str(exc)
+            or "read_only_discovery_failed_closed" in str(exc)
+        )
         is_bounded_debug_repair_timeout = _is_bounded_debug_repair_timeout(
             exc, runtime_diagnostics
         )
@@ -229,6 +234,7 @@ class FailureCoordinator:
             and not is_bounded_debug_repair_timeout
             and not is_planning_lock_wait_timeout
             and not is_project_mutation_lock_conflict
+            and not is_discovery_terminal_failure
         )
         is_timeout = (
             "time limit" in str(exc).lower()
@@ -303,6 +309,7 @@ class FailureCoordinator:
             and getattr(task, "plan_position", None) is not None
             and not is_timeout
             and not is_project_mutation_lock_conflict
+            and not is_discovery_terminal_failure
             and not _is_retry_exempt_category(failure_category_for_retry)
             and getattr(task, "workspace_status", None) != "changes_requested"
             and _automatic_recovery_rerun_allowed(
