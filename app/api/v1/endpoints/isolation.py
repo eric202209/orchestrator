@@ -15,6 +15,8 @@ from app.models import Project
 from app.services.workspace.project_isolation_service import (
     ProjectIsolationService,
     ProjectIsolationError,
+    normalize_project_workspace_path,
+    resolve_project_workspace_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,11 +175,17 @@ async def update_project_workspace(
         if not workspace_path:
             raise HTTPException(status_code=422, detail="Workspace path is required")
 
-        # Validate the path exists
-        from pathlib import Path
+        project = db.query(Project).filter(Project.id == project_id).first()
 
-        base_path = Path("/root/.openclaw/workspace/vault")
-        full_path = (base_path / workspace_path).resolve()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # Resolve through the configured workspace root rather than a
+        # machine-specific base, so the endpoint works on any installation.
+        normalized = normalize_project_workspace_path(
+            workspace_path, project.name, db=db
+        )
+        full_path = resolve_project_workspace_path(normalized, project.name, db=db)
 
         if not full_path.exists():
             raise HTTPException(
@@ -190,13 +198,7 @@ async def update_project_workspace(
                 detail=f"Workspace path is not a directory: {full_path}",
             )
 
-        # Update the project
-        project = db.query(Project).filter(Project.id == project_id).first()
-
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-
-        project.workspace_path = workspace_path
+        project.workspace_path = normalized
         db.commit()
         db.refresh(project)
 
