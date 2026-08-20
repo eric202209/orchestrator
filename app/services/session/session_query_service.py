@@ -282,23 +282,30 @@ def read_task_events_from_candidates(
     task_id: int,
     event_type_filter: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    from app.services.orchestration import read_orchestration_events
+    from app.services.orchestration.state.persistence import (
+        read_legacy_orchestration_events,
+        read_orchestration_events,
+    )
+    from app.services.workspace.control_state_paths import (
+        project_control_state_location,
+    )
 
-    for project_dir in event_project_dir_candidates(
-        db=db,
-        project=project,
-        task=task,
-    ):
-        events = read_orchestration_events(
-            project_dir,
-            session_id,
-            task_id,
-            event_type_filter=event_type_filter,
-            project_id=project.id,
-        )
-        if events:
-            return events
-    return []
+    # Probe the legacy roots to find which one holds this task's history, then
+    # read that root combined with the identity-keyed relocated journal.
+    candidates = event_project_dir_candidates(db=db, project=project, task=task)
+    if not candidates:
+        return []
+    chosen = candidates[0]
+    for candidate in candidates:
+        if read_legacy_orchestration_events(candidate, session_id, task_id):
+            chosen = candidate
+            break
+    return read_orchestration_events(
+        project_control_state_location(chosen, project.id, db=db),
+        session_id,
+        task_id,
+        event_type_filter=event_type_filter,
+    )
 
 
 def resolve_replay_task_id(

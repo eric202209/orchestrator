@@ -51,6 +51,10 @@ from app.services.workspace.system_settings import (
 )
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.services.orchestration.validation.path_authority import PathAuthorityError
+from app.services.workspace.control_state_paths import (
+    ControlStateLocation,
+    project_control_state_location,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -142,7 +146,7 @@ def _resolve_retry_event_project_dir(
     task: Task,
     task_workspace: Dict,
     db: Session,
-) -> Path | str:
+) -> Path | str | ControlStateLocation:
     workspace_path = task_workspace.get("workspace_path")
     if not project:
         return workspace_path or "."
@@ -666,6 +670,10 @@ def _queue_task_retry(
         task_workspace=task_workspace,
         db=db,
     )
+    if project is not None:
+        event_project_dir = project_control_state_location(
+            event_project_dir, project.id, db=db
+        )
 
     queued_event = append_orchestration_event(
         project_dir=event_project_dir,

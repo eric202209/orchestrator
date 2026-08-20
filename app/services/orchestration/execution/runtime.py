@@ -16,7 +16,9 @@ from app.services.workspace.project_isolation_service import (
 )
 from app.services.workspace.control_state_paths import (
     STATE_MANAGER_FILENAME,
+    control_state_read_path,
     control_state_root,
+    project_control_state_location,
 )
 from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.tasks.service import TaskService
@@ -31,10 +33,39 @@ from app.services.orchestration.execution.runtime_context import (
 
 
 def get_state_manager_path(
-    project_root: Path, *, project_id: Optional[int] = None
+    project_root: Path,
+    *,
+    project_id: Optional[int] = None,
+    db: Optional[Session] = None,
 ) -> Path:
+    """Authoritative (write) path for the project state-manager snapshot."""
+    if project_id is None:
+        return control_state_root(project_root) / STATE_MANAGER_FILENAME
     return (
-        control_state_root(project_root, project_id=project_id) / STATE_MANAGER_FILENAME
+        control_state_root(
+            project_control_state_location(project_root, project_id, db=db)
+        )
+        / STATE_MANAGER_FILENAME
+    )
+
+
+def get_state_manager_read_path(
+    project_root: Path,
+    *,
+    project_id: Optional[int] = None,
+    db: Optional[Session] = None,
+) -> Path:
+    """Relocated state-manager snapshot if present, else the historical one.
+
+    The snapshot is a whole-file latest-state document rewritten on every
+    update, so the relocated file supersedes the legacy one outright; the two
+    are never merged.
+    """
+    if project_id is None:
+        return control_state_root(project_root) / STATE_MANAGER_FILENAME
+    return control_state_read_path(
+        project_control_state_location(project_root, project_id, db=db),
+        STATE_MANAGER_FILENAME,
     )
 
 
@@ -134,7 +165,7 @@ def write_project_state_snapshot(
     if not project:
         return
     project_root = resolve_project_workspace_path(project.workspace_path, project.name)
-    state_path = get_state_manager_path(project_root, project_id=project.id)
+    state_path = get_state_manager_path(project_root, project_id=project.id, db=db)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     ensure_shared_permissions(state_path.parent)
     payload = build_project_state_snapshot(db, project, current_task, session_id)

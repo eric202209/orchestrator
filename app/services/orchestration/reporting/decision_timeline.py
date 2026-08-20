@@ -16,6 +16,9 @@ from typing import Any, Dict, Iterable, List, Optional
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.services.workspace.control_state_paths import (
+    project_control_state_location,
+)
 from app.models import (
     InterventionRequest,
     KnowledgeItem,
@@ -34,7 +37,10 @@ from app.services.workspace.project_isolation_service import (
 from app.services.tasks.service import TASK_CHANGE_SET_LOG_MESSAGE
 
 from ..events.event_types import EventType
-from ..state.persistence import read_orchestration_events
+from ..state.persistence import (
+    read_legacy_orchestration_events,
+    read_orchestration_events,
+)
 
 KNOWN_PHASES = ("planning", "validation", "execution", "failure", "completion")
 DEFAULT_TIMELINE_LIMIT = 300
@@ -141,13 +147,21 @@ def _read_task_orchestration_events(
     session_id: int,
     task_id: int,
 ) -> List[Dict[str, Any]]:
-    for project_dir in event_project_dir_candidates(db=db, project=project, task=task):
-        events = read_orchestration_events(
-            project_dir, session_id, task_id, project_id=project.id
-        )
-        if events:
-            return events
-    return []
+    # Probe the legacy roots to find which one holds this task's history, then
+    # read that root combined with the identity-keyed relocated journal.
+    candidates = event_project_dir_candidates(db=db, project=project, task=task)
+    if not candidates:
+        return []
+    chosen = candidates[0]
+    for candidate in candidates:
+        if read_legacy_orchestration_events(candidate, session_id, task_id):
+            chosen = candidate
+            break
+    return read_orchestration_events(
+        project_control_state_location(chosen, project.id, db=db),
+        session_id,
+        task_id,
+    )
 
 
 def event_project_dir_candidates(

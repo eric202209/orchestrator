@@ -41,7 +41,10 @@ from app.services.agents.agent_backends import (
     UnsupportedAgentBackendError,
     get_backend_descriptor,
 )
-from app.services.workspace.control_state_paths import ControlStateLocation
+from app.services.workspace.control_state_paths import (
+    ControlStateLocation,
+    project_control_state_location,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -306,15 +309,13 @@ def resolve_event_log_project_dir(
             task.description,
         )
         if task and task.task_subfolder and not runs_in_canonical_workspace:
-            return ControlStateLocation(
-                legacy_root=_resolve_task_workspace_path(
-                    project_workspace,
-                    task.task_subfolder,
-                ),
-                project_id=project.id,
+            return project_control_state_location(
+                _resolve_task_workspace_path(project_workspace, task.task_subfolder),
+                project.id,
+                db=db,
             )
 
-    return ControlStateLocation(legacy_root=project_workspace, project_id=project.id)
+    return project_control_state_location(project_workspace, project.id, db=db)
 
 
 def _maybe_compact_checkpoint_before_dispatch(

@@ -9,9 +9,14 @@ from typing import Dict, List, Optional
 from sqlalchemy.orm import Session as DbSession
 
 from app.models import Project, Session as SessionModel, SessionTask
+from app.services.workspace.control_state_paths import (
+    ControlStateLocation,
+    project_control_state_root,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.system_settings import get_effective_runtime_root
 
 
 @dataclass(frozen=True)
@@ -19,7 +24,7 @@ class EventJournalTarget:
     project_id: int
     session_id: int
     task_id: int
-    project_dir: Path
+    project_dir: ControlStateLocation
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,9 @@ def load_event_journal_targets(db: DbSession) -> List[EventJournalTarget]:
             .all()
         )
         session_task_rows = db.query(SessionTask.session_id, SessionTask.task_id).all()
+        # Resolved before the read transaction is released, so the filesystem
+        # walk below needs no further database access.
+        runtime_root = get_effective_runtime_root(db)
     except Exception:
         return []
     finally:
@@ -86,7 +94,7 @@ def load_event_journal_targets(db: DbSession) -> List[EventJournalTarget]:
         for row in session_rows
     }
 
-    project_dirs: Dict[int, Path] = {}
+    project_dirs: Dict[int, ControlStateLocation] = {}
     targets: List[EventJournalTarget] = []
     for row in session_task_rows:
         session = sessions.get(row.session_id)
@@ -97,8 +105,12 @@ def load_event_journal_targets(db: DbSession) -> List[EventJournalTarget]:
             continue
         project_dir = project_dirs.get(project.id)
         if project_dir is None:
-            project_dir = Path(
-                resolve_project_workspace_path(project.workspace_path, project.name)
+            project_dir = ControlStateLocation(
+                legacy_root=Path(
+                    resolve_project_workspace_path(project.workspace_path, project.name)
+                ),
+                project_id=project.id,
+                control_root=project_control_state_root(runtime_root, project.id),
             )
             project_dirs[project.id] = project_dir
         targets.append(

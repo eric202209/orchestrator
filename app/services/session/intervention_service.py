@@ -44,6 +44,9 @@ from app.services.orchestration.state.session_state import (
     normalize_session_status,
     SessionStatus,
 )
+from app.services.workspace.control_state_paths import (
+    project_control_state_location,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -96,13 +99,14 @@ def _emit_intervention_event(
     if project and project.workspace_path and task_id:
         from pathlib import Path
 
-        workspace_path = str(
-            resolve_project_workspace_path(project.workspace_path, project.name)
+        workspace_path = project_control_state_location(
+            resolve_project_workspace_path(project.workspace_path, project.name),
+            project.id,
+            db=db,
         )
         try:
             append_orchestration_event(
                 project_dir=workspace_path,
-                project_id=project.id,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=event_type,

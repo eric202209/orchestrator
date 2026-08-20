@@ -207,6 +207,22 @@ def isolated_workspace_root(monkeypatch, tmp_path, db_session_factory):
 
 
 @pytest.fixture(autouse=True)
+def isolated_runtime_root(monkeypatch, tmp_path):
+    """Keep Orchestrator runtime state (control/, tasks/, planning/) in tmp_path.
+
+    Durable control state now resolves through the runtime root, so without
+    this a test that writes an event would land in the developer's real
+    ``~/.orchestrator/runtime`` tree.
+    """
+    runtime_root = tmp_path / "runtime-root"
+    monkeypatch.setattr(
+        "app.services.workspace.system_settings.settings.RUNTIME_ROOT",
+        str(runtime_root),
+    )
+    return runtime_root
+
+
+@pytest.fixture(autouse=True)
 def reset_runtime_flags():
     original_force_inline = settings.INLINE_PLANNING
     original_keypair_flag = settings.ALLOW_TEST_KEYPAIR_ENDPOINT

@@ -120,6 +120,9 @@ from app.services.orchestration.reporting.decision_timeline import (
     get_session_decision_timeline_payload,
 )
 from app.services.orchestration.reporting.replay import reconstruct_execution_state
+from app.services.workspace.control_state_paths import (
+    project_control_state_location,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -1272,8 +1275,10 @@ def get_session_replay_reconstruction(
         snapshot_index=snapshot_index,
         checkpoint_name=checkpoint_name,
     )
-    project_dir = str(
-        resolve_project_workspace_path(project.workspace_path, project.name, db=db)
+    project_dir = project_control_state_location(
+        resolve_project_workspace_path(project.workspace_path, project.name, db=db),
+        project.id,
+        db=db,
     )
     report = reconstruct_execution_state(
         project_dir=project_dir,

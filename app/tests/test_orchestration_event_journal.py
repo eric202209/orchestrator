@@ -5,6 +5,10 @@ import os
 
 import pytest
 
+from app.services.workspace.control_state_paths import (
+    project_control_state_root,
+)
+from app.services.workspace.system_settings import get_effective_runtime_root
 from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.orchestration.events.event_types import EventType, is_known_event_type
 from app.services.orchestration.state.persistence import (
@@ -239,14 +243,14 @@ def test_tool_tracking_also_persists_tool_events(db_session, tmp_path, monkeypat
         error_message="rg failed",
     )
 
+    # Relocated: durable control state lives under the Orchestrator runtime
+    # root, keyed by Project.id, not inside the project workspace.
     log_path = (
-        tmp_path
-        / "tool-events"
-        / "task-21"
-        / ".agent"
+        project_control_state_root(get_effective_runtime_root(db_session), project.id)
         / "events"
         / f"session_{session.id}_task_{task.id}.jsonl"
     )
+    assert not (tmp_path / "tool-events" / "task-21" / ".agent").exists()
     lines = [
         json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
     ]

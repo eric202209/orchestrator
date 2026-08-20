@@ -4,6 +4,10 @@ import json
 
 import pytest
 
+from app.services.workspace.control_state_paths import (
+    project_control_state_root,
+)
+from app.services.workspace.system_settings import get_effective_runtime_root
 from app.models import (
     LogEntry,
     Plan,
@@ -266,13 +270,15 @@ def test_task_retry_dual_writes_pending_task_execution(
     assert task_execution.task_id == task.id
     assert task_execution.attempt_number == 1
     assert task_execution.status == TaskStatus.PENDING
+    # Relocated: the retry TASK_QUEUED event is durable control state and is
+    # written under the runtime root, keyed by Project.id.
     assert (
-        isolated_workspace_root
-        / "dual-write-project"
-        / "retry-task-1"
-        / ".agent"
+        project_control_state_root(get_effective_runtime_root(db_session), project.id)
         / "events"
         / f"session_{payload['session_id']}_task_{task.id}.jsonl"
+    ).exists()
+    assert not (
+        isolated_workspace_root / "dual-write-project" / "retry-task-1" / ".agent"
     ).exists()
 
 

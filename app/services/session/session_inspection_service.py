@@ -50,6 +50,8 @@ from app.services.orchestration.state.persistence import (
 )
 from app.services.orchestration.state.persistence import (
     append_orchestration_event,
+    read_legacy_orchestration_events,
+    read_legacy_orchestration_state_snapshots,
     read_orchestration_events,
     read_orchestration_state_snapshots,
 )
@@ -64,6 +66,9 @@ from app.services.orchestration.state.persistence import (
     read_session_fingerprint_index,
     write_session_fingerprint_index,
     _apply_counterfactual_overrides_to_checkpoint,
+)
+from app.services.workspace.control_state_paths import (
+    project_control_state_location,
 )
 from app.services.workspace.overwrite_protection_service import (
     OverwriteProtectionError,
@@ -259,6 +264,7 @@ def _session_task_event_roots(
         if not task:
             continue
         project_dir = _pick_event_project_dir(
+            db=db,
             session_id=session.id,
             task_id=task.id,
             candidates=_event_project_dir_candidates(
@@ -307,23 +313,32 @@ def _pick_event_project_dir(
     candidates: List[Path],
     prefer_snapshots: bool = False,
     project_id: Optional[int] = None,
-) -> Path:
+    db: Any = None,
+):
+    """Pick the historical root for a task and attach its durable identity.
+
+    The relocated journal is identity-keyed and therefore identical for every
+    candidate, so the candidates are probed against the *legacy* journals only;
+    otherwise the first candidate would always win and hide history stored
+    under a task subfolder. The returned location carries both roots, so the
+    combined reader sees legacy history and relocated events.
+    """
     if not candidates:
         raise ValueError("No project-dir candidates provided")
+    chosen = candidates[0]
     for candidate in candidates:
         if prefer_snapshots:
-            snapshots = read_orchestration_state_snapshots(
-                candidate, session_id, task_id, project_id=project_id
+            found = read_legacy_orchestration_state_snapshots(
+                candidate, session_id, task_id
             )
-            if snapshots:
-                return candidate
         else:
-            events = read_orchestration_events(
-                candidate, session_id, task_id, project_id=project_id
-            )
-            if events:
-                return candidate
-    return candidates[0]
+            found = read_legacy_orchestration_events(candidate, session_id, task_id)
+        if found:
+            chosen = candidate
+            break
+    if project_id is None:
+        return chosen
+    return project_control_state_location(chosen, project_id, db=db)
 
 
 def _parse_timestamp(raw_value: Any) -> Optional[datetime]:
@@ -935,8 +950,14 @@ def get_session_divergence_compare_payload(
     current_tags = set(current.get("anomaly_tags", []))
 
     project = db.query(Project).filter(Project.id == session.project_id).first()
+    # Identity-resolved once: new fingerprints are written under the runtime
+    # root, historical ones stay readable in the project root.
     workspace_path = (
-        str(resolve_project_workspace_path(project.workspace_path, project.name, db=db))
+        project_control_state_location(
+            resolve_project_workspace_path(project.workspace_path, project.name, db=db),
+            project.id,
+            db=db,
+        )
         if project and project.workspace_path
         else None
     )
@@ -944,9 +965,7 @@ def get_session_divergence_compare_payload(
     # Write current fingerprint to index so siblings can reference it later.
     if workspace_path:
         try:
-            write_session_fingerprint_index(
-                workspace_path, session_id, current, project_id=project.id
-            )
+            write_session_fingerprint_index(workspace_path, session_id, current)
         except Exception:
             pass
 
@@ -978,7 +997,6 @@ def get_session_divergence_compare_payload(
                     workspace_path,
                     candidate.id,
                     max_age_seconds=max_age,
-                    project_id=project.id,
                 )
             except Exception:
                 fingerprint = None
@@ -987,7 +1005,7 @@ def get_session_divergence_compare_payload(
             if workspace_path:
                 try:
                     write_session_fingerprint_index(
-                        workspace_path, candidate.id, fingerprint, project_id=project.id
+                        workspace_path, candidate.id, fingerprint
                     )
                 except Exception:
                     pass
@@ -1695,6 +1713,7 @@ def get_session_state_diff_payload(
         raise HTTPException(status_code=404, detail="Project not found")
 
     project_dir = _pick_event_project_dir(
+        db=db,
         session_id=session_id,
         task_id=task_id,
         candidates=_event_project_dir_candidates(

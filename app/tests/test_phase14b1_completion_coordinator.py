@@ -19,6 +19,8 @@ from app.services.orchestration.phases.completion_repair_capsule import (
     build_completion_repair_capsule,
 )
 from app.services.orchestration.review_policy import decide_change_set_review
+from app.services.workspace.control_state_paths import project_control_state_root
+from app.services.workspace.system_settings import get_effective_runtime_root
 from app.services.orchestration.state.execution_states import TerminalReason
 from app.services.orchestration.types import CandidateFinding, ValidationVerdict
 
@@ -1015,9 +1017,12 @@ def test_complete_task_verification_integrity_failure(tmp_path, monkeypatch):
 
 
 def test_complete_task_writes_report_to_durable_project_root(tmp_path, monkeypatch):
-    """Phase 24B-7: the task report must land in the durable project root,
-    not in the disposable Task Execution Sandbox the coordinator ran in,
-    because the virtual merge gate resolves reports against the project root."""
+    """Phase 24B-7: the task report must land in durable storage, not in the
+    disposable Task Execution Sandbox the coordinator ran in, because the
+    virtual merge gate resolves reports by durable Project identity.
+
+    Post-relocation that durable storage is the Orchestrator runtime control
+    root rather than the project root; the sandbox exclusion is unchanged."""
     durable_root = tmp_path / "durable-project"
     durable_root.mkdir()
     sandbox_dir = tmp_path / "runtime-sandbox"
@@ -1053,7 +1058,12 @@ def test_complete_task_writes_report_to_durable_project_root(tmp_path, monkeypat
         )
 
     assert result["status"] == "completed"
-    durable_report = durable_root / ".agent" / "task-reports" / "task_report_1.md"
+    durable_report = (
+        project_control_state_root(get_effective_runtime_root(ctx.db), ctx.project.id)
+        / "task-reports"
+        / "task_report_1.md"
+    )
     sandbox_report = sandbox_dir / ".agent" / "task-reports" / "task_report_1.md"
     assert durable_report.exists()
     assert not sandbox_report.exists()
+    assert not (durable_root / ".agent").exists()

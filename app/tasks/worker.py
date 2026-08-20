@@ -23,8 +23,8 @@ from app.models import (
 )
 from app.database import get_db_session
 from app.services.workspace.control_state_paths import (
-    ControlStateLocation,
     control_state_of,
+    project_control_state_location,
 )
 from app.services import (
     create_agent_runtime,
@@ -99,7 +99,7 @@ from app.services.orchestration.state.persistence import (
 from app.services.orchestration.execution.runtime import (
     build_runtime_executor_context as _build_runtime_executor_context,
     dispose_runtime_workspace_safely as _dispose_runtime_workspace_safely,
-    get_state_manager_path as _get_state_manager_path,
+    get_state_manager_read_path as _get_state_manager_read_path,
     maybe_allocate_runtime_workspace as _maybe_allocate_runtime_workspace,
     maybe_bind_runtime_cwd_override as _maybe_bind_runtime_cwd_override,
     resolve_workspace_contract_args as _resolve_workspace_contract_args,
@@ -579,9 +579,8 @@ def execute_orchestration_task(
                 ).resolve()
             # Carry the owning Project.id with the dispatch control-state root
             # so every dispatch-phase event resolves by identity, not by path.
-            dispatch_project_dir = ControlStateLocation(
-                legacy_root=dispatch_project_dir,
-                project_id=project.id,
+            dispatch_project_dir = project_control_state_location(
+                dispatch_project_dir, project.id, db=db
             )
 
         queued_event = None
@@ -900,8 +899,11 @@ def execute_orchestration_task(
                     },
                 )
                 _append_orchestration_event(
-                    project_dir=_runtime_sandbox.path,
-                    project_id=project.id if project else None,
+                    project_dir=project_control_state_location(
+                        _runtime_sandbox.path,
+                        project.id if project else None,
+                        db=db,
+                    ),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.RUNTIME_WORKSPACE_ALLOCATED,
@@ -1877,7 +1879,7 @@ def execute_orchestration_task(
             project=project,
             current_task=task,
             execution_profile=execution_profile,
-            get_state_manager_path_fn=_get_state_manager_path,
+            get_state_manager_path_fn=_get_state_manager_read_path,
             profile_source=execution_profile_source,
         )
         if gate_error:
@@ -2709,8 +2711,11 @@ def execute_orchestration_task(
             if _runtime_sandbox_project_root is not None:
                 try:
                     _append_orchestration_event(
-                        project_dir=_runtime_sandbox_project_root,
-                        project_id=project.id if project else None,
+                        project_dir=project_control_state_location(
+                            _runtime_sandbox_project_root,
+                            project.id if project else None,
+                            db=db,
+                        ),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.RUNTIME_WORKSPACE_DISPOSED,

@@ -224,11 +224,20 @@ class BaselinePromotionService:
     def _change_set_artifact_files_root(
         self, project: Project, task_execution_id: int
     ) -> Path:
+        """Relocated change-set artifact files if present, else the historical ones.
+
+        Publication reads the same directory the change-set service wrote; the
+        lookup is delegated so exactly one module owns where that is.
+        """
+        from app.services.workspace.changeset_service import change_set_dir_for_read
+
         return (
-            self.get_project_root(project)
-            / ".agent"
-            / "change-sets"
-            / str(task_execution_id)
+            change_set_dir_for_read(
+                self.get_project_root(project),
+                getattr(project, "id", None),
+                task_execution_id,
+                db=self.db,
+            )
             / "files"
         )
 

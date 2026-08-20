@@ -17,8 +17,8 @@ from typing import Any, Dict, Iterable, List, Optional
 from ..events.event_types import EventType, is_known_event_type
 from ..state.persistence import (
     _compute_workspace_hash,
-    _orchestration_event_log_path,
-    _orchestration_state_snapshot_log_path,
+    _event_journal_read_paths,
+    _state_snapshot_read_paths,
 )
 
 REDUCER_VERSION = "phase4a-v1"
@@ -387,46 +387,53 @@ def reduce_replay_events(
 def _read_event_records(
     project_dir: Any, session_id: int, task_id: int
 ) -> tuple[List[ReplayRecord], List[Dict[str, Any]]]:
-    log_path = _orchestration_event_log_path(project_dir, session_id, task_id)
+    # Historical journal then relocated journal; ``line_index`` keeps counting
+    # across both so replay ordering stays monotonic over the cutover.
+    log_paths = _event_journal_read_paths(project_dir, session_id, task_id)
     findings: List[Dict[str, Any]] = []
     records: List[ReplayRecord] = []
-    if not log_path.exists():
+    present = [path for path in log_paths if path.exists()]
+    if not present:
         findings.append(
             {
                 "type": "missing_event_journal",
                 "severity": "error",
-                "message": f"No event journal found at {log_path}",
+                "message": f"No event journal found at {log_paths[-1]}",
             }
         )
         return records, findings
 
-    try:
-        with log_path.open("r", encoding="utf-8") as handle:
-            for line_index, line in enumerate(handle):
-                raw = line.strip()
-                if not raw:
-                    continue
-                try:
-                    event = json.loads(raw)
-                except json.JSONDecodeError as exc:
-                    findings.append(
-                        {
-                            "type": "malformed_jsonl",
-                            "severity": "warning",
-                            "line_index": line_index,
-                            "message": str(exc),
-                        }
-                    )
-                    continue
-                records.append(ReplayRecord(event=event, line_index=line_index))
-    except OSError as exc:
-        findings.append(
-            {
-                "type": "event_journal_read_error",
-                "severity": "error",
-                "message": str(exc),
-            }
-        )
+    line_index = 0
+    for log_path in present:
+        try:
+            with log_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    current_index = line_index
+                    line_index += 1
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    try:
+                        event = json.loads(raw)
+                    except json.JSONDecodeError as exc:
+                        findings.append(
+                            {
+                                "type": "malformed_jsonl",
+                                "severity": "warning",
+                                "line_index": current_index,
+                                "message": str(exc),
+                            }
+                        )
+                        continue
+                    records.append(ReplayRecord(event=event, line_index=current_index))
+        except OSError as exc:
+            findings.append(
+                {
+                    "type": "event_journal_read_error",
+                    "severity": "error",
+                    "message": str(exc),
+                }
+            )
     return records, findings
 
 
@@ -593,22 +600,22 @@ def _select_boundary_records(
 def _read_state_snapshots(
     project_dir: Any, session_id: int, task_id: int
 ) -> List[Dict[str, Any]]:
-    path = _orchestration_state_snapshot_log_path(project_dir, session_id, task_id)
     snapshots: List[Dict[str, Any]] = []
-    if not path.exists():
-        return snapshots
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    snapshots.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        return []
+    for path in _state_snapshot_read_paths(project_dir, session_id, task_id):
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        snapshots.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            continue
     return snapshots
 
 

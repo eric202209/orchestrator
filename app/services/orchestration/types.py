@@ -11,6 +11,7 @@ from app.services.orchestration.policy import PolicyProfile, get_policy_profile
 from app.services.workspace.control_state_paths import (
     ControlStateLocation,
     control_state_of,
+    project_control_state_location,
 )
 
 
@@ -371,9 +372,17 @@ class OrchestrationRunContext:
         state has no identity, so ctx-based producers are never unthreaded.
         """
         location = control_state_of(self.orchestration_state)
-        if location.project_id is None:
-            return location.with_project_id(getattr(self.project, "id", None))
-        return location
+        if location.project_id is not None and location.control_root is not None:
+            return location
+        return project_control_state_location(
+            location.legacy_root,
+            (
+                location.project_id
+                if location.project_id is not None
+                else getattr(self.project, "id", None)
+            ),
+            db=self.db,
+        )
 
     @property
     def policy_profile(self) -> PolicyProfile:

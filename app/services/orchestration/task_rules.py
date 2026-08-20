@@ -20,6 +20,8 @@ from app.services.workspace.project_isolation_service import (
 from app.services.workspace.control_state_paths import (
     FAMILY_TASK_REPORTS,
     control_state_family_dir,
+    control_state_read_path,
+    project_control_state_location,
 )
 from app.services.tasks.service import TaskService
 
@@ -321,16 +323,41 @@ def _contains_negated_stack_marker(text: str, markers: tuple[str, ...]) -> bool:
     return False
 
 
+def _task_report_filename(task: Task) -> str:
+    return f"task_report_{task.id}.md"
+
+
 def get_task_report_path(
     project_root: Path, task: Task, *, project_id: Optional[int] = None
 ) -> Optional[Path]:
+    """Authoritative (write) path for one task report."""
     if not task:
         return None
-    return (
-        control_state_family_dir(
-            project_root, FAMILY_TASK_REPORTS, project_id=project_id
-        )
-        / f"task_report_{task.id}.md"
+    return control_state_family_dir(
+        project_root, FAMILY_TASK_REPORTS, project_id=project_id
+    ) / _task_report_filename(task)
+
+
+def get_task_report_read_path(
+    project_root: Path,
+    task: Task,
+    *,
+    project_id: Optional[int] = None,
+    db: Any = None,
+) -> Optional[Path]:
+    """Relocated task report if present, else the historical one.
+
+    Task reports are immutable, task-keyed documents; a report written before
+    the relocation stays exactly where and as it was written.
+    """
+    if not task:
+        return None
+    if project_id is None:
+        return get_task_report_path(project_root, task)
+    return control_state_read_path(
+        project_control_state_location(project_root, project_id, db=db),
+        FAMILY_TASK_REPORTS,
+        _task_report_filename(task),
     )
 
 
@@ -464,7 +491,9 @@ def run_virtual_merge_gate(
     missing_reports = []
     missing_report_task_ids = []
     for task in prior_tasks:
-        report_path = get_task_report_path(project_root, task, project_id=project.id)
+        report_path = get_task_report_read_path(
+            project_root, task, project_id=project.id, db=db
+        )
         legacy_report_path = get_legacy_task_report_path(project_root, task)
         if (
             report_path
@@ -482,7 +511,7 @@ def run_virtual_merge_gate(
             missing_report_task_ids,
         )
 
-    state_path = get_state_manager_path_fn(project_root, project_id=project.id)
+    state_path = get_state_manager_path_fn(project_root, project_id=project.id, db=db)
     if state_path.exists():
         try:
             state_data = json.loads(state_path.read_text(encoding="utf-8"))

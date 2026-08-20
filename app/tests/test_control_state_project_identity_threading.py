@@ -32,7 +32,7 @@ from app.services.workspace.control_state_paths import (
     control_state_family_dir,
     control_state_identity,
     control_state_root,
-    future_control_state_project_root,
+    project_control_state_root,
 )
 from app.services.workspace.system_settings import get_effective_runtime_root
 
@@ -69,7 +69,7 @@ def test_identity_resolution_is_distinct_from_current_storage_location(tmp_path)
     assert control_state_root(location) == root / CONTROL_STATE_DIR_NAME
 
 
-def test_future_root_is_keyed_only_by_project_id(db_session, tmp_path, monkeypatch):
+def test_relocated_root_is_keyed_only_by_project_id(db_session, tmp_path, monkeypatch):
     """The relocation target is derived from the runtime root + Project.id only."""
     monkeypatch.setattr(
         "app.services.workspace.system_settings.settings.RUNTIME_ROOT",
@@ -77,16 +77,16 @@ def test_future_root_is_keyed_only_by_project_id(db_session, tmp_path, monkeypat
     )
     runtime_root = get_effective_runtime_root(db_session)
 
-    target = future_control_state_project_root(runtime_root, PROJECT_ID)
+    target = project_control_state_root(runtime_root, PROJECT_ID)
 
     assert target == runtime_root / "control" / "projects" / str(PROJECT_ID)
     # No workspace path, machine root, or project name contributes to it.
     assert "orchestrator" not in target.relative_to(runtime_root).as_posix()
 
 
-def test_future_root_requires_identity():
+def test_relocated_root_requires_identity():
     with pytest.raises(ValueError):
-        future_control_state_project_root("/anything", None)
+        project_control_state_root("/anything", None)
 
 
 # ── current storage location is unchanged by this gate ───────────────────────
@@ -116,9 +116,13 @@ def test_change_set_state_manager_and_report_paths_are_unchanged(tmp_path, db_se
         control_state_family_dir(root, FAMILY_CHANGE_SETS, project_id=PROJECT_ID) / "9"
         == root / ".agent" / "change-sets" / "9"
     )
-    assert (
-        get_state_manager_path(root, project_id=PROJECT_ID)
-        == root / ".agent" / "state_manager.json"
+    # Relocated: identity now resolves the state manager under the runtime root.
+    assert get_state_manager_path(root, project_id=PROJECT_ID) == (
+        get_effective_runtime_root(db_session)
+        / "control"
+        / "projects"
+        / str(PROJECT_ID)
+        / "state_manager.json"
     )
 
     project = Project(name="Report Project", user_id=1)
@@ -172,16 +176,23 @@ def test_append_and_read_round_trip_carries_identity_and_legacy_path(tmp_path):
         details={"phase": "planning"},
     )
 
-    written = tmp_path / "project" / ".agent" / "events" / "session_5_task_3.jsonl"
-    assert written.exists(), "write location must stay the legacy .agent layout"
+    # Relocated: the write leaves the project repository entirely.
+    written = (
+        project_control_state_root(get_effective_runtime_root(), PROJECT_ID)
+        / "events"
+        / "session_5_task_3.jsonl"
+    )
+    assert written.exists(), "write location must be the runtime control root"
+    assert not (tmp_path / "project" / ".agent").exists()
 
     events = read_orchestration_events(state.control_state_location, 5, 3)
     assert events[0]["event_type"] == "phase_started"
 
-    # A bare path with an explicit project_id reads exactly the same journal.
+    # A bare path carries no resolved control root, so it stays legacy-scoped
+    # and sees only the historical journal — here, nothing.
     assert (
         read_orchestration_events(tmp_path / "project", 5, 3, project_id=PROJECT_ID)
-        == events
+        == []
     )
 
 
@@ -300,6 +311,6 @@ def test_relocating_a_project_does_not_split_its_control_state_identity(tmp_path
     )
 
     runtime_root = tmp_path / "runtime"
-    assert future_control_state_project_root(
+    assert project_control_state_root(
         runtime_root, before.project_id
-    ) == future_control_state_project_root(runtime_root, after.project_id)
+    ) == project_control_state_root(runtime_root, after.project_id)

@@ -23,7 +23,7 @@ from typing import Any, Callable, Optional
 
 from app.services.orchestration.events.event_types import EventType
 from app.services.workspace.control_state_paths import (
-    coerce_control_state_location,
+    control_state_location_for,
 )
 from app.services.orchestration.recovery.execution_recovery_service import (
     ExecutionRecoveryService,
@@ -323,10 +323,7 @@ class RecoveryStrategyRegistry:
         effective_strategy = rule.strategy
         reflection_result: Optional[RecoveryResult] = None
         control_state = (
-            coerce_control_state_location(
-                project_dir,
-                project_id=getattr(orchestration_state, "project_id", None),
-            )
+            control_state_location_for(project_dir, orchestration_state)
             if project_dir is not None
             else None
         )

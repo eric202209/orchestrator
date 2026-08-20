@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from collections import OrderedDict
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -30,56 +31,95 @@ from app.services.observability.streaming_health import (
 
 from app.services.workspace.control_state_paths import (
     FAMILY_EVENTS,
+    coerce_control_state_location,
     control_state_family_dir,
+    legacy_control_state_family_dir,
+    project_control_state_location,
 )
 
 logger = logging.getLogger(__name__)
 
 
+def _resolve_event_stream_location(
+    workspace_path: Optional[str], project_id: Optional[int]
+) -> Any:
+    """Resolve the stream's control-state location once per connection.
+
+    The poll loop runs every second, so the runtime-root lookup happens here
+    rather than inside ``_poll_new_orchestration_events``.  A failure degrades
+    to the historical project root, which is a read-only source.
+    """
+    if not workspace_path or project_id is None:
+        return workspace_path
+    try:
+        return project_control_state_location(workspace_path, project_id)
+    except Exception:
+        return workspace_path
+
+
+def _orchestration_event_dirs(
+    workspace_path: str, project_id: Optional[int]
+) -> List[Path]:
+    """Historical journal directory then the relocated one, without duplicates.
+
+    A session that straddles the relocation cutover has part of its backlog in
+    each, so the tail reads both; identical paths (a legacy-scoped location)
+    collapse to one.
+    """
+    location = coerce_control_state_location(workspace_path, project_id=project_id)
+    legacy = legacy_control_state_family_dir(location, FAMILY_EVENTS)
+    current = control_state_family_dir(location, FAMILY_EVENTS)
+    return [legacy] if legacy == current else [legacy, current]
+
+
 def _poll_new_orchestration_events(
     workspace_path: str,
     session_id: int,
-    task_event_cursors: Dict[int, int],
+    task_event_cursors: Dict[Any, int],
     project_id: Optional[int] = None,
-) -> Tuple[List[Dict[str, Any]], Dict[int, int]]:
+) -> Tuple[List[Dict[str, Any]], Dict[Any, int]]:
     """Read new events from per-task JSONL journals since the last cursor position.
 
-    ``task_event_cursors`` maps task_id → number of lines already sent.
+    ``task_event_cursors`` maps a journal key → number of lines already sent.
+    The key is the task id for the historical journal (unchanged) and the
+    journal path for the relocated one, so one task's two journals keep
+    independent cursors.
     Returns (new_events_list, updated_cursors).
     """
-    events_dir = control_state_family_dir(
-        workspace_path, FAMILY_EVENTS, project_id=project_id
-    )
-    if not events_dir.exists():
-        return [], task_event_cursors
-
     new_events: List[Dict[str, Any]] = []
     updated_cursors = dict(task_event_cursors)
+    dirs = _orchestration_event_dirs(workspace_path, project_id)
 
-    try:
-        for log_path in sorted(events_dir.glob(f"session_{session_id}_task_*.jsonl")):
-            try:
-                task_id = int(log_path.stem.split("_task_")[-1])
-            except (ValueError, IndexError):
-                continue
-            already_sent = updated_cursors.get(task_id, 0)
-            try:
-                with log_path.open("r", encoding="utf-8") as fh:
-                    all_lines = fh.readlines()
-            except OSError:
-                continue
-            for line in all_lines[already_sent:]:
-                line = line.strip()
-                if not line:
-                    continue
+    for index, events_dir in enumerate(dirs):
+        if not events_dir.exists():
+            continue
+        try:
+            for log_path in sorted(
+                events_dir.glob(f"session_{session_id}_task_*.jsonl")
+            ):
                 try:
-                    event = json.loads(line)
-                    new_events.append(event)
-                except json.JSONDecodeError:
-                    pass
-            updated_cursors[task_id] = len(all_lines)
-    except Exception:
-        pass
+                    task_id = int(log_path.stem.split("_task_")[-1])
+                except (ValueError, IndexError):
+                    continue
+                cursor_key: Any = task_id if index == 0 else str(log_path)
+                already_sent = updated_cursors.get(cursor_key, 0)
+                try:
+                    with log_path.open("r", encoding="utf-8") as fh:
+                        all_lines = fh.readlines()
+                except OSError:
+                    continue
+                for line in all_lines[already_sent:]:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        new_events.append(event)
+                    except json.JSONDecodeError:
+                        pass
+                updated_cursors[cursor_key] = len(all_lines)
+        except Exception:
+            pass
 
     return new_events, updated_cursors
 
@@ -150,6 +190,7 @@ async def mobile_sse_event_generator(
     """
     seen_event_ids: OrderedDict = OrderedDict()
 
+    workspace_path = _resolve_event_stream_location(workspace_path, project_id)
     initial_events, task_event_cursors = _prepare_initial_orchestration_events(
         workspace_path, session_id, project_id=project_id
     )
@@ -316,7 +357,7 @@ async def stream_session_logs(
     )
 
     # Resolve workspace path for orchestration event journal polling.
-    _workspace_path: Optional[str] = None
+    _workspace_path: Any = None
     if session.project_id:
         from app.models import Project
 
@@ -355,6 +396,9 @@ async def stream_session_logs(
 
     _seen_event_ids: OrderedDict = OrderedDict()
 
+    _workspace_path = _resolve_event_stream_location(
+        _workspace_path, session.project_id
+    )
     initial_orch_events, _task_event_cursors = _prepare_initial_orchestration_events(
         _workspace_path, session_id, project_id=session.project_id
     )

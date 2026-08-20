@@ -16,7 +16,10 @@ from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.workspace.permissions import ensure_shared_tree
 from app.services.workspace.control_state_paths import (
     FAMILY_CHANGE_SETS,
+    ControlStateLocation,
     control_state_family_dir,
+    control_state_read_path,
+    project_control_state_location,
 )
 from app.services.workspace.workspace_paths import (
     AUTO_SNAPSHOT_ROOT,
@@ -55,11 +58,32 @@ CONFIG_FILE_NAMES = {
 }
 
 
+def change_set_dir_for_read(
+    project_root: Path,
+    project_id: Optional[int],
+    task_execution_id: int,
+    *,
+    db: Optional[Session] = None,
+) -> Path:
+    """Relocated change-set directory if present, else the historical one.
+
+    Change-set identity, contents, and manifest semantics are untouched; only
+    where the directory is looked up changed.  Kept module-level so Publication
+    resolves it against *its own* project root without constructing a service.
+    """
+    return control_state_read_path(
+        project_control_state_location(project_root, project_id, db=db),
+        FAMILY_CHANGE_SETS,
+        str(task_execution_id),
+    )
+
+
 class ChangesetService:
     """Own build, persistence, lookup, and disposition for task change sets."""
 
     def __init__(self, db: Session):
         self.db = db
+        self._control_state_locations: dict[int, ControlStateLocation] = {}
 
     def get_project_root(self, project: Project) -> Path:
         return resolve_project_root(project, self.db)
@@ -116,17 +140,33 @@ class ChangesetService:
     def _artifact_manifest_path(self, project: Project, task_execution_id: int) -> Path:
         return self._change_set_dir(project, task_execution_id) / "manifest.json"
 
-    def _change_set_dir(self, project: Project, task_execution_id: int) -> Path:
-        """One change-set directory, resolved by durable Project identity.
+    def _control_state_location(self, project: Project) -> ControlStateLocation:
+        """Identity-resolved control-state location, memoized per service."""
+        cached = self._control_state_locations.get(project.id)
+        if cached is None:
+            cached = project_control_state_location(
+                self.get_project_root(project), project.id, db=self.db
+            )
+            self._control_state_locations[project.id] = cached
+        return cached
 
-        Directory name and manifest/file layout are unchanged; only the root
+    def _change_set_dir(self, project: Project, task_execution_id: int) -> Path:
+        """Authoritative (write) change-set directory for one task execution.
+
+        Directory name, manifest, and file layout are unchanged; only the root
         resolution is routed through the control-state contract.
         """
         return control_state_family_dir(
-            self.get_project_root(project),
-            FAMILY_CHANGE_SETS,
-            project_id=project.id,
+            self._control_state_location(project), FAMILY_CHANGE_SETS
         ) / str(task_execution_id)
+
+    def change_set_dir_for_read(self, project: Project, task_execution_id: int) -> Path:
+        """Relocated change-set directory if present, else the historical one."""
+        return control_state_read_path(
+            self._control_state_location(project),
+            FAMILY_CHANGE_SETS,
+            str(task_execution_id),
+        )
 
     def _path_is_safe_relative(self, relative_path: str) -> bool:
         path = Path(relative_path)
@@ -381,10 +421,11 @@ class ChangesetService:
         }
         project = self.db.query(Project).filter(Project.id == record.project_id).first()
         if project is not None:
-            files_root = self._artifact_files_root(project, record.task_execution_id)
-            manifest_path = self._artifact_manifest_path(
+            change_set_dir = self.change_set_dir_for_read(
                 project, record.task_execution_id
             )
+            files_root = change_set_dir / "files"
+            manifest_path = change_set_dir / "manifest.json"
             payload["artifact_path"] = str(files_root)
             payload["artifact_exists"] = files_root.exists()
             payload["artifact_manifest_path"] = str(manifest_path)

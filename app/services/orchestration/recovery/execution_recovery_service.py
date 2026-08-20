@@ -20,6 +20,7 @@ from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.workspace.control_state_paths import (
     coerce_control_state_location,
+    control_state_location_for,
 )
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     ExecutionRecoveryEvidence,
@@ -161,9 +162,7 @@ class ExecutionRecoveryService:
         # Control-state identity travels separately from the filesystem path:
         # `project_dir` below stays a plain Path for patch/rerun I/O, while
         # `control_state` carries the owning Project.id to the event journal.
-        control_state = coerce_control_state_location(
-            project_dir, project_id=getattr(orchestration_state, "project_id", None)
-        )
+        control_state = control_state_location_for(project_dir, orchestration_state)
         project_dir = _Path(str(project_dir))
 
         should, skip_reason = ExecutionRecoveryService.should_attempt(

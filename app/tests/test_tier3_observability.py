@@ -414,10 +414,14 @@ def test_divergence_compare_resolves_relative_project_workspace(
 
     get_session_divergence_compare_payload(db_session, session.id, limit=5)
 
+    # Post-relocation the fingerprint index is keyed by Project.id under the
+    # runtime root, so a relative workspace_path cannot place it anywhere
+    # machine-specific -- least of all the process CWD.
+    from app.services.workspace.control_state_paths import project_control_state_root
+    from app.services.workspace.system_settings import get_effective_runtime_root
+
     expected = (
-        workspace_root
-        / "relative-project"
-        / ".agent"
+        project_control_state_root(get_effective_runtime_root(db_session), project.id)
         / "fingerprints"
         / f"session_{session.id}.json"
     )
@@ -430,6 +434,7 @@ def test_divergence_compare_resolves_relative_project_workspace(
     )
     assert expected.exists()
     assert not wrong.exists()
+    assert not (workspace_root / "relative-project" / ".agent").exists()
 
 
 def test_divergence_compare_higher_tag_overlap_scores_higher(db_session, monkeypatch):

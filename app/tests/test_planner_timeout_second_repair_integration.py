@@ -18,6 +18,18 @@ from app.services.orchestration.validation.parsing import extract_structured_tex
 from app.tests.planner_timeout_test_helpers import _patch_planning_flow_external_writes
 
 
+def _stub_db():
+    """A stub Session whose system_settings table is empty.
+
+    Durable control state resolves the Orchestrator runtime root through
+    `system_settings`; an unconfigured MagicMock would return a mock value
+    there, which the control-state contract rejects as non-concrete.
+    """
+    db = MagicMock()
+    db.query.return_value.filter.return_value.first.return_value = None
+    return db
+
+
 def test_post_repair_weak_verification_gets_one_targeted_second_repair(
     tmp_path, monkeypatch
 ):
@@ -96,6 +108,7 @@ def test_post_repair_weak_verification_gets_one_targeted_second_repair(
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -120,7 +133,7 @@ def test_post_repair_weak_verification_gets_one_targeted_second_repair(
     events = []
 
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,
@@ -232,6 +245,7 @@ def test_post_repair_weak_verification_second_repair_is_capped(tmp_path, monkeyp
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -255,7 +269,7 @@ def test_post_repair_weak_verification_second_repair_is_capped(tmp_path, monkeyp
     session_task_link = MagicMock()
 
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,
@@ -373,6 +387,7 @@ def test_post_repair_python_source_syntax_gets_one_targeted_second_repair(
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -395,7 +410,7 @@ def test_post_repair_python_source_syntax_gets_one_targeted_second_repair(
     session.is_active = True
     session_task_link = MagicMock()
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,
@@ -518,6 +533,7 @@ def test_post_repair_python_source_syntax_second_repair_is_capped(
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -540,7 +556,7 @@ def test_post_repair_python_source_syntax_second_repair_is_capped(
     session.is_active = True
     session_task_link = MagicMock()
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,
@@ -752,6 +768,7 @@ def test_post_repair_argparse_framework_mismatch_gets_one_targeted_second_repair
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -774,7 +791,7 @@ def test_post_repair_argparse_framework_mismatch_gets_one_targeted_second_repair
     session.is_active = True
     session_task_link = MagicMock()
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,
@@ -903,6 +920,7 @@ def test_post_repair_argparse_framework_mismatch_second_repair_is_capped(
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -925,7 +943,7 @@ def test_post_repair_argparse_framework_mismatch_second_repair_is_capped(
     session.is_active = True
     session_task_link = MagicMock()
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,
@@ -1025,6 +1043,7 @@ def test_post_repair_background_process_gets_one_targeted_second_repair(
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -1048,7 +1067,7 @@ def test_post_repair_background_process_gets_one_targeted_second_repair(
     session_task_link = MagicMock()
 
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,
@@ -1144,6 +1163,7 @@ def test_post_repair_missing_verification_gets_one_targeted_second_repair(
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -1167,7 +1187,7 @@ def test_post_repair_missing_verification_gets_one_targeted_second_repair(
     session_task_link = MagicMock()
 
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,
@@ -1306,6 +1326,7 @@ def test_post_repair_missing_verification_second_repair_is_capped(
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -1329,7 +1350,7 @@ def test_post_repair_missing_verification_second_repair_is_capped(
     session_task_link = MagicMock()
 
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,
@@ -1450,6 +1471,7 @@ def test_post_repair_missing_materialization_rejects_inspect_only_plan(
 
     orchestration_state = MagicMock()
     orchestration_state.project_dir = tmp_path
+    orchestration_state.project_id = 12
     orchestration_state.project_context = ""
     orchestration_state.plan = []
     orchestration_state.current_step_index = 0
@@ -1473,7 +1495,7 @@ def test_post_repair_missing_materialization_rejects_inspect_only_plan(
     session_task_link = MagicMock()
 
     ctx = OrchestrationRunContext(
-        db=MagicMock(),
+        db=_stub_db(),
         session=session,
         project=MagicMock(),
         task=task,

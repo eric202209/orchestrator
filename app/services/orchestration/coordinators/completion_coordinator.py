@@ -73,6 +73,7 @@ from app.services.workspace.project_isolation_service import (
 from app.services.workspace.control_state_paths import (
     FAMILY_TASK_REPORTS,
     control_state_family_dir,
+    project_control_state_location,
 )
 from app.services.workspace.control_state_paths import control_state_of
 
@@ -1510,9 +1511,12 @@ class CompletionCoordinator:
                             report_root = orchestration_state.project_dir
                     report_path = (
                         control_state_family_dir(
-                            report_root,
+                            project_control_state_location(
+                                report_root,
+                                getattr(project, "id", None),
+                                db=db,
+                            ),
                             FAMILY_TASK_REPORTS,
-                            project_id=getattr(project, "id", None),
                         )
                         / f"task_report_{task_id}.md"
                     )

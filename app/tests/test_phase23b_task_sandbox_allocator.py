@@ -57,8 +57,19 @@ class TestRuntimePathGeneration:
 
 
 class TestRuntimeRootSetting:
-    def test_default_runtime_root(self, db_session):
+    def test_default_runtime_root(self, db_session, monkeypatch):
         from pathlib import Path
+
+        from app.tests.conftest import repo_default_settings
+
+        # The autouse runtime-root isolation fixture redirects
+        # settings.RUNTIME_ROOT into tmp_path so control state written by tests
+        # never escapes; restore the repository default to assert the real
+        # no-database-row fallback.
+        monkeypatch.setattr(
+            "app.services.workspace.system_settings.settings.RUNTIME_ROOT",
+            repo_default_settings().RUNTIME_ROOT,
+        )
 
         root = get_effective_runtime_root(db_session)
         assert root == Path(DEFAULT_RUNTIME_ROOT).expanduser().resolve()

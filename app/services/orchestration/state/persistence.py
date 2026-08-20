@@ -28,6 +28,9 @@ from app.services.workspace.control_state_paths import (
     FAMILY_FINGERPRINTS,
     coerce_control_state_location,
     control_state_family_dir,
+    control_state_location_for,
+    control_state_read_path,
+    legacy_control_state_family_dir,
 )
 from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.workspace.checkpoint_service import CheckpointService
@@ -91,6 +94,10 @@ class CheckpointData:
         )
 
 
+def _event_journal_filename(session_id: int, task_id: int) -> str:
+    return f"session_{session_id}_task_{task_id}.jsonl"
+
+
 def _orchestration_event_log_path(
     project_dir: Any,
     session_id: int,
@@ -98,10 +105,45 @@ def _orchestration_event_log_path(
     *,
     project_id: Optional[int] = None,
 ) -> Path:
-    return (
-        control_state_family_dir(project_dir, FAMILY_EVENTS, project_id=project_id)
-        / f"session_{session_id}_task_{task_id}.jsonl"
-    )
+    """Authoritative (write) journal path for one session/task pair."""
+    return control_state_family_dir(
+        project_dir, FAMILY_EVENTS, project_id=project_id
+    ) / _event_journal_filename(session_id, task_id)
+
+
+def _legacy_orchestration_event_log_path(
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    project_id: Optional[int] = None,
+) -> Path:
+    """Historical project-root journal path, for compatibility reads only."""
+    return legacy_control_state_family_dir(
+        project_dir, FAMILY_EVENTS, project_id=project_id
+    ) / _event_journal_filename(session_id, task_id)
+
+
+def _event_journal_read_paths(
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    project_id: Optional[int] = None,
+) -> List[Path]:
+    """Historical journal first, then the relocated one.
+
+    Writes for a given session/task stop in the legacy journal at the cutover
+    and continue in the runtime-root journal, so legacy-then-current is the
+    chronological order of the combined stream. The two paths are identical for
+    a legacy-scoped location, in which case only one is read.
+    """
+    location = coerce_control_state_location(project_dir, project_id=project_id)
+    current = _orchestration_event_log_path(location, session_id, task_id)
+    legacy = _legacy_orchestration_event_log_path(location, session_id, task_id)
+    if legacy == current:
+        return [current]
+    return [legacy, current]
 
 
 def _session_fingerprint_index_path(
@@ -110,11 +152,32 @@ def _session_fingerprint_index_path(
     *,
     project_id: Optional[int] = None,
 ) -> Path:
+    """Authoritative (write) path for a session fingerprint index."""
     return (
         control_state_family_dir(
             workspace_path, FAMILY_FINGERPRINTS, project_id=project_id
         )
         / f"session_{session_id}.json"
+    )
+
+
+def _session_fingerprint_index_read_path(
+    workspace_path: Any,
+    session_id: int,
+    *,
+    project_id: Optional[int] = None,
+) -> Path:
+    """New-first, legacy-fallback path for a session fingerprint index.
+
+    A fingerprint index is a latest-value record for one session, rewritten
+    atomically in place and read back with a freshness bound; there is no
+    history to merge, so the relocated file simply supersedes the legacy one.
+    """
+    return control_state_read_path(
+        workspace_path,
+        FAMILY_FINGERPRINTS,
+        f"session_{session_id}.json",
+        project_id=project_id,
     )
 
 
@@ -143,7 +206,7 @@ def read_session_fingerprint_index(
     max_age_seconds: int = 300,
     project_id: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    path = _session_fingerprint_index_path(
+    path = _session_fingerprint_index_read_path(
         workspace_path, session_id, project_id=project_id
     )
     if not path.exists():
@@ -219,6 +282,10 @@ def _apply_counterfactual_overrides_to_checkpoint(
     return modified, applied, deferred
 
 
+def _state_snapshot_filename(session_id: int, task_id: int) -> str:
+    return f"session_{session_id}_task_{task_id}_state_snapshots.jsonl"
+
+
 def _orchestration_state_snapshot_log_path(
     project_dir: Any,
     session_id: int,
@@ -226,10 +293,28 @@ def _orchestration_state_snapshot_log_path(
     *,
     project_id: Optional[int] = None,
 ) -> Path:
-    return (
-        control_state_family_dir(project_dir, FAMILY_EVENTS, project_id=project_id)
-        / f"session_{session_id}_task_{task_id}_state_snapshots.jsonl"
-    )
+    """Authoritative (write) snapshot journal path."""
+    return control_state_family_dir(
+        project_dir, FAMILY_EVENTS, project_id=project_id
+    ) / _state_snapshot_filename(session_id, task_id)
+
+
+def _state_snapshot_read_paths(
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    project_id: Optional[int] = None,
+) -> List[Path]:
+    """Historical snapshot journal first, then the relocated one."""
+    location = coerce_control_state_location(project_dir, project_id=project_id)
+    current = _orchestration_state_snapshot_log_path(location, session_id, task_id)
+    legacy = legacy_control_state_family_dir(
+        location, FAMILY_EVENTS
+    ) / _state_snapshot_filename(session_id, task_id)
+    if legacy == current:
+        return [current]
+    return [legacy, current]
 
 
 def _safe_jsonl_length(log_path: Path) -> int:
@@ -804,15 +889,14 @@ def write_orchestration_state_snapshot(
 ) -> Dict[str, Any]:
     # Identity comes from the caller, else from the OrchestrationState the
     # snapshot is built from; it is never derived from ``project_dir``.
-    project_dir = coerce_control_state_location(
-        project_dir,
-        project_id=(
-            project_id
-            if project_id is not None
-            else getattr(orchestration_state, "project_id", None)
-        ),
-    )
+    # Every caller passes ``orchestration_state.project_dir`` (a bare path) for
+    # the legacy root, so identity and the relocated root are inherited from the
+    # state's own already-resolved location rather than re-resolved here.
+    project_dir = control_state_location_for(project_dir, orchestration_state)
+    if project_id is not None:
+        project_dir = project_dir.with_project_id(project_id)
     log_path = _orchestration_state_snapshot_log_path(project_dir, session_id, task_id)
+    read_paths = _state_snapshot_read_paths(project_dir, session_id, task_id)
     payload = build_orchestration_state_snapshot(
         session_id=session_id,
         task_id=task_id,
@@ -821,7 +905,9 @@ def write_orchestration_state_snapshot(
         trigger=trigger,
         related_event_id=related_event_id,
     )
-    payload["snapshot_index"] = _safe_jsonl_length(log_path)
+    # Indices stay monotonic across the relocation cutover: a session/task that
+    # already has legacy snapshots continues counting from where it left off.
+    payload["snapshot_index"] = sum(_safe_jsonl_length(path) for path in read_paths)
     _append_jsonl_line(log_path, payload)
     return payload
 
@@ -1086,30 +1172,52 @@ def read_orchestration_events(
     Returns events in chronological order.  Pass ``event_type_filter`` to
     restrict results to a single event type.
     """
-    log_path = _orchestration_event_log_path(
-        project_dir, session_id, task_id, project_id=project_id
-    )
-    if not log_path.exists():
-        return []
-
     events: List[Dict[str, Any]] = []
-    try:
-        with log_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if event_type_filter and event.get("event_type") != event_type_filter:
-                    continue
-                events.append(event)
-    except OSError:
-        pass
+    for log_path in _event_journal_read_paths(
+        project_dir, session_id, task_id, project_id=project_id
+    ):
+        if not log_path.exists():
+            continue
+        try:
+            with log_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        event_type_filter
+                        and event.get("event_type") != event_type_filter
+                    ):
+                        continue
+                    events.append(event)
+        except OSError:
+            pass
 
     return events
+
+
+def read_legacy_orchestration_events(
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    project_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Historical project-root journal only.
+
+    Used by the candidate-root probes that decide *which* legacy root holds a
+    task's history: the relocated journal is identity-keyed and therefore the
+    same for every candidate, so probing with the combined reader would always
+    select the first candidate and hide history under the others.
+    """
+    legacy_root = coerce_control_state_location(
+        project_dir, project_id=project_id
+    ).legacy_root
+    return read_orchestration_events(legacy_root, session_id, task_id)
 
 
 def load_accepted_path_authority(
@@ -1285,26 +1393,39 @@ def read_orchestration_state_snapshots(
     *,
     project_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    log_path = _orchestration_state_snapshot_log_path(
-        project_dir, session_id, task_id, project_id=project_id
-    )
-    if not log_path.exists():
-        return []
-
     snapshots: List[Dict[str, Any]] = []
-    try:
-        with log_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    snapshots.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
-    except OSError:
-        pass
+    for log_path in _state_snapshot_read_paths(
+        project_dir, session_id, task_id, project_id=project_id
+    ):
+        if not log_path.exists():
+            continue
+        try:
+            with log_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        snapshots.append(json.loads(line))
+                    except json.JSONDecodeError:
+                        continue
+        except OSError:
+            pass
     return snapshots
+
+
+def read_legacy_orchestration_state_snapshots(
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    project_id: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Historical project-root snapshot journal only; see the events twin."""
+    legacy_root = coerce_control_state_location(
+        project_dir, project_id=project_id
+    ).legacy_root
+    return read_orchestration_state_snapshots(legacy_root, session_id, task_id)
 
 
 def diff_orchestration_state_snapshots(

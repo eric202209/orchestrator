@@ -28,7 +28,10 @@ from app.services.orchestration.planning.prompt_contracts import (
     render_operator_guidance_precedence,
     render_operation_choice_contract,
 )
-from app.services.workspace.control_state_paths import ControlStateLocation
+from app.services.workspace.control_state_paths import (
+    ControlStateLocation,
+    resolve_project_control_root,
+)
 from app.services.workspace.system_settings import get_effective_workspace_root
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
@@ -130,6 +133,9 @@ class OrchestrationState:
     _task_subfolder_override: Optional[str] = None
     # Optional: Override concrete execution directory (for canonical project runs)
     _project_dir_override: Optional[str] = None
+    # Resolved <runtime_root>/control/projects/<project_id>, memoized per state so
+    # the runtime-root lookup happens once per run, not once per event append.
+    _control_root_cache: Optional[str] = None
     # Artifact-driven Continuation: populated by _inject_project_artifacts_into_context
     # when ARTIFACT_CONTINUATION_ENABLED=True. Injected post-shaping in assemble_planning_prompt.
     artifact_supplement: Optional[str] = None
@@ -209,9 +215,16 @@ class OrchestrationState:
         Pass this (not ``project_dir``) into control-state producers so the
         owning ``Project.id`` travels with the location.
         """
+        if self.project_id is None:
+            return ControlStateLocation(legacy_root=self.project_dir)
+        if self._control_root_cache is None:
+            self._control_root_cache = str(
+                resolve_project_control_root(self.project_id)
+            )
         return ControlStateLocation(
             legacy_root=self.project_dir,
             project_id=self.project_id,
+            control_root=Path(self._control_root_cache),
         )
 
     @property

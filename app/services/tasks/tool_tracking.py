@@ -19,6 +19,9 @@ from app.services.orchestration.state.persistence import (
     maybe_emit_divergence_detected,
     write_checkpoint_state_snapshot,
 )
+from app.services.workspace.control_state_paths import (
+    project_control_state_location,
+)
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -268,7 +271,9 @@ class ToolTrackingService:
                 project.workspace_path, project.name
             )
             task_subfolder = str(task.task_subfolder or f"task-{task.id}")
-            project_dir = Path(workspace_root) / task_subfolder
+            project_dir = project_control_state_location(
+                Path(workspace_root) / task_subfolder, project.id, db=self.db
+            )
             parent_event = find_latest_orchestration_event(
                 project_dir,
                 session_id,
