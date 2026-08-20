@@ -818,7 +818,7 @@ def _reject_repair_candidate_by_bootstrap_contract(
         arbitration["reason"] = "repair_candidate_rejected_by_bootstrap_contract"
         try:
             append_orchestration_event(
-                project_dir=ctx.orchestration_state.project_dir,
+                project_dir=ctx.control_state_location,
                 session_id=ctx.session_id,
                 task_id=ctx.task_id,
                 event_type=EventType.PLANNING_REPAIR_ARBITRATION,
@@ -895,7 +895,7 @@ def _reject_repair_candidate_by_bootstrap_contract(
     )
     try:
         append_orchestration_event(
-            project_dir=ctx.orchestration_state.project_dir,
+            project_dir=ctx.control_state_location,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.PLANNING_REPAIR_ARBITRATION,
@@ -983,7 +983,7 @@ def _emit_planning_repair_arbitration(
     )
     try:
         append_orchestration_event(
-            project_dir=ctx.orchestration_state.project_dir,
+            project_dir=ctx.control_state_location,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.PLANNING_REPAIR_ARBITRATION,

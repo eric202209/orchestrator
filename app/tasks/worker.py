@@ -22,6 +22,10 @@ from app.models import (
     Project,
 )
 from app.database import get_db_session
+from app.services.workspace.control_state_paths import (
+    ControlStateLocation,
+    control_state_of,
+)
 from app.services import (
     create_agent_runtime,
     build_task_subfolder_name,
@@ -573,6 +577,12 @@ def execute_orchestration_task(
                 dispatch_project_dir = (
                     dispatch_project_dir / str(task.task_subfolder)
                 ).resolve()
+            # Carry the owning Project.id with the dispatch control-state root
+            # so every dispatch-phase event resolves by identity, not by path.
+            dispatch_project_dir = ControlStateLocation(
+                legacy_root=dispatch_project_dir,
+                project_id=project.id,
+            )
 
         queued_event = None
         queued_at = None
@@ -732,6 +742,7 @@ def execute_orchestration_task(
             project_context=context.get("project_context", "") if context else "",
             task_id=task_id,  # Pass task ID for subfolder generation
             planner_contract=planner_contract,
+            project_id=project.id if project else None,
         )
 
         # If project has workspace_path configured, use it
@@ -890,6 +901,7 @@ def execute_orchestration_task(
                 )
                 _append_orchestration_event(
                     project_dir=_runtime_sandbox.path,
+                    project_id=project.id if project else None,
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.RUNTIME_WORKSPACE_ALLOCATED,
@@ -1273,7 +1285,7 @@ def execute_orchestration_task(
                 identity_projection,
             )
             _append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.TASK_STARTED,
@@ -1482,7 +1494,7 @@ def execute_orchestration_task(
                     **runtime_service.get_backend_metadata(),
                 }
                 _append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.WORKSPACE_CONTRACT_FAILED,
@@ -1539,7 +1551,7 @@ def execute_orchestration_task(
             )
             if resolved_resume_checkpoint_name != requested_resume_checkpoint_name:
                 _append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.CHECKPOINT_REDIRECTED,
@@ -1598,7 +1610,7 @@ def execute_orchestration_task(
                                 },
                             )
                             _append_orchestration_event(
-                                project_dir=orchestration_state.project_dir,
+                                project_dir=control_state_of(orchestration_state),
                                 session_id=session_id,
                                 task_id=task_id,
                                 event_type=EventType.RESUME_WORKSPACE_DRIFT,
@@ -1644,7 +1656,7 @@ def execute_orchestration_task(
                             },
                         )
                         _append_orchestration_event(
-                            project_dir=orchestration_state.project_dir,
+                            project_dir=control_state_of(orchestration_state),
                             session_id=session_id,
                             task_id=task_id,
                             event_type=EventType.RESUME_WORKSPACE_DRIFT,
@@ -1682,7 +1694,7 @@ def execute_orchestration_task(
                         },
                     )
                     _append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.RESUME_WORKSPACE_DRIFT,
@@ -1899,7 +1911,7 @@ def execute_orchestration_task(
                 )
                 try:
                     _append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.TASK_ADMISSION_HELD,
@@ -2201,7 +2213,7 @@ def execute_orchestration_task(
                     )
                     try:
                         _append_orchestration_event(
-                            project_dir=orchestration_state.project_dir,
+                            project_dir=control_state_of(orchestration_state),
                             session_id=session_id,
                             task_id=task_id,
                             event_type=EventType.LANE_ESCALATION_RESULT,
@@ -2698,6 +2710,7 @@ def execute_orchestration_task(
                 try:
                     _append_orchestration_event(
                         project_dir=_runtime_sandbox_project_root,
+                        project_id=project.id if project else None,
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.RUNTIME_WORKSPACE_DISPOSED,

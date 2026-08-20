@@ -20,7 +20,7 @@ def emit_planning_phase_finished(
 ) -> None:
     try:
         phase_finished_event = append_orchestration_event(
-            project_dir=ctx.orchestration_state.project_dir,
+            project_dir=ctx.control_state_location,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.PHASE_FINISHED,

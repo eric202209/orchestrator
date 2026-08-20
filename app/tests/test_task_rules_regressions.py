@@ -240,7 +240,7 @@ def test_virtual_merge_gate_ignores_stale_unsynced_state_for_current_task_retry(
             project,
             current_task,
             "full_lifecycle",
-            lambda root: root / ".agent" / "state_manager.json",
+            lambda root, **_kw: root / ".agent" / "state_manager.json",
         )
         is None
     )
@@ -299,7 +299,7 @@ def test_virtual_merge_gate_blocks_unsynced_prior_task(db_session, tmp_path):
         project,
         current_task,
         "full_lifecycle",
-        lambda root: root / ".agent" / "state_manager.json",
+        lambda root, **_kw: root / ".agent" / "state_manager.json",
     )
 
     assert reason is not None
@@ -345,7 +345,7 @@ def test_virtual_merge_gate_scopes_prior_tasks_to_same_plan(db_session, tmp_path
             project,
             recovery_validation,
             "test_only",
-            lambda root: root / ".agent" / "state_manager.json",
+            lambda root, **_kw: root / ".agent" / "state_manager.json",
         )
         is None
     )
@@ -394,7 +394,7 @@ def test_virtual_merge_gate_accepts_legacy_root_task_report(db_session, tmp_path
             project,
             current_task,
             "full_lifecycle",
-            lambda root: root / ".agent" / "state_manager.json",
+            lambda root, **_kw: root / ".agent" / "state_manager.json",
         )
         is None
     )
@@ -456,7 +456,7 @@ def test_e2_implementation_task_is_not_blocked_by_incomplete_prior_tasks(
             project,
             current_task,
             "full_lifecycle",
-            lambda root: root / ".agent" / "state_manager.json",
+            lambda root, **_kw: root / ".agent" / "state_manager.json",
         )
         is None
     )
@@ -528,7 +528,7 @@ def test_genuine_verification_hold_exposes_classification_and_blocking_scope(
         project,
         current_task,
         "full_lifecycle",
-        lambda root: root / ".agent" / "state_manager.json",
+        lambda root, **_kw: root / ".agent" / "state_manager.json",
     )
 
     assert reason is not None
@@ -589,7 +589,7 @@ def test_explicit_plan_predecessor_still_blocks_implementation_task(
         project,
         current_task,
         "full_lifecycle",
-        lambda root: root / ".agent" / "state_manager.json",
+        lambda root, **_kw: root / ".agent" / "state_manager.json",
     )
 
     assert reason is not None
@@ -746,7 +746,7 @@ def test_virtual_merge_gate_reports_heuristic_profile_authority(db_session, tmp_
         project,
         current_task,
         "review_only",
-        lambda root: root / ".agent" / "state_manager.json",
+        lambda root, **_kw: root / ".agent" / "state_manager.json",
         profile_source=EXECUTION_PROFILE_SOURCE_REVIEW_HEURISTIC,
     )
 
@@ -795,7 +795,7 @@ def test_attempt14_shaped_task_is_admitted_by_virtual_merge_gate(db_session, tmp
             project,
             current_task,
             "full_lifecycle",
-            lambda root: root / ".agent" / "state_manager.json",
+            lambda root, **_kw: root / ".agent" / "state_manager.json",
         )
         is None
     )

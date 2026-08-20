@@ -669,6 +669,7 @@ def _queue_task_retry(
 
     queued_event = append_orchestration_event(
         project_dir=event_project_dir,
+        project_id=project.id if project else None,
         session_id=selected_session.id,
         task_id=task.id,
         event_type=EventType.TASK_QUEUED,

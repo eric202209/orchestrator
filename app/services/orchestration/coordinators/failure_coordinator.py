@@ -42,6 +42,7 @@ from app.services.orchestration.state.session_state import (
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
+from app.services.workspace.control_state_paths import control_state_of
 
 # A session that already reached a terminal state must never be re-armed by an
 # automatic recovery rerun queued from a late failure of its last execution.
@@ -381,7 +382,7 @@ class FailureCoordinator:
         if orchestration_state and session_id and task_id:
             try:
                 append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.TASK_FAILED,

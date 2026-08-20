@@ -142,7 +142,9 @@ def _read_task_orchestration_events(
     task_id: int,
 ) -> List[Dict[str, Any]]:
     for project_dir in event_project_dir_candidates(db=db, project=project, task=task):
-        events = read_orchestration_events(project_dir, session_id, task_id)
+        events = read_orchestration_events(
+            project_dir, session_id, task_id, project_id=project.id
+        )
         if events:
             return events
     return []

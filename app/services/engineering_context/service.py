@@ -23,6 +23,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+from app.services.workspace.control_state_paths import (
+    CONTROL_STATE_DIR_NAME,
+    FAMILY_ENGINEERING_CONTEXT,
+    control_state_family_dir,
+)
 from app.services.engineering_context.structural import (
     StructuralInformation,
     StructuralInformationError,
@@ -34,7 +39,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_SUBSYSTEM_ID = "project-log-authorization"
 DEFAULT_SUBSYSTEM_VERSION = 1
 DEFAULT_REGISTRY_PATH = Path(__file__).with_name("registrations.json")
-STORAGE_DIR_NAME = ".agent/engineering-context"
+# Engineering context is keyed by *repository* identity (git remote / root),
+# not by Project.id; see the identity-threading gate report. The directory is
+# still resolved through the one control-state contract.
+STORAGE_DIR_NAME = f"{CONTROL_STATE_DIR_NAME}/{FAMILY_ENGINEERING_CONTEXT}"
 SCHEMA_VERSION = 1
 
 
@@ -364,7 +372,9 @@ class _ContextFileStore:
     """Atomic immutable JSON files under the repository's ignored .agent tree."""
 
     def __init__(self, repository_root: Path):
-        self.directory = Path(repository_root).resolve() / STORAGE_DIR_NAME
+        self.directory = control_state_family_dir(
+            Path(repository_root).resolve(), FAMILY_ENGINEERING_CONTEXT
+        )
         self.lock_path = self.directory / ".lock"
 
     def _ensure_directory(self) -> None:

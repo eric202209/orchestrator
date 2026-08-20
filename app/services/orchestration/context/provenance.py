@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from app.schemas.knowledge import KnowledgeContext
 from app.services.project.source_imports import python_test_source_context_from_tests
+from app.services.workspace.control_state_paths import control_state_of
 
 _TASK_PREVIEW_CHARS = 200
 
@@ -41,7 +42,7 @@ def _maybe_emit_provenance(
             ),
         )
         append_orchestration_event(
-            project_dir=getattr(state, "project_dir", None),
+            project_dir=control_state_of(state),
             session_id=getattr(ctx, "session_id", None),
             task_id=getattr(ctx, "task_id", None),
             event_type=EventType.PLANNING_CONTEXT_PROVENANCE,

@@ -7,7 +7,6 @@ import json
 import logging
 from collections import OrderedDict
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, WebSocket, WebSocketDisconnect, status
@@ -29,6 +28,11 @@ from app.services.observability.streaming_health import (
     unregister_stream_connection,
 )
 
+from app.services.workspace.control_state_paths import (
+    FAMILY_EVENTS,
+    control_state_family_dir,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -36,13 +40,16 @@ def _poll_new_orchestration_events(
     workspace_path: str,
     session_id: int,
     task_event_cursors: Dict[int, int],
+    project_id: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[int, int]]:
     """Read new events from per-task JSONL journals since the last cursor position.
 
     ``task_event_cursors`` maps task_id → number of lines already sent.
     Returns (new_events_list, updated_cursors).
     """
-    events_dir = Path(workspace_path) / ".agent" / "events"
+    events_dir = control_state_family_dir(
+        workspace_path, FAMILY_EVENTS, project_id=project_id
+    )
     if not events_dir.exists():
         return [], task_event_cursors
 
@@ -82,13 +89,16 @@ def _prepare_initial_orchestration_events(
     session_id: int,
     *,
     replay_limit: int = 100,
+    project_id: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[int, int]]:
     """Replay a bounded event backlog to reconnecting websocket clients."""
 
     if not workspace_path:
         return [], {}
 
-    events, cursors = _poll_new_orchestration_events(workspace_path, session_id, {})
+    events, cursors = _poll_new_orchestration_events(
+        workspace_path, session_id, {}, project_id=project_id
+    )
     if replay_limit > 0 and len(events) > replay_limit:
         events = events[-replay_limit:]
     return events, cursors
@@ -129,6 +139,7 @@ def _should_send_event(
 async def mobile_sse_event_generator(
     session_id: int,
     workspace_path: Optional[str],
+    project_id: Optional[int] = None,
 ):
     """Async generator that yields SSE-formatted bytes for a session.
 
@@ -140,7 +151,7 @@ async def mobile_sse_event_generator(
     seen_event_ids: OrderedDict = OrderedDict()
 
     initial_events, task_event_cursors = _prepare_initial_orchestration_events(
-        workspace_path, session_id
+        workspace_path, session_id, project_id=project_id
     )
     for event in initial_events:
         if _should_send_event(event, seen_event_ids):
@@ -162,7 +173,7 @@ async def mobile_sse_event_generator(
 
             if workspace_path:
                 new_events, task_event_cursors = _poll_new_orchestration_events(
-                    workspace_path, session_id, task_event_cursors
+                    workspace_path, session_id, task_event_cursors, project_id
                 )
                 for event in new_events:
                     if _should_send_event(event, seen_event_ids):
@@ -345,7 +356,7 @@ async def stream_session_logs(
     _seen_event_ids: OrderedDict = OrderedDict()
 
     initial_orch_events, _task_event_cursors = _prepare_initial_orchestration_events(
-        _workspace_path, session_id
+        _workspace_path, session_id, project_id=session.project_id
     )
     for orch_event in initial_orch_events:
         if _should_send_event(orch_event, _seen_event_ids):
@@ -446,7 +457,10 @@ async def stream_session_logs(
                     if _workspace_path:
                         new_orch_events, _task_event_cursors = (
                             _poll_new_orchestration_events(
-                                _workspace_path, session_id, _task_event_cursors
+                                _workspace_path,
+                                session_id,
+                                _task_event_cursors,
+                                session.project_id,
                             )
                         )
                         for orch_event in new_orch_events:

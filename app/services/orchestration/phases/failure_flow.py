@@ -34,6 +34,7 @@ from app.services.orchestration.state.session_state import (
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.services.orchestration.prompt_templates import OrchestrationStatus
+from app.services.workspace.control_state_paths import control_state_of
 
 DIRTY_RETRY_CHECKPOINT_NAME = "autosave_error"
 _KNOWLEDGE_HALT_MIN_CONFIDENCE = 0.95
@@ -102,7 +103,7 @@ def _has_no_orchestration_events_for_retry(
         return False
     try:
         events = read_orchestration_events(
-            orchestration_state.project_dir,
+            control_state_of(orchestration_state),
             session_id,
             task_id,
         )
@@ -225,7 +226,7 @@ def _prepare_retry_workspace(
     if orchestration_state is not None:
         try:
             append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.WORKSPACE_RETRY_DIRTY,

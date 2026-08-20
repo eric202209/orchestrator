@@ -266,12 +266,14 @@ def _session_task_event_roots(
                 project,
                 task_subfolder=getattr(task, "task_subfolder", None),
             ),
+            project_id=project.id,
         )
         roots.append(
             {
                 "task_id": task.id,
                 "task_title": task.title,
                 "project_dir": project_dir,
+                "project_id": project.id,
             }
         )
     return roots
@@ -304,18 +306,21 @@ def _pick_event_project_dir(
     task_id: int,
     candidates: List[Path],
     prefer_snapshots: bool = False,
+    project_id: Optional[int] = None,
 ) -> Path:
     if not candidates:
         raise ValueError("No project-dir candidates provided")
     for candidate in candidates:
         if prefer_snapshots:
             snapshots = read_orchestration_state_snapshots(
-                candidate, session_id, task_id
+                candidate, session_id, task_id, project_id=project_id
             )
             if snapshots:
                 return candidate
         else:
-            events = read_orchestration_events(candidate, session_id, task_id)
+            events = read_orchestration_events(
+                candidate, session_id, task_id, project_id=project_id
+            )
             if events:
                 return candidate
     return candidates[0]
@@ -531,6 +536,7 @@ def get_session_dispatch_watchdog_payload(
             root["project_dir"],
             session.id,
             root["task_id"],
+            project_id=root.get("project_id"),
         )
         queue_event = None
         claim_event = None
@@ -784,6 +790,7 @@ def refresh_session_dispatch_watchdog_alert(
                 project_dir,
                 session.id,
                 int(item.get("task_id") or 0),
+                project_id=session.project_id,
             )
             latest_stale_event = next(
                 (
@@ -802,6 +809,7 @@ def refresh_session_dispatch_watchdog_alert(
                 continue
             append_orchestration_event(
                 project_dir=project_dir,
+                project_id=session.project_id,
                 session_id=session.id,
                 task_id=int(item.get("task_id") or 0),
                 event_type=EventType.TASK_QUEUE_STALE,
@@ -838,6 +846,7 @@ def _build_session_divergence_fingerprint(
                 root["project_dir"],
                 session.id,
                 root["task_id"],
+                project_id=root.get("project_id"),
             )
         )
     events.sort(key=lambda item: str(item.get("timestamp") or ""))
@@ -935,7 +944,9 @@ def get_session_divergence_compare_payload(
     # Write current fingerprint to index so siblings can reference it later.
     if workspace_path:
         try:
-            write_session_fingerprint_index(workspace_path, session_id, current)
+            write_session_fingerprint_index(
+                workspace_path, session_id, current, project_id=project.id
+            )
         except Exception:
             pass
 
@@ -964,7 +975,10 @@ def get_session_divergence_compare_payload(
             )
             try:
                 fingerprint = read_session_fingerprint_index(
-                    workspace_path, candidate.id, max_age_seconds=max_age
+                    workspace_path,
+                    candidate.id,
+                    max_age_seconds=max_age,
+                    project_id=project.id,
                 )
             except Exception:
                 fingerprint = None
@@ -973,7 +987,7 @@ def get_session_divergence_compare_payload(
             if workspace_path:
                 try:
                     write_session_fingerprint_index(
-                        workspace_path, candidate.id, fingerprint
+                        workspace_path, candidate.id, fingerprint, project_id=project.id
                     )
                 except Exception:
                     pass
@@ -1357,9 +1371,17 @@ def _latest_session_task_context(
     if not roots:
         return None, [], []
     root = roots[-1]
-    events = read_orchestration_events(root["project_dir"], session.id, root["task_id"])
+    events = read_orchestration_events(
+        root["project_dir"],
+        session.id,
+        root["task_id"],
+        project_id=root.get("project_id"),
+    )
     snapshots = read_orchestration_state_snapshots(
-        root["project_dir"], session.id, root["task_id"]
+        root["project_dir"],
+        session.id,
+        root["task_id"],
+        project_id=root.get("project_id"),
     )
     return root, events, snapshots
 
@@ -1598,6 +1620,7 @@ async def replay_session_checkpoint_counterfactual_payload(
         try:
             append_orchestration_event(
                 project_dir=task_root["project_dir"],
+                project_id=task_root.get("project_id"),
                 session_id=session_id,
                 task_id=task_root["task_id"],
                 event_type=EventType.COUNTERFACTUAL_REPLAY_STARTED,
@@ -1678,6 +1701,7 @@ def get_session_state_diff_payload(
             session, project, task_subfolder=getattr(task, "task_subfolder", None)
         ),
         prefer_snapshots=True,
+        project_id=project.id,
     )
     try:
         return diff_orchestration_state_snapshots(
@@ -1686,6 +1710,7 @@ def get_session_state_diff_payload(
             task_id,
             from_checkpoint=from_checkpoint,
             to_checkpoint=to_checkpoint,
+            project_id=project.id,
         )
     except ValueError as exc:
         msg = str(exc)

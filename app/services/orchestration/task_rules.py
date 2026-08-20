@@ -17,7 +17,10 @@ from app.services.orchestration.workflow_profiles import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
+from app.services.workspace.control_state_paths import (
+    FAMILY_TASK_REPORTS,
+    control_state_family_dir,
+)
 from app.services.tasks.service import TaskService
 
 
@@ -318,10 +321,17 @@ def _contains_negated_stack_marker(text: str, markers: tuple[str, ...]) -> bool:
     return False
 
 
-def get_task_report_path(project_root: Path, task: Task) -> Optional[Path]:
+def get_task_report_path(
+    project_root: Path, task: Task, *, project_id: Optional[int] = None
+) -> Optional[Path]:
     if not task:
         return None
-    return project_root / TASK_REPORT_ROOT / f"task_report_{task.id}.md"
+    return (
+        control_state_family_dir(
+            project_root, FAMILY_TASK_REPORTS, project_id=project_id
+        )
+        / f"task_report_{task.id}.md"
+    )
 
 
 def get_legacy_task_report_path(project_root: Path, task: Task) -> Optional[Path]:
@@ -454,7 +464,7 @@ def run_virtual_merge_gate(
     missing_reports = []
     missing_report_task_ids = []
     for task in prior_tasks:
-        report_path = get_task_report_path(project_root, task)
+        report_path = get_task_report_path(project_root, task, project_id=project.id)
         legacy_report_path = get_legacy_task_report_path(project_root, task)
         if (
             report_path
@@ -472,7 +482,7 @@ def run_virtual_merge_gate(
             missing_report_task_ids,
         )
 
-    state_path = get_state_manager_path_fn(project_root)
+    state_path = get_state_manager_path_fn(project_root, project_id=project.id)
     if state_path.exists():
         try:
             state_data = json.loads(state_path.read_text(encoding="utf-8"))

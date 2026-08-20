@@ -123,6 +123,7 @@ from app.services.orchestration.recovery.execution_recovery_evidence import (
 from app.services.orchestration.recovery.execution_recovery_service import (
     ExecutionRecoveryService,
 )
+from app.services.workspace.control_state_paths import control_state_of
 
 __all__ = [
     "_attempt_completion_repair",
@@ -495,7 +496,7 @@ def _attempt_completion_repair(
             },
         )
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_REJECTED,
@@ -530,13 +531,13 @@ def _attempt_completion_repair(
         session_id=ctx.session_id,
         task_id=ctx.task_id,
         session_instance_id=ctx.session_instance_id,
-        project_dir=orchestration_state.project_dir,
+        project_dir=control_state_of(orchestration_state),
         envelope=debug_feedback_envelope,
         evidence_capsule=_evidence_capsule,
     )
     if _evidence_capsule and not _evidence_capsule.is_empty():
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.WORKSPACE_EVIDENCE_COLLECTED,
@@ -590,7 +591,7 @@ def _attempt_completion_repair(
         failure_envelope,
     )
     append_orchestration_event(
-        project_dir=orchestration_state.project_dir,
+        project_dir=control_state_of(orchestration_state),
         session_id=ctx.session_id,
         task_id=ctx.task_id,
         event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
@@ -761,7 +762,7 @@ def _attempt_completion_repair(
             )
         )
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_GENERATED,
@@ -794,7 +795,7 @@ def _attempt_completion_repair(
             )
         )
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_GENERATED,
@@ -819,7 +820,7 @@ def _attempt_completion_repair(
             )
         )
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_GENERATED,
@@ -850,7 +851,7 @@ def _attempt_completion_repair(
         )
     )
     append_orchestration_event(
-        project_dir=orchestration_state.project_dir,
+        project_dir=control_state_of(orchestration_state),
         session_id=ctx.session_id,
         task_id=ctx.task_id,
         event_type=EventType.REPAIR_GENERATED,
@@ -858,7 +859,7 @@ def _attempt_completion_repair(
     )
     if not verification_is_safe:
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_REJECTED,
@@ -892,7 +893,7 @@ def _attempt_completion_repair(
             invalid_paths[:10],
         )
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_REJECTED,
@@ -921,7 +922,7 @@ def _attempt_completion_repair(
             signature_guard_details["completion_repair_signature_violation_types"],
         )
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_REJECTED,
@@ -1085,7 +1086,7 @@ def _attempt_completion_repair(
                     ],
                 )
                 append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=ctx.session_id,
                     task_id=ctx.task_id,
                     event_type=EventType.REPAIR_REJECTED,
@@ -1226,7 +1227,7 @@ def _attempt_completion_repair(
             },
         )
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.REPAIR_APPLIED,
@@ -1265,7 +1266,7 @@ def _attempt_completion_repair(
         },
     )
     append_orchestration_event(
-        project_dir=orchestration_state.project_dir,
+        project_dir=control_state_of(orchestration_state),
         session_id=ctx.session_id,
         task_id=ctx.task_id,
         event_type=EventType.REPAIR_REJECTED,
@@ -1366,7 +1367,7 @@ def _run_evaluator(
             },
         )
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=getattr(orchestration_state, "session_id", None),
             task_id=getattr(orchestration_state, "task_id", None),
             event_type=EventType.EVALUATOR_RESULT,

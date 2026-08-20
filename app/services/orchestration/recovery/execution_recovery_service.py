@@ -18,6 +18,9 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import append_orchestration_event
+from app.services.workspace.control_state_paths import (
+    coerce_control_state_location,
+)
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     ExecutionRecoveryEvidence,
 )
@@ -155,6 +158,12 @@ class ExecutionRecoveryService:
         """
         from pathlib import Path as _Path
 
+        # Control-state identity travels separately from the filesystem path:
+        # `project_dir` below stays a plain Path for patch/rerun I/O, while
+        # `control_state` carries the owning Project.id to the event journal.
+        control_state = coerce_control_state_location(
+            project_dir, project_id=getattr(orchestration_state, "project_id", None)
+        )
         project_dir = _Path(str(project_dir))
 
         should, skip_reason = ExecutionRecoveryService.should_attempt(
@@ -167,7 +176,7 @@ class ExecutionRecoveryService:
         if not should:
             try:
                 append_orchestration_event(
-                    project_dir=project_dir,
+                    project_dir=control_state,
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.EXECUTION_RECOVERY_SKIPPED,
@@ -212,7 +221,7 @@ class ExecutionRecoveryService:
             if not _completion_eligible:
                 stop_reason = "completion_scope_disabled"
                 return ExecutionRecoveryService._noop_attempt(
-                    project_dir=project_dir,
+                    project_dir=control_state,
                     session_id=session_id,
                     task_id=task_id,
                     evidence=evidence,
@@ -228,7 +237,7 @@ class ExecutionRecoveryService:
             # Keep S1-compatible stop_reason so existing tests pass.
             stop_reason = "llm_patch_generation_disabled"
             return ExecutionRecoveryService._noop_attempt(
-                project_dir=project_dir,
+                project_dir=control_state,
                 session_id=session_id,
                 task_id=task_id,
                 evidence=evidence,
@@ -243,6 +252,7 @@ class ExecutionRecoveryService:
         # --- Step scope OR eligible completion scope: real recovery. ---
         return ExecutionRecoveryService._step_recovery(
             project_dir=project_dir,
+            control_state=control_state,
             session_id=session_id,
             task_id=task_id,
             evidence=evidence,
@@ -273,9 +283,10 @@ class ExecutionRecoveryService:
         stop_reason: str,
     ) -> Dict[str, Any]:
         """S1-compatible noop: emit ATTEMPTED + FAILED, never succeed."""
+        control_state = coerce_control_state_location(project_dir)
         try:
             append_orchestration_event(
-                project_dir=project_dir,
+                project_dir=control_state,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.EXECUTION_RECOVERY_ATTEMPTED,
@@ -299,7 +310,7 @@ class ExecutionRecoveryService:
 
         try:
             append_orchestration_event(
-                project_dir=project_dir,
+                project_dir=control_state,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.EXECUTION_RECOVERY_FAILED,
@@ -332,6 +343,7 @@ class ExecutionRecoveryService:
     def _step_recovery(
         *,
         project_dir: Any,
+        control_state: Any = None,
         session_id: int,
         task_id: int,
         evidence: ExecutionRecoveryEvidence,
@@ -356,6 +368,10 @@ class ExecutionRecoveryService:
             validate_recovery_patch,
         )
 
+        control_state = coerce_control_state_location(
+            control_state if control_state is not None else project_dir
+        )
+
         # Tracks whether patch was applied to disk (determines rollback_performed in events).
         _patch_applied = False
 
@@ -367,7 +383,7 @@ class ExecutionRecoveryService:
         ) -> None:
             try:
                 append_orchestration_event(
-                    project_dir=project_dir,
+                    project_dir=control_state,
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.EXECUTION_RECOVERY_FAILED,
@@ -436,7 +452,7 @@ class ExecutionRecoveryService:
         # Step 5: Emit ATTEMPTED (valid patch about to be applied).
         try:
             append_orchestration_event(
-                project_dir=project_dir,
+                project_dir=control_state,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.EXECUTION_RECOVERY_ATTEMPTED,
@@ -547,7 +563,7 @@ class ExecutionRecoveryService:
         # Step 10: Recovery succeeded.
         try:
             append_orchestration_event(
-                project_dir=project_dir,
+                project_dir=control_state,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.EXECUTION_RECOVERY_SUCCEEDED,

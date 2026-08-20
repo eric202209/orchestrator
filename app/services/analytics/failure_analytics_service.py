@@ -164,6 +164,7 @@ class FailureAnalyticsService:
                     target.project_dir,
                     target.session_id,
                     target.task_id,
+                    project_id=target.project_id,
                 )
             except Exception:
                 continue

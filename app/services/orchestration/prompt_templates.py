@@ -28,6 +28,7 @@ from app.services.orchestration.planning.prompt_contracts import (
     render_operator_guidance_precedence,
     render_operation_choice_contract,
 )
+from app.services.workspace.control_state_paths import ControlStateLocation
 from app.services.workspace.system_settings import get_effective_workspace_root
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
@@ -97,6 +98,9 @@ class OrchestrationState:
     project_name: str = ""  # project slug, no spaces
     project_context: str = ""
     task_id: Optional[int] = None  # For generating task subfolder
+    # Durable Project.id. Identity of Orchestrator-owned control state; never
+    # derived from project_name or from any workspace path.
+    project_id: Optional[int] = None
     planner_contract: Optional[Dict[str, Any]] = None
     plan: List[Dict[str, Any]] = field(default_factory=list)
     current_step_index: int = 0
@@ -197,6 +201,18 @@ class OrchestrationState:
         if self._project_dir_override:
             return Path(self._project_dir_override)
         return self.project_workspace_path / self.task_subfolder
+
+    @property
+    def control_state_location(self) -> "ControlStateLocation":
+        """Durable control-state identity + its current legacy on-disk root.
+
+        Pass this (not ``project_dir``) into control-state producers so the
+        owning ``Project.id`` travels with the location.
+        """
+        return ControlStateLocation(
+            legacy_root=self.project_dir,
+            project_id=self.project_id,
+        )
 
     @property
     def session_manifest_path(self) -> Path:

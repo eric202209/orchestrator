@@ -11,6 +11,7 @@ from app.services.orchestration.execution.runtime import (
 from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
 )
+from app.services.workspace.control_state_paths import control_state_of
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ def _restore_workspace_snapshot_if_needed(
             },
         )
         _append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.WORKSPACE_RESTORE_SKIPPED,
@@ -100,7 +101,7 @@ def _restore_workspace_snapshot_if_needed(
             },
         )
         _append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.WORKSPACE_PRESERVED,
@@ -139,7 +140,7 @@ def _restore_workspace_snapshot_if_needed(
             },
         )
         _append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.WORKSPACE_RESTORE_SKIPPED,

@@ -102,7 +102,7 @@ class RecoveryLifecycle:
             )
 
             event = append_orchestration_event(
-                project_dir=self.context.project_dir,
+                project_dir=self.context.control_state_location,
                 session_id=self.context.session_id,
                 task_id=self.context.task_id,
                 event_type=event_type,

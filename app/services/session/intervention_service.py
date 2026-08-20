@@ -102,6 +102,7 @@ def _emit_intervention_event(
         try:
             append_orchestration_event(
                 project_dir=workspace_path,
+                project_id=project.id,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=event_type,

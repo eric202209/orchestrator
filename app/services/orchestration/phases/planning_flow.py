@@ -193,7 +193,7 @@ def execute_planning_phase(
     planning_phase_event = None
     try:
         planning_phase_event = append_orchestration_event(
-            project_dir=ctx.orchestration_state.project_dir,
+            project_dir=ctx.control_state_location,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.PHASE_STARTED,
@@ -2251,7 +2251,7 @@ def execute_planning_phase(
             ctx.orchestration_state.reasoning_artifact = reasoning_artifact
             try:
                 append_orchestration_event(
-                    project_dir=ctx.orchestration_state.project_dir,
+                    project_dir=ctx.control_state_location,
                     session_id=ctx.session_id,
                     task_id=ctx.task_id,
                     event_type=EventType.REASONING_ARTIFACT_GENERATED,
@@ -2379,7 +2379,7 @@ def execute_planning_phase(
         )
         try:
             phase_finished_event = append_orchestration_event(
-                project_dir=ctx.orchestration_state.project_dir,
+                project_dir=ctx.control_state_location,
                 session_id=ctx.session_id,
                 task_id=ctx.task_id,
                 event_type=EventType.PHASE_FINISHED,
@@ -2452,7 +2452,7 @@ def execute_planning_phase(
         )
         try:
             phase_finished_event = append_orchestration_event(
-                project_dir=ctx.orchestration_state.project_dir,
+                project_dir=ctx.control_state_location,
                 session_id=ctx.session_id,
                 task_id=ctx.task_id,
                 event_type=EventType.PHASE_FINISHED,
@@ -2515,7 +2515,7 @@ def execute_planning_phase(
         )
         try:
             phase_finished_event = append_orchestration_event(
-                project_dir=ctx.orchestration_state.project_dir,
+                project_dir=ctx.control_state_location,
                 session_id=ctx.session_id,
                 task_id=ctx.task_id,
                 event_type=EventType.PHASE_FINISHED,
@@ -2567,7 +2567,7 @@ def execute_planning_phase(
         )
         try:
             phase_finished_event = append_orchestration_event(
-                project_dir=ctx.orchestration_state.project_dir,
+                project_dir=ctx.control_state_location,
                 session_id=ctx.session_id,
                 task_id=ctx.task_id,
                 event_type=EventType.PHASE_FINISHED,

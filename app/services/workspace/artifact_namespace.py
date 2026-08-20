@@ -5,6 +5,11 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from app.services.workspace.control_state_paths import (
+    FAMILY_EVENTS,
+    FAMILY_TASK_REPORTS,
+    control_state_family_dir,
+)
 from app.services.workspace.workspace_paths import (
     AUTO_SNAPSHOT_ROOT,
     PROMOTED_WORKSPACE_ARCHIVE_ROOT,
@@ -48,9 +53,13 @@ def artifact_namespace_payload() -> dict[str, str]:
     return DEFAULT_ARTIFACT_NAMESPACE.as_dict()
 
 
-def event_journal_dir(project_root: str | Path) -> Path:
-    return Path(project_root) / EVENT_JOURNAL_ROOT
+def event_journal_dir(
+    project_root: str | Path, *, project_id: int | None = None
+) -> Path:
+    return control_state_family_dir(project_root, FAMILY_EVENTS, project_id=project_id)
 
 
-def task_report_dir(project_root: str | Path) -> Path:
-    return Path(project_root) / TASK_REPORT_ROOT
+def task_report_dir(project_root: str | Path, *, project_id: int | None = None) -> Path:
+    return control_state_family_dir(
+        project_root, FAMILY_TASK_REPORTS, project_id=project_id
+    )

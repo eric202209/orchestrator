@@ -177,6 +177,7 @@ from app.services.orchestration.recovery.recovery_context import RecoveryContext
 from app.services.orchestration.recovery.recovery_strategy_registry import (
     RecoveryStrategyRegistry,
 )
+from app.services.workspace.control_state_paths import control_state_of
 
 _DEBUG_KNOWLEDGE_MIN_CONFIDENCE = 0.85
 
@@ -490,7 +491,7 @@ def execute_step_loop(
     executing_phase_event = None
     try:
         executing_phase_event = append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.PHASE_STARTED,
@@ -677,7 +678,7 @@ def execute_step_loop(
         step_started_event = None
         try:
             step_started_event = append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.STEP_STARTED,
@@ -801,7 +802,7 @@ def execute_step_loop(
             )
             try:
                 phase_finished_event = append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -1186,7 +1187,7 @@ def execute_step_loop(
             )
             try:
                 phase_finished_event = append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -1324,7 +1325,7 @@ def execute_step_loop(
         step_finished_event = None
         try:
             step_finished_event = append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.STEP_FINISHED,
@@ -1372,7 +1373,9 @@ def execute_step_loop(
                 event
                 for event in (
                     read_orchestration_events(
-                        orchestration_state.project_dir, session_id, task_id
+                        control_state_of(orchestration_state),
+                        session_id,
+                        task_id,
                     )
                 )[-20:]
                 if event.get("event_type") == EventType.TOOL_INVOKED
@@ -1436,7 +1439,7 @@ def execute_step_loop(
             )
             try:
                 phase_finished_event = append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -1510,7 +1513,7 @@ def execute_step_loop(
         debugging_phase_event = None
         try:
             debugging_phase_event = append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.PHASE_STARTED,
@@ -1527,7 +1530,7 @@ def execute_step_loop(
             pass
         try:
             retry_event = append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.RETRY_ENTERED,
@@ -1628,7 +1631,7 @@ def execute_step_loop(
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -1887,7 +1890,7 @@ def execute_step_loop(
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -1972,7 +1975,7 @@ def execute_step_loop(
             )
             try:
                 append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.REPAIR_REJECTED,
@@ -2024,7 +2027,7 @@ def execute_step_loop(
                 session_id=session_id,
                 task_id=task_id,
                 session_instance_id=session.instance_id if session else None,
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 envelope=debug_feedback_envelope,
                 parent_event_id=(step_finished_event or step_started_event or {}).get(
                     "event_id"
@@ -2033,7 +2036,7 @@ def execute_step_loop(
             )
             if _evidence_capsule and not _evidence_capsule.is_empty():
                 append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.WORKSPACE_EVIDENCE_COLLECTED,
@@ -2116,7 +2119,7 @@ def execute_step_loop(
                     session_id=session_id,
                     task_id=task_id,
                     session_instance_id=session.instance_id if session else None,
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     envelope=debug_feedback_envelope,
                     parent_event_id=(
                         step_finished_event or step_started_event or {}
@@ -2126,7 +2129,7 @@ def execute_step_loop(
 
         try:
             append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
@@ -2504,7 +2507,7 @@ def execute_step_loop(
                         )
                     )
                     append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.REPAIR_REJECTED,
@@ -2587,7 +2590,7 @@ def execute_step_loop(
                 )
                 try:
                     append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.REPAIR_REJECTED,
@@ -2636,7 +2639,7 @@ def execute_step_loop(
                 db.commit()
                 try:
                     phase_finished_event = append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PHASE_FINISHED,
@@ -2767,7 +2770,7 @@ def execute_step_loop(
                             )
                         try:
                             append_orchestration_event(
-                                project_dir=orchestration_state.project_dir,
+                                project_dir=control_state_of(orchestration_state),
                                 session_id=session_id,
                                 task_id=task_id,
                                 event_type=EventType.REPAIR_REJECTED,
@@ -2841,7 +2844,7 @@ def execute_step_loop(
             if bounded_debug_repair_allowed and debug_data is not None:
                 try:
                     append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.REPAIR_GENERATED,
@@ -2905,7 +2908,7 @@ def execute_step_loop(
                 )
                 try:
                     append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PHASE_FINISHED,
@@ -2921,7 +2924,7 @@ def execute_step_loop(
                 plan_revision_phase_event = None
                 try:
                     plan_revision_phase_event = append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PHASE_STARTED,
@@ -3018,7 +3021,7 @@ def execute_step_loop(
                     db.commit()
                     try:
                         phase_finished_event = append_orchestration_event(
-                            project_dir=orchestration_state.project_dir,
+                            project_dir=control_state_of(orchestration_state),
                             session_id=session_id,
                             task_id=task_id,
                             event_type=EventType.PHASE_FINISHED,
@@ -3065,7 +3068,7 @@ def execute_step_loop(
                 )
                 try:
                     append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PLAN_REVISED,
@@ -3082,7 +3085,7 @@ def execute_step_loop(
                     pass
                 try:
                     phase_finished_event = append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PHASE_FINISHED,
@@ -3184,7 +3187,7 @@ def execute_step_loop(
                         db.commit()
                         try:
                             phase_finished_event = append_orchestration_event(
-                                project_dir=orchestration_state.project_dir,
+                                project_dir=control_state_of(orchestration_state),
                                 session_id=session_id,
                                 task_id=task_id,
                                 event_type=EventType.REPAIR_REJECTED,
@@ -3247,7 +3250,7 @@ def execute_step_loop(
                             }
                             try:
                                 append_orchestration_event(
-                                    project_dir=orchestration_state.project_dir,
+                                    project_dir=control_state_of(orchestration_state),
                                     session_id=session_id,
                                     task_id=task_id,
                                     event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
@@ -3330,7 +3333,9 @@ def execute_step_loop(
                                         sig_violations = []
                                         try:
                                             append_orchestration_event(
-                                                project_dir=orchestration_state.project_dir,
+                                                project_dir=control_state_of(
+                                                    orchestration_state
+                                                ),
                                                 session_id=session_id,
                                                 task_id=task_id,
                                                 event_type=EventType.DEBUG_REPAIR_ATTEMPTED,
@@ -3383,7 +3388,7 @@ def execute_step_loop(
                         db.commit()
                         try:
                             phase_finished_event = append_orchestration_event(
-                                project_dir=orchestration_state.project_dir,
+                                project_dir=control_state_of(orchestration_state),
                                 session_id=session_id,
                                 task_id=task_id,
                                 event_type=EventType.REPAIR_REJECTED,
@@ -3463,7 +3468,7 @@ def execute_step_loop(
                     db.commit()
                     try:
                         phase_finished_event = append_orchestration_event(
-                            project_dir=orchestration_state.project_dir,
+                            project_dir=control_state_of(orchestration_state),
                             session_id=session_id,
                             task_id=task_id,
                             event_type=EventType.REPAIR_REJECTED,
@@ -3561,7 +3566,7 @@ def execute_step_loop(
                 db.commit()
                 try:
                     phase_finished_event = append_orchestration_event(
-                        project_dir=orchestration_state.project_dir,
+                        project_dir=control_state_of(orchestration_state),
                         session_id=session_id,
                         task_id=task_id,
                         event_type=EventType.PHASE_FINISHED,
@@ -3598,7 +3603,7 @@ def execute_step_loop(
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -3634,7 +3639,7 @@ def execute_step_loop(
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -3674,7 +3679,7 @@ def execute_step_loop(
             db.commit()
             try:
                 phase_finished_event = append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -3701,7 +3706,7 @@ def execute_step_loop(
 
     try:
         phase_finished_event = append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.PHASE_FINISHED,

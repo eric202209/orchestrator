@@ -70,7 +70,11 @@ from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.workspace.workspace_paths import TASK_REPORT_ROOT
+from app.services.workspace.control_state_paths import (
+    FAMILY_TASK_REPORTS,
+    control_state_family_dir,
+)
+from app.services.workspace.control_state_paths import control_state_of
 
 
 def _completion_plan_identity(plan: Any) -> str:
@@ -445,7 +449,7 @@ class CompletionCoordinator:
             message="[ORCHESTRATION] Phase 5: TASK_SUMMARY - summarizing completion",
         )
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.PHASE_STARTED,
@@ -686,7 +690,7 @@ class CompletionCoordinator:
                     db, session_id, task_id, prompt, orchestration_state
                 )
                 append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -734,11 +738,11 @@ class CompletionCoordinator:
                 session_id=session_id,
                 task_id=task_id,
                 session_instance_id=ctx.session_instance_id,
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 envelope=debug_feedback_envelope,
             )
             append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.COMPLETION_EVIDENCE_FAILED,
@@ -925,7 +929,7 @@ class CompletionCoordinator:
                     },
                 )
                 append_orchestration_event(
-                    project_dir=orchestration_state.project_dir,
+                    project_dir=control_state_of(orchestration_state),
                     session_id=session_id,
                     task_id=task_id,
                     event_type=EventType.PHASE_FINISHED,
@@ -1505,7 +1509,12 @@ class CompletionCoordinator:
                         except Exception:
                             report_root = orchestration_state.project_dir
                     report_path = (
-                        report_root / TASK_REPORT_ROOT / f"task_report_{task_id}.md"
+                        control_state_family_dir(
+                            report_root,
+                            FAMILY_TASK_REPORTS,
+                            project_id=getattr(project, "id", None),
+                        )
+                        / f"task_report_{task_id}.md"
                     )
                     os.makedirs(report_path.parent, exist_ok=True)
                     report_path.parent.chmod(0o777)

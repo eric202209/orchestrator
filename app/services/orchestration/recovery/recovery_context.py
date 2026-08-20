@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from app.services.workspace.control_state_paths import (
+    ControlStateLocation,
+    coerce_control_state_location,
+)
 from app.services.orchestration.recovery.execution_recovery_evidence import (
     ExecutionRecoveryEvidence,
 )
@@ -52,3 +56,11 @@ class RecoveryContext:
     working_memory: Optional[Any] = None
     human_guidance: Optional[Any] = None
     recovery_metadata: Optional[dict[str, Any]] = None
+
+    @property
+    def control_state_location(self) -> ControlStateLocation:
+        """Control-state location for this recovery, carrying Project identity."""
+        return coerce_control_state_location(
+            self.project_dir,
+            project_id=getattr(self.orchestration_state, "project_id", None),
+        )

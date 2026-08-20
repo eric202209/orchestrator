@@ -15,6 +15,7 @@ from app.services.orchestration.state.persistence import (
     restore_step_result as _restore_step_result,
 )
 from app.services.orchestration.prompt_templates import OrchestrationStatus
+from app.services.workspace.control_state_paths import control_state_of
 
 
 def _apply_checkpoint_payload(
@@ -117,7 +118,7 @@ def _apply_checkpoint_payload(
             "reason": "checkpoint_cursor_execution_results_mismatch",
         }
         _append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.CHECKPOINT_CURSOR_RECONCILED,
@@ -139,7 +140,7 @@ def _apply_checkpoint_payload(
     ):
         orchestration_state.status = OrchestrationStatus.EXECUTING
     _append_orchestration_event(
-        project_dir=orchestration_state.project_dir,
+        project_dir=control_state_of(orchestration_state),
         session_id=session_id,
         task_id=task_id,
         event_type=EventType.CHECKPOINT_LOADED,

@@ -963,7 +963,7 @@ def test_compatibility_execute_e2_shape_reaches_planning_boundary_without_duplic
             project,
             selected_task,
             "full_lifecycle",
-            lambda root: root / ".agent" / "state_manager.json",
+            lambda root, **_kw: root / ".agent" / "state_manager.json",
         )
         is None
     )

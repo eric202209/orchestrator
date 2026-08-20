@@ -22,6 +22,9 @@ from datetime import UTC, datetime
 from typing import Any, Callable, Optional
 
 from app.services.orchestration.events.event_types import EventType
+from app.services.workspace.control_state_paths import (
+    coerce_control_state_location,
+)
 from app.services.orchestration.recovery.execution_recovery_service import (
     ExecutionRecoveryService,
 )
@@ -319,12 +322,20 @@ class RecoveryStrategyRegistry:
         rule = PolicyTable.lookup(failure_event.failure_class)
         effective_strategy = rule.strategy
         reflection_result: Optional[RecoveryResult] = None
+        control_state = (
+            coerce_control_state_location(
+                project_dir,
+                project_id=getattr(orchestration_state, "project_id", None),
+            )
+            if project_dir is not None
+            else None
+        )
 
         if rule.strategy == "retry_with_reflection":
             try:
                 reflection_result = _route_reflection(
                     failure_event=failure_event,
-                    project_dir=project_dir,
+                    project_dir=control_state,
                     session_id=session_id,
                     task_id=task_id,
                     orchestration_state=orchestration_state,
@@ -345,7 +356,7 @@ class RecoveryStrategyRegistry:
             timestamp=datetime.now(UTC).isoformat(),
             reflection_result=reflection_result,
         )
-        _emit_decision_event(decision, project_dir, session_id, task_id)
+        _emit_decision_event(decision, control_state, session_id, task_id)
         logger.debug(
             "[17A/17B] recovery routed: failure_class=%s policy=%s effective=%s",
             failure_event.failure_class,
@@ -381,7 +392,7 @@ class RecoveryStrategyRegistry:
                 "task_id": context.task_id,
                 "timestamp": datetime.now(UTC).isoformat(),
             },
-            context.project_dir,
+            context.control_state_location,
             context.session_id,
             context.task_id,
         )

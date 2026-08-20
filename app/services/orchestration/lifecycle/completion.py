@@ -24,6 +24,7 @@ from app.services.orchestration.state.session_state import (
     mark_session_running,
 )
 from app.services.orchestration.types import OrchestrationRunContext
+from app.services.workspace.control_state_paths import control_state_of
 
 
 class TaskCompletionFinalizer:
@@ -152,7 +153,7 @@ class TaskCompletionFinalizer:
         task.completed_at = completed_at
         try:
             append_orchestration_event(
-                project_dir=orchestration_state.project_dir,
+                project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.TASK_COMPLETED,
@@ -395,7 +396,7 @@ class TaskCompletionFinalizer:
             )
 
         append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.PHASE_FINISHED,

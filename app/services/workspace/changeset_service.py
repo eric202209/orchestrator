@@ -14,6 +14,10 @@ from sqlalchemy.orm import Session
 from app.models import LogEntry, Project, Task, TaskExecutionChangeSet
 from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.workspace.permissions import ensure_shared_tree
+from app.services.workspace.control_state_paths import (
+    FAMILY_CHANGE_SETS,
+    control_state_family_dir,
+)
 from app.services.workspace.workspace_paths import (
     AUTO_SNAPSHOT_ROOT,
     HYDRATION_EXCLUDED_NAMES,
@@ -107,22 +111,22 @@ class ChangesetService:
         return digest.hexdigest()
 
     def _artifact_files_root(self, project: Project, task_execution_id: int) -> Path:
-        return (
-            self.get_project_root(project)
-            / ".agent"
-            / "change-sets"
-            / str(task_execution_id)
-            / "files"
-        )
+        return self._change_set_dir(project, task_execution_id) / "files"
 
     def _artifact_manifest_path(self, project: Project, task_execution_id: int) -> Path:
-        return (
-            self.get_project_root(project)
-            / ".agent"
-            / "change-sets"
-            / str(task_execution_id)
-            / "manifest.json"
-        )
+        return self._change_set_dir(project, task_execution_id) / "manifest.json"
+
+    def _change_set_dir(self, project: Project, task_execution_id: int) -> Path:
+        """One change-set directory, resolved by durable Project identity.
+
+        Directory name and manifest/file layout are unchanged; only the root
+        resolution is routed through the control-state contract.
+        """
+        return control_state_family_dir(
+            self.get_project_root(project),
+            FAMILY_CHANGE_SETS,
+            project_id=project.id,
+        ) / str(task_execution_id)
 
     def _path_is_safe_relative(self, relative_path: str) -> bool:
         path = Path(relative_path)

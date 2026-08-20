@@ -294,6 +294,7 @@ def read_task_events_from_candidates(
             session_id,
             task_id,
             event_type_filter=event_type_filter,
+            project_id=project.id,
         )
         if events:
             return events

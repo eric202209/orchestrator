@@ -281,6 +281,7 @@ class ToolTrackingService:
             )
             emitted = append_orchestration_event(
                 project_dir=project_dir,
+                project_id=project.id,
                 session_id=session_id,
                 task_id=task_id,
                 event_type=event_type,

@@ -14,6 +14,10 @@ from app.models import Project, Session as SessionModel, Task, TaskStatus
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.workspace.control_state_paths import (
+    STATE_MANAGER_FILENAME,
+    control_state_root,
+)
 from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.tasks.service import TaskService
 from app.services.workspace.task_sandbox_allocator import (
@@ -26,8 +30,12 @@ from app.services.orchestration.execution.runtime_context import (
 )
 
 
-def get_state_manager_path(project_root: Path) -> Path:
-    return project_root / ".agent" / "state_manager.json"
+def get_state_manager_path(
+    project_root: Path, *, project_id: Optional[int] = None
+) -> Path:
+    return (
+        control_state_root(project_root, project_id=project_id) / STATE_MANAGER_FILENAME
+    )
 
 
 def build_project_state_snapshot(
@@ -126,7 +134,7 @@ def write_project_state_snapshot(
     if not project:
         return
     project_root = resolve_project_workspace_path(project.workspace_path, project.name)
-    state_path = get_state_manager_path(project_root)
+    state_path = get_state_manager_path(project_root, project_id=project.id)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     ensure_shared_permissions(state_path.parent)
     payload = build_project_state_snapshot(db, project, current_task, session_id)

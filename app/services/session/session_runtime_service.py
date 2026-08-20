@@ -41,6 +41,7 @@ from app.services.agents.agent_backends import (
     UnsupportedAgentBackendError,
     get_backend_descriptor,
 )
+from app.services.workspace.control_state_paths import ControlStateLocation
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
@@ -204,6 +205,7 @@ def ensure_task_workspace(
         task_description=task.description or task.title,
         project_name=project.name or "",
         task_id=task.id,
+        project_id=project.id,
     )
 
     project_workspace_path = Path(
@@ -274,8 +276,12 @@ def resolve_event_log_project_dir(
     db: Session,
     session: SessionModel,
     task_id: Optional[int] = None,
-) -> Optional[Path]:
-    """Resolve the project_dir required by read_orchestration_events()."""
+) -> Optional[ControlStateLocation]:
+    """Resolve the control-state location read_orchestration_events() needs.
+
+    Returns the legacy on-disk root together with the owning ``Project.id``, so
+    consumers never have to re-derive identity from the path.
+    """
     project = (
         db.query(Project)
         .filter(Project.id == session.project_id, Project.deleted_at.is_(None))
@@ -300,12 +306,15 @@ def resolve_event_log_project_dir(
             task.description,
         )
         if task and task.task_subfolder and not runs_in_canonical_workspace:
-            return _resolve_task_workspace_path(
-                project_workspace,
-                task.task_subfolder,
+            return ControlStateLocation(
+                legacy_root=_resolve_task_workspace_path(
+                    project_workspace,
+                    task.task_subfolder,
+                ),
+                project_id=project.id,
             )
 
-    return project_workspace
+    return ControlStateLocation(legacy_root=project_workspace, project_id=project.id)
 
 
 def _maybe_compact_checkpoint_before_dispatch(
@@ -338,6 +347,7 @@ def _maybe_compact_checkpoint_before_dispatch(
             checkpoint_service.save_compact_checkpoint(session.id, task.id, compacted)
             append_orchestration_event(
                 project_dir=event_project_dir,
+                project_id=session.project_id,
                 session_id=session.id,
                 task_id=task.id,
                 event_type=EventType.CONTEXT_COMPACTED,
@@ -355,6 +365,7 @@ def _maybe_compact_checkpoint_before_dispatch(
         if len(plan) > settings.MAX_PLAN_STEPS:
             append_orchestration_event(
                 project_dir=event_project_dir,
+                project_id=session.project_id,
                 session_id=session.id,
                 task_id=task.id,
                 event_type=EventType.PLAN_TRUNCATED,
@@ -581,6 +592,7 @@ def queue_task_for_session(
     # check always finds this fresh event instead of a stale one from a prior run.
     queued_event = append_orchestration_event(
         project_dir=event_project_dir,
+        project_id=session.project_id,
         session_id=session.id,
         task_id=task.id,
         event_type=EventType.TASK_QUEUED,
@@ -803,6 +815,7 @@ def retry_session_with_stronger_planning_lane(
         try:
             append_orchestration_event(
                 project_dir=event_project_dir,
+                project_id=project.id,
                 session_id=session.id,
                 task_id=task_id,
                 event_type=EventType.LANE_ESCALATION_TRIGGERED,

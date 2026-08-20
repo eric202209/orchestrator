@@ -8,6 +8,10 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from app.services.agents.interfaces import AgentRuntime
 from app.services.orchestration.policy import PolicyProfile, get_policy_profile
+from app.services.workspace.control_state_paths import (
+    ControlStateLocation,
+    control_state_of,
+)
 
 
 @dataclass(frozen=True)
@@ -358,6 +362,18 @@ class OrchestrationRunContext:
     # Request-local advisory evidence; never persisted as planning authority.
     read_only_observation: Any = None
     read_only_discovery_completed: bool = False
+
+    @property
+    def control_state_location(self) -> ControlStateLocation:
+        """Control-state location for this run, carrying Project identity.
+
+        Falls back to the context's own ``project`` row when the orchestration
+        state has no identity, so ctx-based producers are never unthreaded.
+        """
+        location = control_state_of(self.orchestration_state)
+        if location.project_id is None:
+            return location.with_project_id(getattr(self.project, "id", None))
+        return location
 
     @property
     def policy_profile(self) -> PolicyProfile:

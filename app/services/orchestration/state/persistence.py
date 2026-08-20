@@ -23,9 +23,16 @@ from app.models import (
     TaskCheckpoint,
     TaskExecution,
 )
+from app.services.workspace.control_state_paths import (
+    FAMILY_EVENTS,
+    FAMILY_FINGERPRINTS,
+    coerce_control_state_location,
+    control_state_family_dir,
+)
 from app.services.workspace.permissions import ensure_shared_permissions
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.orchestration.prompt_templates import OrchestrationState, StepResult
+from app.services.workspace.control_state_paths import control_state_of
 
 from ..events.event_types import EventType
 from ..policy import MAX_STEP_ATTEMPTS
@@ -85,19 +92,29 @@ class CheckpointData:
 
 
 def _orchestration_event_log_path(
-    project_dir: Any, session_id: int, task_id: int
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    project_id: Optional[int] = None,
 ) -> Path:
     return (
-        Path(project_dir)
-        / ".agent"
-        / "events"
+        control_state_family_dir(project_dir, FAMILY_EVENTS, project_id=project_id)
         / f"session_{session_id}_task_{task_id}.jsonl"
     )
 
 
-def _session_fingerprint_index_path(workspace_path: Any, session_id: int) -> Path:
+def _session_fingerprint_index_path(
+    workspace_path: Any,
+    session_id: int,
+    *,
+    project_id: Optional[int] = None,
+) -> Path:
     return (
-        Path(workspace_path) / ".agent" / "fingerprints" / f"session_{session_id}.json"
+        control_state_family_dir(
+            workspace_path, FAMILY_FINGERPRINTS, project_id=project_id
+        )
+        / f"session_{session_id}.json"
     )
 
 
@@ -105,8 +122,12 @@ def write_session_fingerprint_index(
     workspace_path: Any,
     session_id: int,
     fingerprint: Dict[str, Any],
+    *,
+    project_id: Optional[int] = None,
 ) -> None:
-    path = _session_fingerprint_index_path(workspace_path, session_id)
+    path = _session_fingerprint_index_path(
+        workspace_path, session_id, project_id=project_id
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {**fingerprint, "indexed_at": datetime.now(UTC).isoformat()}
     try:
@@ -120,8 +141,11 @@ def read_session_fingerprint_index(
     session_id: int,
     *,
     max_age_seconds: int = 300,
+    project_id: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
-    path = _session_fingerprint_index_path(workspace_path, session_id)
+    path = _session_fingerprint_index_path(
+        workspace_path, session_id, project_id=project_id
+    )
     if not path.exists():
         return None
     try:
@@ -196,12 +220,14 @@ def _apply_counterfactual_overrides_to_checkpoint(
 
 
 def _orchestration_state_snapshot_log_path(
-    project_dir: Any, session_id: int, task_id: int
+    project_dir: Any,
+    session_id: int,
+    task_id: int,
+    *,
+    project_id: Optional[int] = None,
 ) -> Path:
     return (
-        Path(project_dir)
-        / ".agent"
-        / "events"
+        control_state_family_dir(project_dir, FAMILY_EVENTS, project_id=project_id)
         / f"session_{session_id}_task_{task_id}_state_snapshots.jsonl"
     )
 
@@ -774,7 +800,18 @@ def write_orchestration_state_snapshot(
     checkpoint_name: Optional[str] = None,
     trigger: str,
     related_event_id: Optional[str] = None,
+    project_id: Optional[int] = None,
 ) -> Dict[str, Any]:
+    # Identity comes from the caller, else from the OrchestrationState the
+    # snapshot is built from; it is never derived from ``project_dir``.
+    project_dir = coerce_control_state_location(
+        project_dir,
+        project_id=(
+            project_id
+            if project_id is not None
+            else getattr(orchestration_state, "project_id", None)
+        ),
+    )
     log_path = _orchestration_state_snapshot_log_path(project_dir, session_id, task_id)
     payload = build_orchestration_state_snapshot(
         session_id=session_id,
@@ -799,7 +836,11 @@ def append_orchestration_event(
     parent_event_id: Optional[str] = None,
     phase: Optional[str] = None,
     coordinator: Optional[str] = None,
+    project_id: Optional[int] = None,
 ) -> Dict[str, Any]:
+    # ``project_dir`` may already be a ControlStateLocation carrying identity;
+    # an explicit ``project_id`` only fills in when it does not.
+    project_dir = coerce_control_state_location(project_dir, project_id=project_id)
     payload: Dict[str, Any] = {
         "event_id": str(uuid.uuid4()),
         "timestamp": datetime.now(UTC).isoformat(),
@@ -944,7 +985,7 @@ def save_orchestration_checkpoint(
     )
     try:
         event = append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.CHECKPOINT_SAVED,
@@ -996,7 +1037,7 @@ def record_validation_verdict(
     orchestration_state.validation_history.append(verdict_payload)
     try:
         event = append_orchestration_event(
-            project_dir=orchestration_state.project_dir,
+            project_dir=control_state_of(orchestration_state),
             session_id=session_id,
             task_id=task_id,
             event_type=EventType.VALIDATION_RESULT,
@@ -1038,13 +1079,16 @@ def read_orchestration_events(
     task_id: int,
     *,
     event_type_filter: Optional[str] = None,
+    project_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Read the append-only event journal for a session/task pair.
 
     Returns events in chronological order.  Pass ``event_type_filter`` to
     restrict results to a single event type.
     """
-    log_path = _orchestration_event_log_path(project_dir, session_id, task_id)
+    log_path = _orchestration_event_log_path(
+        project_dir, session_id, task_id, project_id=project_id
+    )
     if not log_path.exists():
         return []
 
@@ -1238,8 +1282,12 @@ def read_orchestration_state_snapshots(
     project_dir: Any,
     session_id: int,
     task_id: int,
+    *,
+    project_id: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    log_path = _orchestration_state_snapshot_log_path(project_dir, session_id, task_id)
+    log_path = _orchestration_state_snapshot_log_path(
+        project_dir, session_id, task_id, project_id=project_id
+    )
     if not log_path.exists():
         return []
 
@@ -1266,8 +1314,11 @@ def diff_orchestration_state_snapshots(
     *,
     from_checkpoint: Optional[int] = None,
     to_checkpoint: Optional[int] = None,
+    project_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    snapshots = read_orchestration_state_snapshots(project_dir, session_id, task_id)
+    snapshots = read_orchestration_state_snapshots(
+        project_dir, session_id, task_id, project_id=project_id
+    )
     if not snapshots:
         raise ValueError("No orchestration state snapshots found")
     if to_checkpoint is None:

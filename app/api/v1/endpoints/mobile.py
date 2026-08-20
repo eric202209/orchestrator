@@ -1328,7 +1328,9 @@ async def mobile_session_sse_stream(
 
     async def _stream():
         try:
-            async for frame in mobile_sse_event_generator(session_id, workspace_path):
+            async for frame in mobile_sse_event_generator(
+                session_id, workspace_path, session.project_id
+            ):
                 yield frame
         except Exception as exc:
             record_stream_error("mobile_session_sse", exc)

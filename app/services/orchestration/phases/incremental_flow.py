@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.prompt_templates import StepResult
+from app.services.workspace.control_state_paths import control_state_of
 
 # Code-fence stripper: LLMs often wrap output in ``` blocks or add prose before
 # the block despite the prompt saying "raw content only."  Search anywhere in the
@@ -72,7 +73,7 @@ def _is_within_project_dir(file_path: str, project_dir: Path) -> bool:
 def _emit_event(ctx: Any, event_type: str, details: Dict[str, Any]) -> None:
     try:
         append_orchestration_event(
-            project_dir=ctx.orchestration_state.project_dir,
+            project_dir=control_state_of(ctx.orchestration_state),
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=event_type,

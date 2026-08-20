@@ -1309,7 +1309,7 @@ def _abort_root_cause_oscillation_repair_loop(
     )
     try:
         append_orchestration_event(
-            project_dir=ctx.orchestration_state.project_dir,
+            project_dir=ctx.control_state_location,
             session_id=ctx.session_id,
             task_id=ctx.task_id,
             event_type=EventType.CROSS_STAGE_CONVERGENCE,
