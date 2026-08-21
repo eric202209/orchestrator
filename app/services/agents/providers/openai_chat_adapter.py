@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -114,6 +115,24 @@ def _response_shape_observability(body: Any, content: str) -> dict[str, Any]:
         "normalization_branch": branch,
         "normalized_response_type": type(content).__name__,
         "normalized_response_length": len(content or ""),
+    }
+
+
+def _provider_bound_prompt_diagnostics(
+    prompt: str, *, invocation_kind: str
+) -> dict[str, Any]:
+    prompt_text = prompt or ""
+    return {
+        "prompt_stage": "P6_PROVIDER_BOUND_PROMPT",
+        "provider_bound_prompt_sha256_12": hashlib.sha256(
+            prompt_text.encode("utf-8")
+        ).hexdigest()[:12],
+        "provider_bound_prompt_chars": len(prompt_text),
+        "provider_bound_prompt_token_estimate": (len(prompt_text) + 3) // 4,
+        "provider_bound_prompt_token_estimator": "ceil_chars_div_4",
+        "provider_invocation_kind": invocation_kind,
+        "provider_invocation_started": False,
+        "provider_response_received": False,
     }
 
 
@@ -239,6 +258,14 @@ class OpenAIChatCompletionsRuntime:
         timeout_seconds: int,
         invocation_options: RuntimeInvocationOptions | None = None,
     ) -> str:
+        provider_diagnostics = _provider_bound_prompt_diagnostics(
+            user,
+            invocation_kind=(
+                f"{self.backend_role}_chat_completions"
+                if self.backend_role
+                else "openai_chat_completions"
+            ),
+        )
         headers = {"Content-Type": "application/json"}
         api_key = self._invocation_api_key(invocation_options)
         if api_key:
@@ -311,18 +338,26 @@ class OpenAIChatCompletionsRuntime:
             transport_timeout = (
                 effective_timeout if exact_contract else effective_timeout + 30
             )
+            request_url = (
+                f"{self._invocation_base_url(invocation_options)}" "/chat/completions"
+            )
             async with httpx.AsyncClient(timeout=transport_timeout) as client:
+                provider_diagnostics["provider_invocation_started"] = True
                 response = await client.post(
-                    f"{self._invocation_base_url(invocation_options)}/chat/completions",
+                    request_url,
                     headers=headers,
                     json=payload,
                 )
+                provider_diagnostics["provider_response_received"] = True
                 response.raise_for_status()
+                body = response.json()
+                content = _extract_chat_completion_content(body)
         except httpx.TimeoutException as exc:
             error = AgentRuntimeError(
                 f"OpenAI-compatible chat request timed out after {effective_timeout}s."
             )
             error.runtime_diagnostics = {
+                **provider_diagnostics,
                 "timed_out": True,
                 "timeout_boundary": "runtime_invocation",
                 "timeout_seconds": effective_timeout,
@@ -331,17 +366,34 @@ class OpenAIChatCompletionsRuntime:
         except httpx.HTTPError as exc:
             error = AgentRuntimeError(f"OpenAI-compatible chat request failed: {exc}")
             error.runtime_diagnostics = {
+                **provider_diagnostics,
                 "timed_out": False,
                 "timeout_boundary": "runtime_invocation",
                 "timeout_seconds": effective_timeout,
             }
             raise error from exc
+        except Exception as exc:
+            setattr(
+                exc,
+                "runtime_diagnostics",
+                {
+                    **provider_diagnostics,
+                    "timed_out": False,
+                    "timeout_boundary": "runtime_invocation",
+                    "timeout_seconds": effective_timeout,
+                },
+            )
+            raise
 
-        body = response.json()
-        content = _extract_chat_completion_content(body)
         self._last_response_shape_observability = _response_shape_observability(
             body, content
         )
+        self._last_runtime_diagnostics = {
+            **provider_diagnostics,
+            "provider_response_observability": dict(
+                self._last_response_shape_observability
+            ),
+        }
         return content if exact_contract else _strip_thinking(content)
 
     async def create_session(
@@ -371,6 +423,7 @@ class OpenAIChatCompletionsRuntime:
         return {
             "status": "completed",
             "output": output,
+            "diagnostics": dict(getattr(self, "_last_runtime_diagnostics", {})),
             "provider_response_observability": dict(
                 getattr(self, "_last_response_shape_observability", {})
             ),
@@ -405,6 +458,7 @@ class OpenAIChatCompletionsRuntime:
             "backend": self.backend_descriptor.name,
             "model_family": self._model_name(),
             "role": self.backend_role,
+            "diagnostics": dict(getattr(self, "_last_runtime_diagnostics", {})),
             "provider_response_observability": dict(
                 getattr(self, "_last_response_shape_observability", {})
             ),

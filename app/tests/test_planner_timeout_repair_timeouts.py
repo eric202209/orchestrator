@@ -579,7 +579,15 @@ def test_planning_repair_returned_prose_raises_output_contract_violation():
     class Runtime:
         async def invoke_prompt(self, prompt, **kwargs):
             attempts["count"] += 1
-            return {"output": "I repaired the plan. Here are the steps..."}
+            return {
+                "output": "I repaired the plan. Here are the steps...",
+                "diagnostics": {
+                    "prompt_stage": "P6_PROVIDER_BOUND_PROMPT",
+                    "provider_bound_prompt_chars": len(prompt),
+                    "provider_invocation_started": True,
+                    "provider_response_received": True,
+                },
+            }
 
     with pytest.raises(PlanningRepairOutputContractViolation) as exc_info:
         PlannerService.repair_output(
@@ -602,6 +610,12 @@ def test_planning_repair_returned_prose_raises_output_contract_violation():
     assert attempts["count"] == 1
     assert exc_info.value.runtime_diagnostics["output_contract_violated"] is True
     assert exc_info.value.runtime_diagnostics["repair_output_fenced"] is False
+    assert (
+        exc_info.value.runtime_diagnostics["prompt_stage"] == "P6_PROVIDER_BOUND_PROMPT"
+    )
+    assert exc_info.value.runtime_diagnostics["provider_bound_prompt_chars"] > 0
+    assert exc_info.value.runtime_diagnostics["provider_invocation_started"] is True
+    assert exc_info.value.runtime_diagnostics["provider_response_received"] is True
     assert "prose" in str(exc_info.value)
     contract_events = [
         metadata

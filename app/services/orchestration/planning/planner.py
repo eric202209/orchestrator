@@ -2647,6 +2647,7 @@ class PlannerService:
                     else "repair returned prose; expected bare JSON array"
                 )
                 diagnostics = {
+                    **runtime_diagnostics,
                     "output_contract_violated": True,
                     "repair_output_fenced": is_fenced,
                     "stdout_chars": repair_output_chars,
