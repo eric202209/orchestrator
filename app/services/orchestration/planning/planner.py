@@ -58,6 +58,9 @@ from app.services.orchestration.planning.planner_contract_registry import (
     planner_grounding_evidence,
     render_planner_repair_contract_context,
 )
+from app.services.orchestration.planning.read_only_discovery import (
+    render_discovery_observation,
+)
 from app.services.orchestration.planning.source_operation_verification import (
     verify_replace_in_file,
 )
@@ -1243,6 +1246,7 @@ class PlannerService:
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
+        read_only_observation: Any = None,
     ) -> str:
         prompt = _build_minimal_planning_prompt(
             task_description,
@@ -1264,6 +1268,9 @@ class PlannerService:
             prompt += "\n\n" + source_materialization.to_prompt_block(
                 provider_safe=True
             )
+        discovery_block = render_discovery_observation(read_only_observation)
+        if discovery_block:
+            prompt += "\n\n" + discovery_block
         return prompt
 
     @staticmethod
@@ -1279,6 +1286,7 @@ class PlannerService:
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
+        read_only_observation: Any = None,
     ) -> str:
         prompt = _build_ultra_minimal_planning_prompt(
             task_description,
@@ -1298,6 +1306,9 @@ class PlannerService:
             prompt += "\n\n" + source_materialization.to_prompt_block(
                 provider_safe=True
             )
+        discovery_block = render_discovery_observation(read_only_observation)
+        if discovery_block:
+            prompt += "\n\n" + discovery_block
         return prompt
 
     @staticmethod
@@ -2029,6 +2040,7 @@ class PlannerService:
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
+        read_only_observation: Any = None,
     ) -> Dict[str, Any]:
         can_store_retry_guard = hasattr(runtime_service, "__dict__")
         if can_store_retry_guard:
@@ -2074,6 +2086,7 @@ class PlannerService:
             workspace_identity=workspace_identity,
             planner_contract=planner_contract,
             source_materialization=source_materialization,
+            read_only_observation=read_only_observation,
         )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)
@@ -2208,6 +2221,7 @@ class PlannerService:
                 workspace_identity=workspace_identity,
                 planner_contract=planner_contract,
                 source_materialization=source_materialization,
+                read_only_observation=read_only_observation,
             )
             ultra_minimal_prompt_diagnostics = {
                 "planning_prompt_builder": "ultra_minimal_planning_prompt",
