@@ -716,23 +716,23 @@ Repair the plan, not the task. Preserve valid steps.
 {current_source_context_block + chr(10) if current_source_context_block else ""}
 {current_structure_capsule + chr(10) if current_structure_capsule else ""}
 {validation_guidance_block + chr(10) if validation_guidance_block else ""}
-Strict output schema: step_number, description, commands, verification,
-rollback, expected_files; optional ops.
+Strict output schema: description, commands, verification, expected_files;
+optional step_number, rollback, and ops. Array order is authoritative.
 
 Rules:
-1. Use 3 to 4 steps, numbered 1..N.
+1. Use 3 to 4 steps in array order.
 2. {ops_contract}
 2x. {operation_choice_contract}
 2a. Shell fallback limits: {shell_fallback_limits}
 2b. {verification_contract}
 2c. {test_scaffold_contract}
 2d. {json_content_contract}
-3. verification/rollback: one shell string or null.
+3. verification: one shell string or null; optional rollback is one shell string or null.
 4. expected_files: relative path array.
 5. Relative paths only; no absolute, .., ~, frontend/src/frontend/src, backend/src/backend/src; rooted exactly once.
 6. No nested project folder; use workspace.
 7. No background processes, &, nohup, disown, or dev servers.
-8. No prose, markdown, payloads, logs, session history, or extra keys.
+8. No prose, markdown, or extra keys.
 10. expected_files steps must write real content; no touch-only scaffold step.
 11. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command; no `echo` or `cd /... &&`.
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
@@ -2116,7 +2116,8 @@ Repair this invalid plan into 3 to 4 executable steps.
 {validation_guidance_block + chr(10) if validation_guidance_block else ""}
 {current_source_api_contract_block + chr(10) if current_source_api_contract_block else ""}
 Schema per step:
-step_number, description, commands, verification, rollback, expected_files, optional ops.
+description, commands, verification, expected_files; optional step_number,
+rollback, and ops. Array order is authoritative.
 
 Rules:
 - commands: shell strings <=900 chars.
@@ -2133,7 +2134,7 @@ Rules:
 - do not remove, comment out, or weaken existing test assertions; test-modifying ops must preserve all original assertions.
 - no nested project folder; run directly in the task workspace and do not `cd` into a new app/backend/frontend root.
 - no duplicated path roots like frontend/src/frontend/src or backend/src/backend/src.
-- no background processes, dev servers, absolute paths, prose, markdown, or extra keys.
+- no background processes, dev servers, absolute paths, prose, or markdown.
 - each step is a separate complete JSON object in the array; never merge content from multiple steps into one step.
 """
 
@@ -2219,8 +2220,8 @@ Required repair:
 - Use existing source modules and public symbols named above.
 - Do not introduce a different Python CLI/web framework.
 - Use ops.write_file or ops.replace_in_file for Python source edits.
-- Return only valid JSON step objects with step_number, description, commands, verification, rollback, expected_files, and optional ops.
-- Relative paths only; no heredocs, background processes, dev servers, absolute paths, prose, markdown, or extra keys.
+- Return only valid JSON step objects with description, commands, verification, expected_files, and optional step_number, rollback, and ops.
+- Relative paths only; no heredocs, background processes, dev servers, absolute paths, prose, or markdown.
 """
 
 
@@ -2538,8 +2539,9 @@ def build_minimum_safe_stale_replace_repair_envelope(
             _RepairPromptPart(
                 section_name="json_schema_and_output_format",
                 content=(
-                    "Output schema: each step requires step_number, description, commands, "
-                    "verification, rollback, expected_files; ops is optional. write_file/"
+                    "Output schema: each step requires description, commands, verification, "
+                    "expected_files; step_number, rollback, and ops are optional. "
+                    "write_file/"
                     "append_file content and replace_in_file old/new must be valid escaped "
                     "JSON strings.\n"
                 ),
@@ -2678,7 +2680,7 @@ Stale replace second-pass target preservation:
 - Return the minimum number of steps required; do not assume a fixed number of steps.
 - Preserve every valid source-file materialization operation (write_file, append_file, replace_in_file) from the rejected plan; if the rejected plan modified N source files, the repaired plan must modify those same N source files.
 - Do not simplify a multi-file implementation into a single-file implementation; dropping source-file materialization operations is plan corruption unless the rejection reason explicitly requires it.
-- Each step must contain: step_number, description, commands, verification, rollback, expected_files; optional ops.
+- Each step must contain: description, commands, verification, expected_files; optional step_number, rollback, and ops. Array order is authoritative.
 - {json_content_contract}
 - Relative paths only. No absolute paths, parent traversal, background processes, prose commands, markdown, or extra keys.
 - No heredocs, multiline shell file bodies, or nested python -c one-liners for file writes.

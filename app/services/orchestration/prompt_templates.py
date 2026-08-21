@@ -346,11 +346,11 @@ No prose. No markdown fences. No plan.json. No explanation.
 4. Do NOT create documentation files unless the task explicitly asks for them
 5. Avoid README files, notes files, summaries, or explanation documents unless required by the task
 6. Prefer the smallest workable plan; each step should change one concern only
-7. `step_number` values must be unique integers and exactly 1, 2, 3... in order
-8. Required keys, with no extra keys except optional `ops`: step_number, description, commands, verification, rollback, expected_files
+7. Array order is authoritative; if `step_number` is supplied, Orchestrator normalizes it to the positional sequence before execution
+8. Required keys, with no extra keys except optional `step_number`, `rollback`, and `ops`: description, commands, verification, expected_files
 9. `commands` must be a JSON array of strings; it may be empty when `ops` contains deterministic file operations
 10. `verification` must always be present and must be one shell string or null
-11. `rollback` must always be present and must be one shell string or null
+11. If supplied, `rollback` must be one shell string or null; workspace snapshots own restoration
 12. `expected_files` must always be present and must be a JSON array of relative path strings (or [])
 13. Optional `ops` may contain these operations with relative `path` values and required string fields: {supported_file_ops}
 14. {operation_choice_contract}
@@ -379,30 +379,24 @@ Invalid: Objects like {{"steps": [...]}} instead of a top-level array.
 **Valid Minimal JSON Example:**
 [
   {{
-    "step_number": 1,
     "description": "Inspect the current workspace",
     "commands": ["rg --files . | sort"],
     "verification": "python -m pytest --version",
-    "rollback": null,
     "expected_files": []
   }},
   {{
-    "step_number": 2,
     "description": "Create required files",
     "ops": [
       {{"op": "write_file", "path": "README.md", "content": "# Project Notes\\n\\nInitial implementation notes.\\n"}}
     ],
     "commands": [],
     "verification": "python -c \\"import pathlib; assert pathlib.Path('README.md').exists()\\"",
-    "rollback": "rm -f README.md",
     "expected_files": ["README.md"]
   }},
   {{
-    "step_number": 3,
     "description": "Run verification",
     "commands": ["npm run build"],
     "verification": "npm run build",
-    "rollback": null,
     "expected_files": []
   }}
 ]

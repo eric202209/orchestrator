@@ -524,7 +524,7 @@ def test_planning_repair_prompt_uses_reduced_context_only():
     assert "Massive task context" not in prompt
     assert "Validation error:" in prompt
     assert "Strict output schema:" in prompt
-    assert "logs, session history" in prompt
+    assert "No prose, markdown, or extra keys." in prompt
     assert len(prompt) < PLANNING_REPAIR_PROMPT_MAX_CHARS
 
 

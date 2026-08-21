@@ -472,7 +472,8 @@ def test_attempt6_safe_envelope_retains_complete_plan_authority(repository_root)
     assert "old text" in result
     assert "selector internals" in result
     assert "Never reconstruct or overwrite a whole existing file" not in result
-    assert "step_number, description, commands, verification, rollback" in result
+    assert "description, commands, verification, expected_files" in result
+    assert "optional step_number, rollback, and ops" in result
 
 
 def test_attempt6_section_accounting_exactly_reconciles_and_is_deterministic(

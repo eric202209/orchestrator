@@ -30,7 +30,11 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
         "No prose. No markdown fences. No plan.json. No explanation."
     )
     assert "Valid Minimal JSON Example:" in prompt
-    assert '"step_number": 1' in prompt
+    example = prompt.split("Valid Minimal JSON Example:", 1)[1]
+    assert '"step_number"' not in example
+    assert '"rollback"' not in example
+    assert "Array order is authoritative" in prompt
+    assert "optional `step_number`, `rollback`, and `ops`" in prompt
     assert '"description": "Inspect the current workspace"' in prompt
     assert '"commands": ["rg --files . | sort"]' in prompt
     assert (
@@ -49,7 +53,9 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
     assert "append_file, delete_file, mkdir, replace_in_file, write_file" in prompt
     assert '"op": "write_file"' in prompt
     assert '"commands": []' in prompt
-    assert "no extra keys except optional `ops`" in prompt
+    assert (
+        "no extra keys except optional `step_number`, `rollback`, and `ops`" in prompt
+    )
     assert "No markdown. No prose." in prompt
     assert 'Objects like {"steps": [...]} instead of a top-level array' in prompt
 
