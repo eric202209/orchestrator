@@ -137,9 +137,6 @@ def select_minimal_prompt_first_strategy(
         ctx.orchestration_state.project_context,
     )
     trigger = "planner_heuristic" if start else None
-    if workspace_review.get("has_existing_files"):
-        start = True
-        trigger = trigger or "workspace_has_existing_files"
     if planning_prompt_tokens > MINIMAL_PROMPT_TOKEN_THRESHOLD:
         start = True
         trigger = "dense_planning_context"
