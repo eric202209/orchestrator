@@ -9,9 +9,16 @@ import re
 import shutil
 import subprocess
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from app.config import settings
+from app.services.orchestration.planning.source_materialization import (
+    SOURCE_STATUS_EXISTING,
+    SOURCE_STATUS_NEW,
+    TARGET_HINT_ABSENT,
+    PlannerSourceMaterialization,
+    extract_source_target_hints,
+)
 
 MAX_DISCOVERY_QUERY_CHARS = 256
 MAX_DISCOVERY_PATHS = 4
@@ -22,6 +29,9 @@ MAX_FILE_BYTES = 4096
 MAX_FILE_LINES = 200
 MAX_SNIPPET_CHARS = 240
 DISCOVERY_PROVIDER_TIMEOUT_SECONDS = 120
+
+DISCOVERY_ADMISSION_SKIPPED = "SKIPPED_SUFFICIENT_GROUNDING"
+DISCOVERY_ADMISSION_REQUIRED = "REQUIRED_MISSING_GROUNDING"
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _COMMAND_SYNTAX_RE = re.compile(r"(?:&&|\|\||;|\$\(|`|[<>])")
@@ -85,6 +95,164 @@ class DiscoveryTurnGuard:
         if self._used:
             raise DiscoveryContractError("discovery_turn_already_used")
         self._used = True
+
+
+@dataclass(frozen=True)
+class DiscoveryAdmission:
+    status: str
+    reason: str
+
+
+def assess_discovery_admission(
+    *,
+    prompt: str,
+    planner_contract: Mapping[str, Any] | None,
+    materialization: PlannerSourceMaterialization,
+) -> DiscoveryAdmission:
+    """Decide whether current bounded source facts justify one discovery call."""
+
+    expected = tuple(
+        item for item in materialization.files if bool(getattr(item, "expected", False))
+    )
+    if not expected:
+        return DiscoveryAdmission(
+            DISCOVERY_ADMISSION_REQUIRED, "no_explicit_source_or_creation_path"
+        )
+
+    if all(
+        getattr(item, "status", None) == SOURCE_STATUS_NEW
+        and bool(getattr(item, "creation_authorized", False))
+        for item in expected
+    ):
+        return DiscoveryAdmission(
+            DISCOVERY_ADMISSION_SKIPPED, "authorized_new_paths_are_grounded"
+        )
+    if any(
+        getattr(item, "status", None) != SOURCE_STATUS_EXISTING for item in expected
+    ):
+        return DiscoveryAdmission(
+            DISCOVERY_ADMISSION_REQUIRED, "expected_source_status_not_grounded"
+        )
+
+    existing = expected
+    if any(
+        not getattr(item, "version_identity", None)
+        or not getattr(item, "content_hash", None)
+        or getattr(item, "content", None) is None
+        or bool(getattr(item, "truncated", False))
+        for item in existing
+    ):
+        return DiscoveryAdmission(
+            DISCOVERY_ADMISSION_REQUIRED, "current_source_is_missing_or_truncated"
+        )
+
+    hints = extract_source_target_hints(prompt, planner_contract=planner_contract)
+    if hints:
+        from app.services.orchestration.planning.semantic_target_inventory import (
+            build_semantic_target_inventory,
+        )
+
+        hinted_paths = {hint.target_path for hint in hints if hint.target_path}
+        target_records = tuple(
+            item
+            for item in existing
+            if (
+                not hinted_paths or getattr(item, "relative_path", None) in hinted_paths
+            )
+            and (
+                getattr(item, "target_hint", None)
+                or getattr(item, "target_hint_status", None) != TARGET_HINT_ABSENT
+            )
+        )
+        if not target_records:
+            return DiscoveryAdmission(
+                DISCOVERY_ADMISSION_REQUIRED, "semantic_target_not_materialized"
+            )
+        inventory = build_semantic_target_inventory(materialization)
+        eligible_paths = set(inventory.eligible_existing_mutable_paths)
+        for item in target_records:
+            if (
+                getattr(item, "target_match_count", 0) != 1
+                or not bool(getattr(item, "target_included", False))
+                or getattr(item, "relative_path", None) not in eligible_paths
+            ):
+                return DiscoveryAdmission(
+                    DISCOVERY_ADMISSION_REQUIRED, "semantic_target_is_not_unique"
+                )
+
+    return DiscoveryAdmission(
+        DISCOVERY_ADMISSION_SKIPPED, "explicit_current_source_is_sufficient"
+    )
+
+
+def emit_discovery_admission(
+    *,
+    ctx: Any,
+    admission: DiscoveryAdmission,
+    emit_phase_event: Callable[..., Any],
+) -> None:
+    """Record admission without implying that a provider action occurred."""
+
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="INFO",
+        phase="planning",
+        message=f"[ORCHESTRATION] Discovery admission: {admission.status}",
+        details={
+            "stage": "read_only_discovery_admission",
+            "discovery_admission": admission.status,
+            "reason": admission.reason,
+            "max_discovery_turns": 1,
+            "discovery_turns_used": 0,
+        },
+    )
+
+
+def prepare_discovery_context(
+    *,
+    ctx: Any,
+    planning_timeout_seconds: int,
+    extract_structured_text: Callable[[Any], str],
+    planner_service: Any,
+    emit_phase_event: Callable[..., Any],
+    materialize: Callable[..., Any],
+) -> None:
+    """Materialize once before admission and refresh only after observation."""
+
+    source_cache: dict[str, str] = {}
+    materialization = materialize(
+        project_dir=Path(ctx.orchestration_state.project_dir),
+        task_description=ctx.prompt,
+        planner_contract=ctx.planner_contract,
+        supporting_paths=(),
+        source_cache=source_cache,
+    )
+    admission = assess_discovery_admission(
+        prompt=ctx.prompt,
+        planner_contract=ctx.planner_contract,
+        materialization=materialization,
+    )
+    emit_discovery_admission(
+        ctx=ctx, admission=admission, emit_phase_event=emit_phase_event
+    )
+    if admission.status == DISCOVERY_ADMISSION_REQUIRED:
+        observation = run_discovery_stage(
+            ctx=ctx,
+            planning_timeout_seconds=planning_timeout_seconds,
+            extract_structured_text=extract_structured_text,
+            planner_service=planner_service,
+            emit_phase_event=emit_phase_event,
+        )
+        materialization = materialize_observation_source_context(
+            project_dir=Path(ctx.orchestration_state.project_dir),
+            prompt=ctx.prompt,
+            planner_contract=ctx.planner_contract,
+            observation=observation,
+            materialize=materialize,
+            source_cache=source_cache,
+        )
+    ctx.planner_source_materialization = materialization
 
 
 def build_discovery_prompt(task_description: str, project_context: str = "") -> str:
@@ -288,6 +456,7 @@ def materialize_observation_source_context(
     planner_contract: Any,
     observation: DiscoveryObservation,
     materialize: Callable[..., Any],
+    source_cache: dict[str, str] | None = None,
 ) -> Any:
     paths = observation.materialization_paths()
     hints = (
@@ -300,6 +469,7 @@ def materialize_observation_source_context(
         task_description=f"{prompt}\n\n{hints}" if hints else prompt,
         planner_contract=planner_contract,
         supporting_paths=paths,
+        source_cache=source_cache,
     )
 
 

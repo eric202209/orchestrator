@@ -1010,6 +1010,7 @@ def materialize_planner_source_context(
     maximum_bytes_per_file: int = MAX_SOURCE_CONTENT_PER_FILE_CHARS,
     maximum_total_source_bytes: int = MAX_SOURCE_CONTENT_TOTAL_CHARS,
     creation_authorized_paths: Iterable[Any] | None = None,
+    source_cache: dict[str, str] | None = None,
 ) -> PlannerSourceMaterialization:
     """Materialize only named paths through the existing bounded source reader."""
 
@@ -1046,7 +1047,7 @@ def materialize_planner_source_context(
     target_hints = extract_source_target_hints(
         task_text, planner_contract=planner_contract
     )
-    source_cache: dict[str, str] = {}
+    source_cache = source_cache if source_cache is not None else {}
     priorities = _prioritized_source_paths(
         root,
         candidates,

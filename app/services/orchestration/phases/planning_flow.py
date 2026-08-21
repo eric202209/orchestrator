@@ -38,8 +38,7 @@ from app.services.orchestration.planning.source_materialization import (
 from app.services.orchestration.planning.read_only_discovery import (
     DiscoveryContractError,
     fail_closed_discovery,
-    materialize_observation_source_context,
-    run_discovery_stage,
+    prepare_discovery_context,
 )
 from app.services.orchestration.planning.semantic_target_inventory import (
     SemanticTargetContractError,
@@ -234,12 +233,13 @@ def execute_planning_phase(
     ctx.workspace_has_existing_files = bool(workspace_review.get("has_existing_files"))
     planning_timeout_seconds = clamp_planning_timeout(ctx.timeout_seconds)
     try:
-        discovery_observation = run_discovery_stage(
+        prepare_discovery_context(
             ctx=ctx,
             planning_timeout_seconds=planning_timeout_seconds,
             extract_structured_text=extract_structured_text,
             planner_service=PlannerService,
             emit_phase_event=emit_phase_event,
+            materialize=materialize_planner_source_context,
         )
     except (DiscoveryContractError, TimeoutError, OSError) as exc:
         return fail_closed_discovery(
@@ -250,13 +250,6 @@ def execute_planning_phase(
             emit_phase_event=emit_phase_event,
             finalize_failure=_finalize_planning_terminal_failure,
         )
-    ctx.planner_source_materialization = materialize_observation_source_context(
-        project_dir=Path(ctx.orchestration_state.project_dir),
-        prompt=ctx.prompt,
-        planner_contract=ctx.planner_contract,
-        observation=discovery_observation,
-        materialize=materialize_planner_source_context,
-    )
     if not ctx.planner_source_materialization.available:
         return fail_closed_discovery(
             ctx=ctx,
