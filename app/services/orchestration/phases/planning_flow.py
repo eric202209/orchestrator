@@ -335,6 +335,8 @@ def execute_planning_phase(
             "chars": len(planning_prompt),
             "estimated_tokens": planning_prompt_tokens,
             "prompt_profile": prompt_profile,
+            "prompt_stage": "P4_PROFILED_PROMPT",
+            "prompt_builder": "full_planning_prompt",
         }
     # 10H-C: emit context budget on every planning attempt so it appears in
     # session debug output regardless of dense-prompt detection.
@@ -438,13 +440,28 @@ def execute_planning_phase(
             )
         )
 
+    planning_runtime_diagnostics = planning_result.get("runtime_diagnostics") or {}
     emit_phase_event(
         ctx.orchestration_state,
         ctx.emit_live,
         level="INFO",
         phase="planning",
         message="[ORCHESTRATION] Planning response received; parsing and validating plan",
-        details={"phase_state": "planning_response_received"},
+        details={
+            "phase_state": "planning_response_received",
+            "provider_prompt_observability": {
+                key: planning_runtime_diagnostics[key]
+                for key in (
+                    "prompt_stage",
+                    "provider_bound_prompt_sha256_12",
+                    "provider_bound_prompt_chars",
+                    "provider_bound_prompt_token_estimate",
+                    "provider_invocation_started",
+                    "provider_response_received",
+                )
+                if key in planning_runtime_diagnostics
+            },
+        },
     )
 
     initial_output_text = __coerce_output_text(

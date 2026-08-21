@@ -50,6 +50,7 @@ def test_openclaw_invocation_metadata_redacts_prompt_and_captures_flags():
     assert metadata["cwd"] == "/tmp/isolated"
     assert metadata["isolate_workspace_context"] is True
     assert metadata["prompt_size"] == len("secret prompt")
+    assert metadata["prompt_stage"] == "P6_PROVIDER_BOUND_PROMPT"
     assert (
         metadata["prompt_sha256_12"]
         == hashlib.sha256(b"secret prompt").hexdigest()[:12]

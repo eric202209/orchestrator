@@ -1328,6 +1328,26 @@ class OpenClawSessionService:
             )
 
     @staticmethod
+    def _provider_bound_prompt_metadata(
+        prompt: str, *, invocation_kind: str
+    ) -> Dict[str, Any]:
+        """Describe the exact prompt string at the provider boundary."""
+
+        prompt_text = prompt or ""
+        return {
+            "prompt_stage": "P6_PROVIDER_BOUND_PROMPT",
+            "provider_bound_prompt_sha256_12": hashlib.sha256(
+                prompt_text.encode("utf-8")
+            ).hexdigest()[:12],
+            "provider_bound_prompt_chars": len(prompt_text),
+            "provider_bound_prompt_token_estimate": (
+                OpenClawSessionService._estimate_token_count(prompt_text)
+            ),
+            "provider_bound_prompt_token_estimator": "ceil_chars_div_4",
+            "provider_invocation_kind": invocation_kind,
+        }
+
+    @staticmethod
     def _openclaw_invocation_metadata(
         *,
         full_cmd: List[str],
@@ -1396,6 +1416,7 @@ class OpenClawSessionService:
             "cwd": cwd,
             "isolate_workspace_context": isolate_workspace_context,
             "prompt_size": len(prompt or ""),
+            "prompt_stage": "P6_PROVIDER_BOUND_PROMPT",
             "prompt_sha256_12": hashlib.sha256(
                 (prompt or "").encode("utf-8")
             ).hexdigest()[:12],
@@ -1621,6 +1642,11 @@ class OpenClawSessionService:
             "timeout_boundary": None,
             "response_boundary_reached": False,
             "response_cleanup_return_code": None,
+            **self._provider_bound_prompt_metadata(
+                prompt, invocation_kind=invocation_kind
+            ),
+            "provider_invocation_started": False,
+            "provider_response_received": False,
             "invocation": self._openclaw_invocation_metadata(
                 full_cmd=full_cmd,
                 prompt=prompt,
@@ -1648,12 +1674,16 @@ class OpenClawSessionService:
                 env=subprocess_env,
                 start_new_session=True,
             )
-        except BaseException:
+        except BaseException as exc:
+            diagnostics["provider_invocation_started"] = False
+            diagnostics["provider_response_received"] = False
+            exc.runtime_diagnostics = diagnostics
             cleanup_git_containment_shim(git_guard_shim_dir)
             raise
         register_process_group(process.pid)
         subprocess_started_at = time.monotonic()
         diagnostics["process_pid"] = process.pid
+        diagnostics["provider_invocation_started"] = True
         diagnostics["subprocess_start_seconds"] = round(
             subprocess_started_at - subprocess_start_started_at, 3
         )
@@ -1932,6 +1962,11 @@ class OpenClawSessionService:
                     "response_channel": output_channel,
                     "cleanup_status": diagnostics.get("cleanup_status") or "completed",
                     "truncated": "truncated" in f"{stdout_text}\n{stderr_text}".lower(),
+                    **self._provider_bound_prompt_metadata(
+                        prompt, invocation_kind=invocation_kind
+                    ),
+                    "provider_invocation_started": True,
+                    "provider_response_received": response_ready,
                 }
             )
             if activity_classification == "caller_cancelled":
@@ -2353,6 +2388,8 @@ class OpenClawSessionService:
                                 **(diagnostic_metadata or {}),
                                 "original_prompt_size": len(prompt or ""),
                                 "optimized_prompt_size": len(optimized_prompt or ""),
+                                "optimizer_applied": optimized_prompt != prompt,
+                                "optimizer_target_chars": 75000,
                             },
                         }
                     result = await self.execute_task_with_streaming(
@@ -2379,6 +2416,8 @@ class OpenClawSessionService:
                                         "optimized_prompt_size": len(
                                             retry_prompt or ""
                                         ),
+                                        "optimizer_applied": retry_prompt != prompt,
+                                        "optimizer_target_chars": 1800,
                                         "context_overflow_retry": True,
                                     },
                                 }
@@ -3053,6 +3092,11 @@ class OpenClawSessionService:
                         ),
                         "timeout_boundary": timeout_boundary,
                         "contract_violation_type": None,
+                        **self._provider_bound_prompt_metadata(
+                            prompt, invocation_kind=invocation_kind
+                        ),
+                        "provider_invocation_started": process_pid is not None,
+                        "provider_response_received": response_ready,
                         "invocation": self._openclaw_invocation_metadata(
                             full_cmd=full_cmd,
                             prompt=prompt,

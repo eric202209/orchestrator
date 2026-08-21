@@ -541,6 +541,11 @@ def test_direct_planning_uses_runtime_ollama_model_for_hyphen_alias(monkeypatch)
     )
 
     assert result["planning_direct"] is True
+    diagnostics = result["runtime_diagnostics"]
+    assert diagnostics["prompt_stage"] == "P6_PROVIDER_BOUND_PROMPT"
+    assert diagnostics["provider_bound_prompt_chars"] == len("plan me")
+    assert diagnostics["provider_invocation_started"] is True
+    assert diagnostics["provider_response_received"] is True
     assert captured["url"] == "http://localhost:11434/v1/chat/completions"
     assert captured["payload"]["model"] == "qwen3:8b-hybrid"
 

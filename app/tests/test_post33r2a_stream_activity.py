@@ -340,6 +340,10 @@ async def test_legacy_execution_path_reports_completed_activity(tmp_path):
 
     diagnostics = result["runtime_diagnostics"]
     assert result["status"] == "completed"
+    assert diagnostics["prompt_stage"] == "P6_PROVIDER_BOUND_PROMPT"
+    assert diagnostics["provider_bound_prompt_chars"] == len("provider-free fixture")
+    assert diagnostics["provider_invocation_started"] is True
+    assert diagnostics["provider_response_received"] is True
     assert diagnostics["activity_classification"] == "completed"
     assert diagnostics["terminal_reason"] == "completed"
     assert diagnostics["activity_state"] == "terminal_response"
@@ -368,7 +372,37 @@ async def test_legacy_execution_path_reports_partial_stall(monkeypatch, tmp_path
         )
 
     diagnostics = exc_info.value.runtime_diagnostics
+    assert diagnostics["prompt_stage"] == "P6_PROVIDER_BOUND_PROMPT"
+    assert diagnostics["provider_invocation_started"] is True
+    assert diagnostics["provider_response_received"] is False
     assert diagnostics["activity_classification"] == "partial_stream_stall"
     assert diagnostics["terminal_reason"] == "partial_stream_stall"
     assert diagnostics["partial_response_seen"] is True
     assert diagnostics["stream_stalled"] is True
+
+
+@pytest.mark.asyncio
+async def test_provider_initialization_failure_does_not_claim_invocation_or_response(
+    monkeypatch, tmp_path
+):
+    service = _service()
+    monkeypatch.setattr(
+        openclaw_service_module.asyncio,
+        "create_subprocess_exec",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("provider init failed")),
+    )
+
+    with pytest.raises(OSError) as exc_info:
+        await service._run_cli_prompt_with_diagnostics(
+            _command("pass"),
+            timeout_seconds=1,
+            cwd=str(tmp_path),
+            prompt="provider-free fixture",
+            invocation_kind="planning",
+        )
+
+    diagnostics = exc_info.value.runtime_diagnostics
+    assert diagnostics["prompt_stage"] == "P6_PROVIDER_BOUND_PROMPT"
+    assert diagnostics["provider_invocation_started"] is False
+    assert diagnostics["provider_response_received"] is False
+    assert "provider-free fixture" not in json.dumps(diagnostics)

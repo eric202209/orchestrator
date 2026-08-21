@@ -468,6 +468,19 @@ class PlannerService:
         headers: Dict[str, str] = {"Content-Type": "application/json"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
+        provider_prompt_diagnostics = {
+            "prompt_stage": "P6_PROVIDER_BOUND_PROMPT",
+            "provider_bound_prompt_sha256_12": hashlib.sha256(
+                planning_prompt.encode("utf-8")
+            ).hexdigest()[:12],
+            "provider_bound_prompt_chars": len(planning_prompt),
+            "provider_bound_prompt_token_estimate": (len(planning_prompt) + 3) // 4,
+            "provider_bound_prompt_token_estimator": "ceil_chars_div_4",
+            "provider_invocation_kind": "direct_chat_completions",
+            "provider_invocation_started": False,
+            "provider_response_received": False,
+        }
+
         started_at = _time.monotonic()
         _logger.info(
             "[PLANNING_DIRECT] attempting direct no-thinking planning url=%s model=%s"
@@ -489,6 +502,7 @@ class PlannerService:
             return PlannerService._extract_chat_completion_content(resp.json())
 
         try:
+            provider_prompt_diagnostics["provider_invocation_started"] = True
             output = await asyncio.wait_for(
                 _do_request(), timeout=float(direct_timeout)
             )
@@ -497,7 +511,10 @@ class PlannerService:
                 "[PLANNING_DIRECT] wall-clock timeout after %ds; falling back to runtime",
                 direct_timeout,
             )
-            return None
+            return {
+                "planning_direct": False,
+                "runtime_diagnostics": dict(provider_prompt_diagnostics),
+            }
         except Exception as exc:
             _logger.warning(
                 "[PLANNING_DIRECT] failed after %.1fs (%s: %s); falling back to runtime",
@@ -505,13 +522,20 @@ class PlannerService:
                 type(exc).__name__,
                 str(exc)[:200],
             )
-            return None
+            return {
+                "planning_direct": False,
+                "runtime_diagnostics": dict(provider_prompt_diagnostics),
+            }
+        provider_prompt_diagnostics["provider_response_received"] = True
         if not output.strip():
             _logger.warning(
                 "[PLANNING_DIRECT] empty output after %.1fs; falling back to runtime",
                 _time.monotonic() - started_at,
             )
-            return None
+            return {
+                "planning_direct": False,
+                "runtime_diagnostics": dict(provider_prompt_diagnostics),
+            }
         duration_seconds = _time.monotonic() - started_at
         _logger.info(
             "[PLANNING_DIRECT] success planning_direct=True backend=direct_chat_completions"
@@ -526,6 +550,7 @@ class PlannerService:
             "direct_planning_seconds": round(duration_seconds, 3),
             "direct_planning_prompt_chars": len(planning_prompt),
             "direct_planning_timeout_seconds": direct_timeout,
+            "runtime_diagnostics": dict(provider_prompt_diagnostics),
         }
 
     @classmethod
@@ -562,7 +587,16 @@ class PlannerService:
                 timeout_budget_seconds=timeout_budget_seconds,
             )
             if direct is not None:
-                return direct
+                if direct.get("planning_direct") is True:
+                    return direct
+                direct_diagnostics = direct.get("runtime_diagnostics") or {}
+                if isinstance(direct_diagnostics, dict):
+                    direct_planning_state.update(direct_diagnostics)
+                    kwargs["diagnostic_metadata"] = {
+                        **dict(kwargs.get("diagnostic_metadata") or {}),
+                        "direct_route_attempted": True,
+                        "direct_provider_prompt_observability": direct_diagnostics,
+                    }
             direct_planning_state["direct_unavailable"] = True
             direct_planning_state["direct_unavailable_after_prompt_chars"] = len(prompt)
             if timeout_budget_seconds is not None:
@@ -572,10 +606,12 @@ class PlannerService:
                 )
                 remaining_seconds = timeout_budget_seconds - elapsed_seconds
                 if remaining_seconds <= 0:
-                    raise TimeoutError(
+                    timeout_error = TimeoutError(
                         "Direct planning fallback budget exhausted before OpenClaw "
                         f"fallback could start after {elapsed_seconds:.1f}s"
                     )
+                    timeout_error.runtime_diagnostics = dict(direct_planning_state)
+                    raise timeout_error
                 adjusted_timeout = max(1, int(remaining_seconds))
                 if adjusted_timeout < int(timeout_budget_seconds):
                     kwargs = {**kwargs, "timeout_seconds": adjusted_timeout}
@@ -2109,6 +2145,7 @@ class PlannerService:
                 MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD
             ),
             "ultra_dense_planning_context": ultra_dense_planning_context,
+            "prompt_stage": "P2_SELECTED_PROMPT",
         }
         logger.warning(
             "[ORCHESTRATION] Minimal planning prompt size diagnostics "
@@ -2230,6 +2267,7 @@ class PlannerService:
                     ultra_minimal_prompt.encode("utf-8")
                 ).hexdigest(),
                 "ultra_minimal_prompt_chars": len(ultra_minimal_prompt),
+                "prompt_stage": "P2_SELECTED_PROMPT",
             }
             logger.warning(
                 "[ORCHESTRATION] Minimal planning prompt timed out; retrying with ultra-minimal prompt"
@@ -2380,6 +2418,7 @@ class PlannerService:
             )
             repair_prompt = repair_prompt_result.prompt
             repair_prompt_metadata = dict(repair_prompt_result.metadata)
+        repair_prompt_metadata.setdefault("prompt_stage", "P2_SELECTED_PROMPT")
         repair_projection_failure = repair_prompt_metadata.get("repair_prompt_failure")
         if isinstance(repair_projection_failure, dict):
             emit_live(
