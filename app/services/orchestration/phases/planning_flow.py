@@ -154,6 +154,7 @@ from app.services.orchestration.phases.planning_support import (
     _task1_bootstrap_second_repair_rejection_reasons,
     _truncated_multistep_collapse_diagnostics,
     _usable_knowledge_context,
+    _provider_prompt_observability,
     _validate_planning_plan,
 )
 
@@ -440,7 +441,6 @@ def execute_planning_phase(
             )
         )
 
-    planning_runtime_diagnostics = planning_result.get("runtime_diagnostics") or {}
     emit_phase_event(
         ctx.orchestration_state,
         ctx.emit_live,
@@ -449,21 +449,11 @@ def execute_planning_phase(
         message="[ORCHESTRATION] Planning response received; parsing and validating plan",
         details={
             "phase_state": "planning_response_received",
-            "provider_prompt_observability": {
-                key: planning_runtime_diagnostics[key]
-                for key in (
-                    "prompt_stage",
-                    "provider_bound_prompt_sha256_12",
-                    "provider_bound_prompt_chars",
-                    "provider_bound_prompt_token_estimate",
-                    "provider_invocation_started",
-                    "provider_response_received",
-                )
-                if key in planning_runtime_diagnostics
-            },
+            "provider_prompt_observability": _provider_prompt_observability(
+                planning_result
+            ),
         },
     )
-
     initial_output_text = __coerce_output_text(
         ctx=ctx,
         planning_result=planning_result,

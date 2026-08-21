@@ -102,7 +102,7 @@
           "workspace_identity": "/root/.orchestrator/runtime/tasks/12/253"
         },
         {
-          "content_hash": "b01f25331fea9b540f938dad5d9e4c66eb7b7b0d74bb6a9ad269e531b08c0f30",
+          "content_hash": "761d8a97e35a6cbaed2a5d8685ae0ad9892c4216f9f5521f81c7dc0fd9e6af28",
           "creation_authorized": false,
           "end_byte": 110793,
           "end_line": 2630,
@@ -497,7 +497,7 @@
           "workspace_identity": "/root/.orchestrator/runtime/tasks/12/255"
         },
         {
-          "content_hash": "b01f25331fea9b540f938dad5d9e4c66eb7b7b0d74bb6a9ad269e531b08c0f30",
+          "content_hash": "761d8a97e35a6cbaed2a5d8685ae0ad9892c4216f9f5521f81c7dc0fd9e6af28",
           "creation_authorized": false,
           "end_byte": 110793,
           "end_line": 2630,

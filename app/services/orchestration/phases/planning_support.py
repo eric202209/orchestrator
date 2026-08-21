@@ -55,6 +55,24 @@ TRUNCATED_PLAN_REPAIR_REJECTION_REASON = (
 )
 
 
+def _provider_prompt_observability(
+    planning_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    diagnostics = planning_result.get("runtime_diagnostics") or {}
+    return {
+        key: diagnostics[key]
+        for key in (
+            "prompt_stage",
+            "provider_bound_prompt_sha256_12",
+            "provider_bound_prompt_chars",
+            "provider_bound_prompt_token_estimate",
+            "provider_invocation_started",
+            "provider_response_received",
+        )
+        if key in diagnostics
+    }
+
+
 def _usable_knowledge_context(knowledge_context: Any) -> Any:
     return (
         knowledge_context
