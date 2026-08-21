@@ -266,13 +266,11 @@ def test_minimal_and_ultra_minimal_planning_prompts_include_contract_example():
             "No prose. No markdown fences. No plan.json. No explanation."
         )
         assert "Valid minimal JSON example:" in prompt
-        assert '"step_number": 1' in prompt
+        assert '"description":' in prompt
         assert '"commands": ["rg --files . | sort"]' in prompt
         assert "optional" in prompt
         assert "ops" in prompt
-        assert (
-            "no other keys" in prompt or "no extra keys except optional `ops`" in prompt
-        )
+        assert "optional keys are step_number, rollback, and ops" in prompt
         assert "No markdown. No prose." in prompt
 
 

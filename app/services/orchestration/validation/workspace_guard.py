@@ -712,6 +712,11 @@ def normalize_step(
     step_label = f"step {step_index}" if step_index is not None else "step"
 
     normalized_step = dict(step)
+    if step_index is not None and "step_number" not in normalized_step:
+        # Provider-facing step numbering is positional metadata. Keep the
+        # canonical field for persisted and execution compatibility, but do
+        # not require compact stored plans to re-emit it.
+        normalized_step["step_number"] = step_index
     normalized_commands = []
     for command_index, command in enumerate(step.get("commands", []) or [], start=1):
         raw_command = str(command)

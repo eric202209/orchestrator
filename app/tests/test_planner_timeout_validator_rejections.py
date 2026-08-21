@@ -195,11 +195,11 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert "If a scaffold command is genuinely required" in prompt
     assert "use `ops` for any follow-up source edits" in prompt
     assert (
-        "Each step must include these required keys, optional ops, and no other keys: step_number, description, commands, verification, rollback, expected_files"
+        "Each step must include description, commands, verification, and expected_files; optional keys are step_number, rollback, and ops"
         in prompt
     )
-    assert "`step_number` must be a unique integer" in prompt
-    assert "Do not omit keys" in prompt
+    assert "Array order is authoritative" in prompt
+    assert "workspace snapshots own restoration" in prompt
 
 
 def test_weak_verification_is_treated_as_blocking_immediate_repair_issue():

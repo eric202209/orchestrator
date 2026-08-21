@@ -39,30 +39,24 @@ from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 PLANNING_VALID_MINIMAL_JSON_EXAMPLE = """[
   {
-    "step_number": 1,
     "description": "Inspect the current workspace",
     "commands": ["rg --files . | sort"],
     "verification": "python -c \\"import pathlib,sys; sys.exit(0 if pathlib.Path('.').exists() else 1)\\"",
-    "rollback": null,
     "expected_files": []
   },
   {
-    "step_number": 2,
     "description": "Create the smallest required implementation files",
     "ops": [
       {"op": "write_file", "path": "README.md", "content": "# Project Notes\\n\\nInitial implementation notes.\\n"}
     ],
     "commands": [],
     "verification": "python -c \\"import pathlib,sys; sys.exit(0 if 'Project Notes' in pathlib.Path('README.md').read_text() else 1)\\"",
-    "rollback": "rm -f README.md",
     "expected_files": ["README.md"]
   },
   {
-    "step_number": 3,
     "description": "Run a one-shot verification",
     "commands": ["npm run build"],
     "verification": "npm run build",
-    "rollback": null,
     "expected_files": []
   }
 ]"""
@@ -229,12 +223,12 @@ Rules:
 3. If a step will later need file-read or file-write tools, keep the planned path relative; the executor will expand it to an absolute path under {display_project_dir}
 4. Do not use absolute paths, .., or ~
 5. Return 3 or 4 small sequential steps maximum
-6. Each step must include these required keys, optional ops, and no other keys: step_number, description, commands, verification, rollback, expected_files
-7. `step_number` must be a unique integer and the sequence must be exactly 1, 2, 3...
-8. Do not omit keys and do not invent extra keys inside step objects except optional `ops`
+6. Each step must include description, commands, verification, and expected_files; optional keys are step_number, rollback, and ops
+7. Array order is authoritative. If step_number is supplied, Orchestrator normalizes it to the positional sequence before execution.
+8. Do not invent extra keys inside step objects
 9. `commands` must be an array of strings; it may be empty when `ops` contains deterministic file operations
 10. `verification` must be a single shell string or null
-11. `rollback` must be a single shell string or null
+11. If supplied, `rollback` must be a single shell string or null; workspace snapshots own restoration
 12. expected_files must be relative file paths or []
 13. {ops_contract}
 13a. {operation_choice_contract}
@@ -340,11 +334,10 @@ Requirements:
 5. Shell fallback limits: {shell_fallback_limits}
 6. {verification_contract}
 6a. {test_scaffold_contract}
-7. Each step must contain exactly these required keys, plus optional `ops`, and no other keys:
-   step_number, description, commands, verification, rollback, expected_files
-8. step_number values must be unique integers and exactly 1, 2, 3... in order
+7. Each step must contain description, commands, verification, and expected_files; optional keys are step_number, rollback, and ops
+8. Array order is authoritative; any supplied step_number is normalized to 1, 2, 3... before execution
 9. commands must be a JSON array of shell strings; it may be empty when `ops` contains deterministic file operations
-10. verification and rollback must each be one shell string or null
+10. verification must be one shell string or null; rollback is optional and, when supplied, must be one shell string or null
 11. No background processes, &, nohup, disown, or dev servers.
 12. Keep each command short and machine-runnable
 13. If the workspace already has files, inspect or extend them before re-scaffolding
