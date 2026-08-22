@@ -19,6 +19,10 @@ from app.services.orchestration.planning.source_materialization import (
     PlannerSourceMaterialization,
     extract_source_target_hints,
 )
+from app.services.workspace.workspace_paths import (
+    HYDRATION_EXCLUDED_NAMES,
+    is_hydration_excluded_path,
+)
 
 MAX_DISCOVERY_QUERY_CHARS = 256
 MAX_DISCOVERY_PATHS = 4
@@ -262,7 +266,9 @@ def build_discovery_prompt(task_description: str, project_context: str = "") -> 
         "READ-ONLY DISCOVERY ONLY. Return exactly one JSON object and no prose.\n"
         'Allowed: {"action":"search_text","query":"...","paths":["..."]}, '
         '{"action":"read_file","path":"..."}, or {"action":"stop"}.\n'
-        "Use relative paths in the admitted workspace. Return no plan, shell "
+        "Use relative paths in the admitted workspace; search_text paths may "
+        "name existing files or directories, while read_file requires one "
+        "existing regular file. Return no plan, shell "
         "command, mutation, old/new, target ID, selector, offsets, or tests.\n"
         "Choose at most one action; it executes once, then Planning resumes.\n"
         f"TASK:\n{task}\nCURRENT PLANNING CONTEXT:\n{context}"
@@ -297,7 +303,7 @@ def parse_discovery_request(output_text: str) -> DiscoveryRequest:
             raise DiscoveryContractError("discovery_search_paths_invalid")
         if len(raw_paths) > MAX_DISCOVERY_PATHS:
             raise DiscoveryContractError("discovery_search_path_count_exceeded")
-        paths = tuple(_validate_declared_path(value) for value in raw_paths)
+        paths = tuple(_validate_search_scope(value) for value in raw_paths)
         if len(set(paths)) != len(paths):
             raise DiscoveryContractError("discovery_search_paths_duplicated")
         return DiscoveryRequest(action=action, query=query, paths=paths)
@@ -537,6 +543,15 @@ def _validate_declared_path(value: Any) -> str:
         raise DiscoveryContractError("discovery_path_unsafe") from exc
 
 
+def _validate_search_scope(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > MAX_DISCOVERY_PATH_CHARS:
+        raise DiscoveryContractError("discovery_path_bound_exceeded")
+    normalized = value.rstrip("/")
+    if not normalized:
+        raise DiscoveryContractError("discovery_path_unsafe")
+    return _validate_declared_path(normalized)
+
+
 def _observe_entry(
     root: Path, relative_path: str, *, require_file: bool = False
 ) -> Any:
@@ -549,6 +564,8 @@ def _observe_entry(
         raise DiscoveryContractError("discovery_path_observation_failed") from exc
     if evidence.symlink_segment:
         raise DiscoveryContractError("discovery_path_symlink")
+    if evidence.trust_class is not path_authority.TrustClass.PRODUCT:
+        raise DiscoveryContractError("discovery_path_excluded")
     if not evidence.exists:
         raise DiscoveryContractError("discovery_path_missing")
     if require_file and evidence.entry_type != path_authority.EntryType.REGULAR_FILE:
@@ -580,6 +597,11 @@ def _execute_search(root: Path, request: DiscoveryRequest) -> DiscoveryObservati
         "--max-columns",
         str(MAX_SNIPPET_CHARS),
         "--max-columns-preview",
+        *(
+            item
+            for name in sorted(HYDRATION_EXCLUDED_NAMES)
+            for item in ("--glob", f"!**/{name}", "--glob", f"!**/{name}/**")
+        ),
         "--",
         request.query,
         *request.paths,
@@ -666,11 +688,18 @@ def _execute_python_search(
             ):
                 dir_path = Path(directory)
                 dir_names[:] = sorted(
-                    name for name in dir_names if not (dir_path / name).is_symlink()
+                    name
+                    for name in dir_names
+                    if not (dir_path / name).is_symlink()
+                    and not is_hydration_excluded_path(
+                        (dir_path / name).relative_to(root)
+                    )
                 )
                 for file_name in sorted(file_names):
                     candidate = dir_path / file_name
-                    if candidate.is_symlink():
+                    if candidate.is_symlink() or is_hydration_excluded_path(
+                        candidate.relative_to(root)
+                    ):
                         continue
                     yield candidate, candidate.relative_to(root).as_posix()
 
@@ -772,6 +801,10 @@ def _execute_read_file(root: Path, request: DiscoveryRequest) -> DiscoveryObserv
 
 def _bounded_text(value: Any, maximum: int) -> str:
     text = str(value or "")
-    if len(text) <= maximum:
+    encoded = text.encode("utf-8")
+    if len(encoded) <= maximum:
         return text
-    return text[:maximum]
+    end = maximum
+    while end > 0 and (encoded[end] & 0xC0) == 0x80:
+        end -= 1
+    return encoded[:end].decode("utf-8", errors="ignore")

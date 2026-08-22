@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import uuid
 
@@ -307,3 +309,219 @@ def test_discovery_prompt_is_small_and_excludes_executable_plan_contract():
     assert "Return exactly one JSON object" in prompt
     assert "final executable Plan" not in prompt
     assert "old/new" in prompt
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ["app/services/tasks/tool_tracking.py"],
+        ["app/services/tasks/"],
+        ["app/services/tasks/", "app/tests/"],
+    ],
+)
+def test_search_accepts_existing_files_and_directory_scopes(paths):
+    request = parse_discovery_request(
+        json.dumps(
+            {
+                "action": "search_text",
+                "query": "ToolTrackingService|get_tool_statistics",
+                "paths": paths,
+            }
+        )
+    )
+
+    assert request.paths == tuple(path.rstrip("/") for path in paths)
+    observation = execute_discovery_request(REPO_ROOT, request)
+
+    assert observation.result_count > 0
+    assert observation.result_count <= MAX_SEARCH_RESULTS
+    assert len(render_discovery_observation(observation).encode("utf-8")) <= (
+        MAX_OBSERVATION_BYTES
+    )
+
+
+def test_task_222_retained_action_is_accepted_without_target_evidence():
+    query = "tool usage " + "analytics"
+    request = parse_discovery_request(
+        json.dumps(
+            {
+                "action": "search_text",
+                "query": query,
+                "paths": ["app/", "docs/", "scripts/"],
+            }
+        )
+    )
+
+    assert request.paths == ("app", "docs", "scripts")
+    observation = execute_discovery_request(REPO_ROOT, request)
+
+    assert observation.result_count <= MAX_SEARCH_RESULTS
+    assert all(
+        hit.path
+        not in {
+            "app/services/tasks/tool_tracking.py",
+            "app/tests/test_orchestration_event_journal.py",
+        }
+        for hit in observation.hits
+    )
+    assert len(render_discovery_observation(observation).encode("utf-8")) <= (
+        MAX_OBSERVATION_BYTES
+    )
+
+
+@pytest.mark.parametrize("path", ["missing/subtree", "app/no-such-file.py"])
+def test_search_rejects_nonexistent_scope_at_execution(path):
+    request = parse_discovery_request(
+        json.dumps({"action": "search_text", "query": "x", "paths": [path]})
+    )
+
+    with pytest.raises(DiscoveryContractError, match="missing"):
+        execute_discovery_request(REPO_ROOT, request)
+
+
+@pytest.mark.parametrize("path", ["/etc", "../outside.py", "app/../docs"])
+def test_search_rejects_absolute_and_traversal_scopes(path):
+    with pytest.raises(DiscoveryContractError, match="unsafe"):
+        parse_discovery_request(
+            json.dumps({"action": "search_text", "query": "x", "paths": [path]})
+        )
+
+
+def test_search_rejects_project_root_scope():
+    with pytest.raises(DiscoveryContractError, match="unsafe"):
+        parse_discovery_request('{"action":"search_text","query":"x","paths":["."]}')
+
+
+def test_search_rejects_symlink_scopes_inside_and_outside_project(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    safe_target = project / "safe-target"
+    safe_target.mkdir()
+    (outside / "secret.py").write_text("secret", encoding="utf-8")
+    (project / "outside-link").symlink_to(outside, target_is_directory=True)
+    (project / "safe-link").symlink_to(safe_target, target_is_directory=True)
+
+    for path in ("outside-link", "safe-link"):
+        request = parse_discovery_request(
+            json.dumps({"action": "search_text", "query": "secret", "paths": [path]})
+        )
+        with pytest.raises(DiscoveryContractError, match="symlink"):
+            execute_discovery_request(project, request)
+
+
+def test_search_rejects_runtime_and_toolchain_scopes_from_existing_ownership_policy(
+    tmp_path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "src").mkdir()
+    for relative in (
+        "src/.agent",
+        "src/.openclaw",
+        "src/node_modules",
+        "src/venv",
+    ):
+        (project / relative).mkdir()
+    for relative in ("src/runtime.json", "src/BOOTSTRAP.md"):
+        (project / relative).write_text("runtime state", encoding="utf-8")
+    (project / "src/.agent/secret.txt").write_text("runtime secret", encoding="utf-8")
+    (project / "src/visible.py").write_text("runtime secret", encoding="utf-8")
+
+    directory_request = parse_discovery_request(
+        '{"action":"search_text","query":"runtime secret","paths":["src"]}'
+    )
+    directory_observation = execute_discovery_request(project, directory_request)
+    assert "src/visible.py" in directory_observation.materialization_paths()
+    assert all(".agent" not in hit.path for hit in directory_observation.hits)
+
+    for path in (
+        "src/.agent",
+        "src/.openclaw",
+        "src/node_modules",
+        "src/venv",
+        "src/runtime.json",
+        "src/BOOTSTRAP.md",
+    ):
+        request = parse_discovery_request(
+            json.dumps({"action": "search_text", "query": "runtime", "paths": [path]})
+        )
+        with pytest.raises(DiscoveryContractError, match="excluded"):
+            execute_discovery_request(project, request)
+
+
+def test_search_rejects_special_scope_and_rg_timeout(monkeypatch, tmp_path):
+    fifo = tmp_path / "pipe"
+    try:
+        fifo_path = fifo
+        fifo_path.parent.mkdir(exist_ok=True)
+        os.mkfifo(fifo_path)
+    except (AttributeError, NotImplementedError, OSError):
+        pytest.skip("FIFOs are unsupported on this platform")
+    request = parse_discovery_request(
+        '{"action":"search_text","query":"x","paths":["pipe"]}'
+    )
+    with pytest.raises(DiscoveryContractError, match="readable"):
+        execute_discovery_request(tmp_path, request)
+
+    source = tmp_path / "source.py"
+    source.write_text("x", encoding="utf-8")
+    request = parse_discovery_request(
+        '{"action":"search_text","query":"x","paths":["source.py"]}'
+    )
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("rg", 30)
+
+    monkeypatch.setattr(
+        "app.services.orchestration.planning.read_only_discovery.subprocess.run",
+        timeout,
+    )
+    monkeypatch.setattr(
+        "app.services.orchestration.planning.read_only_discovery.shutil.which",
+        lambda _executable: "/usr/bin/rg",
+    )
+    with pytest.raises(DiscoveryContractError, match="execution_failed"):
+        execute_discovery_request(tmp_path, request)
+
+
+def test_search_binary_match_fails_closed_without_rendering_binary_content(tmp_path):
+    binary = tmp_path / "binary.dat"
+    binary.write_bytes(b"\x00binary secret")
+    request = parse_discovery_request(
+        '{"action":"search_text","query":"secret","paths":["binary.dat"]}'
+    )
+
+    with pytest.raises(DiscoveryContractError, match="output_invalid"):
+        execute_discovery_request(tmp_path, request)
+
+
+def test_search_observation_cap_is_a_utf8_byte_cap():
+    observation = DiscoveryObservation(
+        action="search_text",
+        status="completed",
+        hits=tuple(
+            SearchHit(path="é.py", line_number=index, snippet="é" * 240)
+            for index in range(MAX_SEARCH_RESULTS)
+        ),
+    )
+
+    rendered = render_discovery_observation(observation)
+    assert len(rendered.encode("utf-8")) <= MAX_OBSERVATION_BYTES
+
+
+def test_read_file_remains_exact_existing_regular_file_only(tmp_path):
+    source = tmp_path / "source.py"
+    source.write_text("current", encoding="utf-8")
+    file_request = parse_discovery_request('{"action":"read_file","path":"source.py"}')
+    assert execute_discovery_request(tmp_path, file_request).content == "current"
+
+    with pytest.raises(DiscoveryContractError, match="unsafe"):
+        parse_discovery_request('{"action":"read_file","path":"."}')
+
+    directory = tmp_path / "src"
+    directory.mkdir()
+    directory_request = parse_discovery_request('{"action":"read_file","path":"src"}')
+    with pytest.raises(DiscoveryContractError, match="regular_file"):
+        execute_discovery_request(tmp_path, directory_request)
