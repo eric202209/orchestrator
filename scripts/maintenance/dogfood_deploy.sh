@@ -31,6 +31,12 @@ if [ "$#" -ne 0 ]; then
     exit 2
 fi
 
+NATIVE_WORKER_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+if ! PATH="$NATIVE_WORKER_PATH" command -v rg >/dev/null 2>&1; then
+    echo "FAIL: native dogfood requires system ripgrep on the worker PATH." >&2
+    exit 1
+fi
+
 if [ -n "$(git status --porcelain --untracked-files=all)" ]; then
     echo "FAIL: dogfood deployment requires a clean committed worktree." >&2
     git status --short >&2

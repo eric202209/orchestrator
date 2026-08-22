@@ -598,6 +598,8 @@ def _execute_search(root: Path, request: DiscoveryRequest) -> DiscoveryObservati
         "--max-columns",
         str(MAX_SNIPPET_CHARS),
         "--max-columns-preview",
+        "--sort",
+        "path",
         *(
             item
             for name in sorted(HYDRATION_EXCLUDED_NAMES)

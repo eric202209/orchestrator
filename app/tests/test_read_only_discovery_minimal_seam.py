@@ -221,6 +221,7 @@ def test_search_uses_shell_false_and_caps_many_results(monkeypatch):
     argv, kwargs = calls[0]
     assert kwargs["shell"] is False
     assert argv[0].endswith("rg")
+    assert argv[argv.index("--sort") + 1] == "path"
     assert observation.result_count == MAX_SEARCH_RESULTS
     assert observation.truncated
     assert (
