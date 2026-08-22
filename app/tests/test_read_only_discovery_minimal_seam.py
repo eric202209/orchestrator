@@ -182,20 +182,15 @@ def test_empty_search_is_bounded_no_result_evidence():
     assert "result_count: 0" in render_discovery_observation(observation)
 
 
-def test_search_falls_back_without_ripgrep(monkeypatch):
-    sentinel = REPO_ROOT / "app/tasks/maintenance.py"
-    before = sentinel.read_bytes()
+def test_search_fails_closed_without_ripgrep(monkeypatch):
     monkeypatch.setattr(
         "app.services.orchestration.planning.read_only_discovery.shutil.which",
         lambda _executable: None,
     )
     monkeypatch.setenv("PATH", "")
 
-    _request, observation = _search()
-
-    assert observation.result_count <= MAX_SEARCH_RESULTS
-    assert "app/tasks/maintenance.py" in set(observation.materialization_paths())
-    assert sentinel.read_bytes() == before
+    with pytest.raises(DiscoveryContractError, match="execution_failed"):
+        _search()
 
 
 def test_search_uses_shell_false_and_caps_many_results(monkeypatch):
@@ -374,22 +369,20 @@ def test_search_query_and_scope_beginning_with_dash_are_safe(tmp_path):
     assert observation.hits[0].path == "-scope/source.py"
 
 
-def test_rg_and_python_fallback_agree_on_regex_matching(tmp_path, monkeypatch):
+def test_search_requires_ripgrep_for_regex_matching(tmp_path, monkeypatch):
     source = tmp_path / "source.py"
     source.write_text("AlphaService\nalpha_beta\n", encoding="utf-8")
     request = parse_discovery_request(
         '{"action":"search_text","query":"AlphaService|alpha_beta",'
         '"paths":["source.py"]}'
     )
-    rg_observation = execute_discovery_request(tmp_path, request)
-
     monkeypatch.setattr(
         "app.services.orchestration.planning.read_only_discovery.shutil.which",
         lambda _executable: None,
     )
-    fallback_observation = execute_discovery_request(tmp_path, request)
 
-    assert fallback_observation.hits == rg_observation.hits
+    with pytest.raises(DiscoveryContractError, match="execution_failed"):
+        execute_discovery_request(tmp_path, request)
 
 
 @pytest.mark.parametrize(
