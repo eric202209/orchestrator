@@ -311,6 +311,87 @@ def test_discovery_prompt_is_small_and_excludes_executable_plan_contract():
     assert "old/new" in prompt
 
 
+def test_discovery_prompt_declares_rg_compatible_query_semantics():
+    prompt = build_discovery_prompt("Find the relevant implementation.")
+
+    assert "ripgrep-compatible text/regex pattern" in prompt
+    assert "spaces are literal" in prompt
+    assert "use `|` for alternatives" in prompt
+
+
+def test_search_query_supports_literal_phrase_snake_case_alternation_and_class(
+    tmp_path,
+):
+    source = tmp_path / "source.py"
+    source.write_text(
+        "alpha beta\n" "AlphaService\n" "alpha_beta\n",
+        encoding="utf-8",
+    )
+
+    cases = {
+        "AlphaService": 1,
+        "alpha_beta": 1,
+        " ".join(("alpha", "beta")): 1,
+        "AlphaService|alpha_beta": 2,
+        r"alpha[_ ]beta": 2,
+    }
+    for query, expected_count in cases.items():
+        request = parse_discovery_request(
+            json.dumps(
+                {"action": "search_text", "query": query, "paths": ["source.py"]}
+            )
+        )
+        observation = execute_discovery_request(tmp_path, request)
+        assert observation.result_count == expected_count
+
+
+@pytest.mark.parametrize("query", ["[", "x" * 257, "line\nfeed", "line\x00feed"])
+def test_search_query_rejects_or_classifies_invalid_and_unsafe_inputs(tmp_path, query):
+    (tmp_path / "source.py").write_text("source\n", encoding="utf-8")
+    request_payload = json.dumps(
+        {"action": "search_text", "query": query, "paths": ["source.py"]}
+    )
+    if query == "[":
+        request = parse_discovery_request(request_payload)
+        with pytest.raises(DiscoveryContractError, match="search_failed"):
+            execute_discovery_request(tmp_path, request)
+    else:
+        with pytest.raises(DiscoveryContractError):
+            parse_discovery_request(request_payload)
+
+
+def test_search_query_and_scope_beginning_with_dash_are_safe(tmp_path):
+    scope = tmp_path / "-scope"
+    scope.mkdir()
+    (scope / "source.py").write_text("-needle\n", encoding="utf-8")
+    request = parse_discovery_request(
+        json.dumps({"action": "search_text", "query": "-needle", "paths": ["-scope"]})
+    )
+
+    observation = execute_discovery_request(tmp_path, request)
+
+    assert observation.result_count == 1
+    assert observation.hits[0].path == "-scope/source.py"
+
+
+def test_rg_and_python_fallback_agree_on_regex_matching(tmp_path, monkeypatch):
+    source = tmp_path / "source.py"
+    source.write_text("AlphaService\nalpha_beta\n", encoding="utf-8")
+    request = parse_discovery_request(
+        '{"action":"search_text","query":"AlphaService|alpha_beta",'
+        '"paths":["source.py"]}'
+    )
+    rg_observation = execute_discovery_request(tmp_path, request)
+
+    monkeypatch.setattr(
+        "app.services.orchestration.planning.read_only_discovery.shutil.which",
+        lambda _executable: None,
+    )
+    fallback_observation = execute_discovery_request(tmp_path, request)
+
+    assert fallback_observation.hits == rg_observation.hits
+
+
 @pytest.mark.parametrize(
     "paths",
     [

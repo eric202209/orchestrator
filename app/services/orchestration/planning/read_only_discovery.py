@@ -266,6 +266,8 @@ def build_discovery_prompt(task_description: str, project_context: str = "") -> 
         "READ-ONLY DISCOVERY ONLY. Return exactly one JSON object and no prose.\n"
         'Allowed: {"action":"search_text","query":"...","paths":["..."]}, '
         '{"action":"read_file","path":"..."}, or {"action":"stop"}.\n'
+        "For search_text, query is a bounded ripgrep-compatible text/regex "
+        "pattern; spaces are literal, and use `|` for alternatives when useful.\n"
         "Use relative paths in the admitted workspace; search_text paths may "
         "name existing files or directories, while read_file requires one "
         "existing regular file. Return no plan, shell "
@@ -711,13 +713,18 @@ def _execute_python_search(
             handle = full_path.open("rb")
         except OSError as exc:
             raise DiscoveryContractError("discovery_search_execution_failed") from exc
+        file_hit_start = len(hits)
+        binary_seen = False
         with handle:
             for line_number, raw_line in enumerate(handle, start=1):
                 if time.monotonic() > deadline:
                     raise DiscoveryContractError("discovery_search_execution_failed")
+                binary_seen = binary_seen or b"\x00" in raw_line
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
                 if not pattern.search(line):
                     continue
+                if binary_seen:
+                    raise DiscoveryContractError("discovery_search_output_invalid")
                 snippet = _bounded_text(line, MAX_SNIPPET_CHARS)
                 rendered = f"{relative_path}:{line_number}:{snippet}\n".encode(
                     "utf-8", errors="replace"
@@ -738,6 +745,8 @@ def _execute_python_search(
                     truncated = True
                     stop = True
                     break
+        if binary_seen and len(hits) > file_hit_start:
+            raise DiscoveryContractError("discovery_search_output_invalid")
         if stop:
             break
 
