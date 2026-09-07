@@ -92,6 +92,24 @@ def test_actual_assembled_full_prompt_keeps_evidence_and_uses_pl3_fields(tmp_pat
     assert "optional `step_number`, `rollback`, and `ops`" in prompt
 
 
+def test_typed_grounding_evidence_stays_separate_from_operator_task(tmp_path):
+    ctx, task, _ = _planning_context(tmp_path)
+    ctx.planning_grounding_context = (
+        "## DETERMINISTIC GROUNDING EVIDENCE\n"
+        "bounded observation evidence: implementation bytes"
+    )
+
+    prompt = assemble_planning_prompt(
+        ctx,
+        {"has_existing_files": True, "file_count": 2, "source_file_count": 2},
+    )
+
+    assert "## DETERMINISTIC GROUNDING EVIDENCE" in prompt
+    assert "bounded observation evidence: implementation bytes" in prompt
+    assert task in prompt
+    assert f"{task}\n## DETERMINISTIC GROUNDING EVIDENCE" not in prompt
+
+
 def test_minimal_and_ultra_retries_keep_the_same_pl3_field_contract(tmp_path):
     _, task, materialization = _planning_context(tmp_path)
     kwargs = {

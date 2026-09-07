@@ -1,7 +1,7 @@
-"""Isolated production grounding contracts and deterministic executors.
+"""Production grounding contracts, deterministic executor, and coordinator.
 
-Slice 1 intentionally exposes this package only to focused tests and future
-coordinator work.  Existing live Planning imports no grounding modules.
+The coordinator remains provider-injected and is selected by a default-off
+Planning boundary.  The executor remains provider-neutral and read-only.
 """
 
 from .contracts import (
@@ -30,6 +30,31 @@ from .contracts import (
     parse_grounding_request,
 )
 from .executor import GroundingExecutor
+from .coordinator import (
+    GroundingCoordinator,
+    GroundingDecisionProvider,
+    GroundingProviderError,
+    render_grounding_state,
+)
+from .coordinator_contracts import (
+    GroundingAssessment,
+    GroundingAssessmentKind,
+    GroundingCoordinatorState,
+    GroundingDecisionContext,
+    GroundingEvidence,
+    GroundingProposal,
+    GroundingRequestStateSignal,
+    GroundingRequestStateSignalKind,
+    GroundingResult,
+    GroundingRunConfig,
+    GroundingStateProjection,
+    GroundingTaskReference,
+    GroundingTerminalReason,
+)
+from .context_adapter import (
+    apply_grounding_result_to_planning_context,
+    render_grounding_result_context,
+)
 
 __all__ = [
     "EnclosingSymbolLocator",
@@ -41,6 +66,25 @@ __all__ = [
     "GroundingBudgetSnapshot",
     "GroundingExecutionError",
     "GroundingExecutor",
+    "GroundingCoordinator",
+    "GroundingDecisionProvider",
+    "GroundingProviderError",
+    "GroundingAssessment",
+    "GroundingAssessmentKind",
+    "GroundingCoordinatorState",
+    "GroundingDecisionContext",
+    "GroundingEvidence",
+    "GroundingProposal",
+    "GroundingRequestStateSignal",
+    "GroundingRequestStateSignalKind",
+    "GroundingResult",
+    "GroundingRunConfig",
+    "GroundingStateProjection",
+    "GroundingTaskReference",
+    "GroundingTerminalReason",
+    "apply_grounding_result_to_planning_context",
+    "render_grounding_result_context",
+    "render_grounding_state",
     "GroundingObservation",
     "GroundingOutcome",
     "GroundingRequest",

@@ -524,7 +524,7 @@ def test_outcomes_rejection_and_execution_error_are_distinct(tmp_path, monkeypat
         )
 
 
-def test_executor_has_no_task_text_or_provider_dependency_and_legacy_path_is_untouched():
+def test_executor_has_no_task_text_or_provider_dependency_and_legacy_path_remains_available():
     signature = inspect.signature(GroundingExecutor.execute)
     assert "task_description" not in signature.parameters
     assert "operator_task" not in signature.parameters
@@ -545,7 +545,9 @@ def test_executor_has_no_task_text_or_provider_dependency_and_legacy_path_is_unt
         Path(__file__).parents[1]
         / "services/orchestration/planning/read_only_discovery.py"
     )
-    assert "planning.grounding" not in planning_flow.read_text(encoding="utf-8").lower()
+    planning_text = planning_flow.read_text(encoding="utf-8")
+    assert "ENABLE_TYPED_GROUNDING_COORDINATOR" in planning_text
+    assert "prepare_discovery_context" in planning_text
     assert "planning.grounding" not in discovery.read_text(encoding="utf-8").lower()
 
 

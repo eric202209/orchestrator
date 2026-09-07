@@ -172,6 +172,12 @@ class Settings(BaseSettings):
     PLANNING_DIRECT_TEMPERATURE: float = 0.0
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
+    # PHASE35-PGI3: provider-injected typed grounding remains fail-safe off.
+    # Limits are intentionally unset until an operator-approved run contract
+    # supplies them; no experimental turn count is a production default.
+    ENABLE_TYPED_GROUNDING_COORDINATOR: bool = False
+    TYPED_GROUNDING_MAX_STEPS: Optional[int] = None
+    TYPED_GROUNDING_MAX_PROVIDER_REQUESTS: Optional[int] = None
     # Opt-in deployment contract for machines that intentionally expose one
     # direct inference runtime and one generation model to every lifecycle
     # role.  False preserves the existing role-specific GX10 configuration.

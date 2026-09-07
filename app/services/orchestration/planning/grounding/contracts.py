@@ -1,7 +1,7 @@
-"""Provider-neutral contracts for bounded repository grounding.
+"""Provider-neutral PGI1 contracts for bounded repository grounding.
 
-This module deliberately contains data contracts and validation only.  It is
-not imported by the live Planning/Discovery path in Slice 1.
+This module contains the closed request/observation contracts and validation;
+the coordinator lifecycle is defined in the adjacent coordinator modules.
 """
 
 from __future__ import annotations
@@ -576,6 +576,7 @@ class GroundingObservation:
     source_versions: Mapping[str, str] = field(default_factory=dict)
     source_hashes: Mapping[str, str | None] = field(default_factory=dict)
     workspace_identity: str | None = None
+    snapshot_identity: str | None = None
     provenance: ObservationProvenance = ObservationProvenance.DETERMINISTIC_EXECUTOR
     truncated: bool = False
     result_count: int = 0

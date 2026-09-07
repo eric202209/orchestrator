@@ -50,6 +50,13 @@ class EventType:
     PLANNING_PROVIDER_COMPLETED = "planning_provider_completed"
     PLANNING_PROVIDER_FAILED = "planning_provider_failed"
 
+    # PHASE35-PGI3 bounded provider-injected grounding lifecycle
+    GROUNDING_STARTED = "grounding_started"
+    GROUNDING_REQUEST = "grounding_request"
+    GROUNDING_OBSERVATION = "grounding_observation"
+    GROUNDING_ASSESSMENT = "grounding_assessment"
+    GROUNDING_TERMINAL = "grounding_terminal"
+
     # Low-resource execution
     CONTEXT_COMPACTED = "context_compacted"
     PLAN_TRUNCATED = "plan_truncated"

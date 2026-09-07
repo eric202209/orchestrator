@@ -68,9 +68,11 @@ class GroundingExecutor:
         project_dir: Path,
         *,
         search_timeout_seconds: float = SEARCH_TIMEOUT_SECONDS,
+        snapshot_identity: str | None = None,
     ):
         self.project_dir = Path(project_dir).resolve()
         self.search_timeout_seconds = search_timeout_seconds
+        self.snapshot_identity = snapshot_identity
         self._tracked_paths: frozenset[str] | None = None
 
     def execute(
@@ -349,6 +351,8 @@ class GroundingExecutor:
             outcome=outcome,
             budget_delta=delta,
             budget_cumulative=cumulative,
+            workspace_identity=str(self.project_dir),
+            snapshot_identity=self.snapshot_identity,
             **kwargs,
         )
 
@@ -514,7 +518,6 @@ class GroundingExecutor:
             structural_facts={"result_order": "path_line"},
             source_versions=versions,
             source_hashes=selected_hashes,
-            workspace_identity=str(self.project_dir),
             truncated=truncated,
             result_count=len(hits),
             result_limit=MAX_HIT_COUNT,
@@ -540,7 +543,6 @@ class GroundingExecutor:
                 outcome=GroundingOutcome.NOT_FOUND,
                 delta=GroundingBudgetDelta(repository_actions=1),
                 source_paths=(canonical.value,),
-                workspace_identity=str(self.project_dir),
                 result_limit=1,
             )
         document = self._read_source(
@@ -580,7 +582,6 @@ class GroundingExecutor:
             structural_facts=facts,
             source_versions=versions,
             source_hashes=hashes,
-            workspace_identity=str(self.project_dir),
             truncated=truncated,
             result_count=1,
             result_limit=1,
@@ -615,7 +616,6 @@ class GroundingExecutor:
                 outcome=GroundingOutcome.NOT_FOUND,
                 delta=GroundingBudgetDelta(repository_actions=1),
                 source_paths=(canonical.value,),
-                workspace_identity=str(self.project_dir),
                 result_limit=1,
             )
         document = self._read_source(canonical.value)
@@ -677,7 +677,6 @@ class GroundingExecutor:
             structural_facts=facts,
             source_versions=versions,
             source_hashes=hashes,
-            workspace_identity=str(self.project_dir),
             truncated=truncated,
             result_count=(
                 1 if resolution.identity is not None else len(resolution.candidates)

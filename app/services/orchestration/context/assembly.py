@@ -935,6 +935,14 @@ def assemble_planning_prompt(
     )
     if source_materialization_context:
         raw_prompt = raw_prompt + "\n\n" + source_materialization_context
+    typed_grounding_context = str(
+        getattr(ctx, "planning_grounding_context", "") or ""
+    ).strip()
+    if typed_grounding_context:
+        # The coordinator adapter owns a separate evidence section.  Keep it
+        # out of ``task_description`` so deterministic evidence never acquires
+        # operator-task authority.
+        raw_prompt = raw_prompt + "\n\n" + typed_grounding_context
     knowledge_block = _render_knowledge_block(knowledge_context)
     if knowledge_block:
         raw_prompt = knowledge_block + "\n" + raw_prompt
