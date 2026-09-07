@@ -51,6 +51,8 @@ DECISIONS (choose one of these instead of an action when you are done):
 
 {"decision": "SUFFICIENT", "cited_observation_ids": ["<observation id>", ...], "structural_locators": ["<symbol or route you believe implements the behavior>"], "why": "<one sentence>"}
 
+{"decision": "NEED_MORE_EVIDENCE", "next_action": {"action": "<one available action>", ...}, "why": "<one sentence>"}
+
 {"decision": "INSUFFICIENT", "why": "<one sentence>"}
 
 Rules:
@@ -58,8 +60,10 @@ Rules:
 - Cite only observation ids that already exist in OBSERVATIONS.
 - Cite only the evidence you actually believe implements the requested
   behavior. Do not cite an observation you consider irrelevant.
-- If the evidence you have is not enough and a request remains, ask for one
-  more inspection.
+- After an observation exists, explicitly assess whether the observed existing
+  code is sufficient to identify the implementation area relevant to the requested change. The requested future behavior does not need to already exist.
+- If it is not enough and a request remains, choose NEED_MORE_EVIDENCE and put
+  exactly one next read-only action in next_action.
 - If you cannot establish the implementation within the budget, answer
   INSUFFICIENT."""
 
@@ -88,6 +92,33 @@ def _render_observations(observations) -> str:
         return "OBSERVATIONS: none yet."
     blocks = ["OBSERVATIONS:"]
     for item in observations:
+        if item.outcome == P.OBSERVATION_NOT_FOUND:
+            action = item.action
+            if action.kind == P.ACTION_INSPECT_ROUTE:
+                requested = (
+                    f"{(action.route_method or '').upper()} {action.route_path or ''}"
+                )
+                evidence = "no matching route found"
+                declaration_count = item.notes.get("route_declaration_count")
+                if declaration_count:
+                    evidence += (
+                        f"; {declaration_count} route declarations exist in the "
+                        "scoped file(s)"
+                    )
+            elif action.kind == P.ACTION_INSPECT_SYMBOL:
+                requested = f"symbol {action.symbol_name or ''}"
+                evidence = "no matching symbol found"
+            else:
+                requested = f"literal {action.query or ''}"
+                evidence = "no matching text found"
+            blocks.append(
+                f"\n--- {item.observation_id} ---\n"
+                f"outcome: {P.OBSERVATION_NOT_FOUND}\n"
+                f"request: {requested}\n"
+                f"scope: {', '.join(action.scope_paths)}\n"
+                f"evidence: {evidence}"
+            )
+            continue
         identity = item.structural_identity
         if identity is None:
             descriptor = "no structural owner"
@@ -104,6 +135,7 @@ def _render_observations(observations) -> str:
             )
         blocks.append(
             f"\n--- {item.observation_id} ---\n"
+            f"outcome: {item.outcome}\n"
             f"path: {item.source_path}\n"
             f"structural identity: {descriptor}\n"
             f"bytes returned: {item.byte_count}"
@@ -136,8 +168,56 @@ def build_user_prompt(request: P.GroundingRequest, observations) -> str:
     )
 
 
+def _parse_action_payload(payload: dict, orientation: P.Orientation):
+    kind = str(payload.get("action") or "").strip()
+    raw_scope = payload.get("scope_paths") or []
+    scope = tuple(str(item) for item in raw_scope if isinstance(item, str))
+    # A missing scope defaults to the advisory orientation list. This is a
+    # protocol convenience, not semantic help: it narrows nothing the model
+    # was not already shown.
+    if not scope:
+        scope = orientation.paths
+    try:
+        max_results = max(1, min(4, int(payload.get("max_results") or 1)))
+    except (TypeError, ValueError):
+        return None, "max_results is not an integer"
+    if kind == P.ACTION_SEARCH_TEXT:
+        return (
+            P.GroundingAction(
+                kind=P.ACTION_SEARCH_TEXT,
+                mode=P.SEARCH_MODE_LITERAL,
+                query=str(payload.get("query") or ""),
+                scope_paths=scope,
+                max_results=max_results,
+            ),
+            None,
+        )
+    if kind == P.ACTION_INSPECT_SYMBOL:
+        return (
+            P.GroundingAction(
+                kind=P.ACTION_INSPECT_SYMBOL,
+                symbol_name=str(payload.get("symbol_name") or ""),
+                scope_paths=scope,
+                max_results=max_results,
+            ),
+            None,
+        )
+    if kind == P.ACTION_INSPECT_ROUTE:
+        return (
+            P.GroundingAction(
+                kind=P.ACTION_INSPECT_ROUTE,
+                route_method=str(payload.get("route_method") or "") or None,
+                route_path=str(payload.get("route_path") or ""),
+                scope_paths=scope,
+                max_results=max_results,
+            ),
+            None,
+        )
+    return None, f"unrecognised action/decision: {payload!r}"[:300]
+
+
 def parse_model_reply(reply: str, orientation: P.Orientation):
-    """Parse one JSON object into an action or a decision."""
+    """Parse one JSON object into an action or an explicit assessment."""
 
     match = _JSON_RE.search(reply or "")
     if match is None:
@@ -165,6 +245,21 @@ def parse_model_reply(reply: str, orientation: P.Orientation):
             ),
             None,
         )
+    if decision == P.DECISION_NEED_MORE_EVIDENCE:
+        next_payload = payload.get("next_action")
+        if not isinstance(next_payload, dict):
+            return None, "NEED_MORE_EVIDENCE requires next_action"
+        next_action, error = _parse_action_payload(next_payload, orientation)
+        if error is not None:
+            return None, f"invalid next_action: {error}"
+        return (
+            P.GroundingDecision(
+                decision=P.DECISION_NEED_MORE_EVIDENCE,
+                next_action=next_action,
+                rationale=str(payload.get("why") or "")[:400],
+            ),
+            None,
+        )
     if decision in {P.DECISION_INSUFFICIENT, "INSUFFICIENT_GROUNDING"}:
         return (
             P.GroundingDecision(
@@ -175,47 +270,7 @@ def parse_model_reply(reply: str, orientation: P.Orientation):
             None,
         )
 
-    kind = str(payload.get("action") or "").strip()
-    raw_scope = payload.get("scope_paths") or []
-    scope = tuple(str(item) for item in raw_scope if isinstance(item, str))
-    # A missing scope defaults to the advisory orientation list. This is a
-    # protocol convenience, not semantic help: it narrows nothing the model
-    # was not already shown.
-    if not scope:
-        scope = orientation.paths
-    if kind == P.ACTION_SEARCH_TEXT:
-        return (
-            P.GroundingAction(
-                kind=P.ACTION_SEARCH_TEXT,
-                mode=P.SEARCH_MODE_LITERAL,
-                query=str(payload.get("query") or ""),
-                scope_paths=scope,
-                max_results=max(1, min(4, int(payload.get("max_results") or 1))),
-            ),
-            None,
-        )
-    if kind == P.ACTION_INSPECT_SYMBOL:
-        return (
-            P.GroundingAction(
-                kind=P.ACTION_INSPECT_SYMBOL,
-                symbol_name=str(payload.get("symbol_name") or ""),
-                scope_paths=scope,
-                max_results=max(1, min(4, int(payload.get("max_results") or 1))),
-            ),
-            None,
-        )
-    if kind == P.ACTION_INSPECT_ROUTE:
-        return (
-            P.GroundingAction(
-                kind=P.ACTION_INSPECT_ROUTE,
-                route_method=str(payload.get("route_method") or "") or None,
-                route_path=str(payload.get("route_path") or ""),
-                scope_paths=scope,
-                max_results=max(1, min(4, int(payload.get("max_results") or 1))),
-            ),
-            None,
-        )
-    return None, f"unrecognised action/decision: {payload!r}"[:300]
+    return _parse_action_payload(payload, orientation)
 
 
 @dataclass

@@ -80,13 +80,19 @@ class _RecordingAdapter(GroundingAdapter):
 
 class _AlwaysAsksAdapter(GroundingAdapter):
     def propose(self, request, observations):
-        return P.GroundingAction(
+        action = P.GroundingAction(
             kind=P.ACTION_SEARCH_TEXT,
             mode=P.SEARCH_MODE_LITERAL,
             query="def ",
             scope_paths=request.orientation.paths[:1],
             max_results=1,
         )
+        if observations:
+            return P.GroundingDecision(
+                decision=P.DECISION_NEED_MORE_EVIDENCE,
+                next_action=action,
+            )
+        return action
 
 
 # --------------------------------------------------------------------------
@@ -563,7 +569,9 @@ def test_structural_survey_requires_identity_level_relevance(tmp_path):
         turn=1,
         next_index=1,
     )
-    assert observations == []
+    assert len(observations) == 1
+    assert observations[0].outcome == P.OBSERVATION_NOT_FOUND
+    assert observations[0].structural_identity is None
 
 
 def test_symbol_regions_cover_functions_classes_and_routes():

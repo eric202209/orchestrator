@@ -186,11 +186,18 @@ class GenericGroundingAdapter(GroundingAdapter):
         # about this task", scoped to orientation plus what turn 1 exposed.
         observed = tuple(dict.fromkeys(item.source_path for item in observations))
         scope = tuple(dict.fromkeys(request.orientation.paths + observed))
-        return P.GroundingAction(
-            kind=P.ACTION_SEARCH_TEXT,
-            mode=P.SEARCH_MODE_STRUCTURAL,
-            terms=terms,
-            http_methods=self._methods(request.task_text),
-            scope_paths=scope,
-            max_results=request.remaining_budget.regions_remaining,
+        return P.GroundingDecision(
+            decision=P.DECISION_NEED_MORE_EVIDENCE,
+            next_action=P.GroundingAction(
+                kind=P.ACTION_SEARCH_TEXT,
+                mode=P.SEARCH_MODE_STRUCTURAL,
+                terms=terms,
+                http_methods=self._methods(request.task_text),
+                scope_paths=scope,
+                max_results=request.remaining_budget.regions_remaining,
+            ),
+            rationale=(
+                "the observed evidence does not identify the relevant existing "
+                "implementation area"
+            ),
         )

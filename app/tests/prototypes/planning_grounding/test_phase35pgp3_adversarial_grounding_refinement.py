@@ -259,6 +259,11 @@ def test_adversarial_trial_executes_within_bounds_and_grants_no_authority():
     harness = TrialHarness(REPO_ROOT)
     assert all(harness.in_scope(item.source_path) for item in outcome.observations)
 
+    assert outcome.observations[0].outcome == P.OBSERVATION_NOT_FOUND
+    assert outcome.observations[0].notes["requested_path"] == "/auth/signin"
+    assert outcome.assessments
+    assert outcome.assessments[0].decision == P.DECISION_NEED_MORE_EVIDENCE
+
     assert outcome.plan_created is False
     assert outcome.apa_created is False
     assert outcome.mutation_authority_granted is False

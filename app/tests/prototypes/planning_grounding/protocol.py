@@ -65,10 +65,14 @@ SEARCH_MODES = (SEARCH_MODE_LITERAL, SEARCH_MODE_STRUCTURAL)
 # --- Decisions --------------------------------------------------------------
 
 DECISION_REQUEST_MORE = "REQUEST_MORE"
+DECISION_NEED_MORE_EVIDENCE = "NEED_MORE_EVIDENCE"
 DECISION_SUFFICIENT = "SUFFICIENT"
 DECISION_INSUFFICIENT = "INSUFFICIENT"
 
 STOP_INSUFFICIENT_GROUNDING = "insufficient_grounding"
+
+OBSERVATION_FOUND = "found"
+OBSERVATION_NOT_FOUND = "not_found"
 
 # --- Rejection reasons ------------------------------------------------------
 
@@ -125,6 +129,8 @@ class StructuralIdentity:
     name: str | None
     http_method: str | None
     route_path: str | None
+    decorator_path: str | None
+    mounted_path: str | None
     start_line: int
     end_line: int
     region_start_byte: int
@@ -134,7 +140,8 @@ class StructuralIdentity:
     @property
     def locator(self) -> str:
         if self.kind == "route":
-            return f"route:{self.http_method} {self.route_path} -> {self.name}"
+            path = self.mounted_path or self.route_path
+            return f"route:{self.http_method} {path} -> {self.name}"
         if self.name:
             return f"{self.kind}:{self.name}"
         return f"{self.kind}:{self.start_line}-{self.end_line}"
@@ -194,6 +201,7 @@ class GroundingObservation:
     provenance: str
     byte_count: int
     truncated: bool = False
+    outcome: str = OBSERVATION_FOUND
     notes: Mapping[str, object] = field(default_factory=dict)
 
     def replay_key(self) -> tuple:
@@ -204,6 +212,8 @@ class GroundingObservation:
                 self.structural_identity.name,
                 self.structural_identity.http_method,
                 self.structural_identity.route_path,
+                self.structural_identity.decorator_path,
+                self.structural_identity.mounted_path,
                 self.structural_identity.region_start_byte,
                 self.structural_identity.region_end_byte,
             )
@@ -235,6 +245,7 @@ class SufficiencyClaim:
 class GroundingDecision:
     decision: str
     sufficiency: SufficiencyClaim | None = None
+    next_action: GroundingAction | None = None
     stop_reason: str | None = None
     rationale: str = ""
 
@@ -251,6 +262,7 @@ class GroundingOutcome:
     task_text: str
     budget_trace: tuple[Budget, ...]
     final_budget: Budget
+    assessments: tuple[GroundingDecision, ...] = ()
 
     # Grounding never reaches any of these. They are recorded as constants so
     # the test suite can assert the authority boundary directly.

@@ -21,7 +21,8 @@ from pathlib import Path
 from .protocol import StructuralIdentity
 
 _ROUTE_DECORATOR_RE = re.compile(
-    r"\.(get|post|put|delete|patch)\(\s*[\"']([^\"']+)[\"']"
+    r"(?P<router>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\."
+    r"(?P<method>get|post|put|delete|patch)\(\s*[\"'](?P<path>[^\"']+)[\"']"
 )
 _TOKEN_SPLIT_RE = re.compile(r"[^a-z0-9]+")
 _CAMEL_BOUNDARY_RE = re.compile(r"([a-z0-9])([A-Z])")
@@ -63,6 +64,8 @@ class SymbolRegion:
     name: str
     http_method: str | None
     route_path: str | None
+    decorator_path: str | None
+    mounted_path: str | None
     start_line: int
     end_line: int
     start_byte: int
@@ -74,6 +77,8 @@ class SymbolRegion:
             name=self.name,
             http_method=self.http_method,
             route_path=self.route_path,
+            decorator_path=self.decorator_path,
+            mounted_path=self.mounted_path,
             start_line=self.start_line,
             end_line=self.end_line,
             region_start_byte=self.start_byte,
@@ -91,7 +96,111 @@ def _line_offsets(raw: bytes) -> tuple[list[bytes], list[int]]:
     return lines, offsets
 
 
-def symbol_regions(path: str, raw: bytes) -> tuple[SymbolRegion, ...]:
+def _literal_keyword(call: ast.Call, name: str) -> str | None:
+    for keyword in call.keywords:
+        if keyword.arg != name:
+            continue
+        try:
+            value = ast.literal_eval(keyword.value)
+        except (ValueError, TypeError):
+            return None
+        return value if isinstance(value, str) else None
+    return None
+
+
+def _local_router_prefixes(tree: ast.AST) -> dict[str, str]:
+    prefixes: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = node.value
+        if not isinstance(value, ast.Call):
+            continue
+        try:
+            constructor = ast.unparse(value.func)
+        except (AttributeError, ValueError):
+            continue
+        if constructor not in {"APIRouter", "fastapi.APIRouter"}:
+            continue
+        prefix = _literal_keyword(value, "prefix") or ""
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for target in targets:
+            if isinstance(target, ast.Name):
+                prefixes[target.id] = prefix
+    return prefixes
+
+
+def _join_route_paths(*parts: str | None) -> str:
+    segments: list[str] = []
+    for part in parts:
+        if not part:
+            continue
+        segments.extend(segment for segment in part.split("/") if segment)
+    return "/" + "/".join(segments) if segments else "/"
+
+
+def _module_name(path: str) -> str:
+    module = path[:-3].replace("/", ".")
+    return module[:-9] if module.endswith(".__init__") else module
+
+
+def mounted_router_prefixes(
+    project_dir: Path, target_path: str, tracked_paths: tuple[str, ...]
+) -> tuple[str, ...]:
+    """Find deterministic include_router prefixes for one tracked module.
+
+    This is deliberately a narrow AST read for the prototype: it resolves
+    ``from <target module> import router as alias`` followed by
+    ``include_router(alias, prefix=...)``. It does not execute imports or
+    attempt to model FastAPI's complete router graph.
+    """
+
+    target_module = _module_name(target_path)
+    aliases: set[str] = set()
+    prefixes: set[str] = set()
+    target_parts = Path(target_path).parts
+    ancestor_dirs = {
+        Path(*target_parts[:index]) for index in range(1, len(target_parts))
+    }
+    candidate_paths = (
+        relative_path
+        for relative_path in tracked_paths
+        if relative_path != target_path
+        and Path(relative_path).parent in ancestor_dirs
+        and Path(relative_path).name in {"router.py", "routes.py"}
+    )
+    for relative_path in sorted(candidate_paths):
+        candidate = (project_dir / relative_path).resolve()
+        try:
+            raw = candidate.read_bytes()
+            tree = ast.parse(raw.decode("utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+            continue
+        for node in tree.body:
+            if not isinstance(node, ast.ImportFrom) or node.module != target_module:
+                continue
+            for imported in node.names:
+                if imported.name == "router":
+                    aliases.add(imported.asname or imported.name)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            try:
+                function = ast.unparse(node.func)
+                first_arg = ast.unparse(node.args[0]) if node.args else ""
+            except (AttributeError, ValueError, IndexError):
+                continue
+            if not function.endswith(".include_router") or first_arg not in aliases:
+                continue
+            prefix = _literal_keyword(node, "prefix")
+            if prefix:
+                prefixes.add(prefix)
+    return tuple(sorted(prefixes))
+
+
+def symbol_regions(
+    path: str, raw: bytes, mounted_prefixes: tuple[str, ...] = ()
+) -> tuple[SymbolRegion, ...]:
     """Enumerate function/class regions of one Python file.
 
     A decorated function's region starts at its first decorator, so a route
@@ -106,6 +215,7 @@ def symbol_regions(path: str, raw: bytes) -> tuple[SymbolRegion, ...]:
         return ()
 
     lines, offsets = _line_offsets(raw)
+    router_prefixes = _local_router_prefixes(tree)
     regions: list[SymbolRegion] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -120,6 +230,8 @@ def symbol_regions(path: str, raw: bytes) -> tuple[SymbolRegion, ...]:
 
         http_method: str | None = None
         route_path: str | None = None
+        decorator_path: str | None = None
+        mounted_path: str | None = None
         for decorator in node.decorator_list:
             try:
                 rendered = ast.unparse(decorator)
@@ -127,8 +239,12 @@ def symbol_regions(path: str, raw: bytes) -> tuple[SymbolRegion, ...]:
                 continue
             match = _ROUTE_DECORATOR_RE.search(rendered)
             if match:
-                http_method = match.group(1).upper()
-                route_path = match.group(2)
+                http_method = match.group("method").upper()
+                decorator_path = match.group("path")
+                local_prefix = router_prefixes.get(match.group("router"), "")
+                local_path = _join_route_paths(local_prefix, decorator_path)
+                route_path = _join_route_paths(*mounted_prefixes, local_path)
+                mounted_path = route_path
 
         regions.append(
             SymbolRegion(
@@ -137,6 +253,8 @@ def symbol_regions(path: str, raw: bytes) -> tuple[SymbolRegion, ...]:
                 name=node.name,
                 http_method=http_method,
                 route_path=route_path,
+                decorator_path=decorator_path,
+                mounted_path=mounted_path,
                 start_line=start_line,
                 end_line=end_line,
                 start_byte=start_byte,
@@ -174,6 +292,8 @@ def file_window_identity(
         name=None,
         http_method=None,
         route_path=None,
+        decorator_path=None,
+        mounted_path=None,
         start_line=start_line,
         end_line=end_line,
         region_start_byte=start_byte,

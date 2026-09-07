@@ -27,6 +27,7 @@ from .structure import (
     file_window_identity,
     fold_token,
     owning_region,
+    mounted_router_prefixes,
     read_tracked_source,
     symbol_regions,
     tokenize,
@@ -95,6 +96,7 @@ class GroundingHarness:
         )
         self._source_cache: dict[str, bytes] = {}
         self._region_cache: dict[str, tuple[SymbolRegion, ...]] = {}
+        self._route_prefix_cache: dict[str, tuple[str, ...]] = {}
 
     # -- scope ------------------------------------------------------------
 
@@ -113,7 +115,17 @@ class GroundingHarness:
     def _regions(self, relative_path: str) -> tuple[SymbolRegion, ...]:
         if relative_path not in self._region_cache:
             raw = self._source(relative_path) or b""
-            self._region_cache[relative_path] = symbol_regions(relative_path, raw)
+            if relative_path not in self._route_prefix_cache:
+                self._route_prefix_cache[relative_path] = mounted_router_prefixes(
+                    self.project_dir,
+                    relative_path,
+                    tuple(sorted(self._tracked)),
+                )
+            self._region_cache[relative_path] = symbol_regions(
+                relative_path,
+                raw,
+                self._route_prefix_cache[relative_path],
+            )
         return self._region_cache[relative_path]
 
     # -- validation -------------------------------------------------------
@@ -337,6 +349,49 @@ class GroundingHarness:
         next_index: int,
     ) -> list[P.GroundingObservation]:
         observations: list[P.GroundingObservation] = []
+        if not candidates:
+            # A valid read-only lookup that ran out of matches is still a
+            # bounded observation. It does not consume source bytes or a
+            # structural-region slot, but the surrounding request already
+            # consumes one grounding turn in run_grounding().
+            if budget.evidence_bytes_remaining <= 0 or budget.regions_remaining <= 0:
+                return observations
+            notes: dict[str, object] = {
+                "outcome": P.OBSERVATION_NOT_FOUND,
+                "requested_scope": tuple(action.scope_paths),
+            }
+            if action.kind == P.ACTION_INSPECT_ROUTE:
+                notes.update(
+                    {
+                        "requested_method": (action.route_method or "").upper(),
+                        "requested_path": action.route_path or "",
+                        "route_declaration_count": sum(
+                            1
+                            for path in action.scope_paths
+                            for region in self._regions(path)
+                            if region.route_path is not None
+                        ),
+                    }
+                )
+            elif action.kind == P.ACTION_INSPECT_SYMBOL:
+                notes["requested_symbol"] = action.symbol_name or ""
+            else:
+                notes["requested_query"] = action.query or ""
+            observations.append(
+                P.GroundingObservation(
+                    observation_id=f"obs-{turn}-{next_index}",
+                    action=action,
+                    source_path=action.scope_paths[0],
+                    source_version="not_materialized",
+                    bounded_content=b"",
+                    structural_identity=None,
+                    provenance=P.PROVENANCE_HARNESS_OBSERVATION,
+                    byte_count=0,
+                    outcome=P.OBSERVATION_NOT_FOUND,
+                    notes=notes,
+                )
+            )
+            return observations
         bytes_remaining = budget.evidence_bytes_remaining
         regions_remaining = budget.regions_remaining
         files_remaining = budget.files_remaining
@@ -392,6 +447,7 @@ def run_grounding(
     observations: list[P.GroundingObservation] = []
     requests: list[P.GroundingAction] = []
     rejections: list[tuple[P.GroundingAction, str]] = []
+    assessments: list[P.GroundingDecision] = []
     budget_trace: list[P.Budget] = []
     used_paths: set[str] = set()
 
@@ -406,6 +462,7 @@ def run_grounding(
     decision: P.GroundingDecision | None = None
     turn = 1
     while True:
+        explicit_next_action = False
         request = P.GroundingRequest(
             task_text=task_text,
             task_text_provenance=P.PROVENANCE_OPERATOR_TASK,
@@ -416,7 +473,33 @@ def run_grounding(
         )
         proposal = adapter.propose(request, tuple(observations))
         if isinstance(proposal, P.GroundingDecision):
-            decision = proposal
+            assessment = _validate_decision(proposal, observations)
+            if observations:
+                assessments.append(assessment)
+            if assessment.decision == P.DECISION_NEED_MORE_EVIDENCE:
+                proposal = assessment.next_action
+                explicit_next_action = True
+                if proposal is None:
+                    decision = P.GroundingDecision(
+                        decision=P.DECISION_INSUFFICIENT,
+                        stop_reason=P.STOP_INSUFFICIENT_GROUNDING,
+                        rationale="need_more_evidence_without_next_action",
+                    )
+                    break
+            else:
+                decision = assessment
+                break
+
+        if (
+            observations
+            and isinstance(proposal, P.GroundingAction)
+            and not explicit_next_action
+        ):
+            decision = P.GroundingDecision(
+                decision=P.DECISION_INSUFFICIENT,
+                stop_reason=P.STOP_INSUFFICIENT_GROUNDING,
+                rationale="missing_explicit_evidence_assessment",
+            )
             break
 
         reason = harness.validate(proposal, budget)
@@ -435,11 +518,12 @@ def run_grounding(
         )
         observations.extend(produced)
         spent = sum(item.byte_count for item in produced)
+        source_regions = sum(item.outcome == P.OBSERVATION_FOUND for item in produced)
         budget = P.Budget(
             requests_remaining=budget.requests_remaining - 1,
             evidence_bytes_remaining=budget.evidence_bytes_remaining - spent,
             files_remaining=P.MAX_DISTINCT_FILES - len(used_paths),
-            regions_remaining=budget.regions_remaining - len(produced),
+            regions_remaining=budget.regions_remaining - source_regions,
         )
         budget_trace.append(budget)
         turn += 1
@@ -455,6 +539,7 @@ def run_grounding(
         task_text=task_text,
         budget_trace=tuple(budget_trace),
         final_budget=budget,
+        assessments=tuple(assessments),
     )
 
 
@@ -463,6 +548,14 @@ def _validate_decision(
 ) -> P.GroundingDecision:
     """Sufficiency without a live observation citation is not sufficiency."""
 
+    if decision.decision == P.DECISION_NEED_MORE_EVIDENCE:
+        if decision.next_action is None:
+            return P.GroundingDecision(
+                decision=P.DECISION_INSUFFICIENT,
+                stop_reason=P.STOP_INSUFFICIENT_GROUNDING,
+                rationale="need_more_evidence_without_next_action",
+            )
+        return decision
     if decision.decision != P.DECISION_SUFFICIENT:
         return decision
     known = {item.observation_id: item for item in observations}
@@ -480,11 +573,14 @@ def _validate_decision(
             rationale="sufficiency_cited_unknown_observation",
         )
     cited = [known[item] for item in claim.cited_observation_ids]
-    if any(item.structural_identity is None for item in cited):
+    if any(
+        item.structural_identity is None or item.outcome != P.OBSERVATION_FOUND
+        for item in cited
+    ):
         return P.GroundingDecision(
             decision=P.DECISION_INSUFFICIENT,
             stop_reason=P.STOP_INSUFFICIENT_GROUNDING,
-            rationale="sufficiency_without_structural_locator",
+            rationale="sufficiency_without_positive_structural_observation",
         )
     return replace(
         decision,
@@ -526,10 +622,11 @@ def replay(
         )
         observations.extend(produced)
         spent = sum(item.byte_count for item in produced)
+        source_regions = sum(item.outcome == P.OBSERVATION_FOUND for item in produced)
         budget = P.Budget(
             requests_remaining=budget.requests_remaining - 1,
             evidence_bytes_remaining=budget.evidence_bytes_remaining - spent,
             files_remaining=P.MAX_DISTINCT_FILES - len(used_paths),
-            regions_remaining=budget.regions_remaining - len(produced),
+            regions_remaining=budget.regions_remaining - source_regions,
         )
     return tuple(observations)

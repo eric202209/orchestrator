@@ -277,23 +277,17 @@ def test_real_model_acquires_the_positive_control_region():
         f"get_projects region ({region.start_byte}-{region.end_byte})"
     )
 
-    # SUFFICIENCY -- NOT reproducible. PGP2 recorded SUFFICIENT citing this
-    # region; re-running the identical frozen trial during PGP3 produced
-    # INSUFFICIENT in 3 of 3 runs, with acquisition unchanged, because the
-    # model treats "the requested behavior is not implemented here yet" as
-    # "this is not the right code". Asserting SUFFICIENT would encode a
-    # sampling-dependent outcome as a contract, so the assertion is on
-    # precision instead: *if* the model declares sufficiency, every region it
-    # cites must be the expected one. See the PGP3 report.
+    # The corrected protocol makes this an explicit assessment after the
+    # observation. The model must identify the existing implementation area;
+    # the requested future behavior need not already exist there.
+    assert outcome.assessments
+    assert outcome.assessments[-1].decision == P.DECISION_SUFFICIENT
+    assert outcome.decision.decision == P.DECISION_SUFFICIENT
     claim = outcome.decision.sufficiency
-    if outcome.decision.decision == P.DECISION_SUFFICIENT:
-        assert claim is not None and claim.cited_observation_ids
-        by_id = {item.observation_id: item for item in outcome.observations}
-        cited = [by_id[item] for item in claim.cited_observation_ids]
-        assert all(resolves_to_expected(item) for item in cited)
-    else:
-        assert outcome.decision.decision == P.DECISION_INSUFFICIENT
-        assert claim is None
+    assert claim is not None and claim.cited_observation_ids
+    by_id = {item.observation_id: item for item in outcome.observations}
+    cited = [by_id[item] for item in claim.cited_observation_ids]
+    assert all(resolves_to_expected(item) for item in cited)
 
     # Hard bounds intact.
     assert len(outcome.requests) <= P.MAX_GROUNDING_REQUESTS
