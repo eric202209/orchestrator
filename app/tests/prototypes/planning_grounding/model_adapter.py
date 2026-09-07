@@ -243,3 +243,56 @@ class ModelGroundingAdapter(GroundingAdapter):
                 rationale=f"model_reply_unusable: {error}",
             )
         return parsed
+
+
+# PHASE35-PGP3 only. The single mechanical difference from the PGP2 contract:
+# `scope_paths` is bounded by Git-tracked repository scope rather than by the
+# advisory orientation list, because orientation is truncated and does not
+# necessarily contain the implementation. It adds no semantic hint -- no
+# mention of services, wrappers, aliases, indirection, refinement, repetition,
+# or when to declare sufficiency.
+ACTION_MENU_OPEN_SCOPE = ACTION_MENU.replace(
+    "- scope_paths must be chosen from the orientation list above.",
+    "- scope_paths must be Git-tracked repository paths. The orientation list\n"
+    "  above is partial and advisory: it is neither complete nor known to be\n"
+    "  relevant, and you may name any other repository path instead.",
+)
+
+
+def build_open_scope_user_prompt(request, observations):
+    """PGP3 prompt: identical to PGP2 except for the scope rule above."""
+
+    return "\n\n".join(
+        [
+            "TASK (operator wording, verbatim):\n" + request.task_text,
+            _render_orientation(request.orientation),
+            _render_budget(request.remaining_budget),
+            _render_observations(observations),
+            ACTION_MENU_OPEN_SCOPE,
+        ]
+    )
+
+
+@dataclass
+class OpenScopeModelGroundingAdapter(ModelGroundingAdapter):
+    """PGP3 adapter. Same model, same contract, open Git-tracked path scope."""
+
+    def propose(self, request, observations):
+        user = build_open_scope_user_prompt(request, observations)
+        reply = planning_chat(SYSTEM_PROMPT, user)
+        parsed, error = parse_model_reply(reply, request.orientation)
+        self.transcript.append(
+            {
+                "turn": request.turn,
+                "prompt_bytes": len(user.encode("utf-8")),
+                "reply": reply,
+                "parse_error": error,
+            }
+        )
+        if parsed is None:
+            return P.GroundingDecision(
+                decision=P.DECISION_INSUFFICIENT,
+                stop_reason=P.STOP_INSUFFICIENT_GROUNDING,
+                rationale=f"model_reply_unusable: {error}",
+            )
+        return parsed
