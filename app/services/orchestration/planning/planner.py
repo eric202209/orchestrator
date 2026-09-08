@@ -2560,6 +2560,7 @@ class PlannerService:
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
+        grounding_planning_context: Any = None,
     ) -> Dict[str, Any]:
         repair_build_started_at = time.monotonic()
         logger.warning(
@@ -2578,6 +2579,30 @@ class PlannerService:
             ):
                 guidance_block = "\n\n".join(
                     block for block in (guidance_block, source_block) if block
+                )
+        if grounding_planning_context is not None:
+            grounding_sections = str(
+                getattr(
+                    grounding_planning_context,
+                    "rendered_prompt_sections",
+                    "",
+                )
+                or ""
+            ).strip()
+            if grounding_sections and "## GROUNDING EVIDENCE" not in guidance_block:
+                guidance_block = "\n\n".join(
+                    block
+                    for block in (
+                        guidance_block,
+                        grounding_sections,
+                        (
+                            "## FROZEN GROUNDING HANDOFF\n"
+                            "Planning repair may validate or repair the Plan only. "
+                            "It must not reground, issue repository actions, or "
+                            "change the final cited observation IDs."
+                        ),
+                    )
+                    if block
                 )
         if _compact_no_output_retry:
             repair_prompt = cls.build_compact_planning_repair_prompt(
@@ -3056,6 +3081,7 @@ class PlannerService:
                         guidance_block=guidance_block,
                         workspace_identity=workspace_identity,
                         planner_contract=planner_contract,
+                        grounding_planning_context=grounding_planning_context,
                     )
                 timeout_exc = PlanningRepairNoOutputTimeout(
                     (

@@ -404,7 +404,12 @@ def build_planning_brief_provider_input(
 ) -> PlanningBriefProviderInput:
     """Build bounded input from the persisted manifest and stage config only."""
 
+    input_manifest = context.input_manifest
+
     configuration = dict(context.configuration)
+    # The request-local immutable result is projected into the manifest, not
+    # serialized as stage configuration or routing metadata.
+    configuration.pop("grounding_result", None)
     source_limit = int(configuration.get("max_source_chars", DEFAULT_SOURCE_CHAR_LIMIT))
     total_limit = int(
         configuration.get("max_total_source_chars", DEFAULT_TOTAL_SOURCE_CHAR_LIMIT)
@@ -413,7 +418,7 @@ def build_planning_brief_provider_input(
         raise PlanningBriefApplicationError("source bounds must be positive")
     sources: list[Mapping[str, Any]] = []
     total_chars = 0
-    for source in context.input_manifest.ordered_sources:
+    for source in input_manifest.ordered_sources:
         payload = source.to_dict()
         material = json.dumps(
             payload.get("content"),
@@ -442,9 +447,9 @@ def build_planning_brief_provider_input(
             }
         )
     request = PlanningBriefProviderInput(
-        manifest_id=context.input_manifest.manifest_id,
-        manifest_hash=context.input_manifest.manifest_hash,
-        manifest_schema_version=context.input_manifest.schema_version,
+        manifest_id=input_manifest.manifest_id,
+        manifest_hash=input_manifest.manifest_hash,
+        manifest_schema_version=input_manifest.schema_version,
         sources=tuple(sources),
         stage_configuration=configuration,
         schema_instructions=build_planning_brief_schema_contract(),

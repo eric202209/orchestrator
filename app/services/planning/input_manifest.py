@@ -34,6 +34,7 @@ SOURCE_TYPE_ORDER = {
     "repository": 50,
     "engineering_context": 60,
     "structural_information": 70,
+    "grounding_evidence": 75,
     "runtime_configuration": 80,
     "replanning_lineage": 90,
 }
@@ -738,6 +739,7 @@ def build_input_manifest(
     engineering_context: Mapping[str, Any] | None = None,
     structural_information: Mapping[str, Any] | None = None,
     replanning_lineage: Mapping[str, Any] | None = None,
+    grounding_result: Any | None = None,
     stage_configuration: Mapping[str, Any] | None = None,
     selection_timestamps: Mapping[str, str] | None = None,
     manifest_built_at: str | None = None,
@@ -976,7 +978,7 @@ def build_input_manifest(
             manifest_built_at or datetime.now(timezone.utc).isoformat()
         ),
     )
-    return InputManifest.create(
+    manifest = InputManifest.create(
         schema_version=INPUT_MANIFEST_SCHEMA_VERSION,
         protocol_version=INPUT_MANIFEST_PROTOCOL_VERSION,
         sources=tuple(sources),
@@ -988,6 +990,15 @@ def build_input_manifest(
         structural_information_identity=structural_identity,
         generation_identity=generation,
     )
+    if grounding_result is not None:
+        from app.services.orchestration.planning.grounding import (
+            project_grounding_result_to_input_manifest,
+        )
+
+        manifest = project_grounding_result_to_input_manifest(
+            manifest, grounding_result
+        )
+    return manifest
 
 
 def build_compatibility_manifest(

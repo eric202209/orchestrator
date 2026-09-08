@@ -911,6 +911,17 @@ def assemble_planning_prompt(
         additional_candidate_paths=candidate_paths,
         intent_mode=getattr(ctx, "intent_mode", "default"),
     )
+    typed_grounding_projection = getattr(ctx, "grounding_planning_context", None)
+    if typed_grounding_projection is not None:
+        typed_grounding_context = str(
+            getattr(typed_grounding_projection, "rendered_prompt_sections", "") or ""
+        ).strip()
+    else:
+        typed_grounding_context = ""
+    if typed_grounding_context:
+        # The canonical grounding projection is separate from the original
+        # operator task and precedes the remaining Planning context.
+        raw_prompt = raw_prompt + "\n\n" + typed_grounding_context
     artifact_supplement = getattr(ctx.orchestration_state, "artifact_supplement", None)
     if artifact_supplement:
         raw_prompt = artifact_supplement + "\n\n" + raw_prompt
@@ -935,14 +946,12 @@ def assemble_planning_prompt(
     )
     if source_materialization_context:
         raw_prompt = raw_prompt + "\n\n" + source_materialization_context
-    typed_grounding_context = str(
-        getattr(ctx, "planning_grounding_context", "") or ""
-    ).strip()
-    if typed_grounding_context:
-        # The coordinator adapter owns a separate evidence section.  Keep it
-        # out of ``task_description`` so deterministic evidence never acquires
-        # operator-task authority.
-        raw_prompt = raw_prompt + "\n\n" + typed_grounding_context
+    if typed_grounding_projection is None:
+        legacy_grounding_context = str(
+            getattr(ctx, "planning_grounding_context", "") or ""
+        ).strip()
+        if legacy_grounding_context:
+            raw_prompt = raw_prompt + "\n\n" + legacy_grounding_context
     knowledge_block = _render_knowledge_block(knowledge_context)
     if knowledge_block:
         raw_prompt = knowledge_block + "\n" + raw_prompt

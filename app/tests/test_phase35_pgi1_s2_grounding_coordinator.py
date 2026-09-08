@@ -393,7 +393,7 @@ def test_flag_off_calls_legacy_prepare_only(monkeypatch):
         (
             "SUFFICIENT",
             GroundingTerminalReason.SUFFICIENT,
-            "GROUNDING_CONSUMER_NOT_INTEGRATED",
+            "planning_grounding_handoff_failed",
         ),
         (
             "INSUFFICIENT",
@@ -407,7 +407,7 @@ def test_flag_off_calls_legacy_prepare_only(monkeypatch):
         ),
     ],
 )
-def test_flag_on_never_continues_to_planning_before_slice3(
+def test_flag_on_malformed_sufficient_result_fails_before_planning(
     monkeypatch, terminal_state, reason, expected_reason
 ):
     monkeypatch.setattr(settings, "ENABLE_TYPED_GROUNDING_COORDINATOR", True)

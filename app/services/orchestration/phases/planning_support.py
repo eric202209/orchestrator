@@ -303,6 +303,7 @@ def _repair_planning_output(
         workspace_identity=_planner_workspace_identity(ctx),
         planner_contract=ctx.planner_contract,
         source_materialization=getattr(ctx, "planner_source_materialization", None),
+        grounding_planning_context=getattr(ctx, "grounding_planning_context", None),
     )
 
 

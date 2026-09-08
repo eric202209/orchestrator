@@ -9,9 +9,11 @@ from app.config import settings
 from app.services.orchestration.planning.grounding import (
     GroundingCoordinator,
     GroundingExecutor,
+    GroundingHandoffError,
     GroundingRunConfig,
     GroundingTaskReference,
     GroundingTerminalReason,
+    build_grounding_planning_context,
 )
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.planning.read_only_discovery import (
@@ -20,6 +22,7 @@ from app.services.orchestration.planning.read_only_discovery import (
     prepare_discovery_context,
 )
 from app.services.orchestration.planning.source_materialization import (
+    SELECTION_HEAD_FALLBACK,
     SOURCE_STATUS_EXISTING,
     SOURCE_STATUS_NEW,
 )
@@ -147,6 +150,7 @@ def _mechanical_grounding_skip(materialization: Any, intent_mode: str) -> bool:
         and bool(getattr(item, "content_hash", None))
         and getattr(item, "content", None) is not None
         and not bool(getattr(item, "truncated", False))
+        and getattr(item, "selection_strategy", None) != SELECTION_HEAD_FALLBACK
         for item in expected
     )
 
@@ -225,15 +229,45 @@ def prepare_planning_source_context(
             ctx.planner_source_materialization = initial_materialization
             return None
         if grounding_result.terminal_state.value == "SUFFICIENT":
-            return fail_typed_grounding(
-                ctx=ctx,
-                reason=GroundingTerminalReason.GROUNDING_CONSUMER_NOT_INTEGRATED.value,
-                detail=(
-                    "grounding_consumer_not_integrated: typed grounding produced "
-                    "a result before the Slice 3 Planning consumer exists"
-                ),
-                emit_phase_event=emit_phase_event,
+            try:
+                grounding_context = build_grounding_planning_context(
+                    grounding_result,
+                    project_dir=Path(ctx.orchestration_state.project_dir),
+                    operator_task=str(ctx.prompt or ""),
+                    planner_contract=ctx.planner_contract,
+                    source_cache={},
+                )
+            except (GroundingHandoffError, OSError, ValueError) as exc:
+                return fail_typed_grounding(
+                    ctx=ctx,
+                    reason="planning_grounding_handoff_failed",
+                    detail=f"typed grounding handoff failed closed: {exc}",
+                    emit_phase_event=emit_phase_event,
+                )
+            ctx.grounding_planning_context = grounding_context
+            ctx.planning_grounding_context = grounding_context.rendered_prompt_sections
+            ctx.planner_source_materialization = (
+                grounding_context.source_materialization
             )
+            emit_phase_event(
+                ctx.orchestration_state,
+                ctx.emit_live,
+                level="INFO",
+                phase="planning",
+                message="[ORCHESTRATION] Typed grounding handed off to Planning",
+                details={
+                    "stage": "typed_grounding_handoff",
+                    "grounding_run_id": grounding_result.grounding_run_id,
+                    "terminal_state": grounding_result.terminal_state.value,
+                    "cited_observation_ids": list(
+                        grounding_result.cited_observation_ids
+                    ),
+                    "source_versions": dict(grounding_result.source_versions),
+                    "grounding_evidence_bytes": grounding_result.budget_snapshot.source_evidence_bytes,
+                    "handoff": "legacy_planning_context",
+                },
+            )
+            return None
         failure_reason = (
             "planning_grounding_insufficient"
             if grounding_result.terminal_state.value == "INSUFFICIENT"

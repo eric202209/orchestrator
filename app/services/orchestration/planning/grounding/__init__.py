@@ -61,6 +61,14 @@ from .context_adapter import (
     apply_grounding_result_to_planning_context,
     render_grounding_result_context,
 )
+from .consumer import (
+    GroundingHandoffError,
+    GroundingPlanningContext,
+    GroundingPlanningEvidence,
+    build_grounding_planning_context,
+    grounding_result_manifest_content,
+    project_grounding_result_to_input_manifest,
+)
 
 __all__ = [
     "EnclosingSymbolLocator",
@@ -90,6 +98,12 @@ __all__ = [
     "GroundingRequestStateSignal",
     "GroundingRequestStateSignalKind",
     "GroundingResult",
+    "GroundingHandoffError",
+    "GroundingPlanningContext",
+    "GroundingPlanningEvidence",
+    "build_grounding_planning_context",
+    "grounding_result_manifest_content",
+    "project_grounding_result_to_input_manifest",
     "GroundingRunConfig",
     "GroundingStateProjection",
     "GroundingTaskReference",

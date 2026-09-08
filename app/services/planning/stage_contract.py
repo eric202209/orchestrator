@@ -18,6 +18,7 @@ class StageContext(Protocol):
 
     configuration: Mapping[str, Any]
     input_manifest: Any
+    grounding_result: Any
     planning_brief: Any
     predecessor_checkpoints: Mapping[str, Any]
     session: Any

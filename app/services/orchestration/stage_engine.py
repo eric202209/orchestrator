@@ -263,6 +263,9 @@ class StageContext:
     reviewable_candidates: tuple[Any, ...] = field(default_factory=tuple)
     review_status: Any = None
     latest_review_decision: Any = None
+    # Optional request-local canonical grounding projection.  It is injected
+    # only by an owning integration boundary; the stage never explores.
+    grounding_result: Any = None
 
     @property
     def accepted_brief(self) -> PlanningBrief | None:
@@ -366,12 +369,14 @@ class StageExecutor:
         stage_definitions: Iterable[StageDefinition] = (),
         *,
         configuration: Mapping[str, Any] | None = None,
+        grounding_result: Any = None,
         stage_logger: logging.Logger | None = None,
     ) -> None:
         self.db = db
         self.persistence = PlanningProtocolPersistenceService(db)
         self.graph = StageDependencyGraph(stage_definitions)
         self.configuration = dict(configuration or {})
+        self.grounding_result = grounding_result
         self.logger = stage_logger or logger
         self._running: set[tuple[int, str]] = set()
 
@@ -544,11 +549,23 @@ class StageExecutor:
             self.persistence, ownership, session.protocol_version
         )
         review_projection = self._load_review_projection(session_id)
+        input_manifest = self._require_input_manifest(session_id)
+        grounding_result = self.grounding_result
+        if grounding_result is None:
+            grounding_result = self.configuration.get("grounding_result")
+        if grounding_result is not None:
+            from app.services.orchestration.planning.grounding import (
+                project_grounding_result_to_input_manifest,
+            )
+
+            input_manifest = project_grounding_result_to_input_manifest(
+                input_manifest, grounding_result
+            )
         context = StageContext(
             session=session,
             protocol_version=session.protocol_version,
             protocol_input=self.persistence.recovery_state(session_id)["input"],
-            input_manifest=self._require_input_manifest(session_id),
+            input_manifest=input_manifest,
             checkpoint_access=checkpoint_access,
             dependency_graph=self.graph,
             ownership=ownership,
@@ -560,6 +577,7 @@ class StageExecutor:
             reviewable_candidates=review_projection.get("reviewable_candidates", ()),
             review_status=review_projection.get("review_status"),
             latest_review_decision=review_projection.get("latest_review_decision"),
+            grounding_result=grounding_result,
         )
         key = (session_id, stage_identifier)
         self._running.add(key)
