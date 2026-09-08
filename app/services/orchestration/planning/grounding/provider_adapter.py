@@ -112,6 +112,8 @@ def render_first_turn_prompt(context: GroundingDecisionContext) -> str:
         "Allowed first-turn shapes (use exactly one):\n"
         f"{_wire_examples(False)}\n\n"
         "search_text fields are exactly action, query, scopes.\n"
+        "Each search scope is a named canonical relative product-owned file or directory path;\n"
+        'the repository root "." is not a legal scope. Use a named path such as app.\n'
         "inspect_file fields are exactly action, path.\n"
         "resolve_structure fields are exactly action, relation, locator.\n"
         "relation is exactly symbol_definition, enclosing_symbol, or mounted_route;\n"
@@ -171,6 +173,8 @@ def render_rejection_correction_prompt(context: GroundingDecisionContext) -> str
         "Do not return a Plan, mutation, write, or shell field.\n"
         "Unknown fields are invalid.\n\n"
         f"LEGAL WIRE SHAPES:\n{_wire_examples(after_observation)}\n\n"
+        "Search scopes are named canonical relative product-owned file or directory paths;\n"
+        'the repository root "." is not a legal scope.\n\n'
         "## CURRENT TYPED STATE\n"
         f"{render_grounding_state(safe_state)}\n\n"
         "## REMAINING BUDGET\n"

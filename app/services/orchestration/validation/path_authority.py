@@ -396,7 +396,9 @@ def _missing_observation(
     )
 
 
-def observe(root: Path, path: CanonicalPath) -> PathObservation:
+def observe(
+    root: Path, path: CanonicalPath, *, include_content: bool = True
+) -> PathObservation:
     """Observe one already-declared canonical path beneath ``root``.
 
     The declaration step is not performed here: the signature requires a
@@ -417,6 +419,8 @@ def observe(root: Path, path: CanonicalPath) -> PathObservation:
     * a symlink segment is *evidence*, not an error — it is reported as
       ``symlink_segment=True`` so the caller's authorization gate can fail
       closed with the reason in hand;
+    * when ``include_content`` is false, regular files are metadata-checked but
+      not read or hashed;
     * a regular file larger than :data:`MAX_OBSERVED_HASH_BYTES` is reported as
       ``entry_type=regular_file`` with ``byte_length`` set and
       ``content_sha256=None``.  Observation never reads an unbounded file and
@@ -475,10 +479,12 @@ def observe(root: Path, path: CanonicalPath) -> PathObservation:
             trust_class=classify_trust(path),
         )
 
-    return _observe_regular_file(current, path)
+    return _observe_regular_file(current, path, include_content=include_content)
 
 
-def _observe_regular_file(full: Path, path: CanonicalPath) -> PathObservation:
+def _observe_regular_file(
+    full: Path, path: CanonicalPath, *, include_content: bool
+) -> PathObservation:
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(full, flags)
@@ -497,6 +503,16 @@ def _observe_regular_file(full: Path, path: CanonicalPath) -> PathObservation:
             raise PathObservationError(
                 "path_changed_during_observation",
                 "path changed to a non-regular entry during observation",
+            )
+        if not include_content:
+            return PathObservation(
+                path=path,
+                exists=True,
+                entry_type=EntryType.REGULAR_FILE,
+                symlink_segment=False,
+                content_sha256=None,
+                byte_length=int(before.st_size),
+                trust_class=classify_trust(path),
             )
         if before.st_size > MAX_OBSERVED_HASH_BYTES:
             return PathObservation(

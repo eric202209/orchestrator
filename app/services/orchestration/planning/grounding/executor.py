@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import time
 from typing import Any
 
 from app.services.orchestration.planning.repository_orientation import (
@@ -55,7 +56,10 @@ from .structure import (
 )
 
 
-MAX_SCOPE_FILES = 512
+# A directory scope is expanded from the Git-tracked product paths, but is
+# searched in fixed batches.  This bounds each subprocess argv/output without
+# making the provider predict repository cardinality.
+SEARCH_BATCH_FILE_COUNT = 64
 MAX_SOURCE_PARSE_BYTES = 1024 * 1024
 SEARCH_TIMEOUT_SECONDS = 30
 
@@ -158,10 +162,14 @@ class GroundingExecutor:
             )
         return canonical
 
-    def _observe_path(self, raw_path: str) -> path_authority.PathObservation:
+    def _observe_path(
+        self, raw_path: str, *, include_content: bool = True
+    ) -> path_authority.PathObservation:
         canonical = self._declare_product(raw_path)
         try:
-            observation = path_authority.observe(self.project_dir, canonical)
+            observation = path_authority.observe(
+                self.project_dir, canonical, include_content=include_content
+            )
         except path_authority.PathObservationError as exc:
             raise GroundingRequestRejection("unsafe_path", str(exc)) from exc
         if observation.symlink_segment:
@@ -191,7 +199,9 @@ class GroundingExecutor:
             )
         return canonical, True
 
-    def _validate_scope(self, raw_scope: str) -> tuple[str, ...]:
+    def _validate_scope(
+        self, raw_scope: str, *, deadline: float | None = None
+    ) -> tuple[str, ...]:
         canonical = self._declare_product(raw_scope)
         observation = self._observe_path(canonical.value)
         if not observation.exists:
@@ -208,13 +218,13 @@ class GroundingExecutor:
             )
         prefix = f"{canonical.value}/"
         candidates = sorted(path for path in self._tracked() if path.startswith(prefix))
-        if len(candidates) > MAX_SCOPE_FILES:
-            raise GroundingRequestRejection(
-                "scope_file_limit", "scope contains too many tracked files"
-            )
         validated: list[str] = []
         for candidate in candidates:
-            candidate_observation = self._observe_path(candidate)
+            if deadline is not None and time.monotonic() >= deadline:
+                raise GroundingExecutionError(
+                    "search_timeout", "bounded search deadline exhausted"
+                )
+            candidate_observation = self._observe_path(candidate, include_content=False)
             if not candidate_observation.exists:
                 continue
             if (
@@ -377,22 +387,16 @@ class GroundingExecutor:
             raise self._rejection(
                 request, "invalid_action_contract", "search action contract mismatch"
             )
+        deadline = time.monotonic() + self.search_timeout_seconds
         scopes = tuple(self._declare_product(scope).value for scope in action.scopes)
         files: list[str] = []
         for scope in scopes:
-            files.extend(self._validate_scope(scope))
+            files.extend(self._validate_scope(scope, deadline=deadline))
         files = sorted(set(files))
-        versions_before = {
-            path: current_source_version_identity(self.project_dir / path)
-            for path in files
-        }
-        if any(version is None for version in versions_before.values()):
-            raise self._error(
-                request, "source_stability_failed", "a search source disappeared"
-            )
-
-        raw_output = b""
         truncated = False
+        hits: list[GroundingSearchHit] = []
+        source_versions: dict[str, str] = {}
+        source_hashes: dict[str, str | None] = {}
         if files:
             executable = shutil.which("rg")
             if executable is None:
@@ -401,93 +405,149 @@ class GroundingExecutor:
                     "search_unavailable",
                     "bounded search executable unavailable",
                 )
-            command = [
-                executable,
-                "--no-heading",
-                "--with-filename",
-                "--line-number",
-                "--color",
-                "never",
-                "--sort",
-                "path",
-                "--max-count",
-                str(MAX_HIT_COUNT),
-                "--max-columns",
-                str(MAX_SNIPPET_CHARS),
-                "--",
-                action.query,
-                *files,
-            ]
-            try:
-                process = subprocess.Popen(
-                    command,
-                    cwd=self.project_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    shell=False,
-                )
-                stdout, _ = process.communicate(timeout=self.search_timeout_seconds)
-                raw_output = stdout or b""
-                if len(raw_output) > MAX_OBSERVATION_BYTES:
-                    truncated = True
-            except subprocess.TimeoutExpired as exc:
-                process.kill()
-                process.communicate()
-                raise self._error(request, "search_timeout", str(exc)) from exc
-            except OSError as exc:
-                raise self._error(request, "search_execution_failed", str(exc)) from exc
-            return_code = process.returncode
-            if return_code not in {0, 1}:
-                raise self._error(
-                    request, "search_execution_failed", "bounded search failed"
-                )
+            for start in range(0, len(files), SEARCH_BATCH_FILE_COUNT):
+                batch = tuple(files[start : start + SEARCH_BATCH_FILE_COUNT])
+                versions_before = {
+                    path: current_source_version_identity(self.project_dir / path)
+                    for path in batch
+                }
+                if any(version is None for version in versions_before.values()):
+                    raise self._error(
+                        request,
+                        "source_stability_failed",
+                        "a search source disappeared",
+                    )
+                command = [
+                    executable,
+                    "--no-heading",
+                    "--with-filename",
+                    "--line-number",
+                    "--color",
+                    "never",
+                    "--sort",
+                    "path",
+                    "--max-count",
+                    str(MAX_HIT_COUNT),
+                    "--max-columns",
+                    str(MAX_SNIPPET_CHARS),
+                    "--",
+                    action.query,
+                    *batch,
+                ]
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise self._error(
+                        request,
+                        "search_timeout",
+                        "bounded search deadline exhausted",
+                    )
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        cwd=self.project_dir,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.DEVNULL,
+                        shell=False,
+                    )
+                    stdout, _ = process.communicate(timeout=remaining)
+                    raw_output = stdout or b""
+                except subprocess.TimeoutExpired as exc:
+                    process.kill()
+                    process.communicate()
+                    raise self._error(request, "search_timeout", str(exc)) from exc
+                except OSError as exc:
+                    raise self._error(
+                        request, "search_execution_failed", str(exc)
+                    ) from exc
+                return_code = process.returncode
+                if return_code not in {0, 1}:
+                    raise self._error(
+                        request, "search_execution_failed", "bounded search failed"
+                    )
 
-        hits: list[GroundingSearchHit] = []
-        output_text = raw_output[:MAX_OBSERVATION_BYTES].decode(
-            "utf-8", errors="replace"
-        )
-        for line in output_text.splitlines():
-            parts = line.split(":", 2)
-            if len(parts) != 3:
-                if truncated and line == output_text.splitlines()[-1]:
-                    continue
-                raise self._error(
-                    request, "search_output_invalid", "search output was malformed"
+                batch_truncated = len(raw_output) > MAX_OBSERVATION_BYTES
+                truncated = truncated or batch_truncated
+                output_text = raw_output[:MAX_OBSERVATION_BYTES].decode(
+                    "utf-8", errors="replace"
                 )
-            path, line_number, snippet = parts
-            try:
-                line_value = int(line_number)
-            except ValueError as exc:
-                raise self._error(
-                    request, "search_output_invalid", "search line number was invalid"
-                ) from exc
-            if path not in files or line_value <= 0:
-                raise self._error(
-                    request,
-                    "search_output_invalid",
-                    "search returned an unvalidated path",
-                )
-            hits.append(
-                GroundingSearchHit(path, line_value, snippet[:MAX_SNIPPET_CHARS])
-            )
-            if len(hits) >= MAX_HIT_COUNT:
-                truncated = True
-                break
+                output_lines = output_text.splitlines()
+                batch_hits: list[GroundingSearchHit] = []
+                for line_index, line in enumerate(output_lines):
+                    parts = line.split(":", 2)
+                    if len(parts) != 3:
+                        if batch_truncated and line_index == len(output_lines) - 1:
+                            continue
+                        raise self._error(
+                            request,
+                            "search_output_invalid",
+                            "search output was malformed",
+                        )
+                    path, line_number, snippet = parts
+                    try:
+                        line_value = int(line_number)
+                    except ValueError as exc:
+                        raise self._error(
+                            request,
+                            "search_output_invalid",
+                            "search line number was invalid",
+                        ) from exc
+                    if path not in batch or line_value <= 0:
+                        raise self._error(
+                            request,
+                            "search_output_invalid",
+                            "search returned an unvalidated path",
+                        )
+                    batch_hits.append(
+                        GroundingSearchHit(
+                            path, line_value, snippet[:MAX_SNIPPET_CHARS]
+                        )
+                    )
+                    if len(hits) + len(batch_hits) >= MAX_HIT_COUNT:
+                        truncated = True
+                        break
+
+                for path in dict.fromkeys(hit.path for hit in batch_hits):
+                    version_after = current_source_version_identity(
+                        self.project_dir / path
+                    )
+                    if version_after != versions_before[path] or version_after is None:
+                        raise self._error(
+                            request,
+                            "source_changed_during_search",
+                            f"source changed during search: {path}",
+                        )
+                    try:
+                        observation = self._observe_path(path)
+                    except GroundingRequestRejection as exc:
+                        raise self._error(
+                            request, "source_stability_failed", str(exc)
+                        ) from exc
+                    if (
+                        not observation.exists
+                        or observation.entry_type
+                        is not path_authority.EntryType.REGULAR_FILE
+                        or observation.content_sha256 is None
+                    ):
+                        raise self._error(
+                            request,
+                            "source_stability_failed",
+                            f"search source is not stable: {path}",
+                        )
+                    stable_version = current_source_version_identity(
+                        self.project_dir / path
+                    )
+                    if stable_version != version_after:
+                        raise self._error(
+                            request,
+                            "source_changed_during_search",
+                            f"source changed after search: {path}",
+                        )
+                    source_versions[path] = stable_version
+                    source_hashes[path] = observation.content_sha256
+                hits.extend(batch_hits)
+                if len(hits) >= MAX_HIT_COUNT:
+                    break
         hits.sort(key=lambda hit: (hit.path, hit.line_number, hit.snippet))
-        versions_after = {
-            path: current_source_version_identity(self.project_dir / path)
-            for path in files
-        }
-        if versions_before != versions_after:
-            raise self._error(
-                request, "source_changed_during_search", "source changed during search"
-            )
-        hashes: dict[str, str | None] = {}
-        for path in files:
-            try:
-                hashes[path] = self._observe_path(path).content_sha256
-            except GroundingRequestRejection as exc:
-                raise self._error(request, "source_stability_failed", str(exc)) from exc
         content = "\n".join(
             f"{hit.path}:{hit.line_number}:{hit.snippet}" for hit in hits
         ).encode("utf-8")
@@ -500,10 +560,6 @@ class GroundingExecutor:
             distinct_files=len(source_paths),
             positive_regions=positive_regions,
         )
-        versions = {
-            path: versions_after[path] for path in source_paths if versions_after[path]
-        }
-        selected_hashes = {path: hashes[path] for path in source_paths}
         return self._make_observation(
             request,
             current_budget,
@@ -516,8 +572,8 @@ class GroundingExecutor:
             hits=tuple(hits),
             bounded_content=content if hits else b"",
             structural_facts={"result_order": "path_line"},
-            source_versions=versions,
-            source_hashes=selected_hashes,
+            source_versions=source_versions,
+            source_hashes=source_hashes,
             truncated=truncated,
             result_count=len(hits),
             result_limit=MAX_HIT_COUNT,
