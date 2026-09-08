@@ -1,21 +1,27 @@
-"""Bounded production Grounding Coordinator over the PGI1 executor."""
+"""Bounded, provider-injected Grounding Coordinator.
+
+The coordinator owns only the read-only grounding lifecycle. It does not
+materialize Planning context, assemble a Planning prompt, create a Plan, or
+grant mutation/execution authority.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import fields, is_dataclass, replace
 import json
-from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.planning.source_materialization import (
     current_source_version_identity,
 )
-from app.services.orchestration.events.event_types import EventType
 
 from .contracts import (
     GroundingBudgetAccounting,
     GroundingBudgetDelta,
+    GroundingBudgetLimits,
+    GroundingBudgetSnapshot,
     GroundingExecutionError,
     GroundingObservation,
     GroundingOutcome,
@@ -29,9 +35,10 @@ from .coordinator_contracts import (
     GroundingCoordinatorState,
     GroundingDecisionContext,
     GroundingEvidence,
+    GROUNDING_RESULT_SCHEMA_VERSION,
+    GroundingLifecycleState,
     GroundingProposal,
-    GroundingRequestStateSignal,
-    GroundingRequestStateSignalKind,
+    GroundingRejection,
     GroundingResult,
     GroundingRunConfig,
     GroundingStateProjection,
@@ -44,19 +51,84 @@ EventSink = Callable[[str, Mapping[str, Any]], Any]
 
 
 class GroundingProviderError(RuntimeError):
-    """Provider infrastructure failed before a semantic proposal was returned."""
+    """Provider infrastructure or wire output failed before valid output."""
+
+
+class GroundingInvariantError(RuntimeError):
+    """An illegal coordinator lifecycle transition occurred."""
+
+
+class _MalformedProviderResponse(ValueError):
+    pass
+
+
+class _InvalidSufficiency(ValueError):
+    pass
+
+
+class _BudgetExhausted(RuntimeError):
+    pass
+
+
+class _SourceVersionChanged(RuntimeError):
+    pass
 
 
 @runtime_checkable
 class GroundingDecisionProvider(Protocol):
-    """Narrow semantic proposal boundary used by the coordinator."""
+    """Minimal injected provider boundary used by the coordinator."""
 
-    def decide(self, context: GroundingDecisionContext) -> GroundingProposal:
-        """Return one typed action/assessment proposal from rendered state."""
+    def decide(self, context: GroundingDecisionContext) -> Any:
+        """Return one structured action or one structured assessment."""
 
 
-class _InvalidModelRequest(ValueError):
-    pass
+_ALLOWED_TRANSITIONS: dict[
+    GroundingLifecycleState, frozenset[GroundingLifecycleState]
+] = {
+    GroundingLifecycleState.NOT_STARTED: frozenset({GroundingLifecycleState.ORIENTED}),
+    GroundingLifecycleState.ORIENTED: frozenset(
+        {
+            GroundingLifecycleState.REQUESTING,
+            GroundingLifecycleState.SKIPPED,
+            GroundingLifecycleState.FAILED,
+            GroundingLifecycleState.INSUFFICIENT,
+        }
+    ),
+    GroundingLifecycleState.REQUESTING: frozenset(
+        {
+            GroundingLifecycleState.OBSERVED,
+            GroundingLifecycleState.ASSESSING,
+            GroundingLifecycleState.INSUFFICIENT,
+            GroundingLifecycleState.FAILED,
+        }
+    ),
+    GroundingLifecycleState.OBSERVED: frozenset(
+        {
+            GroundingLifecycleState.ASSESSING,
+            GroundingLifecycleState.FAILED,
+            GroundingLifecycleState.INSUFFICIENT,
+        }
+    ),
+    GroundingLifecycleState.ASSESSING: frozenset(
+        {
+            GroundingLifecycleState.NEED_MORE_EVIDENCE,
+            GroundingLifecycleState.SUFFICIENT,
+            GroundingLifecycleState.INSUFFICIENT,
+            GroundingLifecycleState.FAILED,
+        }
+    ),
+    GroundingLifecycleState.NEED_MORE_EVIDENCE: frozenset(
+        {
+            GroundingLifecycleState.REQUESTING,
+            GroundingLifecycleState.INSUFFICIENT,
+            GroundingLifecycleState.FAILED,
+        }
+    ),
+    GroundingLifecycleState.SUFFICIENT: frozenset(),
+    GroundingLifecycleState.SKIPPED: frozenset(),
+    GroundingLifecycleState.INSUFFICIENT: frozenset(),
+    GroundingLifecycleState.FAILED: frozenset(),
+}
 
 
 def _plain(value: Any) -> Any:
@@ -79,37 +151,71 @@ def _unique_append(values: tuple[Any, ...], value: Any) -> tuple[Any, ...]:
     return values if value in values else (*values, value)
 
 
-def _remaining_budget(config: GroundingRunConfig, budget: Any) -> dict[str, int | None]:
-    remaining: dict[str, int | None] = {}
-    for name in (
-        "provider_requests",
-        "repository_actions",
-        "source_evidence_bytes",
-        "distinct_files",
-        "positive_regions",
-    ):
-        limit = getattr(config.budget_limits, name)
-        remaining[name] = (
-            None if limit is None else max(0, limit - getattr(budget, name))
+def _is_budget_rejection(error: GroundingRequestRejection) -> bool:
+    return str(error.code).startswith("budget_")
+
+
+def _remaining_budget(
+    config: GroundingRunConfig, budget: GroundingBudgetSnapshot
+) -> dict[str, int | None]:
+    return {
+        name: (
+            None
+            if getattr(config.budget_limits, name) is None
+            else max(0, getattr(config.budget_limits, name) - getattr(budget, name))
         )
-    return remaining
+        for name in (
+            "provider_requests",
+            "repository_actions",
+            "source_evidence_bytes",
+            "distinct_files",
+            "positive_regions",
+        )
+    }
+
+
+def _transition(
+    state: GroundingCoordinatorState, target: GroundingLifecycleState
+) -> GroundingCoordinatorState:
+    current = state.lifecycle_state
+    if target not in _ALLOWED_TRANSITIONS[current]:
+        raise GroundingInvariantError(
+            f"illegal grounding transition {current}->{target}"
+        )
+    return replace(
+        state,
+        lifecycle_state=target,
+        lifecycle_history=(*state.lifecycle_history, target),
+    )
+
+
+def transition_grounding_state(
+    state: GroundingCoordinatorState, target: GroundingLifecycleState
+) -> GroundingCoordinatorState:
+    """Apply one legal lifecycle transition, failing closed otherwise."""
+
+    return _transition(state, target)
 
 
 def render_grounding_state(state: GroundingCoordinatorState) -> str:
-    """Render all typed history required for the next epistemic decision."""
+    """Render bounded typed state for the next provider turn."""
 
-    requests = [
-        {
-            "request_id": request.request_id,
-            "action": request.action_identity,
-            "normalized_action": _plain(request.normalized_payload),
-            "action_digest": request.action_digest,
-        }
-        for request in state.request_history
-    ]
-    observations = []
-    for observation in state.observation_history:
-        observations.append(
+    payload = {
+        "grounding_run_id": state.grounding_run_id,
+        "lifecycle_state": state.lifecycle_state.value,
+        "task_reference": _plain(state.task_reference),
+        "workspace_identity": state.workspace_identity,
+        "snapshot_identity": state.snapshot_identity,
+        "request_history": [
+            {
+                "request_id": request.request_id,
+                "action": request.action_identity,
+                "normalized_action": _plain(request.normalized_payload),
+                "action_digest": request.action_digest,
+            }
+            for request in state.request_history
+        ],
+        "observation_history": [
             {
                 "observation_id": observation.observation_id,
                 "request_id": observation.request_id,
@@ -130,75 +236,141 @@ def render_grounding_state(state: GroundingCoordinatorState) -> str:
                     "utf-8", errors="replace"
                 )[:4096],
             }
-        )
-    assessments = [
-        {
-            "assessment_id": assessment.assessment_id,
-            "kind": assessment.kind.value,
-            "cited_observation_ids": list(assessment.cited_observation_ids),
-            "cited_source_paths": list(assessment.cited_source_paths),
-            "cited_structural_identities": _plain(
-                assessment.cited_structural_identities
-            ),
-            "rationale": assessment.rationale,
-            "unresolved_risk": assessment.unresolved_risk,
-            "next_action_digest": assessment.next_action_digest,
-            "terminal_reason": (
-                assessment.terminal_reason.value if assessment.terminal_reason else None
-            ),
-        }
-        for assessment in state.assessment_history
-    ]
-    negative_facts = []
-    for observation in state.observation_history:
-        if observation.outcome is not GroundingOutcome.NOT_FOUND:
-            continue
-        request = next(
-            (
-                request
-                for request in state.request_history
-                if request.request_id == observation.request_id
-            ),
-            None,
-        )
-        if request is not None:
-            negative_facts.append(
-                {
-                    "observation_id": observation.observation_id,
-                    "action_digest": request.action_digest,
-                    "outcome": GroundingOutcome.NOT_FOUND.value,
-                }
-            )
-    payload = {
-        "grounding_run_id": state.grounding_run_id,
-        "task_reference": _plain(state.task_reference),
-        "workspace_identity": state.workspace_identity,
-        "snapshot_identity": state.snapshot_identity,
-        "request_history": requests,
-        "attempted_action_digests": list(state.attempted_action_digests),
-        "observation_history": observations,
-        "assessment_history": assessments,
+            for observation in state.observation_history
+        ],
+        "assessment_history": [
+            {
+                "assessment_id": assessment.assessment_id,
+                "decision": assessment.decision.value,
+                "after_observation_ids": list(assessment.after_observation_ids),
+                "cited_observation_ids": list(assessment.cited_observation_ids),
+                "rationale": assessment.rationale,
+                "next_action_digest": assessment.next_action_digest,
+            }
+            for assessment in state.assessment_history
+        ],
+        "rejections": _plain(state.rejection_history),
         "discovered_source_paths": list(state.discovered_source_paths),
-        "discovered_structural_identities": _plain(
-            state.discovered_structural_identities
-        ),
         "source_versions": _plain(state.source_versions),
         "budget": _plain(state.budget),
         "remaining_budget": _plain(state.remaining_budget),
-        "request_state_signals": _plain(state.request_state_signals),
-        "previous_terminal_negative_facts": negative_facts,
         "orientation_advisory": _plain(state.orientation_advisory),
-        "termination_state": (
-            state.termination_state.value if state.termination_state else None
-        ),
     }
     return "## TYPED GROUNDING STATE\n" + json.dumps(
         payload, sort_keys=True, separators=(",", ":")
     )
 
 
+def _parse_wire_response(payload: Any, *, after_observation: bool) -> GroundingProposal:
+    """Parse the closed first-turn and post-observation wire shapes."""
+
+    if isinstance(payload, GroundingProposal):
+        if after_observation:
+            if payload.assessment_kind is None:
+                raise _MalformedProviderResponse(
+                    "post-observation response must be an assessment"
+                )
+            if payload.assessment_kind is GroundingAssessmentKind.SUFFICIENT:
+                if payload.action_payload is not None:
+                    raise _MalformedProviderResponse(
+                        "SUFFICIENT cannot include a next action"
+                    )
+            elif payload.assessment_kind is GroundingAssessmentKind.NEED_MORE_EVIDENCE:
+                if payload.action_payload is None:
+                    raise _MalformedProviderResponse(
+                        "NEED_MORE_EVIDENCE requires exactly one next action"
+                    )
+            elif payload.action_payload is not None:
+                raise _MalformedProviderResponse(
+                    "INSUFFICIENT cannot include a next action"
+                )
+        elif payload.assessment_kind is not None or payload.action_payload is None:
+            raise _MalformedProviderResponse(
+                "first turn must return exactly one grounding action"
+            )
+        return payload
+
+    if not isinstance(payload, Mapping):
+        raise _MalformedProviderResponse("provider response must be an object")
+    if not after_observation:
+        if "decision" in payload:
+            raise _MalformedProviderResponse("assessment is invalid on first turn")
+        action = payload.get("action")
+        expected_fields = {
+            "search_text": {"action", "query", "scopes"},
+            "inspect_file": {"action", "path"},
+            "resolve_structure": {"action", "relation", "locator"},
+        }.get(action)
+        if expected_fields is None:
+            if isinstance(action, str):
+                # Keep mutation-shaped/unknown actions in the typed rejection
+                # path so a bounded corrective turn may be offered.
+                return GroundingProposal(action_payload=dict(payload))
+            raise _MalformedProviderResponse("first-turn action shape is invalid")
+        if set(payload) != expected_fields:
+            raise _MalformedProviderResponse("first-turn action shape is invalid")
+        return GroundingProposal(action_payload=dict(payload))
+
+    decision = payload.get("decision")
+    if not isinstance(decision, str):
+        raise _MalformedProviderResponse("post-observation decision is required")
+    decision = decision.upper()
+    if decision == GroundingAssessmentKind.SUFFICIENT.value:
+        if set(payload) != {"decision", "cited_observation_ids", "rationale"}:
+            raise _MalformedProviderResponse("SUFFICIENT assessment shape is invalid")
+        cited = payload["cited_observation_ids"]
+        if not isinstance(cited, (list, tuple)) or any(
+            not isinstance(item, str) for item in cited
+        ):
+            raise _MalformedProviderResponse("citation IDs must be a list")
+        if not isinstance(payload["rationale"], str):
+            raise _MalformedProviderResponse("SUFFICIENT rationale must be text")
+        return GroundingProposal(
+            assessment_kind=GroundingAssessmentKind.SUFFICIENT,
+            cited_observation_ids=tuple(cited),
+            rationale=str(payload["rationale"]),
+        )
+    if decision == GroundingAssessmentKind.NEED_MORE_EVIDENCE.value:
+        if set(payload) != {"decision", "next_action", "rationale"}:
+            raise _MalformedProviderResponse(
+                "NEED_MORE_EVIDENCE assessment shape is invalid"
+            )
+        if not isinstance(payload["next_action"], Mapping):
+            raise _MalformedProviderResponse("next_action must be an object")
+        if not isinstance(payload["rationale"], str):
+            raise _MalformedProviderResponse(
+                "NEED_MORE_EVIDENCE rationale must be text"
+            )
+        return GroundingProposal(
+            assessment_kind=GroundingAssessmentKind.NEED_MORE_EVIDENCE,
+            action_payload=payload["next_action"],
+            rationale=str(payload["rationale"]),
+        )
+    if decision == GroundingAssessmentKind.INSUFFICIENT.value:
+        if set(payload) != {"decision", "reason"}:
+            raise _MalformedProviderResponse("INSUFFICIENT assessment shape is invalid")
+        if not isinstance(payload["reason"], str) or not payload["reason"].strip():
+            raise _MalformedProviderResponse(
+                "INSUFFICIENT reason must be non-empty text"
+            )
+        return GroundingProposal(
+            assessment_kind=GroundingAssessmentKind.INSUFFICIENT,
+            rationale=str(payload["reason"]),
+            terminal_reason=GroundingTerminalReason.INSUFFICIENT_GROUNDING,
+        )
+    raise _MalformedProviderResponse("unsupported post-observation decision")
+
+
+def parse_grounding_provider_response(
+    payload: Any, *, after_observation: bool
+) -> GroundingProposal:
+    """Public strict parser used by provider-free contract tests."""
+
+    return _parse_wire_response(payload, after_observation=after_observation)
+
+
 class GroundingCoordinator:
-    """Coordinate provider proposals and deterministic read-only observations."""
+    """Coordinate strict provider turns with deterministic read-only actions."""
 
     def __init__(
         self,
@@ -214,26 +386,18 @@ class GroundingCoordinator:
         self.provider = provider
         self.config = self._normalize_config(config)
         self.event_sink = event_sink
-        self._budget_trace: list[Any] = []
+        self._budget_trace: list[GroundingBudgetSnapshot] = []
 
     @staticmethod
     def _normalize_config(config: GroundingRunConfig) -> GroundingRunConfig:
         limits = config.budget_limits
-        if limits.repository_actions is None or limits.provider_requests is None:
-            limits = replace(
-                limits,
-                repository_actions=(
-                    config.max_steps
-                    if limits.repository_actions is None
-                    else limits.repository_actions
-                ),
-                provider_requests=(
-                    config.max_provider_requests
-                    if limits.provider_requests is None
-                    else limits.provider_requests
-                ),
-            )
-            config = replace(config, budget_limits=limits)
+        updates: dict[str, int] = {}
+        if limits.repository_actions is None:
+            updates["repository_actions"] = config.max_steps
+        if limits.provider_requests is None:
+            updates["provider_requests"] = config.max_provider_requests
+        if updates:
+            config = replace(config, budget_limits=replace(limits, **updates))
         return config
 
     def _emit(self, event_type: str, details: Mapping[str, Any]) -> None:
@@ -242,13 +406,9 @@ class GroundingCoordinator:
         try:
             self.event_sink(event_type, details)
         except Exception:
-            # Event durability must not grant the coordinator new authority or
-            # turn an otherwise valid provider-free read into a mutation path.
             return
 
     def _initial_state(self) -> GroundingCoordinatorState:
-        from .contracts import GroundingBudgetSnapshot
-
         budget = GroundingBudgetSnapshot()
         return GroundingCoordinatorState(
             grounding_run_id=self.config.grounding_run_id,
@@ -258,29 +418,28 @@ class GroundingCoordinator:
             budget=budget,
             remaining_budget=_remaining_budget(self.config, budget),
             orientation_advisory=self.config.orientation_advisory,
-        )
-
-    def _with_budget(self, state: GroundingCoordinatorState, budget: Any):
-        return replace(
-            state,
-            budget=budget,
-            remaining_budget=_remaining_budget(self.config, budget),
+            lifecycle_history=(GroundingLifecycleState.NOT_STARTED,),
         )
 
     def _apply_budget(
         self,
         state: GroundingCoordinatorState,
         delta: GroundingBudgetDelta,
+        *,
+        limits: GroundingBudgetLimits | None = None,
     ) -> GroundingCoordinatorState:
         try:
             accounting = GroundingBudgetAccounting(state.budget).apply(
-                delta, self.config.budget_limits
+                delta, limits or self.config.budget_limits
             )
         except GroundingRequestRejection as exc:
             raise _BudgetExhausted(str(exc)) from exc
-        next_state = self._with_budget(state, accounting.snapshot)
         self._budget_trace.append(accounting.snapshot)
-        return next_state
+        return replace(
+            state,
+            budget=accounting.snapshot,
+            remaining_budget=_remaining_budget(self.config, accounting.snapshot),
+        )
 
     def _check_snapshot_identity(self) -> None:
         supplier = self.config.snapshot_identity_supplier
@@ -311,10 +470,8 @@ class GroundingCoordinator:
         if observation.snapshot_identity != state.snapshot_identity:
             raise _SourceVersionChanged("observation snapshot identity changed")
         for path, version in observation.source_versions.items():
-            if not version:
-                raise _SourceVersionChanged(f"missing source version: {path}")
             prior = state.source_versions.get(path)
-            if prior is not None and prior != version:
+            if not version or (prior is not None and prior != version):
                 raise _SourceVersionChanged(f"incompatible source version: {path}")
 
     def _append_observation(
@@ -329,17 +486,31 @@ class GroundingCoordinator:
         if observation.structural_identity is not None:
             structural = _unique_append(structural, observation.structural_identity)
         versions.update(dict(observation.source_versions))
-        self._budget_trace.append(observation.budget_cumulative)
+        new_files = len(
+            set(observation.source_paths) - set(state.discovered_source_paths)
+        )
+        delta = replace(observation.budget_delta, distinct_files=new_files)
+        try:
+            accounting = GroundingBudgetAccounting(state.budget).apply(
+                delta, self.config.budget_limits
+            )
+        except GroundingRequestRejection as exc:
+            raise _BudgetExhausted(str(exc)) from exc
+        normalized_observation = replace(
+            observation,
+            budget_delta=delta,
+            budget_cumulative=accounting.snapshot,
+        )
+        self._budget_trace.append(accounting.snapshot)
+        state = _transition(state, GroundingLifecycleState.OBSERVED)
         return replace(
             state,
-            observation_history=(*state.observation_history, observation),
+            observation_history=(*state.observation_history, normalized_observation),
             discovered_source_paths=source_paths,
             discovered_structural_identities=structural,
             source_versions=versions,
-            budget=observation.budget_cumulative,
-            remaining_budget=_remaining_budget(
-                self.config, observation.budget_cumulative
-            ),
+            budget=accounting.snapshot,
+            remaining_budget=_remaining_budget(self.config, accounting.snapshot),
         )
 
     def _append_request(
@@ -353,102 +524,138 @@ class GroundingCoordinator:
             ),
         )
 
-    def _duplicate_negative_observation(
-        self, state: GroundingCoordinatorState, request: GroundingRequest
-    ) -> GroundingObservation | None:
-        for prior_request in state.request_history:
-            if prior_request.action_digest != request.action_digest:
-                continue
-            for observation in state.observation_history:
-                if (
-                    observation.request_id == prior_request.request_id
-                    and observation.outcome is GroundingOutcome.NOT_FOUND
-                ):
-                    return observation
-        return None
+    def _append_rejection(
+        self, state: GroundingCoordinatorState, rejection: GroundingRejection
+    ) -> GroundingCoordinatorState:
+        self._emit(
+            EventType.GROUNDING_REQUEST,
+            {
+                "grounding_run_id": rejection.grounding_run_id,
+                "provider_request_id": rejection.provider_request_id,
+                "rejection_code": rejection.code,
+                "action": rejection.action_kind,
+                "outcome": "rejected",
+                "budget": _plain(state.budget),
+            },
+        )
+        return replace(state, rejection_history=(*state.rejection_history, rejection))
 
     def _validate_citations(
-        self,
-        state: GroundingCoordinatorState,
-        proposal: GroundingProposal,
-        *,
-        sufficient: bool,
+        self, state: GroundingCoordinatorState, proposal: GroundingProposal
     ) -> None:
+        cited_ids = tuple(proposal.cited_observation_ids)
+        if any(not isinstance(item, str) for item in cited_ids):
+            raise _MalformedProviderResponse("citation IDs must be strings")
+        if not cited_ids or len(set(cited_ids)) != len(cited_ids):
+            raise _InvalidSufficiency(
+                "SUFFICIENT requires unique observation citations"
+            )
         observations = {item.observation_id: item for item in state.observation_history}
-        cited_ids = tuple(dict.fromkeys(proposal.cited_observation_ids))
-        if any(observation_id not in observations for observation_id in cited_ids):
-            raise _InvalidModelRequest("assessment cites an unknown observation")
-        if sufficient and not cited_ids:
-            raise _InvalidModelRequest("SUFFICIENT requires cited observations")
-        if sufficient and not proposal.cited_source_paths:
-            raise _InvalidModelRequest("SUFFICIENT requires cited source paths")
-        if sufficient and not proposal.rationale.strip():
-            raise _InvalidModelRequest("SUFFICIENT requires bounded rationale")
-        cited_observations = [observations[item] for item in cited_ids]
-        for path in proposal.cited_source_paths:
-            if not any(
-                path in observation.source_paths for observation in cited_observations
-            ):
-                raise _InvalidModelRequest(
-                    "cited source path is absent from cited evidence"
+        if any(item not in observations for item in cited_ids):
+            raise _InvalidSufficiency("assessment cites an unknown observation")
+        cited = [observations[item] for item in cited_ids]
+        if any(item.grounding_run_id != state.grounding_run_id for item in cited):
+            raise _InvalidSufficiency("assessment cites another grounding run")
+        if any(item.outcome is not GroundingOutcome.FOUND for item in cited):
+            raise _InvalidSufficiency("SUFFICIENT may cite FOUND observations only")
+        if not proposal.rationale.strip():
+            raise _InvalidSufficiency("SUFFICIENT requires bounded rationale")
+        source_paths = tuple(proposal.cited_source_paths) or tuple(
+            dict.fromkeys(path for item in cited for path in item.source_paths)
+        )
+        for path in source_paths:
+            if not any(path in item.source_versions for item in cited):
+                raise _InvalidSufficiency(
+                    "cited source identity is absent from observation"
                 )
-            if not any(
-                path in observation.source_versions
-                for observation in cited_observations
+        for item in cited:
+            if (
+                item.action_identity == "resolve_structure"
+                and item.structural_identity is None
             ):
-                raise _InvalidModelRequest("cited source path has no version identity")
+                raise _InvalidSufficiency(
+                    "structural citation requires structural identity"
+                )
         for identity in proposal.cited_structural_identities:
-            if not any(
-                observation.structural_identity == identity
-                for observation in cited_observations
-            ):
-                raise _InvalidModelRequest(
-                    "cited structural identity is absent from cited evidence"
+            if not any(item.structural_identity == identity for item in cited):
+                raise _InvalidSufficiency(
+                    "cited structural identity is absent from evidence"
                 )
-            if identity.source_path not in proposal.cited_source_paths:
-                raise _InvalidModelRequest(
-                    "cited structural identity path is not cited"
-                )
-        if proposal.rationale and len(proposal.rationale) > 1000:
-            raise _InvalidModelRequest("assessment rationale exceeds bound")
+        self._check_source_versions(state)
 
     def _assessment(
         self,
         state: GroundingCoordinatorState,
         proposal: GroundingProposal,
         *,
-        next_action_digest: str | None = None,
+        provider_request_id: str,
+        next_action: GroundingRequest | None = None,
     ) -> GroundingAssessment:
-        if proposal.assessment_kind is None:
-            raise _InvalidModelRequest(
-                "assessment kind is required after an observation"
-            )
-        if proposal.assessment_kind is GroundingAssessmentKind.SUFFICIENT:
-            self._validate_citations(state, proposal, sufficient=True)
-            terminal_reason = GroundingTerminalReason.SUFFICIENT
-        elif proposal.assessment_kind is GroundingAssessmentKind.NEED_MORE_EVIDENCE:
-            self._validate_citations(state, proposal, sufficient=False)
-            terminal_reason = None
-        else:
-            terminal_reason = proposal.terminal_reason
-            if terminal_reason not in (
-                GroundingTerminalReason.INSUFFICIENT_GROUNDING,
-                GroundingTerminalReason.BUDGET_EXHAUSTED,
-            ):
-                raise _InvalidModelRequest(
-                    "provider terminal stop reason is unsupported"
+        kind = proposal.assessment_kind
+        if kind is None:
+            raise _MalformedProviderResponse("assessment decision is required")
+        if kind is GroundingAssessmentKind.TERMINAL_STOP:
+            kind = GroundingAssessmentKind.INSUFFICIENT
+        cited_ids = tuple(proposal.cited_observation_ids)
+        cited_source_paths = tuple(proposal.cited_source_paths)
+        if kind is GroundingAssessmentKind.SUFFICIENT:
+            self._validate_citations(state, proposal)
+            if not cited_source_paths:
+                observations = {
+                    item.observation_id: item for item in state.observation_history
+                }
+                cited_source_paths = tuple(
+                    dict.fromkeys(
+                        path
+                        for observation_id in cited_ids
+                        for path in observations[observation_id].source_paths
+                    )
                 )
+            if next_action is not None or proposal.action_payload is not None:
+                raise _MalformedProviderResponse(
+                    "SUFFICIENT cannot carry a next action"
+                )
+            reason = GroundingTerminalReason.SUFFICIENT
+        elif kind is GroundingAssessmentKind.NEED_MORE_EVIDENCE:
+            if next_action is None:
+                raise _MalformedProviderResponse(
+                    "NEED_MORE_EVIDENCE requires exactly one next action"
+                )
+            if cited_ids or proposal.cited_source_paths:
+                raise _MalformedProviderResponse(
+                    "NEED_MORE_EVIDENCE cannot carry sufficient citations"
+                )
+            reason = None
+        elif kind is GroundingAssessmentKind.INSUFFICIENT:
+            if next_action is not None or proposal.action_payload is not None:
+                raise _MalformedProviderResponse(
+                    "INSUFFICIENT cannot carry a next action"
+                )
+            if cited_ids or proposal.cited_source_paths:
+                raise _MalformedProviderResponse(
+                    "INSUFFICIENT cannot carry sufficient citations"
+                )
+            if not proposal.rationale.strip():
+                raise _MalformedProviderResponse("INSUFFICIENT requires a reason")
+            reason = GroundingTerminalReason.INSUFFICIENT_GROUNDING
+        else:  # pragma: no cover - closed enum guard
+            raise _MalformedProviderResponse("unsupported assessment decision")
         return GroundingAssessment(
-            assessment_id=(f"grounding-assessment-{len(state.assessment_history) + 1}"),
+            assessment_id=f"grounding-assessment-{len(state.assessment_history) + 1}",
             grounding_run_id=state.grounding_run_id,
-            kind=proposal.assessment_kind,
-            cited_observation_ids=tuple(proposal.cited_observation_ids),
-            cited_source_paths=tuple(proposal.cited_source_paths),
+            kind=kind,
+            provider_request_id=provider_request_id,
+            after_observation_ids=tuple(
+                observation.observation_id for observation in state.observation_history
+            ),
+            cited_observation_ids=cited_ids,
+            cited_source_paths=cited_source_paths,
             cited_structural_identities=tuple(proposal.cited_structural_identities),
             rationale=proposal.rationale.strip(),
             unresolved_risk=proposal.unresolved_risk,
-            next_action_digest=next_action_digest,
-            terminal_reason=terminal_reason,
+            next_action=next_action,
+            next_action_digest=next_action.action_digest if next_action else None,
+            terminal_reason=reason,
         )
 
     def _append_assessment(
@@ -458,12 +665,12 @@ class GroundingCoordinator:
             EventType.GROUNDING_ASSESSMENT,
             {
                 "grounding_run_id": state.grounding_run_id,
+                "provider_request_id": assessment.provider_request_id,
                 "assessment_id": assessment.assessment_id,
-                "kind": assessment.kind.value,
+                "assessment_decision": assessment.decision.value,
                 "cited_observation_ids": list(assessment.cited_observation_ids),
-                "cited_source_paths": list(assessment.cited_source_paths),
-                "rationale": assessment.rationale[:240],
-                "unresolved_risk": assessment.unresolved_risk,
+                "outcome": "assessed",
+                "budget": _plain(state.budget),
             },
         )
         return replace(
@@ -473,71 +680,81 @@ class GroundingCoordinator:
     def _result(
         self,
         state: GroundingCoordinatorState,
+        terminal_state: GroundingLifecycleState,
         reason: GroundingTerminalReason,
         *,
         assessment: GroundingAssessment | None = None,
     ) -> GroundingResult:
-        terminal_state = replace(state, termination_state=reason)
+        if not terminal_state.terminal:
+            raise GroundingInvariantError("result state must be terminal")
+        if state.lifecycle_state is not terminal_state:
+            state = _transition(state, terminal_state)
         projection = GroundingStateProjection(
-            grounding_run_id=terminal_state.grounding_run_id,
-            task_reference=terminal_state.task_reference,
-            workspace_identity=terminal_state.workspace_identity,
-            snapshot_identity=terminal_state.snapshot_identity,
-            request_digests=tuple(
-                request.action_digest for request in terminal_state.request_history
-            ),
+            grounding_run_id=state.grounding_run_id,
+            task_reference=state.task_reference,
+            workspace_identity=state.workspace_identity,
+            snapshot_identity=state.snapshot_identity,
+            request_digests=tuple(item.action_digest for item in state.request_history),
             observation_ids=tuple(
-                observation.observation_id
-                for observation in terminal_state.observation_history
+                item.observation_id for item in state.observation_history
             ),
             observation_outcomes=tuple(
-                observation.outcome.value
-                for observation in terminal_state.observation_history
+                item.outcome.value for item in state.observation_history
             ),
-            assessment_history=terminal_state.assessment_history,
-            attempted_action_digests=terminal_state.attempted_action_digests,
-            request_state_signals=terminal_state.request_state_signals,
-            discovered_source_paths=terminal_state.discovered_source_paths,
-            discovered_structural_identities=terminal_state.discovered_structural_identities,
-            source_versions=terminal_state.source_versions,
-            remaining_budget=terminal_state.remaining_budget,
+            assessment_history=state.assessment_history,
+            attempted_action_digests=state.attempted_action_digests,
+            request_state_signals=(),
+            discovered_source_paths=state.discovered_source_paths,
+            discovered_structural_identities=state.discovered_structural_identities,
+            source_versions=state.source_versions,
+            remaining_budget=state.remaining_budget,
             termination_state=reason,
+            lifecycle_state=state.lifecycle_state,
+            lifecycle_history=state.lifecycle_history,
+            requests=state.request_history,
+            observations=state.observation_history,
+            rejections=state.rejection_history,
         )
         cited_ids = assessment.cited_observation_ids if assessment else ()
         cited_paths = assessment.cited_source_paths if assessment else ()
         cited_structural = assessment.cited_structural_identities if assessment else ()
-        observations = {
-            item.observation_id: item for item in terminal_state.observation_history
-        }
+        observations = {item.observation_id: item for item in state.observation_history}
         evidence: list[GroundingEvidence] = []
-        for path in cited_paths:
-            observation = next(
-                (
-                    item
-                    for item_id in cited_ids
-                    for item in (observations.get(item_id),)
-                    if item is not None and path in item.source_versions
-                ),
-                None,
-            )
-            if observation is not None:
-                evidence.append(
-                    GroundingEvidence(
-                        observation_id=observation.observation_id,
-                        source_path=path,
-                        source_version=observation.source_versions[path],
-                        bounded_content=observation.bounded_content,
+        for observation_id in cited_ids:
+            observation = observations.get(observation_id)
+            if observation is None:
+                continue
+            for path in cited_paths or observation.source_paths:
+                if path in observation.source_versions:
+                    evidence.append(
+                        GroundingEvidence(
+                            observation_id=observation.observation_id,
+                            source_path=path,
+                            source_version=observation.source_versions[path],
+                            bounded_content=observation.bounded_content,
+                        )
                     )
-                )
         result = GroundingResult(
-            grounding_run_id=terminal_state.grounding_run_id,
+            grounding_run_id=state.grounding_run_id,
+            terminal_state=state.lifecycle_state,
             terminal_reason=reason,
             state_projection=projection,
+            schema_version=GROUNDING_RESULT_SCHEMA_VERSION,
+            orientation_advisory=state.orientation_advisory,
+            requests=state.request_history,
+            observations=state.observation_history,
+            assessments=state.assessment_history,
+            rejections=state.rejection_history,
+            budget_snapshot=state.budget,
+            provider_request_count=state.budget.provider_requests,
+            repository_action_count=state.budget.repository_actions,
             cited_observation_ids=tuple(cited_ids),
             cited_source_paths=tuple(cited_paths),
             cited_structural_identities=tuple(cited_structural),
             source_versions={
-                path: terminal_state.source_versions[path] for path in cited_paths
+                path: state.source_versions[path]
+                for path in cited_paths
+                if path in state.source_versions
             },
             cited_source_evidence=tuple(evidence),
             budget_trace=tuple(self._budget_trace),
@@ -545,28 +762,133 @@ class GroundingCoordinator:
             provider_model_telemetry={
                 "provider": self.config.provider_name,
                 "model": self.config.model_name,
-                "provider_requests": terminal_state.budget.provider_requests,
+                "provider_requests": state.budget.provider_requests,
             },
             grounding_diagnostics={
-                "observation_count": len(terminal_state.observation_history),
-                "assessment_count": len(terminal_state.assessment_history),
-                "duplicate_negative_signal_count": len(
-                    terminal_state.request_state_signals
-                ),
+                "observation_count": len(state.observation_history),
+                "assessment_count": len(state.assessment_history),
+                "rejection_count": len(state.rejection_history),
+                "repository_actions": state.budget.repository_actions,
+                "source_evidence_bytes": state.budget.source_evidence_bytes,
+                "distinct_files": state.budget.distinct_files,
+                "positive_regions": state.budget.positive_regions,
             },
         )
         self._emit(
             EventType.GROUNDING_TERMINAL,
             {
                 "grounding_run_id": result.grounding_run_id,
+                "state": result.terminal_state.value,
+                "terminal_state": result.terminal_state.value,
                 "terminal_reason": reason.value,
-                "observation_count": len(terminal_state.observation_history),
+                "provider_requests": state.budget.provider_requests,
+                "repository_actions": state.budget.repository_actions,
                 "cited_observation_ids": list(result.cited_observation_ids),
-                "cited_source_paths": list(result.cited_source_paths),
-                "source_versions": dict(result.source_versions),
             },
         )
         return result
+
+    def _provider_request(
+        self, state: GroundingCoordinatorState, *, provider_request_id: str
+    ) -> tuple[GroundingCoordinatorState, GroundingProposal]:
+        if state.budget.provider_requests >= self.config.max_provider_requests:
+            raise _BudgetExhausted("provider request budget exhausted")
+        state = self._apply_budget(state, GroundingBudgetDelta(provider_requests=1))
+        context = GroundingDecisionContext(
+            state=state,
+            rendered_grounding_state=(
+                "## OPERATOR TASK\n"
+                + self.config.operator_task
+                + "\n\n"
+                + render_grounding_state(state)
+            ),
+            operator_task=self.config.operator_task,
+        )
+        self._emit(
+            EventType.GROUNDING_REQUEST,
+            {
+                "grounding_run_id": state.grounding_run_id,
+                "provider_request_id": provider_request_id,
+                "provider_request_number": state.budget.provider_requests,
+                "budget": _plain(state.budget),
+            },
+        )
+        try:
+            raw = self.provider.decide(context)
+            proposal = _parse_wire_response(
+                raw, after_observation=bool(state.observation_history)
+            )
+        except _MalformedProviderResponse as exc:
+            raise GroundingProviderError(str(exc)) from exc
+        except Exception as exc:
+            raise GroundingProviderError(str(exc)) from exc
+        return state, proposal
+
+    def _request_from_proposal(
+        self, state: GroundingCoordinatorState, proposal: GroundingProposal
+    ) -> GroundingRequest:
+        if proposal.action_payload is None:
+            raise _MalformedProviderResponse("grounding action is required")
+        return parse_grounding_request(
+            proposal.action_payload,
+            grounding_run_id=state.grounding_run_id,
+            request_id=f"grounding-request-{len(state.request_history) + 1}",
+        )
+
+    def _record_request_rejection(
+        self,
+        state: GroundingCoordinatorState,
+        exc: GroundingRequestRejection,
+        provider_request_id: str,
+    ) -> GroundingCoordinatorState:
+        return self._append_rejection(
+            state,
+            GroundingRejection(
+                rejection_id=f"grounding-rejection-{len(state.rejection_history) + 1}",
+                grounding_run_id=state.grounding_run_id,
+                provider_request_id=provider_request_id,
+                code=exc.code,
+                action_kind=exc.action_kind,
+                message=str(exc)[:240],
+            ),
+        )
+
+    def _execute_request(
+        self, state: GroundingCoordinatorState, request: GroundingRequest
+    ) -> GroundingCoordinatorState:
+        state = self._append_request(state, request)
+        self._emit(
+            EventType.GROUNDING_REQUEST,
+            {
+                "grounding_run_id": state.grounding_run_id,
+                "request_id": request.request_id,
+                "action": request.action_identity,
+                "normalized_request": _plain(request.normalized_payload),
+                "outcome": "accepted",
+                "budget": _plain(state.budget),
+            },
+        )
+        executor_limits = replace(self.config.budget_limits, distinct_files=None)
+        observation = self.executor.execute(
+            request,
+            budget=state.budget,
+            limits=executor_limits,
+        )
+        state = self._append_observation(state, observation)
+        self._emit(
+            EventType.GROUNDING_OBSERVATION,
+            {
+                "grounding_run_id": state.grounding_run_id,
+                "observation_id": observation.observation_id,
+                "request_id": observation.request_id,
+                "action": observation.action_identity,
+                "outcome": observation.outcome.value,
+                "normalized_request": _plain(request.normalized_payload),
+                "evidence_bytes": observation.budget_delta.source_evidence_bytes,
+                "budget": _plain(observation.budget_cumulative),
+            },
+        )
+        return state
 
     def run(self) -> GroundingResult:
         state = self._initial_state()
@@ -575,201 +897,268 @@ class GroundingCoordinator:
             EventType.GROUNDING_STARTED,
             {
                 "grounding_run_id": state.grounding_run_id,
-                "task_reference": _plain(state.task_reference),
-                "workspace_identity": state.workspace_identity,
-                "snapshot_identity": state.snapshot_identity,
-                "max_steps": self.config.max_steps,
-                "max_provider_requests": self.config.max_provider_requests,
+                "state": state.lifecycle_state.value,
+                "orientation_available": bool(state.orientation_advisory),
+                "budget": _plain(state.budget),
             },
         )
+        state = _transition(state, GroundingLifecycleState.ORIENTED)
+        if self.config.mechanical_skip:
+            state = _transition(state, GroundingLifecycleState.SKIPPED)
+            return self._result(
+                state,
+                GroundingLifecycleState.SKIPPED,
+                GroundingTerminalReason.SKIPPED,
+            )
+
+        correction_turns = 0
         while True:
             try:
                 self._check_snapshot_identity()
                 self._check_source_versions(state)
             except _SourceVersionChanged:
+                state = _transition(state, GroundingLifecycleState.FAILED)
                 return self._result(
-                    state, GroundingTerminalReason.SOURCE_VERSION_CHANGED
+                    state,
+                    GroundingLifecycleState.FAILED,
+                    GroundingTerminalReason.SOURCE_VERSION_CHANGED,
                 )
 
             if state.budget.provider_requests >= self.config.max_provider_requests:
-                return self._result(state, GroundingTerminalReason.BUDGET_EXHAUSTED)
+                state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                return self._result(
+                    state,
+                    GroundingLifecycleState.INSUFFICIENT,
+                    GroundingTerminalReason.BUDGET_EXHAUSTED,
+                )
 
-            decision_context = GroundingDecisionContext(
-                state=state,
-                rendered_grounding_state=(
-                    "## OPERATOR TASK\n"
-                    + self.config.operator_task
-                    + "\n\n"
-                    + render_grounding_state(state)
-                ),
-                operator_task=self.config.operator_task,
+            after_observation = bool(state.observation_history)
+            if after_observation and state.lifecycle_state in {
+                GroundingLifecycleState.OBSERVED,
+                GroundingLifecycleState.REQUESTING,
+            }:
+                state = _transition(state, GroundingLifecycleState.ASSESSING)
+            elif (
+                not after_observation
+                and state.lifecycle_state is GroundingLifecycleState.ORIENTED
+            ):
+                state = _transition(state, GroundingLifecycleState.REQUESTING)
+
+            provider_request_id = (
+                f"grounding-provider-request-{state.budget.provider_requests + 1}"
             )
             try:
-                state = self._apply_budget(
-                    state, GroundingBudgetDelta(provider_requests=1)
+                state, proposal = self._provider_request(
+                    state, provider_request_id=provider_request_id
                 )
-                proposal = self.provider.decide(decision_context)
             except _BudgetExhausted:
-                return self._result(state, GroundingTerminalReason.BUDGET_EXHAUSTED)
-            except _InvalidModelRequest:
+                state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                 return self._result(
-                    state, GroundingTerminalReason.INVALID_MODEL_REQUEST
+                    state,
+                    GroundingLifecycleState.INSUFFICIENT,
+                    GroundingTerminalReason.BUDGET_EXHAUSTED,
                 )
             except GroundingProviderError:
-                return self._result(state, GroundingTerminalReason.EXECUTOR_FAILURE)
-            except Exception:
-                return self._result(state, GroundingTerminalReason.EXECUTOR_FAILURE)
-            if not isinstance(proposal, GroundingProposal):
+                state = _transition(state, GroundingLifecycleState.FAILED)
                 return self._result(
-                    state, GroundingTerminalReason.INVALID_MODEL_REQUEST
+                    state,
+                    GroundingLifecycleState.FAILED,
+                    GroundingTerminalReason.EXECUTOR_FAILURE,
                 )
 
-            has_observation = bool(state.observation_history)
-            if not has_observation and proposal.assessment_kind is not None:
-                return self._result(
-                    state, GroundingTerminalReason.INVALID_MODEL_REQUEST
-                )
-            if has_observation and proposal.assessment_kind is None:
-                return self._result(
-                    state, GroundingTerminalReason.INVALID_MODEL_REQUEST
-                )
-            if proposal.action_payload is None:
-                if not has_observation:
-                    return self._result(
-                        state, GroundingTerminalReason.INVALID_MODEL_REQUEST
-                    )
+            if not after_observation:
                 try:
-                    assessment = self._assessment(state, proposal)
-                except (ValueError, _InvalidModelRequest):
-                    return self._result(
-                        state, GroundingTerminalReason.INVALID_MODEL_REQUEST
-                    )
-                state = self._append_assessment(state, assessment)
-                if assessment.kind is GroundingAssessmentKind.SUFFICIENT:
-                    try:
-                        self._check_source_versions(state)
-                    except _SourceVersionChanged:
+                    request = self._request_from_proposal(state, proposal)
+                except GroundingRequestRejection as exc:
+                    if _is_budget_rejection(exc):
+                        state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                         return self._result(
-                            state, GroundingTerminalReason.SOURCE_VERSION_CHANGED
+                            state,
+                            GroundingLifecycleState.INSUFFICIENT,
+                            GroundingTerminalReason.BUDGET_EXHAUSTED,
                         )
-                    return self._result(
-                        state, GroundingTerminalReason.SUFFICIENT, assessment=assessment
+                    state = self._record_request_rejection(
+                        state, exc, provider_request_id
                     )
-                if assessment.kind is GroundingAssessmentKind.TERMINAL_STOP:
+                    if (
+                        correction_turns == 0
+                        and state.budget.provider_requests
+                        < self.config.max_provider_requests
+                    ):
+                        correction_turns += 1
+                        continue
+                    state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                     return self._result(
                         state,
-                        assessment.terminal_reason
-                        or GroundingTerminalReason.INSUFFICIENT_GROUNDING,
-                        assessment=assessment,
+                        GroundingLifecycleState.INSUFFICIENT,
+                        GroundingTerminalReason.INVALID_MODEL_REQUEST,
                     )
-                return self._result(
-                    state, GroundingTerminalReason.INVALID_MODEL_REQUEST
-                )
-
-            try:
-                request = parse_grounding_request(
-                    proposal.action_payload,
-                    grounding_run_id=state.grounding_run_id,
-                    request_id=f"grounding-request-{len(state.request_history) + 1}",
-                )
-            except GroundingRequestRejection:
-                return self._result(
-                    state, GroundingTerminalReason.INVALID_MODEL_REQUEST
-                )
-
-            next_digest = request.action_digest
-            assessment = None
-            if has_observation:
                 try:
-                    assessment = self._assessment(
-                        state, proposal, next_action_digest=next_digest
+                    state = self._execute_request(state, request)
+                except GroundingRequestRejection as exc:
+                    if _is_budget_rejection(exc):
+                        state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                        return self._result(
+                            state,
+                            GroundingLifecycleState.INSUFFICIENT,
+                            GroundingTerminalReason.BUDGET_EXHAUSTED,
+                        )
+                    state = self._record_request_rejection(
+                        state, exc, provider_request_id
                     )
-                except (ValueError, _InvalidModelRequest):
+                    if (
+                        correction_turns == 0
+                        and state.budget.provider_requests
+                        < self.config.max_provider_requests
+                    ):
+                        correction_turns += 1
+                        continue
+                    state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                     return self._result(
-                        state, GroundingTerminalReason.INVALID_MODEL_REQUEST
+                        state,
+                        GroundingLifecycleState.INSUFFICIENT,
+                        GroundingTerminalReason.INVALID_MODEL_REQUEST,
                     )
-                state = self._append_assessment(state, assessment)
-
-            duplicate = self._duplicate_negative_observation(state, request)
-            state = self._append_request(state, request)
-            self._emit(
-                EventType.GROUNDING_REQUEST,
-                {
-                    "grounding_run_id": state.grounding_run_id,
-                    "request_id": request.request_id,
-                    "action": request.action_identity,
-                    "action_digest": request.action_digest,
-                    "duplicate_terminal_not_found": duplicate is not None,
-                },
-            )
-            if duplicate is not None:
-                signal = GroundingRequestStateSignal(
-                    kind=GroundingRequestStateSignalKind.DUPLICATE_TERMINAL_NOT_FOUND,
-                    grounding_run_id=state.grounding_run_id,
-                    action_digest=request.action_digest,
-                    source_observation_id=duplicate.observation_id,
-                )
-                state = replace(
-                    state,
-                    request_state_signals=(*state.request_state_signals, signal),
-                )
+                except _BudgetExhausted:
+                    state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                    return self._result(
+                        state,
+                        GroundingLifecycleState.INSUFFICIENT,
+                        GroundingTerminalReason.BUDGET_EXHAUSTED,
+                    )
+                except GroundingExecutionError:
+                    state = _transition(state, GroundingLifecycleState.FAILED)
+                    return self._result(
+                        state,
+                        GroundingLifecycleState.FAILED,
+                        GroundingTerminalReason.EXECUTOR_FAILURE,
+                    )
+                correction_turns = 0
                 continue
 
-            if state.budget.repository_actions >= self.config.max_steps:
-                return self._result(state, GroundingTerminalReason.BUDGET_EXHAUSTED)
+            next_action: GroundingRequest | None = None
+            if proposal.assessment_kind is GroundingAssessmentKind.NEED_MORE_EVIDENCE:
+                try:
+                    next_action = self._request_from_proposal(state, proposal)
+                except GroundingRequestRejection as exc:
+                    if _is_budget_rejection(exc):
+                        state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                        return self._result(
+                            state,
+                            GroundingLifecycleState.INSUFFICIENT,
+                            GroundingTerminalReason.BUDGET_EXHAUSTED,
+                        )
+                    state = self._record_request_rejection(
+                        state, exc, provider_request_id
+                    )
+                    if (
+                        correction_turns == 0
+                        and state.budget.provider_requests
+                        < self.config.max_provider_requests
+                    ):
+                        correction_turns += 1
+                        continue
+                    state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                    return self._result(
+                        state,
+                        GroundingLifecycleState.INSUFFICIENT,
+                        GroundingTerminalReason.INVALID_MODEL_REQUEST,
+                    )
             try:
-                observation = self.executor.execute(
-                    request,
-                    budget=state.budget,
-                    limits=self.config.budget_limits,
+                assessment = self._assessment(
+                    state,
+                    proposal,
+                    provider_request_id=provider_request_id,
+                    next_action=next_action,
                 )
-                state = self._append_observation(state, observation)
-            except GroundingRequestRejection as exc:
-                if str(exc.code).startswith("budget_"):
-                    return self._result(state, GroundingTerminalReason.BUDGET_EXHAUSTED)
+            except _InvalidSufficiency:
+                state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                 return self._result(
-                    state, GroundingTerminalReason.INVALID_MODEL_REQUEST
+                    state,
+                    GroundingLifecycleState.INSUFFICIENT,
+                    GroundingTerminalReason.INVALID_MODEL_REQUEST,
                 )
-            except GroundingExecutionError as exc:
-                source_codes = {
-                    "source_stability_failed",
-                    "source_changed_during_read",
-                    "source_changed_during_search",
-                    "source_disappeared",
-                }
-                reason = (
-                    GroundingTerminalReason.SOURCE_VERSION_CHANGED
-                    if str(exc.args[0] if exc.args else "") in source_codes
-                    else GroundingTerminalReason.EXECUTOR_FAILURE
+            except (_MalformedProviderResponse, GroundingInvariantError):
+                state = _transition(state, GroundingLifecycleState.FAILED)
+                return self._result(
+                    state,
+                    GroundingLifecycleState.FAILED,
+                    GroundingTerminalReason.INVALID_MODEL_REQUEST,
                 )
-                return self._result(state, reason)
-            except Exception:
-                return self._result(state, GroundingTerminalReason.EXECUTOR_FAILURE)
-            self._emit(
-                EventType.GROUNDING_OBSERVATION,
-                {
-                    "grounding_run_id": state.grounding_run_id,
-                    "observation_id": observation.observation_id,
-                    "request_id": observation.request_id,
-                    "outcome": observation.outcome.value,
-                    "source_paths": list(observation.source_paths),
-                    "source_versions": dict(observation.source_versions),
-                    "budget": _plain(observation.budget_cumulative),
-                },
-            )
+            state = self._append_assessment(state, assessment)
+            if assessment.decision is GroundingAssessmentKind.SUFFICIENT:
+                state = _transition(state, GroundingLifecycleState.SUFFICIENT)
+                return self._result(
+                    state,
+                    GroundingLifecycleState.SUFFICIENT,
+                    GroundingTerminalReason.SUFFICIENT,
+                    assessment=assessment,
+                )
+            if assessment.decision is GroundingAssessmentKind.INSUFFICIENT:
+                state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                return self._result(
+                    state,
+                    GroundingLifecycleState.INSUFFICIENT,
+                    GroundingTerminalReason.INSUFFICIENT_GROUNDING,
+                    assessment=assessment,
+                )
 
-
-class _BudgetExhausted(RuntimeError):
-    pass
-
-
-class _SourceVersionChanged(RuntimeError):
-    pass
+            state = _transition(state, GroundingLifecycleState.NEED_MORE_EVIDENCE)
+            if next_action is None:  # defensive; constructor already enforces it
+                state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                return self._result(
+                    state,
+                    GroundingLifecycleState.INSUFFICIENT,
+                    GroundingTerminalReason.INVALID_MODEL_REQUEST,
+                )
+            state = _transition(state, GroundingLifecycleState.REQUESTING)
+            try:
+                state = self._execute_request(state, next_action)
+            except GroundingRequestRejection as exc:
+                if _is_budget_rejection(exc):
+                    state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                    return self._result(
+                        state,
+                        GroundingLifecycleState.INSUFFICIENT,
+                        GroundingTerminalReason.BUDGET_EXHAUSTED,
+                    )
+                state = self._record_request_rejection(state, exc, provider_request_id)
+                if (
+                    correction_turns == 0
+                    and state.budget.provider_requests
+                    < self.config.max_provider_requests
+                ):
+                    correction_turns += 1
+                    continue
+                state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                return self._result(
+                    state,
+                    GroundingLifecycleState.INSUFFICIENT,
+                    GroundingTerminalReason.INVALID_MODEL_REQUEST,
+                )
+            except _BudgetExhausted:
+                state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                return self._result(
+                    state,
+                    GroundingLifecycleState.INSUFFICIENT,
+                    GroundingTerminalReason.BUDGET_EXHAUSTED,
+                )
+            except GroundingExecutionError:
+                state = _transition(state, GroundingLifecycleState.FAILED)
+                return self._result(
+                    state,
+                    GroundingLifecycleState.FAILED,
+                    GroundingTerminalReason.EXECUTOR_FAILURE,
+                )
+            correction_turns = 0
 
 
 __all__ = [
     "GroundingCoordinator",
     "GroundingDecisionProvider",
+    "GroundingInvariantError",
     "GroundingProviderError",
+    "parse_grounding_provider_response",
     "render_grounding_state",
+    "transition_grounding_state",
 ]

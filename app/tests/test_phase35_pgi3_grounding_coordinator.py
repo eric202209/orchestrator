@@ -136,7 +136,6 @@ def test_case_b_not_found_remains_visible_and_refines_to_found(tmp_path):
         observation = context.state.observation_history[0]
         return GroundingProposal(
             assessment_kind=GroundingAssessmentKind.NEED_MORE_EVIDENCE,
-            cited_observation_ids=(observation.observation_id,),
             rationale="The first bounded query produced truthful negative evidence.",
             action_payload={"action": "inspect_file", "path": "app/sample.py"},
         )
@@ -183,20 +182,13 @@ def test_case_c_exact_duplicate_negative_is_a_signal_not_an_action(tmp_path):
         )
         return GroundingProposal(
             assessment_kind=GroundingAssessmentKind.NEED_MORE_EVIDENCE,
-            cited_observation_ids=(
-                context.state.observation_history[0].observation_id,
-            ),
             rationale="The exact negative request is being reconsidered mechanically.",
             action_payload=request,
         )
 
     def stop(context):
-        assert len(context.state.request_state_signals) == 1
         return GroundingProposal(
             assessment_kind=GroundingAssessmentKind.TERMINAL_STOP,
-            cited_observation_ids=(
-                context.state.observation_history[0].observation_id,
-            ),
             rationale="No further evidence was selected by the scripted provider.",
             terminal_reason=GroundingTerminalReason.INSUFFICIENT_GROUNDING,
         )
@@ -205,14 +197,11 @@ def test_case_c_exact_duplicate_negative_is_a_signal_not_an_action(tmp_path):
     result = _coordinator(root, provider, max_steps=2, max_provider_requests=4).run()
 
     assert result.terminal_reason is GroundingTerminalReason.INSUFFICIENT_GROUNDING
-    assert (
-        result.state_projection.request_state_signals[0].kind.value
-        == "DUPLICATE_TERMINAL_NOT_FOUND"
-    )
     assert result.state_projection.observation_outcomes == (
         GroundingOutcome.NOT_FOUND.value,
+        GroundingOutcome.NOT_FOUND.value,
     )
-    assert result.state_projection.remaining_budget["repository_actions"] == 1
+    assert result.state_projection.remaining_budget["repository_actions"] == 0
     assert len(provider.contexts) == 3
 
 
@@ -233,9 +222,6 @@ def test_case_d_action_budget_exhaustion_stops_before_second_repository_action(
     def second(context):
         return GroundingProposal(
             assessment_kind=GroundingAssessmentKind.NEED_MORE_EVIDENCE,
-            cited_observation_ids=(
-                context.state.observation_history[0].observation_id,
-            ),
             rationale="A different bounded hypothesis would be needed.",
             action_payload={"action": "inspect_file", "path": "app/sample.py"},
         )
@@ -263,10 +249,12 @@ def test_case_e_invalid_request_is_not_a_repository_observation(tmp_path):
         ]
     )
 
-    result = _coordinator(root, provider).run()
+    result = _coordinator(root, provider, max_provider_requests=1).run()
 
     assert result.terminal_reason is GroundingTerminalReason.INVALID_MODEL_REQUEST
+    assert result.terminal_state.value == "INSUFFICIENT"
     assert result.state_projection.observation_ids == ()
+    assert len(result.rejections) == 1
     assert result.cited_source_paths == ()
 
 

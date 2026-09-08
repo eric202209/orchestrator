@@ -12,7 +12,6 @@ from app.services.orchestration.planning.grounding import (
     GroundingRunConfig,
     GroundingTaskReference,
     GroundingTerminalReason,
-    apply_grounding_result_to_planning_context,
 )
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.orchestration.planning.read_only_discovery import (
@@ -20,6 +19,21 @@ from app.services.orchestration.planning.read_only_discovery import (
     fail_closed_discovery,
     prepare_discovery_context,
 )
+from app.services.orchestration.planning.source_materialization import (
+    SOURCE_STATUS_EXISTING,
+    SOURCE_STATUS_NEW,
+)
+from app.services.orchestration.planning.repository_orientation import (
+    derive_repository_orientation,
+)
+from app.task_intent import TaskIntentMode, normalize_task_intent
+
+
+class _MechanicalSkipProvider:
+    def decide(self, _context: Any) -> Any:
+        raise AssertionError("mechanical skip must not invoke a provider")
+
+
 from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.orchestration.state.persistence import append_orchestration_event
 from app.services.orchestration.types import OrchestrationRunContext
@@ -39,10 +53,14 @@ def run_typed_grounding_for_planning(
     max_provider_requests = getattr(ctx, "grounding_max_provider_requests", None)
     if max_provider_requests is None:
         max_provider_requests = settings.TYPED_GROUNDING_MAX_PROVIDER_REQUESTS
-    if provider is None or max_steps is None or max_provider_requests is None:
-        raise ValueError(
-            "typed grounding requires an injected decision provider and explicit run limits"
-        )
+    mechanical_skip = bool(getattr(ctx, "grounding_mechanical_skip", False))
+    if mechanical_skip:
+        max_steps = max_steps or 4
+        max_provider_requests = max_provider_requests or 2
+    if provider is None and not mechanical_skip:
+        raise ValueError("typed grounding requires an injected decision provider")
+    if max_steps is None or max_provider_requests is None:
+        raise ValueError("typed grounding requires explicit run limits")
 
     project_dir = Path(ctx.orchestration_state.project_dir).resolve()
     workspace_identity = str(project_dir)
@@ -86,17 +104,51 @@ def run_typed_grounding_for_planning(
         max_provider_requests=int(max_provider_requests),
         operator_task=str(ctx.prompt or ""),
         provider_name="injected_grounding_provider",
+        orientation_advisory=(
+            derive_repository_orientation(
+                project_dir, str(ctx.prompt or "")
+            ).as_details()
+            if not mechanical_skip
+            else {}
+        ),
+        mechanical_skip=mechanical_skip,
     )
     coordinator = GroundingCoordinator(
         executor=GroundingExecutor(
             project_dir,
             snapshot_identity=snapshot_identity,
         ),
-        provider=provider,
+        provider=provider or _MechanicalSkipProvider(),
         config=config,
         event_sink=event_sink,
     )
     return coordinator.run()
+
+
+def _mechanical_grounding_skip(materialization: Any, intent_mode: str) -> bool:
+    """Return only the narrow Slice 2 skip cases; no target-hint semantics."""
+
+    expected = tuple(
+        item
+        for item in getattr(materialization, "files", ())
+        if bool(getattr(item, "expected", False))
+    )
+    if not expected:
+        return False
+    if normalize_task_intent(intent_mode) == TaskIntentMode.CREATE_ONLY.value:
+        return all(
+            getattr(item, "status", None) == SOURCE_STATUS_NEW
+            and bool(getattr(item, "creation_authorized", False))
+            for item in expected
+        )
+    return all(
+        getattr(item, "status", None) == SOURCE_STATUS_EXISTING
+        and bool(getattr(item, "version_identity", None))
+        and bool(getattr(item, "content_hash", None))
+        and getattr(item, "content", None) is not None
+        and not bool(getattr(item, "truncated", False))
+        for item in expected
+    )
 
 
 def fail_closed_typed_grounding(
@@ -142,36 +194,15 @@ def prepare_planning_source_context(
 
     if settings.ENABLE_TYPED_GROUNDING_COORDINATOR:
         try:
-            grounding_result = run_typed_grounding(ctx)
-        except (TypeError, ValueError, OSError) as exc:
-            return fail_typed_grounding(
-                ctx=ctx,
-                reason=GroundingTerminalReason.INVALID_MODEL_REQUEST.value,
-                detail=str(exc),
-                emit_phase_event=emit_phase_event,
-            )
-        if grounding_result.terminal_reason is not GroundingTerminalReason.SUFFICIENT:
-            return fail_typed_grounding(
-                ctx=ctx,
-                reason=grounding_result.terminal_reason.value,
-                detail=(
-                    "typed grounding terminated before Planning: "
-                    + grounding_result.terminal_reason.value
-                ),
-                emit_phase_event=emit_phase_event,
-            )
-        apply_grounding_result_to_planning_context(ctx, grounding_result)
-        try:
-            from app.services.orchestration.planning.workspace_identity import (
-                planner_workspace_identity_for_context,
-            )
-
-            ctx.planner_source_materialization = materialize(
+            initial_materialization = materialize(
                 project_dir=Path(ctx.orchestration_state.project_dir),
                 task_description=ctx.prompt,
                 planner_contract=ctx.planner_contract,
-                supporting_paths=grounding_result.cited_source_paths,
-                workspace_identity=planner_workspace_identity_for_context(ctx),
+                supporting_paths=(),
+            )
+            ctx.grounding_mechanical_skip = _mechanical_grounding_skip(
+                initial_materialization,
+                getattr(ctx, "intent_mode", TaskIntentMode.DEFAULT.value),
             )
         except (OSError, ValueError) as exc:
             return fail_typed_grounding(
@@ -180,7 +211,43 @@ def prepare_planning_source_context(
                 detail=str(exc),
                 emit_phase_event=emit_phase_event,
             )
-        return None
+        try:
+            grounding_result = run_typed_grounding(ctx)
+        except (TypeError, ValueError, OSError) as exc:
+            return fail_typed_grounding(
+                ctx=ctx,
+                reason=GroundingTerminalReason.INVALID_MODEL_REQUEST.value,
+                detail=str(exc),
+                emit_phase_event=emit_phase_event,
+            )
+        ctx.grounding_result = grounding_result
+        if grounding_result.terminal_reason is GroundingTerminalReason.SKIPPED:
+            ctx.planner_source_materialization = initial_materialization
+            return None
+        if grounding_result.terminal_state.value == "SUFFICIENT":
+            return fail_typed_grounding(
+                ctx=ctx,
+                reason=GroundingTerminalReason.GROUNDING_CONSUMER_NOT_INTEGRATED.value,
+                detail=(
+                    "grounding_consumer_not_integrated: typed grounding produced "
+                    "a result before the Slice 3 Planning consumer exists"
+                ),
+                emit_phase_event=emit_phase_event,
+            )
+        failure_reason = (
+            "planning_grounding_insufficient"
+            if grounding_result.terminal_state.value == "INSUFFICIENT"
+            else "planning_grounding_failed"
+        )
+        return fail_typed_grounding(
+            ctx=ctx,
+            reason=failure_reason,
+            detail=(
+                "typed grounding terminated before Planning: "
+                + grounding_result.terminal_reason.value
+            ),
+            emit_phase_event=emit_phase_event,
+        )
 
     try:
         prepare_discovery(

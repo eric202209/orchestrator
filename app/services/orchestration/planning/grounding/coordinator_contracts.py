@@ -24,25 +24,68 @@ from .contracts import (
 
 MAX_ASSESSMENT_RATIONALE_CHARS = 1000
 MAX_TELEMETRY_VALUE_CHARS = 240
+GROUNDING_RESULT_SCHEMA_VERSION = "grounding-result/1"
+
+
+class GroundingLifecycleState(str, Enum):
+    """Explicit coordinator lifecycle states."""
+
+    NOT_STARTED = "NOT_STARTED"
+    ORIENTED = "ORIENTED"
+    REQUESTING = "REQUESTING"
+    OBSERVED = "OBSERVED"
+    ASSESSING = "ASSESSING"
+    NEED_MORE_EVIDENCE = "NEED_MORE_EVIDENCE"
+    SUFFICIENT = "SUFFICIENT"
+    SKIPPED = "SKIPPED"
+    INSUFFICIENT = "INSUFFICIENT"
+    FAILED = "FAILED"
+
+    @property
+    def terminal(self) -> bool:
+        return self in {
+            self.SUFFICIENT,
+            self.SKIPPED,
+            self.INSUFFICIENT,
+            self.FAILED,
+        }
 
 
 class GroundingAssessmentKind(str, Enum):
     SUFFICIENT = "SUFFICIENT"
     NEED_MORE_EVIDENCE = "NEED_MORE_EVIDENCE"
-    TERMINAL_STOP = "TERMINAL_STOP"
+    INSUFFICIENT = "INSUFFICIENT"
+    # Compatibility name for the earlier committed PGI3 test seam.  It is
+    # normalized to INSUFFICIENT by the coordinator and is not a fourth wire
+    # decision.
+    TERMINAL_STOP = "INSUFFICIENT"
 
 
 class GroundingTerminalReason(str, Enum):
     SUFFICIENT = "SUFFICIENT"
+    SKIPPED = "SKIPPED"
     INSUFFICIENT_GROUNDING = "INSUFFICIENT_GROUNDING"
     BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
     INVALID_MODEL_REQUEST = "INVALID_MODEL_REQUEST"
     EXECUTOR_FAILURE = "EXECUTOR_FAILURE"
     SOURCE_VERSION_CHANGED = "SOURCE_VERSION_CHANGED"
+    GROUNDING_CONSUMER_NOT_INTEGRATED = "GROUNDING_CONSUMER_NOT_INTEGRATED"
 
 
 class GroundingRequestStateSignalKind(str, Enum):
     DUPLICATE_TERMINAL_NOT_FOUND = "DUPLICATE_TERMINAL_NOT_FOUND"
+
+
+@dataclass(frozen=True, slots=True)
+class GroundingRejection:
+    """A rejected provider request; it is never repository evidence."""
+
+    rejection_id: str
+    grounding_run_id: str
+    provider_request_id: str
+    code: str
+    action_kind: str | None = None
+    message: str = ""
 
 
 def _freeze(value: Any) -> Any:
@@ -69,6 +112,9 @@ class GroundingAssessment:
     assessment_id: str
     grounding_run_id: str
     kind: GroundingAssessmentKind
+    provider_request_id: str = ""
+    after_observation_ids: tuple[str, ...] = ()
+    next_action: GroundingRequest | None = None
     cited_observation_ids: tuple[str, ...] = ()
     cited_source_paths: tuple[str, ...] = ()
     cited_structural_identities: tuple[StructuralIdentity, ...] = ()
@@ -82,6 +128,8 @@ class GroundingAssessment:
         _identity(self.grounding_run_id, "grounding_run_id")
         if not isinstance(self.kind, GroundingAssessmentKind):
             raise ValueError("invalid grounding assessment kind")
+        if self.kind is GroundingAssessmentKind.TERMINAL_STOP:
+            object.__setattr__(self, "kind", GroundingAssessmentKind.INSUFFICIENT)
         if not isinstance(self.unresolved_risk, bool):
             raise ValueError("unresolved_risk must be boolean")
         if len(self.rationale) > MAX_ASSESSMENT_RATIONALE_CHARS:
@@ -89,11 +137,23 @@ class GroundingAssessment:
         if self.kind is GroundingAssessmentKind.SUFFICIENT:
             if self.terminal_reason not in (None, GroundingTerminalReason.SUFFICIENT):
                 raise ValueError("SUFFICIENT cannot carry a failure terminal reason")
+            if self.next_action is not None:
+                raise ValueError("SUFFICIENT cannot carry a next action")
         elif self.kind is GroundingAssessmentKind.NEED_MORE_EVIDENCE:
             if self.terminal_reason is not None:
                 raise ValueError("NEED_MORE_EVIDENCE cannot be terminal")
+            if self.next_action is None:
+                raise ValueError("NEED_MORE_EVIDENCE requires a next action")
         elif self.terminal_reason is None:
-            raise ValueError("TERMINAL_STOP requires a terminal reason")
+            raise ValueError("INSUFFICIENT requires a terminal reason")
+
+    @property
+    def decision(self) -> GroundingAssessmentKind:
+        return self.kind
+
+    @property
+    def reason(self) -> str:
+        return self.rationale
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +188,7 @@ class GroundingRunConfig:
     provider_name: str = "scripted_or_unbound"
     model_name: str = "unbound"
     snapshot_identity_supplier: Callable[[], str] | None = None
+    mechanical_skip: bool = False
 
     def __post_init__(self) -> None:
         _identity(self.grounding_run_id, "grounding_run_id")
@@ -143,6 +204,8 @@ class GroundingRunConfig:
             raise ValueError("max_provider_requests must be an integer")
         if self.max_provider_requests <= 0:
             raise ValueError("max_provider_requests must be positive")
+        if not isinstance(self.mechanical_skip, bool):
+            raise ValueError("mechanical_skip must be boolean")
         object.__setattr__(
             self, "orientation_advisory", _freeze(self.orientation_advisory)
         )
@@ -168,6 +231,9 @@ class GroundingCoordinatorState:
     request_state_signals: tuple[GroundingRequestStateSignal, ...] = ()
     orientation_advisory: Mapping[str, Any] = field(default_factory=dict)
     termination_state: GroundingTerminalReason | None = None
+    lifecycle_state: GroundingLifecycleState = GroundingLifecycleState.NOT_STARTED
+    lifecycle_history: tuple[GroundingLifecycleState, ...] = ()
+    rejection_history: tuple[GroundingRejection, ...] = ()
 
     def __post_init__(self) -> None:
         _identity(self.grounding_run_id, "grounding_run_id")
@@ -230,6 +296,11 @@ class GroundingStateProjection:
     source_versions: Mapping[str, str]
     remaining_budget: Mapping[str, int | None]
     termination_state: GroundingTerminalReason
+    lifecycle_state: GroundingLifecycleState = GroundingLifecycleState.NOT_STARTED
+    lifecycle_history: tuple[GroundingLifecycleState, ...] = ()
+    requests: tuple[GroundingRequest, ...] = ()
+    observations: tuple[GroundingObservation, ...] = ()
+    rejections: tuple[GroundingRejection, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,8 +318,18 @@ class GroundingResult:
     """Immutable epistemic result.  It carries no Plan or mutation authority."""
 
     grounding_run_id: str
+    terminal_state: GroundingLifecycleState
     terminal_reason: GroundingTerminalReason
     state_projection: GroundingStateProjection
+    schema_version: str = GROUNDING_RESULT_SCHEMA_VERSION
+    orientation_advisory: Mapping[str, Any] = field(default_factory=dict)
+    requests: tuple[GroundingRequest, ...] = ()
+    observations: tuple[GroundingObservation, ...] = ()
+    assessments: tuple[GroundingAssessment, ...] = ()
+    rejections: tuple[GroundingRejection, ...] = ()
+    budget_snapshot: GroundingBudgetSnapshot = GroundingBudgetSnapshot()
+    provider_request_count: int = 0
+    repository_action_count: int = 0
     cited_observation_ids: tuple[str, ...] = ()
     cited_source_paths: tuple[str, ...] = ()
     cited_structural_identities: tuple[StructuralIdentity, ...] = ()
@@ -265,8 +346,14 @@ class GroundingResult:
 
     def __post_init__(self) -> None:
         _identity(self.grounding_run_id, "grounding_run_id")
+        if self.schema_version != GROUNDING_RESULT_SCHEMA_VERSION:
+            raise ValueError("unsupported grounding result schema")
         if not isinstance(self.terminal_reason, GroundingTerminalReason):
             raise ValueError("invalid grounding terminal reason")
+        if not isinstance(self.terminal_state, GroundingLifecycleState):
+            raise ValueError("invalid grounding terminal state")
+        if not self.terminal_state.terminal:
+            raise ValueError("GroundingResult must be terminal")
         if not isinstance(self.unresolved_risk, bool):
             raise ValueError("unresolved_risk must be boolean")
         object.__setattr__(self, "source_versions", _freeze(self.source_versions))
@@ -275,4 +362,7 @@ class GroundingResult:
         )
         object.__setattr__(
             self, "grounding_diagnostics", _freeze(self.grounding_diagnostics)
+        )
+        object.__setattr__(
+            self, "orientation_advisory", _freeze(self.orientation_advisory)
         )
