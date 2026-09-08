@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 import hashlib
 import json
 import re
@@ -11,7 +12,6 @@ from typing import Any, Callable, Dict
 
 from celery.exceptions import SoftTimeLimitExceeded
 
-from app.config import settings
 from app.services.orchestration.context.assembly import (
     assemble_planning_prompt,
     compress_orchestration_context,
@@ -36,18 +36,11 @@ from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
     repair_removed_source_materialization as _repair_removed_source_materialization,
 )
-from app.services.orchestration.planning.read_only_discovery import (
-    DiscoveryContractError,
-    fail_closed_discovery,
-    prepare_discovery_context,
-)
-from app.services.orchestration.planning.grounding import (
-    GroundingCoordinator,
-    GroundingExecutor,
-    GroundingRunConfig,
-    GroundingTaskReference,
-    GroundingTerminalReason,
-    apply_grounding_result_to_planning_context,
+from app.services.orchestration.planning import read_only_discovery
+from app.services.orchestration.phases.planning_grounding_integration import (
+    fail_closed_typed_grounding as _fail_closed_typed_grounding_impl,
+    prepare_planning_source_context as _prepare_planning_source_context,
+    run_typed_grounding_for_planning as _run_typed_grounding_for_planning_impl,
 )
 from app.services.orchestration.planning.semantic_target_inventory import (
     SemanticTargetContractError,
@@ -168,99 +161,17 @@ from app.services.orchestration.phases.planning_support import (
 )
 
 
-def _run_typed_grounding_for_planning(ctx: OrchestrationRunContext):
-    """Run only the provider-injected coordinator selected by the PGI3 flag."""
+prepare_discovery_context = read_only_discovery.prepare_discovery_context
 
-    provider = getattr(ctx, "grounding_decision_provider", None)
-    max_steps = getattr(ctx, "grounding_max_steps", None)
-    if max_steps is None:
-        max_steps = settings.TYPED_GROUNDING_MAX_STEPS
-    max_provider_requests = getattr(ctx, "grounding_max_provider_requests", None)
-    if max_provider_requests is None:
-        max_provider_requests = settings.TYPED_GROUNDING_MAX_PROVIDER_REQUESTS
-    if provider is None or max_steps is None or max_provider_requests is None:
-        raise ValueError(
-            "typed grounding requires an injected decision provider and explicit run limits"
-        )
-
-    project_dir = Path(ctx.orchestration_state.project_dir).resolve()
-    workspace_identity = str(project_dir)
-    snapshot_identity = str(
-        getattr(ctx, "grounding_snapshot_identity", None) or workspace_identity
-    )
-    run_id = (
-        f"planning-grounding-{ctx.session_id}-{ctx.task_id}-"
-        f"{getattr(ctx, 'task_execution_id', None) or 'current'}"
-    )
-
-    def event_sink(event_type: str, details: dict[str, Any]) -> None:
-        try:
-            append_orchestration_event(
-                project_dir=ctx.control_state_location,
-                session_id=ctx.session_id,
-                task_id=ctx.task_id,
-                event_type=event_type,
-                details=details,
-                phase="planning",
-                coordinator="grounding_coordinator",
-            )
-        except Exception:
-            ctx.logger.debug(
-                "[ORCHESTRATION] Grounding event persistence failed: %s", event_type
-            )
-
-    config = GroundingRunConfig(
-        grounding_run_id=run_id,
-        task_reference=GroundingTaskReference(
-            task_id=str(ctx.task_id),
-            task_execution_id=(
-                str(ctx.task_execution_id)
-                if ctx.task_execution_id is not None
-                else None
-            ),
-        ),
-        workspace_identity=workspace_identity,
-        snapshot_identity=snapshot_identity,
-        max_steps=int(max_steps),
-        max_provider_requests=int(max_provider_requests),
-        operator_task=str(ctx.prompt or ""),
-        provider_name="injected_grounding_provider",
-    )
-    coordinator = GroundingCoordinator(
-        executor=GroundingExecutor(
-            project_dir,
-            snapshot_identity=snapshot_identity,
-        ),
-        provider=provider,
-        config=config,
-        event_sink=event_sink,
-    )
-    return coordinator.run()
+_fail_closed_typed_grounding = partial(
+    _fail_closed_typed_grounding_impl,
+    finalize_failure=_finalize_planning_terminal_failure,
+)
 
 
-def _fail_closed_typed_grounding(
-    *,
-    ctx: OrchestrationRunContext,
-    reason: str,
-    detail: str,
-    emit_phase_event: Callable[..., Any],
-) -> Dict[str, Any]:
-    ctx.orchestration_state.status = OrchestrationStatus.ABORTED
-    ctx.orchestration_state.abort_reason = detail
-    emit_phase_event(
-        ctx.orchestration_state,
-        ctx.emit_live,
-        level="ERROR",
-        phase="planning",
-        message="[ORCHESTRATION] Typed grounding failed closed",
-        details={"stage": "typed_grounding", "reason": reason, "detail": detail},
-    )
-    _finalize_planning_terminal_failure(
-        ctx=ctx,
-        failure_type=reason,
-        failure_reason=detail,
-    )
-    return {"status": "failed", "reason": reason}
+_run_typed_grounding_for_planning = partial(
+    _run_typed_grounding_for_planning_impl, append_event=append_orchestration_event
+)
 
 
 def execute_planning_phase(
@@ -337,77 +248,21 @@ def execute_planning_phase(
     ctx.workflow_phases = get_workflow_phases(ctx.workflow_profile)
     ctx.workspace_has_existing_files = bool(workspace_review.get("has_existing_files"))
     planning_timeout_seconds = clamp_planning_timeout(ctx.timeout_seconds)
-    if settings.ENABLE_TYPED_GROUNDING_COORDINATOR:
-        try:
-            grounding_result = _run_typed_grounding_for_planning(ctx)
-        except (TypeError, ValueError, OSError) as exc:
-            return _fail_closed_typed_grounding(
-                ctx=ctx,
-                reason=GroundingTerminalReason.INVALID_MODEL_REQUEST.value,
-                detail=str(exc),
-                emit_phase_event=emit_phase_event,
-            )
-        if grounding_result.terminal_reason is not GroundingTerminalReason.SUFFICIENT:
-            return _fail_closed_typed_grounding(
-                ctx=ctx,
-                reason=grounding_result.terminal_reason.value,
-                detail=(
-                    "typed grounding terminated before Planning: "
-                    + grounding_result.terminal_reason.value
-                ),
-                emit_phase_event=emit_phase_event,
-            )
-        apply_grounding_result_to_planning_context(ctx, grounding_result)
-        try:
-            from app.services.orchestration.planning.workspace_identity import (
-                planner_workspace_identity_for_context,
-            )
-
-            ctx.planner_source_materialization = materialize_planner_source_context(
-                project_dir=Path(ctx.orchestration_state.project_dir),
-                task_description=ctx.prompt,
-                planner_contract=ctx.planner_contract,
-                supporting_paths=grounding_result.cited_source_paths,
-                workspace_identity=planner_workspace_identity_for_context(ctx),
-            )
-        except (OSError, ValueError) as exc:
-            return _fail_closed_typed_grounding(
-                ctx=ctx,
-                reason=GroundingTerminalReason.EXECUTOR_FAILURE.value,
-                detail=str(exc),
-                emit_phase_event=emit_phase_event,
-            )
-    else:
-        try:
-            prepare_discovery_context(
-                ctx=ctx,
-                planning_timeout_seconds=planning_timeout_seconds,
-                extract_structured_text=extract_structured_text,
-                planner_service=PlannerService,
-                emit_phase_event=emit_phase_event,
-                materialize=materialize_planner_source_context,
-                intent_mode=getattr(ctx, "intent_mode", "default"),
-            )
-        except (DiscoveryContractError, TimeoutError, OSError) as exc:
-            return fail_closed_discovery(
-                ctx=ctx,
-                reason="read_only_discovery_failed_closed",
-                detail=str(exc),
-                aborted_status=OrchestrationStatus.ABORTED,
-                emit_phase_event=emit_phase_event,
-                finalize_failure=_finalize_planning_terminal_failure,
-            )
-        if not ctx.planner_source_materialization.available:
-            return fail_closed_discovery(
-                ctx=ctx,
-                reason="planning_source_materialization_unavailable",
-                detail=", ".join(
-                    ctx.planner_source_materialization.unavailable_reasons[:8]
-                ),
-                aborted_status=OrchestrationStatus.ABORTED,
-                emit_phase_event=emit_phase_event,
-                finalize_failure=_finalize_planning_terminal_failure,
-            )
+    # `ENABLE_TYPED_GROUNDING_COORDINATOR` is evaluated inside this seam.
+    source_preparation_failure = _prepare_planning_source_context(
+        ctx=ctx,
+        planning_timeout_seconds=planning_timeout_seconds,
+        extract_structured_text=extract_structured_text,
+        planner_service=PlannerService,
+        emit_phase_event=emit_phase_event,
+        materialize=materialize_planner_source_context,
+        finalize_failure=_finalize_planning_terminal_failure,
+        run_typed_grounding=_run_typed_grounding_for_planning,
+        fail_typed_grounding=_fail_closed_typed_grounding,
+        prepare_discovery=prepare_discovery_context,
+    )
+    if source_preparation_failure is not None:
+        return source_preparation_failure
     try:
         semantic_target_inventory = _build_context_semantic_target_inventory(ctx)
     except SemanticTargetInventoryError as exc:
