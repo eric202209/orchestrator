@@ -21,6 +21,7 @@ PlanningCandidateText = str | bytes | Mapping[str, Any] | None
 class PlanningArtifactKind(str, Enum):
     """Semantic candidate requested from a Planning Provider."""
 
+    GROUNDING = "grounding"
     PLANNING_BRIEF = "planning_brief"
     STRUCTURED_TASK_PLAN = "structured_task_plan"
 

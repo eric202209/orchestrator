@@ -13,6 +13,8 @@ from app.services.orchestration.planning.grounding import (
     GroundingRunConfig,
     GroundingTaskReference,
     GroundingTerminalReason,
+    GROUNDING_PROVIDER_TIMEOUT_SECONDS,
+    PlanningGroundingProviderAdapter,
     build_grounding_planning_context,
 )
 from app.services.orchestration.planning.planner import PlannerService
@@ -60,8 +62,6 @@ def run_typed_grounding_for_planning(
     if mechanical_skip:
         max_steps = max_steps or 4
         max_provider_requests = max_provider_requests or 2
-    if provider is None and not mechanical_skip:
-        raise ValueError("typed grounding requires an injected decision provider")
     if max_steps is None or max_provider_requests is None:
         raise ValueError("typed grounding requires explicit run limits")
 
@@ -91,6 +91,29 @@ def run_typed_grounding_for_planning(
                 "[ORCHESTRATION] Grounding event persistence failed: %s", event_type
             )
 
+    if provider is None and not mechanical_skip:
+        from app.services.planning.providers import create_planning_provider
+
+        planning_provider = create_planning_provider(ctx.db)
+        configured_timeout = int(
+            getattr(ctx, "timeout_seconds", GROUNDING_PROVIDER_TIMEOUT_SECONDS)
+            or GROUNDING_PROVIDER_TIMEOUT_SECONDS
+        )
+        provider = PlanningGroundingProviderAdapter(
+            planning_provider,
+            timeout_seconds=min(
+                max(1, configured_timeout), GROUNDING_PROVIDER_TIMEOUT_SECONDS
+            ),
+            event_sink=event_sink,
+        )
+    if provider is None and not mechanical_skip:
+        raise ValueError("typed grounding provider could not be selected")
+
+    provider_name = str(
+        getattr(provider, "provider_name", "injected_grounding_provider")
+    )
+    model_name = str(getattr(provider, "model_name", "unbound"))
+
     config = GroundingRunConfig(
         grounding_run_id=run_id,
         task_reference=GroundingTaskReference(
@@ -106,7 +129,8 @@ def run_typed_grounding_for_planning(
         max_steps=int(max_steps),
         max_provider_requests=int(max_provider_requests),
         operator_task=str(ctx.prompt or ""),
-        provider_name="injected_grounding_provider",
+        provider_name=provider_name,
+        model_name=model_name,
         orientation_advisory=(
             derive_repository_orientation(
                 project_dir, str(ctx.prompt or "")

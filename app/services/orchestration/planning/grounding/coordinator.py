@@ -155,6 +155,51 @@ def _is_budget_rejection(error: GroundingRequestRejection) -> bool:
     return str(error.code).startswith("budget_")
 
 
+def _protocol_rejection_code(
+    error: GroundingRequestRejection,
+    payload: Mapping[str, Any] | None = None,
+) -> str:
+    """Project legacy request errors into bounded diagnostic identities."""
+
+    code = str(error.code)
+    if code != "invalid_request":
+        return code
+    message = str(error).lower()
+    if "unsupported grounding action" in message:
+        return "unsupported_action"
+    if "relation" in message or "structuralrelation" in message:
+        return "unsupported_relation"
+    if "locator" in message:
+        return "invalid_locator"
+    if isinstance(payload, Mapping):
+        action = payload.get("action")
+        expected = {
+            "search_text": {"action", "query", "scopes"},
+            "inspect_file": {"action", "path"},
+            "resolve_structure": {"action", "relation", "locator"},
+        }.get(action)
+        if expected is not None and set(payload) - expected:
+            return "unknown_fields"
+        if action == "resolve_structure" and isinstance(
+            payload.get("locator"), Mapping
+        ):
+            locator_expected = {
+                "symbol_definition": {"path", "name"},
+                "enclosing_symbol": {"path", "line"},
+                "mounted_route": {"path", "method", "decorator_path"},
+            }.get(payload.get("relation"))
+            if (
+                locator_expected is not None
+                and set(payload["locator"]) - locator_expected
+            ):
+                return "unknown_fields"
+    if "fields are exactly" in message or "request must be an object" in message:
+        return "invalid_request_shape"
+    if "path" in message:
+        return "invalid_locator"
+    return "invalid_request_shape"
+
+
 def _remaining_budget(
     config: GroundingRunConfig, budget: GroundingBudgetSnapshot
 ) -> dict[str, int | None]:
@@ -525,20 +570,69 @@ class GroundingCoordinator:
         )
 
     def _append_rejection(
-        self, state: GroundingCoordinatorState, rejection: GroundingRejection
+        self,
+        state: GroundingCoordinatorState,
+        rejection: GroundingRejection,
+        *,
+        protocol_rejection_code: str | None = None,
     ) -> GroundingCoordinatorState:
+        normalized_code = protocol_rejection_code or _protocol_rejection_code(rejection)
         self._emit(
             EventType.GROUNDING_REQUEST,
             {
                 "grounding_run_id": rejection.grounding_run_id,
                 "provider_request_id": rejection.provider_request_id,
                 "rejection_code": rejection.code,
+                "protocol_rejection_code": normalized_code,
+                "failure_layer": "L5_ACTION_SCHEMA",
                 "action": rejection.action_kind,
                 "outcome": "rejected",
                 "budget": _plain(state.budget),
             },
         )
+        self._emit(
+            EventType.GROUNDING_PROVIDER_TURN,
+            {
+                "grounding_run_id": rejection.grounding_run_id,
+                "provider_request_id": rejection.provider_request_id,
+                "turn_type": (
+                    "POST_OBSERVATION_ASSESSMENT"
+                    if state.observation_history
+                    else "FIRST_ACTION"
+                ),
+                "capture_stage": "coordinator_request_validation",
+                "parser_success": True,
+                "parser_rejection_code": normalized_code,
+                "failure_layer": "L5_ACTION_SCHEMA",
+                "failure_classification": normalized_code,
+                "detail": str(rejection.message)[:240],
+            },
+        )
         return replace(state, rejection_history=(*state.rejection_history, rejection))
+
+    def _emit_assessment_validation_failure(
+        self,
+        state: GroundingCoordinatorState,
+        *,
+        provider_request_id: str,
+        code: str,
+        failure_layer: str,
+        detail: str,
+    ) -> None:
+        self._emit(
+            EventType.GROUNDING_PROVIDER_TURN,
+            {
+                "grounding_run_id": state.grounding_run_id,
+                "provider_request_id": provider_request_id,
+                "turn_type": "POST_OBSERVATION_ASSESSMENT",
+                "capture_stage": "coordinator_assessment_validation",
+                "parser_success": True,
+                "parser_rejection_code": code,
+                "failure_layer": failure_layer,
+                "failure_classification": code,
+                "detail": str(detail)[:240],
+            },
+        )
 
     def _validate_citations(
         self, state: GroundingCoordinatorState, proposal: GroundingProposal
@@ -840,6 +934,8 @@ class GroundingCoordinator:
         state: GroundingCoordinatorState,
         exc: GroundingRequestRejection,
         provider_request_id: str,
+        *,
+        payload: Mapping[str, Any] | None = None,
     ) -> GroundingCoordinatorState:
         return self._append_rejection(
             state,
@@ -851,6 +947,7 @@ class GroundingCoordinator:
                 action_kind=exc.action_kind,
                 message=str(exc)[:240],
             ),
+            protocol_rejection_code=_protocol_rejection_code(exc, payload),
         )
 
     def _execute_request(
@@ -978,7 +1075,10 @@ class GroundingCoordinator:
                             GroundingTerminalReason.BUDGET_EXHAUSTED,
                         )
                     state = self._record_request_rejection(
-                        state, exc, provider_request_id
+                        state,
+                        exc,
+                        provider_request_id,
+                        payload=proposal.action_payload,
                     )
                     if (
                         correction_turns == 0
@@ -1004,7 +1104,10 @@ class GroundingCoordinator:
                             GroundingTerminalReason.BUDGET_EXHAUSTED,
                         )
                     state = self._record_request_rejection(
-                        state, exc, provider_request_id
+                        state,
+                        exc,
+                        provider_request_id,
+                        payload=request.normalized_payload,
                     )
                     if (
                         correction_turns == 0
@@ -1049,7 +1152,10 @@ class GroundingCoordinator:
                             GroundingTerminalReason.BUDGET_EXHAUSTED,
                         )
                     state = self._record_request_rejection(
-                        state, exc, provider_request_id
+                        state,
+                        exc,
+                        provider_request_id,
+                        payload=proposal.action_payload,
                     )
                     if (
                         correction_turns == 0
@@ -1071,14 +1177,36 @@ class GroundingCoordinator:
                     provider_request_id=provider_request_id,
                     next_action=next_action,
                 )
-            except _InvalidSufficiency:
+            except _InvalidSufficiency as exc:
+                self._emit_assessment_validation_failure(
+                    state,
+                    provider_request_id=provider_request_id,
+                    code="invalid_assessment_citations",
+                    failure_layer="L7_SEMANTIC_PROTOCOL_STATE",
+                    detail=str(exc),
+                )
                 state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                 return self._result(
                     state,
                     GroundingLifecycleState.INSUFFICIENT,
                     GroundingTerminalReason.INVALID_MODEL_REQUEST,
                 )
-            except (_MalformedProviderResponse, GroundingInvariantError):
+            except (_MalformedProviderResponse, GroundingInvariantError) as exc:
+                self._emit_assessment_validation_failure(
+                    state,
+                    provider_request_id=provider_request_id,
+                    code=(
+                        "invalid_assessment_state"
+                        if isinstance(exc, GroundingInvariantError)
+                        else "invalid_post_observation_assessment"
+                    ),
+                    failure_layer=(
+                        "L7_SEMANTIC_PROTOCOL_STATE"
+                        if isinstance(exc, GroundingInvariantError)
+                        else "L6_ASSESSMENT_SCHEMA"
+                    ),
+                    detail=str(exc),
+                )
                 state = _transition(state, GroundingLifecycleState.FAILED)
                 return self._result(
                     state,
@@ -1122,7 +1250,12 @@ class GroundingCoordinator:
                         GroundingLifecycleState.INSUFFICIENT,
                         GroundingTerminalReason.BUDGET_EXHAUSTED,
                     )
-                state = self._record_request_rejection(state, exc, provider_request_id)
+                state = self._record_request_rejection(
+                    state,
+                    exc,
+                    provider_request_id,
+                    payload=next_action.normalized_payload,
+                )
                 if (
                     correction_turns == 0
                     and state.budget.provider_requests

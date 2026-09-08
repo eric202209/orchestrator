@@ -53,6 +53,7 @@ class EventType:
     # PHASE35-PGI3 bounded provider-injected grounding lifecycle
     GROUNDING_STARTED = "grounding_started"
     GROUNDING_REQUEST = "grounding_request"
+    GROUNDING_PROVIDER_TURN = "grounding_provider_turn"
     GROUNDING_OBSERVATION = "grounding_observation"
     GROUNDING_ASSESSMENT = "grounding_assessment"
     GROUNDING_TERMINAL = "grounding_terminal"

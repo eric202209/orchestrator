@@ -30,6 +30,7 @@ from app.services.planning.providers.base import (
 
 
 _SESSION_PREFIXES = {
+    PlanningArtifactKind.GROUNDING: "grounding",
     PlanningArtifactKind.PLANNING_BRIEF: "planning-brief",
     PlanningArtifactKind.STRUCTURED_TASK_PLAN: "structured-task-plan",
 }
