@@ -132,7 +132,10 @@ def test_search_is_bounded_deterministic_and_truthfully_negative(tmp_path):
         ("src/b.py", 1),
     ]
     assert observation.budget_delta.repository_actions == 1
-    assert observation.budget_delta.positive_regions == 3
+    # Search hits are candidate/navigation evidence; substantive region and
+    # file budgets begin when a later inspect/structure action consumes them.
+    assert observation.budget_delta.distinct_files == 0
+    assert observation.budget_delta.positive_regions == 0
     assert observation.budget_delta.source_evidence_bytes == len(
         observation.bounded_content
     )

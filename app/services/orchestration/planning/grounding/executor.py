@@ -553,12 +553,15 @@ class GroundingExecutor:
         ).encode("utf-8")
         content = content[:MAX_OBSERVATION_BYTES]
         source_paths = tuple(dict.fromkeys(hit.path for hit in hits))
-        positive_regions = len(hits)
         delta = GroundingBudgetDelta(
             repository_actions=1,
             source_evidence_bytes=len(content) if hits else 0,
-            distinct_files=len(source_paths),
-            positive_regions=positive_regions,
+            # Search results are bounded candidate/navigation evidence.  The
+            # coordinator keeps the paths available for refinement, but only
+            # substantive inspect/structure observations consume file/region
+            # evidence budgets.
+            distinct_files=0,
+            positive_regions=0,
         )
         return self._make_observation(
             request,

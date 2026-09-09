@@ -76,6 +76,9 @@ class _SourceVersionChanged(RuntimeError):
     pass
 
 
+_SUBSTANTIVE_EVIDENCE_ACTIONS = frozenset({"inspect_file", "resolve_structure"})
+
+
 @runtime_checkable
 class GroundingDecisionProvider(Protocol):
     """Minimal injected provider boundary used by the coordinator."""
@@ -677,10 +680,31 @@ class GroundingCoordinator:
         if observation.structural_identity is not None:
             structural = _unique_append(structural, observation.structural_identity)
         versions.update(dict(observation.source_versions))
-        new_files = len(
-            set(observation.source_paths) - set(state.discovered_source_paths)
+        substantive_paths = {
+            path
+            for prior in state.observation_history
+            if (
+                prior.action_identity in _SUBSTANTIVE_EVIDENCE_ACTIONS
+                and prior.budget_delta.distinct_files > 0
+            )
+            for path in prior.source_paths
+        }
+        is_substantive = (
+            observation.action_identity in _SUBSTANTIVE_EVIDENCE_ACTIONS
+            and observation.budget_delta.distinct_files > 0
         )
-        delta = replace(observation.budget_delta, distinct_files=new_files)
+        new_files = (
+            len(set(observation.source_paths) - substantive_paths)
+            if is_substantive
+            else 0
+        )
+        delta = replace(
+            observation.budget_delta,
+            distinct_files=new_files,
+            positive_regions=(
+                observation.budget_delta.positive_regions if is_substantive else 0
+            ),
+        )
         try:
             accounting = GroundingBudgetAccounting(state.budget).apply(
                 delta, self.config.budget_limits
