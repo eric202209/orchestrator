@@ -9,9 +9,12 @@ the application runtime.
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import hashlib
+import json
+from pathlib import Path
+import re
 from types import MappingProxyType
 from typing import Any
 
@@ -24,6 +27,7 @@ from app.services.orchestration.planning.grounding.contracts import (
     GroundingRequest,
     GroundingSearchHit,
     StructuralIdentity,
+    parse_grounding_request,
 )
 from app.services.orchestration.planning.grounding.coordinator_contracts import (
     GroundingAssessment,
@@ -39,9 +43,36 @@ from app.services.orchestration.planning.grounding.coordinator_contracts import 
 
 
 VALIDATION_LABELS = ("A1", "A2", "A3", "B1", "B2", "B3")
+
+VALIDATION_CAPTURE_SCHEMA_VERSION = "pvh1-capture/2"
+ACTION_CAPTURE_SCHEMA_VERSION = "grounding-action-capture/1"
+PROMPT_CAPTURE_SCHEMA_VERSION = "grounding-prompt-capture/1"
 MAX_CAPTURED_STRING = 500
 MAX_CAPTURED_PREFIX = 256
 MAX_CAPTURED_ITEMS = 32
+# The current task admission boundary is 50,000 characters.  This larger
+# validation-only ceiling leaves room for the bounded typed grounding state
+# and is fail-closed if a future provider prompt exceeds it; it never silently
+# truncates a prompt called replayable.
+MAX_CAPTURED_PROMPT_BYTES = 256 * 1024
+MAX_CAPTURED_PROVIDER_CANDIDATE_BYTES = 64 * 1024
+# Legal normalized action fields are bounded by the production contract.  The
+# capture keeps the typed mapping exact; this value is a proof/reporting
+# ceiling for the currently exercised bounded action shapes, not a truncation
+# limit for legal normalized mappings.
+MAX_LEGAL_ACTION_BYTES = 16 * 1024
+
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?:authorization|cookie|password|secret|credential|api[_-]?key|"
+    r"api[_-]?token|access[_-]?token|refresh[_-]?token|bearer|headers?)",
+    re.IGNORECASE,
+)
+_SENSITIVE_TEXT_RE = re.compile(
+    r"(?:authorization|cookie|password|secret|credential|api[_-]?key|"
+    r"api[_-]?token|access[_-]?token|refresh[_-]?token|bearer)"
+    r"\s*[:=]\s*(?:bearer\s+)?[^\s,;]+",
+    re.IGNORECASE,
+)
 
 _PROVIDER_TURN_FIELDS = frozenset(
     {
@@ -166,6 +197,39 @@ def _bounded_bytes(value: bytes) -> dict[str, object]:
     }
 
 
+def _is_sensitive_key(value: object) -> bool:
+    return bool(_SENSITIVE_KEY_RE.search(str(value)))
+
+
+def _safe_text(value: str) -> str:
+    return _SENSITIVE_TEXT_RE.sub("<redacted-secret>", value)
+
+
+def _exact_json(value: object) -> object:
+    """Convert already-typed JSON data without the diagnostic truncation."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _exact_json(item)
+            for key, item in value.items()
+            if not _is_sensitive_key(key)
+        }
+    if isinstance(value, (list, tuple)):
+        return [_exact_json(item) for item in value]
+    value = _enum_identity(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)) or value is None:
+        return value
+    raise TypeError(f"value is not JSON-safe: {type(value).__name__}")
+
+
+def _canonical_json_bytes(value: object) -> bytes:
+    return json.dumps(
+        _exact_json(value), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
 def _bounded_json(value: object, *, _depth: int = 0) -> object:
     """Keep diagnostics JSON-safe and bounded without retaining raw payloads."""
 
@@ -175,6 +239,7 @@ def _bounded_json(value: object, *, _depth: int = 0) -> object:
         return {
             str(key): _bounded_json(item, _depth=_depth + 1)
             for key, item in list(value.items())[:MAX_CAPTURED_ITEMS]
+            if not _is_sensitive_key(key)
         }
     if isinstance(value, (list, tuple)):
         return [
@@ -185,7 +250,7 @@ def _bounded_json(value: object, *, _depth: int = 0) -> object:
         return _bounded_bytes(value)
     value = _enum_identity(value)
     if isinstance(value, str):
-        return value[:MAX_CAPTURED_STRING]
+        return _safe_text(value[:MAX_CAPTURED_STRING])
     if isinstance(value, (int, float, bool)) or value is None:
         return value
     return str(value)[:MAX_CAPTURED_STRING]
@@ -194,9 +259,19 @@ def _bounded_json(value: object, *, _depth: int = 0) -> object:
 def _event_details(event_type: str, details: Mapping[str, Any]) -> Mapping[str, Any]:
     allowed = _EVENT_FIELDS.get(event_type, frozenset())
     bounded = {
-        key: _bounded_json(details[key]) for key in sorted(allowed) if key in details
+        key: (
+            _exact_json(details[key])
+            if key == "normalized_request"
+            else _bounded_json(details[key])
+        )
+        for key in sorted(allowed)
+        if key in details and not _is_sensitive_key(key)
     }
-    unknown = sorted(str(key) for key in details if str(key) not in allowed)
+    unknown = sorted(
+        str(key)
+        for key in details
+        if str(key) not in allowed and not _is_sensitive_key(key)
+    )
     if unknown:
         bounded["unrecorded_field_names"] = unknown[:MAX_CAPTURED_ITEMS]
     return MappingProxyType(bounded)
@@ -268,7 +343,7 @@ def serialize_grounding_observation(
         "grounding_run_id": observation.grounding_run_id,
         "request_id": observation.request_id,
         "action_identity": observation.action_identity,
-        "normalized_action": _bounded_json(observation.normalized_action),
+        "normalized_action": _exact_json(observation.normalized_action),
         "outcome": _enum_identity(observation.outcome),
         "source_paths": list(observation.source_paths),
         "source_scopes": list(observation.source_scopes),
@@ -297,7 +372,7 @@ def _serialize_request(request: GroundingRequest) -> dict[str, object]:
         "grounding_run_id": request.grounding_run_id,
         "request_id": request.request_id,
         "action_identity": request.action_identity,
-        "normalized_action": _bounded_json(request.normalized_payload),
+        "normalized_action": _exact_json(request.normalized_payload),
         "provenance": _enum_identity(request.provenance),
         "action_digest": request.action_digest,
     }
@@ -462,6 +537,226 @@ class RawCapturedEvent:
     details: Mapping[str, Any]
 
 
+class ValidationCaptureError(RuntimeError):
+    """A validation artifact would be incomplete or unsafe to retain."""
+
+
+@dataclass(frozen=True, slots=True)
+class RawProviderTurnCapture:
+    """Exact bounded provider-boundary data captured before adapter parsing."""
+
+    sequence: int
+    grounding_run_id: str
+    provider_request_id: str
+    provider_request_number: int
+    turn_mode: str | None
+    turn_type: str | None
+    provider_provenance: Mapping[str, object]
+    provider_config_fingerprint: str
+    prompt_sha256: str
+    prompt_length: int
+    prompt_utf8_length: int
+    exact_prompt_utf8: str
+    candidate_sha256: str | None = None
+    candidate_length: int | None = None
+    candidate_prefix: str | None = None
+    candidate_raw_utf8: str | None = None
+    candidate_payload: Mapping[str, object] | None = None
+    action_candidate_payload: Mapping[str, object] | None = None
+    action_kind: str | None = None
+    normalized_action: Mapping[str, object] | None = None
+    action_digest: str | None = None
+    request_id: str | None = None
+    parser_input_type: str | None = None
+    provider_output_type: str | None = None
+    response_present: bool = False
+    failure_classification: str | None = None
+
+
+def _provider_request_number(provider_request_id: str, fallback: int) -> int:
+    match = re.search(r"-(\d+)$", provider_request_id)
+    return int(match.group(1)) if match else fallback
+
+
+def _turn_mode(turn_type: object) -> str | None:
+    normalized = str(turn_type or "").strip()
+    if normalized == "REJECTION_CORRECTION":
+        return "CORRECTION"
+    if normalized == "TERMINAL_ASSESSMENT":
+        return "TERMINAL_ASSESSMENT"
+    if normalized in {"FIRST_ACTION", "POST_OBSERVATION_ASSESSMENT"}:
+        return "EXPLORATION"
+    return normalized or None
+
+
+def _provider_identity(provider: object) -> tuple[dict[str, object], str]:
+    """Keep provider identity useful without retaining config or diagnostics."""
+
+    runtime_name = model = adaptation_profile = None
+    try:
+        runtime = provider.runtime_information()  # type: ignore[attr-defined]
+        runtime_name = getattr(runtime, "runtime_name", None)
+        model = getattr(runtime, "model", None)
+        adaptation_profile = getattr(runtime, "adaptation_profile", None)
+    except Exception:
+        pass
+    capabilities: Mapping[str, object] = {}
+    try:
+        value = provider.capabilities  # type: ignore[attr-defined]
+        capabilities = value.to_dict() if hasattr(value, "to_dict") else {}
+    except Exception:
+        pass
+    identity = {
+        "provider": str(getattr(provider, "name", "unknown")),
+        "provider_version": str(getattr(provider, "version", "") or "") or None,
+        "backend": str(runtime_name or "") or None,
+        "model": str(model or "") or None,
+        "adaptation_profile": str(adaptation_profile or "") or None,
+        "capabilities": _exact_json(capabilities),
+    }
+    fingerprint = hashlib.sha256(_canonical_json_bytes(identity)).hexdigest()
+    return identity, fingerprint
+
+
+def _candidate_payload(
+    candidate: object,
+) -> tuple[Mapping[str, object] | None, bool | None]:
+    if isinstance(candidate, Mapping):
+        return candidate, True
+    if isinstance(candidate, str):
+        try:
+            value = json.loads(candidate)
+        except (TypeError, ValueError):
+            return None, False
+        return (value, True) if isinstance(value, Mapping) else (None, True)
+    return None, None
+
+
+def _action_candidate(
+    payload: Mapping[str, object] | None
+) -> Mapping[str, object] | None:
+    if payload is None:
+        return None
+    if "action" in payload:
+        return payload
+    next_action = payload.get("next_action")
+    if isinstance(next_action, Mapping) and "action" in next_action:
+        return next_action
+    return None
+
+
+def _recognized_action_fields(
+    payload: Mapping[str, object] | None,
+) -> Mapping[str, object] | None:
+    """Retain known action fields even when an invalid object is oversized."""
+
+    action = _action_candidate(payload)
+    if action is None:
+        return None
+    action_kind = action.get("action")
+    if action_kind == "search_text":
+        names = ("action", "query", "scopes")
+    elif action_kind == "inspect_file":
+        names = ("action", "path")
+    elif action_kind == "resolve_structure":
+        names = ("action", "relation", "locator")
+    else:
+        names = ("action",)
+    recognized = {name: action[name] for name in names if name in action}
+    locator = recognized.get("locator")
+    relation = recognized.get("relation")
+    if isinstance(locator, Mapping) and relation in {
+        "symbol_definition",
+        "enclosing_symbol",
+        "mounted_route",
+    }:
+        locator_names = {
+            "symbol_definition": ("path", "name"),
+            "enclosing_symbol": ("path", "line"),
+            "mounted_route": ("path", "method", "decorator_path"),
+        }[str(relation)]
+        recognized["locator"] = {
+            name: locator[name] for name in locator_names if name in locator
+        }
+    return recognized
+
+
+def _candidate_bytes(candidate: object, payload: Mapping[str, object] | None) -> bytes:
+    if isinstance(candidate, bytes):
+        return candidate
+    if isinstance(candidate, str):
+        return candidate.encode("utf-8")
+    if payload is not None:
+        try:
+            return _canonical_json_bytes(payload)
+        except TypeError:
+            pass
+    return str(candidate).encode("utf-8", errors="replace")
+
+
+def _bounded_exact_mapping(
+    value: Mapping[str, object] | None, *, maximum_bytes: int
+) -> Mapping[str, object] | None:
+    if value is None:
+        return None
+    try:
+        normalized = _exact_json(value)
+        encoded = _canonical_json_bytes(normalized)
+    except TypeError:
+        return None
+    if len(encoded) > maximum_bytes:
+        return None
+    if not isinstance(normalized, Mapping):
+        return None
+    return dict(normalized)
+
+
+def _provider_turn_mapping(turn: RawProviderTurnCapture) -> dict[str, object]:
+    return {
+        "capture_schema_version": VALIDATION_CAPTURE_SCHEMA_VERSION,
+        "action_capture_schema_version": ACTION_CAPTURE_SCHEMA_VERSION,
+        "prompt_capture_schema_version": PROMPT_CAPTURE_SCHEMA_VERSION,
+        "sequence": turn.sequence,
+        "grounding_run_id": turn.grounding_run_id,
+        "provider_request_id": turn.provider_request_id,
+        "provider_request_number": turn.provider_request_number,
+        "turn_mode": turn.turn_mode,
+        "turn_type": turn.turn_type,
+        "provider_provenance": _exact_json(turn.provider_provenance),
+        "provider_config_fingerprint": turn.provider_config_fingerprint,
+        "prompt_sha256": turn.prompt_sha256,
+        "prompt_length": turn.prompt_length,
+        "prompt_utf8_length": turn.prompt_utf8_length,
+        "exact_prompt_utf8": turn.exact_prompt_utf8,
+        "candidate_sha256": turn.candidate_sha256,
+        "candidate_length": turn.candidate_length,
+        "candidate_prefix": turn.candidate_prefix,
+        "candidate_raw_utf8": turn.candidate_raw_utf8,
+        "candidate_payload": (
+            _exact_json(turn.candidate_payload)
+            if turn.candidate_payload is not None
+            else None
+        ),
+        "action_candidate_payload": (
+            _exact_json(turn.action_candidate_payload)
+            if turn.action_candidate_payload is not None
+            else None
+        ),
+        "action_kind": turn.action_kind,
+        "normalized_action": (
+            _exact_json(turn.normalized_action)
+            if turn.normalized_action is not None
+            else None
+        ),
+        "action_digest": turn.action_digest,
+        "request_id": turn.request_id,
+        "parser_input_type": turn.parser_input_type,
+        "provider_output_type": turn.provider_output_type,
+        "response_present": turn.response_present,
+        "failure_classification": turn.failure_classification,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class RawRunCapture:
     """Failure-resistant per-label capture snapshot."""
@@ -470,6 +765,7 @@ class RawRunCapture:
     grounding_run_id: str | None
     events: tuple[RawCapturedEvent, ...]
     results: tuple[GroundingResult, ...]
+    provider_turns: tuple[RawProviderTurnCapture, ...] = ()
 
     @property
     def provider_turn_events(self) -> tuple[RawCapturedEvent, ...]:
@@ -478,6 +774,146 @@ class RawRunCapture:
             for event in self.events
             if event.event_type == EventType.GROUNDING_PROVIDER_TURN
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ValidationArtifact:
+    """Independent JSON artifact used for post-process and restart replay."""
+
+    payload: Mapping[str, object]
+
+    @classmethod
+    def from_raw_capture(cls, raw: RawRunCapture) -> "ValidationArtifact":
+        return cls(serialize_validation_artifact(raw))
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ValidationArtifact":
+        loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(loaded, Mapping):
+            raise ValidationCaptureError("validation artifact must be a JSON object")
+        if loaded.get("schema_version") != VALIDATION_CAPTURE_SCHEMA_VERSION:
+            raise ValidationCaptureError("unsupported validation artifact schema")
+        return cls(dict(loaded))
+
+    def to_dict(self) -> dict[str, object]:
+        value = _exact_json(self.payload)
+        if not isinstance(value, dict):
+            raise ValidationCaptureError("validation artifact payload is not an object")
+        return value
+
+    def to_json_bytes(self) -> bytes:
+        return (
+            json.dumps(
+                self.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    def write(self, path: str | Path) -> None:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(self.to_json_bytes())
+
+    @property
+    def grounding_run_id(self) -> str | None:
+        value = self.payload.get("grounding_run_id")
+        return str(value) if value is not None else None
+
+    def _turn(self, run_id: str, provider_request_number: int) -> Mapping[str, object]:
+        if self.grounding_run_id != run_id:
+            raise KeyError(f"validation artifact does not contain run {run_id}")
+        turns = self.payload.get("provider_turns", ())
+        if not isinstance(turns, Sequence) or isinstance(turns, (str, bytes)):
+            raise ValidationCaptureError(
+                "validation artifact provider turns are invalid"
+            )
+        for turn in turns:
+            if not isinstance(turn, Mapping):
+                continue
+            if turn.get("provider_request_number") == provider_request_number:
+                return turn
+        raise KeyError(
+            f"validation artifact does not contain provider turn {provider_request_number}"
+        )
+
+    def exact_normalized_action(
+        self, run_id: str, provider_request_number: int
+    ) -> Mapping[str, object]:
+        action = self._turn(run_id, provider_request_number).get("normalized_action")
+        if not isinstance(action, Mapping):
+            raise KeyError("provider turn has no accepted normalized grounding action")
+        return dict(action)
+
+    def exact_provider_prompt(self, run_id: str, provider_request_number: int) -> str:
+        turn = self._turn(run_id, provider_request_number)
+        prompt = turn.get("exact_prompt_utf8")
+        if not isinstance(prompt, str):
+            raise KeyError("provider turn has no exact prompt capture")
+        encoded = prompt.encode("utf-8")
+        if turn.get("prompt_sha256") != hashlib.sha256(encoded).hexdigest():
+            raise ValidationCaptureError("exact prompt hash does not match artifact")
+        if turn.get("prompt_utf8_length") != len(encoded):
+            raise ValidationCaptureError("exact prompt length does not match artifact")
+        return prompt
+
+    def exact_candidate_payload(
+        self, run_id: str, provider_request_number: int
+    ) -> Mapping[str, object]:
+        candidate = self._turn(run_id, provider_request_number).get("candidate_payload")
+        if not isinstance(candidate, Mapping):
+            raise KeyError("provider turn has no bounded candidate object")
+        return dict(candidate)
+
+
+def serialize_validation_artifact(raw: RawRunCapture) -> dict[str, object]:
+    """Serialize durable capture without evaluator/report-only state."""
+
+    return {
+        "schema_version": VALIDATION_CAPTURE_SCHEMA_VERSION,
+        "label": raw.label,
+        "grounding_run_id": raw.grounding_run_id,
+        # Use the joined view so coordinator rejection codes and accepted
+        # request links survive restart alongside the exact boundary capture.
+        "provider_turns": list(_provider_turn_records(raw)),
+        "events": [
+            {
+                "sequence": event.sequence,
+                "event_type": event.event_type,
+                "details": _exact_json(event.details),
+            }
+            for event in raw.events
+        ],
+        "results": [serialize_grounding_result(item) for item in raw.results],
+    }
+
+
+def exact_normalized_action(
+    artifact: ValidationArtifact | str | Path,
+    run_id: str,
+    provider_request_number: int,
+) -> Mapping[str, object]:
+    value = (
+        artifact
+        if isinstance(artifact, ValidationArtifact)
+        else ValidationArtifact.load(artifact)
+    )
+    return value.exact_normalized_action(run_id, provider_request_number)
+
+
+def exact_provider_prompt(
+    artifact: ValidationArtifact | str | Path,
+    run_id: str,
+    provider_request_number: int,
+) -> str:
+    value = (
+        artifact
+        if isinstance(artifact, ValidationArtifact)
+        else ValidationArtifact.load(artifact)
+    )
+    return value.exact_provider_prompt(run_id, provider_request_number)
 
 
 class RawBoundedCaptureStore:
@@ -491,6 +927,8 @@ class RawBoundedCaptureStore:
         self.grounding_run_id = grounding_run_id
         self._events: list[RawCapturedEvent] = []
         self._results: list[GroundingResult] = []
+        self._provider_turns: list[RawProviderTurnCapture] = []
+        self._provider_request_objects: dict[int, int] = {}
 
     def append_event(
         self, event_type: object, details: Mapping[str, Any]
@@ -525,12 +963,168 @@ class RawBoundedCaptureStore:
         self._results.append(result)
         return result
 
+    def capture_provider_request(self, request: Any, provider: object) -> int:
+        """Capture the application request before the provider is invoked."""
+
+        prompt = getattr(request, "prompt", None)
+        if not isinstance(prompt, str) or not prompt:
+            raise ValidationCaptureError(
+                "provider request prompt must be non-empty text"
+            )
+        prompt_bytes = prompt.encode("utf-8")
+        if len(prompt_bytes) > MAX_CAPTURED_PROMPT_BYTES:
+            raise ValidationCaptureError(
+                "provider prompt exceeds the exact validation capture ceiling"
+            )
+        request_metadata = getattr(request, "metadata", {})
+        if not isinstance(request_metadata, Mapping):
+            request_metadata = {}
+        protocol_input = getattr(request, "protocol_input", {})
+        if not isinstance(protocol_input, Mapping):
+            protocol_input = {}
+        provider_request_id = str(
+            request_metadata.get("provider_request_id")
+            or f"validation-provider-request-{len(self._provider_turns) + 1}"
+        )
+        provider_request_number = _provider_request_number(
+            provider_request_id, len(self._provider_turns) + 1
+        )
+        provenance, config_fingerprint = _provider_identity(provider)
+        turn = RawProviderTurnCapture(
+            sequence=len(self._provider_turns) + 1,
+            grounding_run_id=str(
+                request_metadata.get("grounding_run_id") or self.grounding_run_id or ""
+            ),
+            provider_request_id=provider_request_id,
+            provider_request_number=provider_request_number,
+            turn_mode=(
+                _turn_mode(
+                    request_metadata.get("turn_mode")
+                    or protocol_input.get("turn_mode")
+                    or request_metadata.get("turn_type")
+                )
+                if request_metadata.get("turn_mode") is not None
+                or protocol_input.get("turn_mode") is not None
+                or request_metadata.get("turn_type") is not None
+                else None
+            ),
+            turn_type=(
+                str(request_metadata["turn_type"])
+                if request_metadata.get("turn_type") is not None
+                else None
+            ),
+            provider_provenance=provenance,
+            provider_config_fingerprint=config_fingerprint,
+            prompt_sha256=hashlib.sha256(prompt_bytes).hexdigest(),
+            prompt_length=len(prompt),
+            prompt_utf8_length=len(prompt_bytes),
+            exact_prompt_utf8=prompt,
+        )
+        self._provider_request_objects[id(request)] = len(self._provider_turns)
+        self._provider_turns.append(turn)
+        if self.grounding_run_id is None:
+            self.grounding_run_id = turn.grounding_run_id or None
+        return turn.sequence
+
+    def capture_provider_response(self, request: Any, response: Any) -> None:
+        """Capture candidate evidence before adapter parsing can reject it."""
+
+        index = self._provider_request_objects.get(id(request))
+        if index is None:
+            raise ValidationCaptureError("provider response has no captured request")
+        candidate = getattr(response, "candidate_text", None)
+        payload, _ = _candidate_payload(candidate)
+        raw_bytes = (
+            _candidate_bytes(candidate, payload) if candidate is not None else b""
+        )
+        exact_raw = (
+            candidate
+            if isinstance(candidate, str)
+            and len(raw_bytes) <= MAX_CAPTURED_PROVIDER_CANDIDATE_BYTES
+            else None
+        )
+        bounded_payload = _bounded_exact_mapping(
+            payload, maximum_bytes=MAX_CAPTURED_PROVIDER_CANDIDATE_BYTES
+        )
+        action_payload = _action_candidate(payload)
+        exact_action_payload = _bounded_exact_mapping(
+            _recognized_action_fields(payload),
+            maximum_bytes=MAX_LEGAL_ACTION_BYTES,
+        )
+        action_kind = (
+            str(action_payload.get("action"))
+            if action_payload is not None and action_payload.get("action") is not None
+            else None
+        )
+        request_id = None
+        normalized_action = None
+        action_digest = None
+        if action_payload is not None:
+            attempted_request_id = self._next_candidate_request_id()
+            try:
+                parsed = parse_grounding_request(
+                    action_payload,
+                    grounding_run_id=self.grounding_run_id
+                    or self._provider_turns[index].grounding_run_id,
+                    request_id=attempted_request_id,
+                )
+            except (TypeError, ValueError):
+                request_id = attempted_request_id
+            else:
+                request_id = parsed.request_id
+                normalized_action = dict(_exact_json(parsed.normalized_payload))
+                action_digest = parsed.action_digest
+        current = self._provider_turns[index]
+        self._provider_turns[index] = replace(
+            current,
+            candidate_sha256=(
+                hashlib.sha256(raw_bytes).hexdigest() if candidate is not None else None
+            ),
+            candidate_length=(len(raw_bytes) if candidate is not None else None),
+            candidate_prefix=(
+                raw_bytes[:MAX_CAPTURED_PREFIX].decode("utf-8", errors="replace")
+                if candidate is not None
+                else None
+            ),
+            candidate_raw_utf8=exact_raw,
+            candidate_payload=bounded_payload,
+            action_candidate_payload=exact_action_payload,
+            action_kind=action_kind,
+            normalized_action=normalized_action,
+            action_digest=action_digest,
+            request_id=request_id,
+            parser_input_type=(type(payload).__name__ if payload is not None else None),
+            provider_output_type=(
+                type(candidate).__name__ if candidate is not None else None
+            ),
+            response_present=True,
+        )
+
+    def capture_provider_failure(self, request: Any, error: BaseException) -> None:
+        """Record failure identity without inventing a provider response."""
+
+        index = self._provider_request_objects.get(id(request))
+        if index is None:
+            raise ValidationCaptureError("provider failure has no captured request")
+        current = self._provider_turns[index]
+        classification = getattr(error, "classification", None) or type(error).__name__
+        self._provider_turns[index] = replace(
+            current, failure_classification=str(classification), response_present=False
+        )
+
+    def _next_candidate_request_id(self) -> str:
+        accepted_or_parsed = sum(
+            turn.normalized_action is not None for turn in self._provider_turns
+        )
+        return f"grounding-request-{accepted_or_parsed + 1}"
+
     def snapshot(self) -> RawRunCapture:
         return RawRunCapture(
             label=self.label,
             grounding_run_id=self.grounding_run_id,
             events=tuple(self._events),
             results=tuple(self._results),
+            provider_turns=tuple(self._provider_turns),
         )
 
 
@@ -550,6 +1144,16 @@ class ValidationRun:
     def capture_result(self, result: GroundingResult) -> GroundingResult:
         return self.store.capture_result(result)
 
+    def capture_provider(self, provider: object) -> "ValidationProviderProxy":
+        """Wrap a provider so capture starts before its first invocation."""
+
+        return ValidationProviderProxy(provider, self)
+
+    def persist_artifact(self, path: str | Path) -> "ValidationArtifact":
+        artifact = ValidationArtifact.from_raw_capture(self.raw_capture())
+        artifact.write(path)
+        return artifact
+
     def raw_capture(self) -> RawRunCapture:
         return self.store.snapshot()
 
@@ -561,10 +1165,13 @@ class ValidationRun:
         canonical_handoff_result: Mapping[str, Any] | None = None,
         repository_cleanliness_result: Mapping[str, Any] | None = None,
         normalizer: Callable[[RawRunCapture], "ValidationRunRecord"] | None = None,
+        artifact_path: str | Path | None = None,
     ) -> "ValidationRunRecord":
         if result is not None:
             self.capture_result(result)
         raw = self.raw_capture()
+        if artifact_path is not None:
+            ValidationArtifact.from_raw_capture(raw).write(artifact_path)
         if normalizer is not None:
             return normalizer(raw)
         return build_validation_run_record(
@@ -573,6 +1180,43 @@ class ValidationRun:
             canonical_handoff_result=canonical_handoff_result,
             repository_cleanliness_result=repository_cleanliness_result,
         )
+
+
+class ValidationProviderProxy:
+    """Validation-only PlanningProvider proxy; production never imports it."""
+
+    def __init__(self, provider: object, run: ValidationRun) -> None:
+        self._provider = provider
+        self._run = run
+
+    @property
+    def name(self) -> str:
+        return str(getattr(self._provider, "name", "validation-provider"))
+
+    @property
+    def version(self) -> str | None:
+        value = getattr(self._provider, "version", None)
+        return str(value) if value is not None else None
+
+    @property
+    def capabilities(self) -> object:
+        return getattr(self._provider, "capabilities")
+
+    def health(self) -> object:
+        return self._provider.health()  # type: ignore[attr-defined]
+
+    def runtime_information(self) -> object:
+        return self._provider.runtime_information()  # type: ignore[attr-defined]
+
+    def generate(self, request: object) -> object:
+        self._run.store.capture_provider_request(request, self._provider)
+        try:
+            response = self._provider.generate(request)  # type: ignore[attr-defined]
+        except Exception as exc:
+            self._run.store.capture_provider_failure(request, exc)
+            raise
+        self._run.store.capture_provider_response(request, response)
+        return response
 
 
 class ProviderValidationHarness:
@@ -854,6 +1498,14 @@ def _provider_turn_records(
 ) -> tuple[dict[str, object], ...]:
     merged: dict[str, dict[str, object]] = {}
     order: list[str] = []
+    for turn in raw.provider_turns:
+        details = _provider_turn_mapping(turn)
+        identity = details.get("provider_request_id")
+        key = str(identity) if identity else f"capture-{turn.sequence}"
+        merged[key] = dict(details)
+        merged[key]["event_sequences"] = []
+        merged[key]["capture_stages"] = ["provider_boundary"]
+        order.append(key)
     for event in raw.provider_turn_events:
         details = dict(event.details)
         identity = details.get("provider_request_id")
@@ -873,9 +1525,37 @@ def _provider_turn_records(
         for name, value in details.items():
             if name in {"capture_stage", "unrecorded_field_names"}:
                 continue
+            if name == "failure_classification" and value in {
+                "provider_timeout",
+                "provider_failure",
+            }:
+                merged[key][name] = value
+                continue
             if value is not None and (
                 name not in merged[key] or merged[key][name] is None
             ):
+                merged[key][name] = value
+    # Rejection details are emitted on GROUNDING_REQUEST with the same
+    # provider identity as the adapter turn.  Join them without changing the
+    # production event payload or relying on report prose.
+    for event in raw.events:
+        if event.event_type != EventType.GROUNDING_REQUEST:
+            continue
+        details = dict(event.details)
+        identity = details.get("provider_request_id")
+        if not identity:
+            continue
+        key = str(identity)
+        if key not in merged:
+            continue
+        for name in (
+            "rejection_code",
+            "protocol_rejection_code",
+            "failure_layer",
+            "outcome",
+        ):
+            value = details.get(name)
+            if value is not None:
                 merged[key][name] = value
     return tuple(merged[key] for key in order)
 
@@ -1122,24 +1802,36 @@ def _terminal_event(raw: RawRunCapture, *, reason: bool = False) -> str | None:
 
 
 __all__ = [
+    "ACTION_CAPTURE_SCHEMA_VERSION",
     "CASE_A_TRUTH",
     "CASE_B_TRUTH",
     "FROZEN_CASE_TRUTH",
     "FrozenCaseTruth",
     "EVALUATOR_TARGET_METRICS",
+    "MAX_CAPTURED_PROMPT_BYTES",
+    "MAX_LEGAL_ACTION_BYTES",
     "ObservationEvaluation",
     "ProviderValidationHarness",
     "RawBoundedCaptureStore",
     "RawCapturedEvent",
+    "RawProviderTurnCapture",
     "RawRunCapture",
     "VALIDATION_LABELS",
+    "VALIDATION_CAPTURE_SCHEMA_VERSION",
+    "PROMPT_CAPTURE_SCHEMA_VERSION",
+    "ValidationArtifact",
+    "ValidationCaptureError",
+    "ValidationProviderProxy",
     "ValidationRun",
     "ValidationRunRecord",
     "build_validation_run_record",
     "classify_observation",
     "evaluate_frozen_case",
     "evaluate_observation",
+    "exact_normalized_action",
+    "exact_provider_prompt",
     "normalize_event_type",
+    "serialize_validation_artifact",
     "serialize_grounding_observation",
     "serialize_grounding_result",
     "serialize_structural_identity",

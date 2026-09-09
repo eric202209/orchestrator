@@ -128,7 +128,9 @@ def _run_case(root: Path, label: str, files, responses, *, evaluator_case=None):
     harness = ProviderValidationHarness(labels=(label,))
     run = harness.start_run(label, grounding_run_id=f"pvh1-{label}-run")
     provider = ScriptedPlanningProvider(responses)
-    adapter = PlanningGroundingProviderAdapter(provider, event_sink=run.event_sink)
+    adapter = PlanningGroundingProviderAdapter(
+        run.capture_provider(provider), event_sink=run.event_sink
+    )
     config = GroundingRunConfig(
         grounding_run_id=f"pvh1-{label}-run",
         task_reference=GroundingTaskReference(task_id=f"task-{label}"),
