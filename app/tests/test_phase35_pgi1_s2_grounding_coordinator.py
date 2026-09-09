@@ -19,10 +19,12 @@ from app.services.orchestration.planning.grounding import (
     GroundingInvariantError,
     GroundingLifecycleState,
     GroundingProposal,
+    GroundingRequestRejection,
     GroundingRunConfig,
     GroundingTaskReference,
     GroundingTerminalReason,
     parse_grounding_provider_response,
+    parse_grounding_request,
     transition_grounding_state,
 )
 from app.services.orchestration.phases.planning_grounding_integration import (
@@ -240,9 +242,16 @@ def test_unsafe_request_is_recorded_and_can_receive_one_corrective_turn(tmp_path
     assert len(result.rejections) == 1
     assert result.rejections[0].code == "invalid_request"
     assert len(result.observations) == 1
-    # The correction consumed exploration budget, never the reserved allowance.
-    assert result.provider_model_telemetry["exploration_provider_requests"] == 2
-    assert result.provider_model_telemetry["terminal_assessment_requests"] == 1
+    # PHASE35-CPR1: the correction spends its own non-renewable allowance and
+    # never the reserved terminal assessment.
+    telemetry = result.provider_model_telemetry
+    assert telemetry["correction_provider_requests"] == 1
+    assert telemetry["terminal_assessment_requests"] == 0
+    assert telemetry["provider_requests"] == (
+        telemetry["exploration_provider_requests"]
+        + telemetry["correction_provider_requests"]
+        + telemetry["terminal_assessment_requests"]
+    )
 
 
 def test_provider_error_and_executor_error_are_failed_not_negative(
@@ -310,15 +319,28 @@ def test_no_orientation_is_valid_and_mechanical_skip_uses_no_provider(tmp_path):
 
 
 def test_strict_parser_rejects_unknown_wire_fields():
-    with pytest.raises(ValueError):
-        parse_grounding_provider_response(
-            {"action": "inspect_file", "path": "app/a.py", "extra": True},
-            after_observation=False,
+    # PHASE35-CPR1: a recognizable action object with an unknown field is no
+    # longer an uncorrectable wire failure.  It reaches the request validator,
+    # which is the single authority on legality and still rejects it.
+    proposal = parse_grounding_provider_response(
+        {"action": "inspect_file", "path": "app/a.py", "extra": True},
+        after_observation=False,
+    )
+    with pytest.raises(GroundingRequestRejection):
+        parse_grounding_request(
+            proposal.action_payload,
+            grounding_run_id="s2-run",
+            request_id="s2-request",
         )
+    # Assessment shapes stay strict at the wire layer; only actions are routed.
     with pytest.raises(ValueError):
         parse_grounding_provider_response(
             {"decision": "INSUFFICIENT", "reason": "x", "extra": True},
             after_observation=True,
+        )
+    with pytest.raises(ValueError):
+        parse_grounding_provider_response(
+            {"action": 7, "path": "app/a.py"}, after_observation=False
         )
 
 

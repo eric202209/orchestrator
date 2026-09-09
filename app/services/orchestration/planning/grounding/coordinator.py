@@ -347,19 +347,15 @@ def _parse_wire_response(
         if "decision" in payload:
             raise _MalformedProviderResponse("assessment is invalid on first turn")
         action = payload.get("action")
-        expected_fields = {
-            "search_text": {"action", "query", "scopes"},
-            "inspect_file": {"action", "path"},
-            "resolve_structure": {"action", "relation", "locator"},
-        }.get(action)
-        if expected_fields is None:
-            if isinstance(action, str):
-                # Keep mutation-shaped/unknown actions in the typed rejection
-                # path so a bounded corrective turn may be offered.
-                return GroundingProposal(action_payload=dict(payload))
+        if not isinstance(action, str):
             raise _MalformedProviderResponse("first-turn action shape is invalid")
-        if set(payload) != expected_fields:
-            raise _MalformedProviderResponse("first-turn action shape is invalid")
+        # Any recognizable grounding action object -- known kind or not, correct
+        # field set or not -- is routed to ``parse_grounding_request``, which
+        # stays the single authority on request legality.  Failing a known kind
+        # earlier used to make a malformed field set an uncorrectable transport
+        # error while an unknown action name stayed correctable; that asymmetry
+        # is what PHASE35-CPR1 removes.  Nothing here accepts, normalizes, or
+        # auto-fills a malformed request.
         return GroundingProposal(action_payload=dict(payload))
 
     decision = payload.get("decision")
@@ -419,6 +415,129 @@ def _parse_wire_response(
     raise _MalformedProviderResponse("unsupported post-observation decision")
 
 
+#: Action kinds whose repository hypothesis the coordinator can preserve
+#: mechanically across one correction turn.
+_KNOWN_ACTION_KINDS = frozenset({"search_text", "inspect_file", "resolve_structure"})
+
+#: A minimal legal request per action kind, used only as a probe so the existing
+#: request validator itself decides whether one rejected field was independently
+#: valid.  No validation logic is duplicated or weakened here.
+_MINIMAL_LEGAL_ACTION = {
+    "search_text": {"action": "search_text", "query": "probe", "scopes": ["app"]},
+    "inspect_file": {"action": "inspect_file", "path": "app/probe.py"},
+    "resolve_structure": {
+        "action": "resolve_structure",
+        "relation": "symbol_definition",
+        "locator": {"path": "app/probe.py", "name": "probe"},
+    },
+}
+
+
+class _CorrectionIdentityViolation(Exception):
+    """The correction changed repository intent instead of representation."""
+
+
+def _probe_parses(payload: Mapping[str, Any]) -> bool:
+    try:
+        parse_grounding_request(
+            payload,
+            grounding_run_id="correction-probe",
+            request_id="correction-probe-request",
+        )
+    except (GroundingRequestRejection, ValueError, TypeError):
+        return False
+    return True
+
+
+def _field_was_independently_valid(kind: str, field: str, value: Any) -> bool:
+    """Ask the real validator whether this one rejected field was itself legal.
+
+    A field that was the reason for the rejection must stay replaceable, or a
+    bad path could never be repaired.  A field that was already legal carries
+    the repository hypothesis and must survive the correction unchanged.
+    """
+
+    template = _MINIMAL_LEGAL_ACTION.get(kind)
+    if template is None:
+        return False
+    probe = {
+        key: dict(item) if isinstance(item, Mapping) else item
+        for key, item in template.items()
+    }
+    if field == "locator.path":
+        if not isinstance(probe.get("locator"), dict):
+            return False
+        probe["locator"]["path"] = value
+    else:
+        probe[field] = value
+    return _probe_parses(probe)
+
+
+def _preserved_fields(kind: str) -> tuple[str, ...]:
+    if kind == "search_text":
+        return ("query",)
+    if kind == "inspect_file":
+        return ("path",)
+    if kind == "resolve_structure":
+        return ("relation", "locator.path")
+    return ()
+
+
+def _read_field(payload: Mapping[str, Any], field: str) -> Any:
+    if field == "locator.path":
+        locator = payload.get("locator")
+        if isinstance(locator, Mapping):
+            return locator.get("path")
+        return None
+    return payload.get(field)
+
+
+def _validate_correction_identity(
+    rejected: Mapping[str, Any] | None, corrected: Mapping[str, Any]
+) -> None:
+    """Enforce: a correction repairs representation, not repository hypothesis.
+
+    Only mechanically provable preservation is required.  The action kind of a
+    recognizable rejected action is always preserved.  Each hypothesis-carrying
+    field is preserved only when the existing request validator confirms that
+    the rejected value was itself legal, so the field that caused the rejection
+    stays repairable.  When the rejected action carried no recognizable kind --
+    an unknown or mutation-shaped object -- there is no hypothesis to preserve
+    and the correction may propose one legal read-only action instead;
+    ``parse_grounding_request`` remains the sole authority on whether that
+    replacement is legal, so no mutation can be authorized here.
+    """
+
+    if not isinstance(rejected, Mapping):
+        return
+    rejected_action = rejected.get("action")
+    if rejected_action not in _KNOWN_ACTION_KINDS:
+        return
+    kind = str(rejected_action)
+    if corrected.get("action") != rejected_action:
+        raise _CorrectionIdentityViolation(
+            "a correction cannot change the rejected grounding action kind"
+        )
+    for field in _preserved_fields(kind):
+        value = _read_field(rejected, field)
+        if value is None:
+            continue
+        if not _field_was_independently_valid(kind, field, value):
+            continue
+        if _read_field(corrected, field) != value:
+            raise _CorrectionIdentityViolation(
+                f"a correction cannot change the rejected {field}"
+            )
+
+
+def _correction_source(payload: Any) -> dict[str, Any] | None:
+    """Retain the rejected action so a correction can be proved hypothesis-safe."""
+
+    if isinstance(payload, Mapping):
+        return dict(payload)
+    return None
+
+
 def parse_grounding_provider_response(
     payload: Any, *, after_observation: bool, terminal_only: bool = False
 ) -> GroundingProposal:
@@ -459,6 +578,10 @@ class GroundingCoordinator:
         if limits.exploration_provider_requests is None:
             updates["exploration_provider_requests"] = (
                 config.max_exploration_provider_requests
+            )
+        if limits.correction_provider_requests is None:
+            updates["correction_provider_requests"] = (
+                config.max_correction_provider_requests
             )
         if limits.terminal_assessment_requests is None:
             updates["terminal_assessment_requests"] = (
@@ -883,6 +1006,9 @@ class GroundingCoordinator:
                 "exploration_provider_requests": (
                     state.budget.exploration_provider_requests
                 ),
+                "correction_provider_requests": (
+                    state.budget.correction_provider_requests
+                ),
                 "terminal_assessment_requests": (
                     state.budget.terminal_assessment_requests
                 ),
@@ -914,6 +1040,9 @@ class GroundingCoordinator:
                 "exploration_provider_requests": (
                     state.budget.exploration_provider_requests
                 ),
+                "correction_provider_requests": (
+                    state.budget.correction_provider_requests
+                ),
                 "terminal_assessment_requests": (
                     state.budget.terminal_assessment_requests
                 ),
@@ -935,6 +1064,26 @@ class GroundingCoordinator:
             - state.budget.terminal_assessment_requests
         )
 
+    def _correction_allowance_remaining(self, state: GroundingCoordinatorState) -> int:
+        return (
+            self.config.max_correction_provider_requests
+            - state.budget.correction_provider_requests
+        )
+
+    def _correction_is_legal(self, state: GroundingCoordinatorState) -> bool:
+        """One mechanical correction per run, and only after a real rejection.
+
+        The allowance is separate from exploration and from the terminal
+        assessment, so repairing a malformed request neither buys exploration
+        depth nor spends the reserved final assessment.  It is non-renewable:
+        the budget dimension is the only gate, so it can never be reset by a
+        later successful step.
+        """
+
+        return bool(state.rejection_history) and (
+            self._correction_allowance_remaining(state) > 0
+        )
+
     def _select_turn_mode(
         self, state: GroundingCoordinatorState
     ) -> GroundingProviderTurnMode | None:
@@ -943,6 +1092,8 @@ class GroundingCoordinator:
         The terminal allowance is reserved: exploration can never spend it, and
         it is only legal once an observation exists that still needs a bounded
         final assessment.  ``None`` means no provider turn is legal at all.
+        Correction is never selected here; it is scheduled explicitly by the
+        rejection path so it can never be entered speculatively.
         """
 
         if self._exploration_remaining(state) > 0:
@@ -971,6 +1122,14 @@ class GroundingCoordinator:
                 raise _BudgetExhausted("terminal assessment allowance exhausted")
             delta = GroundingBudgetDelta(
                 provider_requests=1, terminal_assessment_requests=1
+            )
+        elif turn_mode is GroundingProviderTurnMode.CORRECTION:
+            if not state.rejection_history:
+                raise GroundingInvariantError("correction requires a rejection")
+            if self._correction_allowance_remaining(state) <= 0:
+                raise _BudgetExhausted("correction allowance exhausted")
+            delta = GroundingBudgetDelta(
+                provider_requests=1, correction_provider_requests=1
             )
         else:
             if self._exploration_remaining(state) <= 0:
@@ -1111,7 +1270,10 @@ class GroundingCoordinator:
                 GroundingTerminalReason.SKIPPED,
             )
 
-        correction_turns = 0
+        # A scheduled correction carries the rejected payload so the next turn
+        # can prove the repair kept the same repository hypothesis.
+        pending_correction: dict[str, Any] | None = None
+        correction_scheduled = False
         while True:
             try:
                 self._check_snapshot_identity()
@@ -1124,7 +1286,16 @@ class GroundingCoordinator:
                     GroundingTerminalReason.SOURCE_VERSION_CHANGED,
                 )
 
-            turn_mode = self._select_turn_mode(state)
+            if correction_scheduled:
+                # The allowance is consumed by this turn whatever it returns, so
+                # a correction can never loop or renew itself.
+                turn_mode = GroundingProviderTurnMode.CORRECTION
+                correction_scheduled = False
+                repairing = pending_correction
+                pending_correction = None
+            else:
+                turn_mode = self._select_turn_mode(state)
+                repairing = None
             if turn_mode is None:
                 state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                 return self._result(
@@ -1171,6 +1342,24 @@ class GroundingCoordinator:
                     GroundingTerminalReason.EXECUTOR_FAILURE,
                 )
 
+            if turn_mode.is_correction and proposal.action_payload is not None:
+                try:
+                    _validate_correction_identity(repairing, proposal.action_payload)
+                except _CorrectionIdentityViolation as exc:
+                    self._emit_assessment_validation_failure(
+                        state,
+                        provider_request_id=provider_request_id,
+                        code="invalid_correction_identity",
+                        failure_layer="L5_ACTION_SCHEMA",
+                        detail=str(exc),
+                    )
+                    state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                    return self._result(
+                        state,
+                        GroundingLifecycleState.INSUFFICIENT,
+                        GroundingTerminalReason.INVALID_MODEL_REQUEST,
+                    )
+
             if not after_observation:
                 try:
                     request = self._request_from_proposal(state, proposal)
@@ -1188,8 +1377,9 @@ class GroundingCoordinator:
                         provider_request_id,
                         payload=proposal.action_payload,
                     )
-                    if correction_turns == 0 and self._exploration_remaining(state) > 0:
-                        correction_turns += 1
+                    if self._correction_is_legal(state):
+                        pending_correction = _correction_source(proposal.action_payload)
+                        correction_scheduled = True
                         continue
                     state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                     return self._result(
@@ -1213,8 +1403,11 @@ class GroundingCoordinator:
                         provider_request_id,
                         payload=request.normalized_payload,
                     )
-                    if correction_turns == 0 and self._exploration_remaining(state) > 0:
-                        correction_turns += 1
+                    if self._correction_is_legal(state):
+                        pending_correction = _correction_source(
+                            request.normalized_payload
+                        )
+                        correction_scheduled = True
                         continue
                     state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                     return self._result(
@@ -1236,7 +1429,6 @@ class GroundingCoordinator:
                         GroundingLifecycleState.FAILED,
                         GroundingTerminalReason.EXECUTOR_FAILURE,
                     )
-                correction_turns = 0
                 continue
 
             next_action: GroundingRequest | None = None
@@ -1257,8 +1449,9 @@ class GroundingCoordinator:
                         provider_request_id,
                         payload=proposal.action_payload,
                     )
-                    if correction_turns == 0 and self._exploration_remaining(state) > 0:
-                        correction_turns += 1
+                    if self._correction_is_legal(state):
+                        pending_correction = _correction_source(proposal.action_payload)
+                        correction_scheduled = True
                         continue
                     state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                     return self._result(
@@ -1366,8 +1559,11 @@ class GroundingCoordinator:
                     provider_request_id,
                     payload=next_action.normalized_payload,
                 )
-                if correction_turns == 0 and self._exploration_remaining(state) > 0:
-                    correction_turns += 1
+                if self._correction_is_legal(state):
+                    pending_correction = _correction_source(
+                        next_action.normalized_payload
+                    )
+                    correction_scheduled = True
                     continue
                 state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                 return self._result(
@@ -1389,7 +1585,6 @@ class GroundingCoordinator:
                     GroundingLifecycleState.FAILED,
                     GroundingTerminalReason.EXECUTOR_FAILURE,
                 )
-            correction_turns = 0
 
 
 __all__ = [

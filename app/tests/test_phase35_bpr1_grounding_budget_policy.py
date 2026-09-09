@@ -117,10 +117,13 @@ FILES = {"app/sample.py": "needle = True\n", "app/other.py": "target = 2\n"}
 
 
 def _counts(result):
+    """(total, exploration, correction, terminal, repository actions)."""
+
     telemetry = result.provider_model_telemetry
     return (
         telemetry["provider_requests"],
         telemetry["exploration_provider_requests"],
+        telemetry["correction_provider_requests"],
         telemetry["terminal_assessment_requests"],
         result.repository_action_count,
     )
@@ -133,7 +136,7 @@ def test_p0_first_observation_sufficient_leaves_terminal_allowance_unspent(tmp_p
     result = _coordinator(root, provider).run()
 
     assert result.terminal_state is GroundingLifecycleState.SUFFICIENT
-    assert _counts(result) == (2, 2, 0, 1)
+    assert _counts(result) == (2, 2, 0, 0, 1)
     assert provider.turn_modes == [
         GroundingProviderTurnMode.EXPLORATION,
         GroundingProviderTurnMode.EXPLORATION,
@@ -148,7 +151,7 @@ def test_p1_first_observation_insufficient_leaves_terminal_allowance_unspent(tmp
 
     assert result.terminal_state is GroundingLifecycleState.INSUFFICIENT
     assert result.terminal_reason is GroundingTerminalReason.INSUFFICIENT_GROUNDING
-    assert _counts(result) == (2, 2, 0, 1)
+    assert _counts(result) == (2, 2, 0, 0, 1)
 
 
 def test_p2_one_useful_refinement_then_terminal_sufficient(tmp_path):
@@ -159,7 +162,7 @@ def test_p2_one_useful_refinement_then_terminal_sufficient(tmp_path):
 
     assert result.terminal_state is GroundingLifecycleState.SUFFICIENT
     assert result.terminal_reason is GroundingTerminalReason.SUFFICIENT
-    assert _counts(result) == (3, 2, 1, 2)
+    assert _counts(result) == (3, 2, 0, 1, 2)
     assert provider.turn_modes[-1] is GroundingProviderTurnMode.TERMINAL_ASSESSMENT
     assert result.cited_observation_ids == (result.observations[-1].observation_id,)
 
@@ -172,7 +175,7 @@ def test_p3_one_useful_refinement_then_terminal_insufficient(tmp_path):
 
     assert result.terminal_state is GroundingLifecycleState.INSUFFICIENT
     assert result.terminal_reason is GroundingTerminalReason.INSUFFICIENT_GROUNDING
-    assert _counts(result) == (3, 2, 1, 2)
+    assert _counts(result) == (3, 2, 0, 1, 2)
 
 
 def test_p4_terminal_turn_cannot_request_more_evidence(tmp_path):
@@ -188,7 +191,7 @@ def test_p4_terminal_turn_cannot_request_more_evidence(tmp_path):
     result = _coordinator(root, provider).run()
 
     assert result.terminal_state is GroundingLifecycleState.FAILED
-    assert _counts(result) == (3, 2, 1, 2)
+    assert _counts(result) == (3, 2, 0, 1, 2)
     assert len(result.observations) == 2
     assert len(provider.contexts) == 3
 
@@ -202,23 +205,29 @@ def test_p5_terminal_turn_rejects_action_only_payload(tmp_path):
     result = _coordinator(root, provider).run()
 
     assert result.terminal_state is GroundingLifecycleState.FAILED
-    assert _counts(result) == (3, 2, 1, 2)
+    assert _counts(result) == (3, 2, 0, 1, 2)
     assert len(result.observations) == 2
 
 
-def test_p6_correction_consumes_exploration_not_terminal_allowance(tmp_path):
+def test_p6_correction_spends_its_own_allowance_not_exploration_or_terminal(
+    tmp_path,
+):
+    """PHASE35-CPR1 separated the mechanical correction from exploration depth."""
+
     root = _repo(tmp_path, FILES)
     provider = FakeProvider([_inspect("../escape.py"), _inspect(), _sufficient])
 
     result = _coordinator(root, provider).run()
 
     assert result.terminal_state is GroundingLifecycleState.SUFFICIENT
-    assert _counts(result) == (3, 2, 1, 1)
+    # The correction spends its own allowance, so the second exploration turn
+    # that the old policy burned on the repair is still available afterwards.
+    assert _counts(result) == (3, 2, 1, 0, 1)
     assert len(result.rejections) == 1
     assert provider.turn_modes == [
         GroundingProviderTurnMode.EXPLORATION,
+        GroundingProviderTurnMode.CORRECTION,
         GroundingProviderTurnMode.EXPLORATION,
-        GroundingProviderTurnMode.TERMINAL_ASSESSMENT,
     ]
 
 
@@ -231,7 +240,7 @@ def test_p7_repeated_unproductive_refinement_stays_bounded(tmp_path):
     result = _coordinator(root, provider).run()
 
     assert result.terminal_state is GroundingLifecycleState.INSUFFICIENT
-    assert _counts(result) == (3, 2, 1, 2)
+    assert _counts(result) == (3, 2, 0, 1, 2)
     assert len(result.observations) == 2
 
 
@@ -289,7 +298,7 @@ def test_total_provider_ceiling_is_explicit_not_an_implicit_increment():
         max_exploration_provider_requests=2,
     )
 
-    assert config.max_total_provider_requests == 3
+    assert config.max_total_provider_requests == 4
 
 
 class _Adversary:
@@ -325,11 +334,14 @@ def test_adversarial_provider_cannot_exceed_the_bounded_policy(tmp_path, mode):
 
     result = _coordinator(root, adversary).run()
 
-    total, exploration, terminal, actions = _counts(result)
+    total, exploration, correction, terminal, actions = _counts(result)
     assert exploration <= 2, "exploration budget was exceeded"
+    assert correction <= 1, "the correction allowance was renewed"
     assert terminal <= 1, "the terminal allowance was renewed"
-    assert total <= 3, "the truthful total provider ceiling was exceeded"
-    assert total == exploration + terminal, "provider accounting is not truthful"
+    assert total <= 4, "the truthful total provider ceiling was exceeded"
+    assert (
+        total == exploration + correction + terminal
+    ), "provider accounting is not truthful"
     assert actions <= 2, "the repository action bound was exceeded"
     assert adversary.calls == total, "a provider call escaped budget accounting"
     assert result.terminal_state.terminal
@@ -353,10 +365,12 @@ def test_no_observation_is_ever_left_without_an_assessment_opportunity(tmp_path)
 
     result = _coordinator(root, adversary).run()
 
+    telemetry = result.provider_model_telemetry
     assessment_turns = (
-        result.provider_model_telemetry["exploration_provider_requests"]
+        telemetry["exploration_provider_requests"]
+        + telemetry["correction_provider_requests"]
         - 1
-        + result.provider_model_telemetry["terminal_assessment_requests"]
+        + telemetry["terminal_assessment_requests"]
     )
     assert assessment_turns >= len(result.observations)
 

@@ -454,12 +454,18 @@ class StructuralIdentity:
 #: Every counted grounding budget dimension, in canonical order.
 #:
 #: ``provider_requests`` stays the truthful total of provider invocations of
-#: every kind.  ``exploration_provider_requests`` and
-#: ``terminal_assessment_requests`` partition that total by lifecycle role, so
-#: the bounded exploration pool cannot spend the reserved terminal assessment.
+#: every kind.  ``exploration_provider_requests``,
+#: ``correction_provider_requests`` and ``terminal_assessment_requests``
+#: partition that total by lifecycle role, so the bounded exploration pool can
+#: spend neither the reserved terminal assessment nor the single mechanical
+#: correction allowance, and the correction allowance can buy no extra
+#: exploration depth.  The partition identity always holds:
+#:
+#:     provider_requests == exploration + correction + terminal_assessment
 GROUNDING_BUDGET_DIMENSIONS = (
     "provider_requests",
     "exploration_provider_requests",
+    "correction_provider_requests",
     "terminal_assessment_requests",
     "repository_actions",
     "source_evidence_bytes",
@@ -472,6 +478,7 @@ GROUNDING_BUDGET_DIMENSIONS = (
 class GroundingBudgetDelta:
     provider_requests: int = 0
     exploration_provider_requests: int = 0
+    correction_provider_requests: int = 0
     terminal_assessment_requests: int = 0
     repository_actions: int = 0
     source_evidence_bytes: int = 0
@@ -492,6 +499,7 @@ class GroundingBudgetDelta:
 class GroundingBudgetSnapshot:
     provider_requests: int = 0
     exploration_provider_requests: int = 0
+    correction_provider_requests: int = 0
     terminal_assessment_requests: int = 0
     repository_actions: int = 0
     source_evidence_bytes: int = 0
@@ -512,6 +520,7 @@ class GroundingBudgetSnapshot:
 class GroundingBudgetLimits:
     provider_requests: int | None = None
     exploration_provider_requests: int | None = None
+    correction_provider_requests: int | None = None
     terminal_assessment_requests: int | None = None
     repository_actions: int | None = None
     source_evidence_bytes: int | None = None

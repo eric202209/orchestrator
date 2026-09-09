@@ -222,7 +222,9 @@ def render_grounding_provider_prompt(context: GroundingDecisionContext) -> str:
 
     if context.turn_mode.terminal_only:
         return render_terminal_assessment_prompt(context)
-    if context.state.rejection_history:
+    # The lifecycle role is fixed before the call, so a spent rejection can no
+    # longer make an ordinary exploration turn render as a correction.
+    if context.turn_mode.is_correction:
         return render_rejection_correction_prompt(context)
     if context.state.observation_history:
         return render_post_observation_prompt(context)
@@ -232,7 +234,7 @@ def render_grounding_provider_prompt(context: GroundingDecisionContext) -> str:
 def _turn_type(context: GroundingDecisionContext) -> str:
     if context.turn_mode.terminal_only:
         return "TERMINAL_ASSESSMENT"
-    if context.state.rejection_history:
+    if context.turn_mode.is_correction:
         return "REJECTION_CORRECTION"
     if context.state.observation_history:
         return "POST_OBSERVATION_ASSESSMENT"

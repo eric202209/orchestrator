@@ -232,11 +232,6 @@ def test_post_observation_wire_examples_are_accepted_by_the_production_parser(
             False,
         ),
         (
-            '{"action":"inspect_file","path":"app/example.py","extra":true}',
-            "unknown_fields",
-            False,
-        ),
-        (
             '{"decision":"SUFFICIENT","cited_observation_ids":["grounding-observation-1"],"rationale":"ok","extra":true}',
             "unknown_fields",
             True,
@@ -274,6 +269,43 @@ def test_wire_failures_are_strict_and_captured(
     assert events[-1]["parser_success"] is False
     assert events[-1]["prompt_length"] > 0
     assert "bounded_content" not in events[-1]
+
+
+def test_known_action_with_unknown_field_reaches_the_request_validator(tmp_path):
+    """PHASE35-CPR1: a recognizable action is routed, not failed at the wire.
+
+    An unknown field on a known action used to raise before
+    ``parse_grounding_request`` ran, which made it an uncorrectable transport
+    error while an unknown *action name* stayed correctable.  The adapter now
+    returns the proposal and the request validator rejects it, so the object
+    reaches the typed rejection and correction boundary.
+    """
+
+    from app.services.orchestration.planning.grounding import (
+        GroundingRequestRejection,
+        parse_grounding_request,
+    )
+
+    wire = '{"action":"inspect_file","path":"app/example.py","extra":true}'
+    provider = FakePlanningProvider([wire])
+    events, sink = _capture_sink()
+    adapter = PlanningGroundingProviderAdapter(provider, event_sink=sink)
+
+    proposal = adapter.decide(_context(tmp_path, provider=provider))
+
+    assert proposal.action_payload == {
+        "action": "inspect_file",
+        "path": "app/example.py",
+        "extra": True,
+    }
+    assert events[-1]["parser_success"] is True
+    with pytest.raises(GroundingRequestRejection) as excinfo:
+        parse_grounding_request(
+            proposal.action_payload,
+            grounding_run_id="pga1-run",
+            request_id="pga1-request",
+        )
+    assert excinfo.value.code == "invalid_request"
 
 
 def test_provider_timeout_and_exception_are_captured_without_recovery(tmp_path):

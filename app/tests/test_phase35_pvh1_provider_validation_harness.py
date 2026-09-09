@@ -335,9 +335,15 @@ def test_provider_free_matrix_fixtures_have_complete_final_summaries(tmp_path):
             None,
         ),
         (
+            # PHASE35-CPR1: an unknown field on a known action is now a typed
+            # request rejection with one mechanical correction, not an
+            # uncorrectable wire failure.  Repeating it must still be refused.
             "A3",
             {"app/target.py": "value = 1\n"},
-            ['{"action":"inspect_file","path":"app/target.py","extra":true}'],
+            [
+                '{"action":"inspect_file","path":"app/target.py","extra":true}',
+                '{"action":"inspect_file","path":"app/target.py","extra":true}',
+            ],
             None,
         ),
         (
@@ -433,7 +439,14 @@ def test_provider_free_matrix_fixtures_have_complete_final_summaries(tmp_path):
     assert by_label["B2"].first_action_digest != by_label["B2"].next_action_digest
     assert by_label["B2"].post_observation_assessment_count == 2
     assert by_label["A2"].second_action_differs_from_first is False
-    assert by_label["A3"].parser_failure_count == 1
+    assert by_label["A3"].parser_failure_count == 0
+    assert by_label["A3"].terminal_reason == "INVALID_MODEL_REQUEST"
+    assert by_label["A3"].observation_count == 0
+    assert [item["code"] for item in by_label["A3"].rejections] == [
+        "invalid_request",
+        "invalid_request",
+    ]
+    assert by_label["A3"].correction_turn_count == 1
     assert by_label["B1"].runtime_failures == ("provider_timeout",)
     assert by_label["B3"].runtime_failures == ("provider_failure",)
     assert by_label["C1"].parser_failure_count == 1

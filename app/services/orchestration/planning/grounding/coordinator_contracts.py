@@ -181,6 +181,7 @@ class GroundingRunConfig:
     snapshot_identity: str
     max_steps: int
     max_exploration_provider_requests: int
+    max_correction_provider_requests: int = 1
     max_terminal_assessment_requests: int = 1
     budget_limits: GroundingBudgetLimits = GroundingBudgetLimits()
     operator_task: str = ""
@@ -204,6 +205,8 @@ class GroundingRunConfig:
             raise ValueError("max_exploration_provider_requests must be an integer")
         if self.max_exploration_provider_requests <= 0:
             raise ValueError("max_exploration_provider_requests must be positive")
+        if self.max_correction_provider_requests != 1:
+            raise ValueError("max_correction_provider_requests must be exactly 1")
         if self.max_terminal_assessment_requests != 1:
             raise ValueError("max_terminal_assessment_requests must be exactly 1")
         if not isinstance(self.mechanical_skip, bool):
@@ -218,6 +221,7 @@ class GroundingRunConfig:
 
         return (
             self.max_exploration_provider_requests
+            + self.max_correction_provider_requests
             + self.max_terminal_assessment_requests
         )
 
@@ -260,14 +264,22 @@ class GroundingCoordinatorState:
 class GroundingProviderTurnMode(str, Enum):
     """Lifecycle role the coordinator fixes before it invokes the provider."""
 
-    #: May request one repository action, assess, correct, or terminate.
+    #: May request one repository action, assess, or terminate.
     EXPLORATION = "EXPLORATION"
+    #: Spends the single non-renewable mechanical correction allowance.  It may
+    #: only repair the representation of an already rejected request: it buys no
+    #: exploration depth, no repository action of its own, and no new hypothesis.
+    CORRECTION = "CORRECTION"
     #: Spends the reserved non-renewable allowance; may only terminate.
     TERMINAL_ASSESSMENT = "TERMINAL_ASSESSMENT"
 
     @property
     def terminal_only(self) -> bool:
         return self is GroundingProviderTurnMode.TERMINAL_ASSESSMENT
+
+    @property
+    def is_correction(self) -> bool:
+        return self is GroundingProviderTurnMode.CORRECTION
 
 
 @dataclass(frozen=True, slots=True)

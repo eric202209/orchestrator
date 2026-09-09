@@ -242,24 +242,21 @@ def test_case_d_action_budget_exhaustion_stops_before_second_repository_action(
 
 def test_case_e_invalid_request_is_not_a_repository_observation(tmp_path):
     root = _git_repo(tmp_path, {"app/sample.py": "value = 1\n"})
-    provider = ScriptedProvider(
-        [
-            lambda _context: GroundingProposal(
-                action_payload={
-                    "action": "inspect_file",
-                    "path": "../escape.py",
-                }
-            )
-        ]
+    unsafe = lambda _context: GroundingProposal(  # noqa: E731
+        action_payload={"action": "inspect_file", "path": "../escape.py"}
     )
+    # PHASE35-CPR1 grants one mechanical correction, so the unsafe request is
+    # offered a single repair.  Repeating it must still reach no observation.
+    provider = ScriptedProvider([unsafe, unsafe])
 
     result = _coordinator(root, provider, max_exploration_provider_requests=1).run()
 
     assert result.terminal_reason is GroundingTerminalReason.INVALID_MODEL_REQUEST
     assert result.terminal_state.value == "INSUFFICIENT"
     assert result.state_projection.observation_ids == ()
-    assert len(result.rejections) == 1
+    assert len(result.rejections) == 2
     assert result.cited_source_paths == ()
+    assert result.provider_model_telemetry["correction_provider_requests"] == 1
 
 
 def test_case_f_snapshot_identity_change_fails_closed(tmp_path):
