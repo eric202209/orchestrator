@@ -61,7 +61,7 @@ def _coordinator(
     provider,
     *,
     max_steps: int = 4,
-    max_provider_requests: int = 3,
+    max_exploration_provider_requests: int = 3,
     mechanical_skip: bool = False,
 ):
     config = GroundingRunConfig(
@@ -70,7 +70,7 @@ def _coordinator(
         workspace_identity=str(root.resolve()),
         snapshot_identity="snapshot-1",
         max_steps=max_steps,
-        max_provider_requests=max_provider_requests,
+        max_exploration_provider_requests=max_exploration_provider_requests,
         budget_limits=GroundingBudgetLimits(
             source_evidence_bytes=12 * 1024,
             distinct_files=4,
@@ -127,7 +127,7 @@ def test_direct_success_has_explicit_terminal_state_and_citation(tmp_path):
     )
 
 
-def test_provider_budget_two_bounds_refinement_before_final_assessment(tmp_path):
+def test_reserved_terminal_allowance_assesses_one_bounded_refinement(tmp_path):
     root = _repo(tmp_path, {"app/sample.py": "needle = True\n"})
     provider = FakeProvider(
         [
@@ -141,16 +141,19 @@ def test_provider_budget_two_bounds_refinement_before_final_assessment(tmp_path)
         ]
     )
 
-    result = _coordinator(root, provider, max_provider_requests=2).run()
+    result = _coordinator(root, provider, max_exploration_provider_requests=2).run()
 
-    assert result.terminal_state is GroundingLifecycleState.INSUFFICIENT
-    assert result.terminal_reason is GroundingTerminalReason.BUDGET_EXHAUSTED
-    assert result.provider_model_telemetry["provider_requests"] == 2
+    assert result.terminal_state is GroundingLifecycleState.SUFFICIENT
+    assert result.terminal_reason is GroundingTerminalReason.SUFFICIENT
+    assert result.provider_model_telemetry["provider_requests"] == 3
+    assert result.provider_model_telemetry["exploration_provider_requests"] == 2
+    assert result.provider_model_telemetry["terminal_assessment_requests"] == 1
+    assert result.grounding_diagnostics["repository_actions"] == 2
     assert tuple(item.outcome.value for item in result.observations) == (
         "NOT_FOUND",
         "FOUND",
     )
-    assert len(provider.contexts) == 2
+    assert len(provider.contexts) == 3
 
 
 def test_negative_then_duplicate_request_is_allowed_and_consumes_action_budget(
@@ -165,14 +168,15 @@ def test_negative_then_duplicate_request_is_allowed_and_consumes_action_budget(
                 "next_action": _search("absent"),
                 "rationale": "Repeat the same bounded request.",
             },
+            {"decision": "INSUFFICIENT", "reason": "Both searches stayed negative."},
         ]
     )
 
-    result = _coordinator(root, provider, max_provider_requests=2).run()
+    result = _coordinator(root, provider, max_exploration_provider_requests=2).run()
 
     assert result.terminal_state is GroundingLifecycleState.INSUFFICIENT
-    assert result.terminal_reason is GroundingTerminalReason.BUDGET_EXHAUSTED
-    assert result.provider_model_telemetry["provider_requests"] == 2
+    assert result.terminal_reason is GroundingTerminalReason.INSUFFICIENT_GROUNDING
+    assert result.provider_model_telemetry["provider_requests"] == 3
     assert result.grounding_diagnostics["repository_actions"] == 2
     assert len(result.observations) == 2
 
@@ -226,16 +230,19 @@ def test_unsafe_request_is_recorded_and_can_receive_one_corrective_turn(tmp_path
         [
             _inspect("../escape.py"),
             _inspect(),
+            _sufficient,
         ]
     )
 
-    result = _coordinator(root, provider, max_provider_requests=2).run()
+    result = _coordinator(root, provider, max_exploration_provider_requests=2).run()
 
-    assert result.terminal_state is GroundingLifecycleState.INSUFFICIENT
-    assert result.terminal_reason is GroundingTerminalReason.BUDGET_EXHAUSTED
+    assert result.terminal_state is GroundingLifecycleState.SUFFICIENT
     assert len(result.rejections) == 1
     assert result.rejections[0].code == "invalid_request"
     assert len(result.observations) == 1
+    # The correction consumed exploration budget, never the reserved allowance.
+    assert result.provider_model_telemetry["exploration_provider_requests"] == 2
+    assert result.provider_model_telemetry["terminal_assessment_requests"] == 1
 
 
 def test_provider_error_and_executor_error_are_failed_not_negative(

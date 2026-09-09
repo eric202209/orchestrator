@@ -451,9 +451,28 @@ class StructuralIdentity:
         return f"{self.source_path}:{self.handler_name}"
 
 
+#: Every counted grounding budget dimension, in canonical order.
+#:
+#: ``provider_requests`` stays the truthful total of provider invocations of
+#: every kind.  ``exploration_provider_requests`` and
+#: ``terminal_assessment_requests`` partition that total by lifecycle role, so
+#: the bounded exploration pool cannot spend the reserved terminal assessment.
+GROUNDING_BUDGET_DIMENSIONS = (
+    "provider_requests",
+    "exploration_provider_requests",
+    "terminal_assessment_requests",
+    "repository_actions",
+    "source_evidence_bytes",
+    "distinct_files",
+    "positive_regions",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class GroundingBudgetDelta:
     provider_requests: int = 0
+    exploration_provider_requests: int = 0
+    terminal_assessment_requests: int = 0
     repository_actions: int = 0
     source_evidence_bytes: int = 0
     distinct_files: int = 0
@@ -464,13 +483,7 @@ class GroundingBudgetDelta:
             not isinstance(getattr(self, name), int)
             or isinstance(getattr(self, name), bool)
             or getattr(self, name) < 0
-            for name in (
-                "provider_requests",
-                "repository_actions",
-                "source_evidence_bytes",
-                "distinct_files",
-                "positive_regions",
-            )
+            for name in GROUNDING_BUDGET_DIMENSIONS
         ):
             raise ValueError("budget deltas cannot be negative")
 
@@ -478,6 +491,8 @@ class GroundingBudgetDelta:
 @dataclass(frozen=True, slots=True)
 class GroundingBudgetSnapshot:
     provider_requests: int = 0
+    exploration_provider_requests: int = 0
+    terminal_assessment_requests: int = 0
     repository_actions: int = 0
     source_evidence_bytes: int = 0
     distinct_files: int = 0
@@ -488,13 +503,7 @@ class GroundingBudgetSnapshot:
             not isinstance(getattr(self, name), int)
             or isinstance(getattr(self, name), bool)
             or getattr(self, name) < 0
-            for name in (
-                "provider_requests",
-                "repository_actions",
-                "source_evidence_bytes",
-                "distinct_files",
-                "positive_regions",
-            )
+            for name in GROUNDING_BUDGET_DIMENSIONS
         ):
             raise ValueError("budget counters cannot be negative")
 
@@ -502,19 +511,15 @@ class GroundingBudgetSnapshot:
 @dataclass(frozen=True, slots=True)
 class GroundingBudgetLimits:
     provider_requests: int | None = None
+    exploration_provider_requests: int | None = None
+    terminal_assessment_requests: int | None = None
     repository_actions: int | None = None
     source_evidence_bytes: int | None = None
     distinct_files: int | None = None
     positive_regions: int | None = None
 
     def __post_init__(self) -> None:
-        for name in (
-            "provider_requests",
-            "repository_actions",
-            "source_evidence_bytes",
-            "distinct_files",
-            "positive_regions",
-        ):
+        for name in GROUNDING_BUDGET_DIMENSIONS:
             value = getattr(self, name)
             if value is not None and (
                 not isinstance(value, int) or isinstance(value, bool) or value < 0
@@ -533,22 +538,11 @@ class GroundingBudgetAccounting:
     ) -> "GroundingBudgetAccounting":
         values = {
             name: getattr(self.snapshot, name) + getattr(delta, name)
-            for name in (
-                "provider_requests",
-                "repository_actions",
-                "source_evidence_bytes",
-                "distinct_files",
-                "positive_regions",
-            )
+            for name in GROUNDING_BUDGET_DIMENSIONS
         }
         if limits is not None:
-            for name, limit in (
-                ("provider_requests", limits.provider_requests),
-                ("repository_actions", limits.repository_actions),
-                ("source_evidence_bytes", limits.source_evidence_bytes),
-                ("distinct_files", limits.distinct_files),
-                ("positive_regions", limits.positive_regions),
-            ):
+            for name in GROUNDING_BUDGET_DIMENSIONS:
+                limit = getattr(limits, name)
                 if limit is not None and values[name] > limit:
                     raise GroundingRequestRejection(
                         f"budget_{name}_exceeded",

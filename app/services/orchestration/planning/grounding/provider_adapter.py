@@ -56,6 +56,12 @@ POST_OBSERVATION_WIRE_EXAMPLES = (
     '{"decision":"INSUFFICIENT","reason":"..."}',
 )
 
+TERMINAL_ASSESSMENT_WIRE_EXAMPLES = (
+    '{"decision":"SUFFICIENT","cited_observation_ids":'
+    '["grounding-observation-..."],"rationale":"..."}',
+    '{"decision":"INSUFFICIENT","reason":"..."}',
+)
+
 _REJECTION_DIAGNOSTICS = {
     "unknown_fields": "The previous object used fields outside the closed wire shape.",
     "invalid_first_turn_action": "The first turn must be exactly one legal action object.",
@@ -80,12 +86,13 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-def _wire_examples(after_observation: bool) -> str:
-    examples = (
-        POST_OBSERVATION_WIRE_EXAMPLES
-        if after_observation
-        else FIRST_TURN_WIRE_EXAMPLES
-    )
+def _wire_examples(after_observation: bool, terminal_only: bool = False) -> str:
+    if terminal_only:
+        examples = TERMINAL_ASSESSMENT_WIRE_EXAMPLES
+    elif after_observation:
+        examples = POST_OBSERVATION_WIRE_EXAMPLES
+    else:
+        examples = FIRST_TURN_WIRE_EXAMPLES
     return "\n".join(f"    {example}" for example in examples)
 
 
@@ -154,6 +161,34 @@ def render_post_observation_prompt(context: GroundingDecisionContext) -> str:
     )
 
 
+def render_terminal_assessment_prompt(context: GroundingDecisionContext) -> str:
+    """Render the closed terminal protocol: the run has no further actions."""
+
+    return (
+        "READ-ONLY GROUNDING FINAL ASSESSMENT.\n"
+        "This is the last turn of this grounding run.\n"
+        "No further repository action is possible.\n"
+        "Return exactly ONE JSON object.\n"
+        "Return no prose.\n"
+        "Return no Markdown fence.\n"
+        "Return no explanation outside JSON.\n"
+        "NEED_MORE_EVIDENCE is invalid on this turn. next_action is invalid.\n"
+        "A bare action is invalid. Do not return a Plan.\n"
+        "Assess the observations already gathered and return exactly one of:\n"
+        f"{_wire_examples(True, terminal_only=True)}\n\n"
+        "Unknown fields are invalid. Assessment fields are closed and exact.\n"
+        "SUFFICIENT must cite existing positive observation IDs.\n"
+        "NOT_FOUND observations cannot be cited as positive evidence.\n"
+        "If the gathered evidence does not ground the task, return INSUFFICIENT.\n\n"
+        "## IMMUTABLE OPERATOR TASK\n"
+        f"{context.operator_task}\n\n"
+        "## TYPED PRIOR OBSERVATIONS AND STATE\n"
+        f"{render_grounding_state(context.state)}\n\n"
+        "## REMAINING BUDGET\n"
+        f"{_remaining_budget_json(context)}"
+    )
+
+
 def render_rejection_correction_prompt(context: GroundingDecisionContext) -> str:
     """Render a mechanical correction without semantic replacement hints."""
 
@@ -185,6 +220,8 @@ def render_rejection_correction_prompt(context: GroundingDecisionContext) -> str
 def render_grounding_provider_prompt(context: GroundingDecisionContext) -> str:
     """Select the deterministic prompt for the current coordinator turn."""
 
+    if context.turn_mode.terminal_only:
+        return render_terminal_assessment_prompt(context)
     if context.state.rejection_history:
         return render_rejection_correction_prompt(context)
     if context.state.observation_history:
@@ -193,6 +230,8 @@ def render_grounding_provider_prompt(context: GroundingDecisionContext) -> str:
 
 
 def _turn_type(context: GroundingDecisionContext) -> str:
+    if context.turn_mode.terminal_only:
+        return "TERMINAL_ASSESSMENT"
     if context.state.rejection_history:
         return "REJECTION_CORRECTION"
     if context.state.observation_history:
@@ -249,9 +288,13 @@ def _failure_layer(code: str | None) -> str | None:
     return None
 
 
-def _wire_rejection_code(payload: Any, *, after_observation: bool) -> str:
+def _wire_rejection_code(
+    payload: Any, *, after_observation: bool, terminal_only: bool = False
+) -> str:
     if not isinstance(payload, Mapping):
         return "json_not_object"
+    if terminal_only:
+        return "invalid_terminal_assessment"
     if not after_observation:
         action = payload.get("action")
         expected = {
@@ -563,9 +606,14 @@ class PlanningGroundingProviderAdapter:
             proposal = parse_grounding_provider_response(
                 payload,
                 after_observation=after_observation,
+                terminal_only=context.turn_mode.terminal_only,
             )
         except (TypeError, ValueError) as exc:
-            code = _wire_rejection_code(payload, after_observation=after_observation)
+            code = _wire_rejection_code(
+                payload,
+                after_observation=after_observation,
+                terminal_only=context.turn_mode.terminal_only,
+            )
             self._capture(
                 context,
                 prompt,
@@ -603,8 +651,10 @@ __all__ = [
     "MAX_CAPTURED_CANDIDATE_PREFIX",
     "PlanningGroundingProviderAdapter",
     "POST_OBSERVATION_WIRE_EXAMPLES",
+    "TERMINAL_ASSESSMENT_WIRE_EXAMPLES",
     "render_first_turn_prompt",
     "render_grounding_provider_prompt",
     "render_post_observation_prompt",
     "render_rejection_correction_prompt",
+    "render_terminal_assessment_prompt",
 ]

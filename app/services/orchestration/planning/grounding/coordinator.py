@@ -18,6 +18,7 @@ from app.services.orchestration.planning.source_materialization import (
 )
 
 from .contracts import (
+    GROUNDING_BUDGET_DIMENSIONS,
     GroundingBudgetAccounting,
     GroundingBudgetDelta,
     GroundingBudgetLimits,
@@ -38,6 +39,7 @@ from .coordinator_contracts import (
     GROUNDING_RESULT_SCHEMA_VERSION,
     GroundingLifecycleState,
     GroundingProposal,
+    GroundingProviderTurnMode,
     GroundingRejection,
     GroundingResult,
     GroundingRunConfig,
@@ -209,13 +211,7 @@ def _remaining_budget(
             if getattr(config.budget_limits, name) is None
             else max(0, getattr(config.budget_limits, name) - getattr(budget, name))
         )
-        for name in (
-            "provider_requests",
-            "repository_actions",
-            "source_evidence_bytes",
-            "distinct_files",
-            "positive_regions",
-        )
+        for name in GROUNDING_BUDGET_DIMENSIONS
     }
 
 
@@ -306,9 +302,15 @@ def render_grounding_state(state: GroundingCoordinatorState) -> str:
     )
 
 
-def _parse_wire_response(payload: Any, *, after_observation: bool) -> GroundingProposal:
-    """Parse the closed first-turn and post-observation wire shapes."""
+def _parse_wire_response(
+    payload: Any, *, after_observation: bool, terminal_only: bool = False
+) -> GroundingProposal:
+    """Parse the closed first-turn, post-observation, and terminal wire shapes."""
 
+    if terminal_only and not after_observation:
+        raise _MalformedProviderResponse(
+            "terminal assessment requires at least one observation"
+        )
     if isinstance(payload, GroundingProposal):
         if after_observation:
             if payload.assessment_kind is None:
@@ -321,6 +323,10 @@ def _parse_wire_response(payload: Any, *, after_observation: bool) -> GroundingP
                         "SUFFICIENT cannot include a next action"
                     )
             elif payload.assessment_kind is GroundingAssessmentKind.NEED_MORE_EVIDENCE:
+                if terminal_only:
+                    raise _MalformedProviderResponse(
+                        "terminal assessment cannot request more evidence"
+                    )
                 if payload.action_payload is None:
                     raise _MalformedProviderResponse(
                         "NEED_MORE_EVIDENCE requires exactly one next action"
@@ -360,6 +366,13 @@ def _parse_wire_response(payload: Any, *, after_observation: bool) -> GroundingP
     if not isinstance(decision, str):
         raise _MalformedProviderResponse("post-observation decision is required")
     decision = decision.upper()
+    if terminal_only and decision not in {
+        GroundingAssessmentKind.SUFFICIENT.value,
+        GroundingAssessmentKind.INSUFFICIENT.value,
+    }:
+        raise _MalformedProviderResponse(
+            "terminal assessment must be SUFFICIENT or INSUFFICIENT"
+        )
     if decision == GroundingAssessmentKind.SUFFICIENT.value:
         if set(payload) != {"decision", "cited_observation_ids", "rationale"}:
             raise _MalformedProviderResponse("SUFFICIENT assessment shape is invalid")
@@ -407,11 +420,13 @@ def _parse_wire_response(payload: Any, *, after_observation: bool) -> GroundingP
 
 
 def parse_grounding_provider_response(
-    payload: Any, *, after_observation: bool
+    payload: Any, *, after_observation: bool, terminal_only: bool = False
 ) -> GroundingProposal:
     """Public strict parser used by provider-free contract tests."""
 
-    return _parse_wire_response(payload, after_observation=after_observation)
+    return _parse_wire_response(
+        payload, after_observation=after_observation, terminal_only=terminal_only
+    )
 
 
 class GroundingCoordinator:
@@ -440,7 +455,15 @@ class GroundingCoordinator:
         if limits.repository_actions is None:
             updates["repository_actions"] = config.max_steps
         if limits.provider_requests is None:
-            updates["provider_requests"] = config.max_provider_requests
+            updates["provider_requests"] = config.max_total_provider_requests
+        if limits.exploration_provider_requests is None:
+            updates["exploration_provider_requests"] = (
+                config.max_exploration_provider_requests
+            )
+        if limits.terminal_assessment_requests is None:
+            updates["terminal_assessment_requests"] = (
+                config.max_terminal_assessment_requests
+            )
         if updates:
             config = replace(config, budget_limits=replace(limits, **updates))
         return config
@@ -857,12 +880,24 @@ class GroundingCoordinator:
                 "provider": self.config.provider_name,
                 "model": self.config.model_name,
                 "provider_requests": state.budget.provider_requests,
+                "exploration_provider_requests": (
+                    state.budget.exploration_provider_requests
+                ),
+                "terminal_assessment_requests": (
+                    state.budget.terminal_assessment_requests
+                ),
             },
             grounding_diagnostics={
                 "observation_count": len(state.observation_history),
                 "assessment_count": len(state.assessment_history),
                 "rejection_count": len(state.rejection_history),
                 "repository_actions": state.budget.repository_actions,
+                "exploration_provider_requests": (
+                    state.budget.exploration_provider_requests
+                ),
+                "terminal_assessment_requests": (
+                    state.budget.terminal_assessment_requests
+                ),
                 "source_evidence_bytes": state.budget.source_evidence_bytes,
                 "distinct_files": state.budget.distinct_files,
                 "positive_regions": state.budget.positive_regions,
@@ -876,18 +911,82 @@ class GroundingCoordinator:
                 "terminal_state": result.terminal_state.value,
                 "terminal_reason": reason.value,
                 "provider_requests": state.budget.provider_requests,
+                "exploration_provider_requests": (
+                    state.budget.exploration_provider_requests
+                ),
+                "terminal_assessment_requests": (
+                    state.budget.terminal_assessment_requests
+                ),
                 "repository_actions": state.budget.repository_actions,
                 "cited_observation_ids": list(result.cited_observation_ids),
             },
         )
         return result
 
-    def _provider_request(
-        self, state: GroundingCoordinatorState, *, provider_request_id: str
-    ) -> tuple[GroundingCoordinatorState, GroundingProposal]:
-        if state.budget.provider_requests >= self.config.max_provider_requests:
-            raise _BudgetExhausted("provider request budget exhausted")
-        state = self._apply_budget(state, GroundingBudgetDelta(provider_requests=1))
+    def _exploration_remaining(self, state: GroundingCoordinatorState) -> int:
+        return (
+            self.config.max_exploration_provider_requests
+            - state.budget.exploration_provider_requests
+        )
+
+    def _terminal_allowance_remaining(self, state: GroundingCoordinatorState) -> int:
+        return (
+            self.config.max_terminal_assessment_requests
+            - state.budget.terminal_assessment_requests
+        )
+
+    def _select_turn_mode(
+        self, state: GroundingCoordinatorState
+    ) -> GroundingProviderTurnMode | None:
+        """Fix the lifecycle role of the next turn before the provider is called.
+
+        The terminal allowance is reserved: exploration can never spend it, and
+        it is only legal once an observation exists that still needs a bounded
+        final assessment.  ``None`` means no provider turn is legal at all.
+        """
+
+        if self._exploration_remaining(state) > 0:
+            return GroundingProviderTurnMode.EXPLORATION
+        if state.observation_history and self._terminal_allowance_remaining(state) > 0:
+            return GroundingProviderTurnMode.TERMINAL_ASSESSMENT
+        return None
+
+    def _charge_provider_turn(
+        self,
+        state: GroundingCoordinatorState,
+        turn_mode: GroundingProviderTurnMode,
+    ) -> GroundingCoordinatorState:
+        """Charge one provider invocation before it is made.
+
+        The charge is unconditional so that a turn which later fails to decode
+        or parse still appears in the truthful provider accounting.
+        """
+
+        if turn_mode is GroundingProviderTurnMode.TERMINAL_ASSESSMENT:
+            if not state.observation_history:
+                raise GroundingInvariantError(
+                    "terminal assessment requires an observation"
+                )
+            if self._terminal_allowance_remaining(state) <= 0:
+                raise _BudgetExhausted("terminal assessment allowance exhausted")
+            delta = GroundingBudgetDelta(
+                provider_requests=1, terminal_assessment_requests=1
+            )
+        else:
+            if self._exploration_remaining(state) <= 0:
+                raise _BudgetExhausted("exploration provider budget exhausted")
+            delta = GroundingBudgetDelta(
+                provider_requests=1, exploration_provider_requests=1
+            )
+        return self._apply_budget(state, delta)
+
+    def _invoke_provider(
+        self,
+        state: GroundingCoordinatorState,
+        *,
+        provider_request_id: str,
+        turn_mode: GroundingProviderTurnMode,
+    ) -> GroundingProposal:
         context = GroundingDecisionContext(
             state=state,
             rendered_grounding_state=(
@@ -897,6 +996,7 @@ class GroundingCoordinator:
                 + render_grounding_state(state)
             ),
             operator_task=self.config.operator_task,
+            turn_mode=turn_mode,
         )
         self._emit(
             EventType.GROUNDING_REQUEST,
@@ -904,19 +1004,22 @@ class GroundingCoordinator:
                 "grounding_run_id": state.grounding_run_id,
                 "provider_request_id": provider_request_id,
                 "provider_request_number": state.budget.provider_requests,
+                "turn_mode": turn_mode.value,
                 "budget": _plain(state.budget),
             },
         )
         try:
             raw = self.provider.decide(context)
             proposal = _parse_wire_response(
-                raw, after_observation=bool(state.observation_history)
+                raw,
+                after_observation=bool(state.observation_history),
+                terminal_only=turn_mode.terminal_only,
             )
         except _MalformedProviderResponse as exc:
             raise GroundingProviderError(str(exc)) from exc
         except Exception as exc:
             raise GroundingProviderError(str(exc)) from exc
-        return state, proposal
+        return proposal
 
     def _request_from_proposal(
         self, state: GroundingCoordinatorState, proposal: GroundingProposal
@@ -1021,7 +1124,8 @@ class GroundingCoordinator:
                     GroundingTerminalReason.SOURCE_VERSION_CHANGED,
                 )
 
-            if state.budget.provider_requests >= self.config.max_provider_requests:
+            turn_mode = self._select_turn_mode(state)
+            if turn_mode is None:
                 state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                 return self._result(
                     state,
@@ -1045,15 +1149,19 @@ class GroundingCoordinator:
                 f"grounding-provider-request-{state.budget.provider_requests + 1}"
             )
             try:
-                state, proposal = self._provider_request(
-                    state, provider_request_id=provider_request_id
-                )
+                state = self._charge_provider_turn(state, turn_mode)
             except _BudgetExhausted:
                 state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
                 return self._result(
                     state,
                     GroundingLifecycleState.INSUFFICIENT,
                     GroundingTerminalReason.BUDGET_EXHAUSTED,
+                )
+            try:
+                proposal = self._invoke_provider(
+                    state,
+                    provider_request_id=provider_request_id,
+                    turn_mode=turn_mode,
                 )
             except GroundingProviderError:
                 state = _transition(state, GroundingLifecycleState.FAILED)
@@ -1080,11 +1188,7 @@ class GroundingCoordinator:
                         provider_request_id,
                         payload=proposal.action_payload,
                     )
-                    if (
-                        correction_turns == 0
-                        and state.budget.provider_requests
-                        < self.config.max_provider_requests
-                    ):
+                    if correction_turns == 0 and self._exploration_remaining(state) > 0:
                         correction_turns += 1
                         continue
                     state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
@@ -1109,11 +1213,7 @@ class GroundingCoordinator:
                         provider_request_id,
                         payload=request.normalized_payload,
                     )
-                    if (
-                        correction_turns == 0
-                        and state.budget.provider_requests
-                        < self.config.max_provider_requests
-                    ):
+                    if correction_turns == 0 and self._exploration_remaining(state) > 0:
                         correction_turns += 1
                         continue
                     state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
@@ -1157,11 +1257,7 @@ class GroundingCoordinator:
                         provider_request_id,
                         payload=proposal.action_payload,
                     )
-                    if (
-                        correction_turns == 0
-                        and state.budget.provider_requests
-                        < self.config.max_provider_requests
-                    ):
+                    if correction_turns == 0 and self._exploration_remaining(state) > 0:
                         correction_turns += 1
                         continue
                     state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
@@ -1239,6 +1335,20 @@ class GroundingCoordinator:
                     GroundingLifecycleState.INSUFFICIENT,
                     GroundingTerminalReason.INVALID_MODEL_REQUEST,
                 )
+            if (
+                self._exploration_remaining(state) <= 0
+                and self._terminal_allowance_remaining(state) <= 0
+            ):
+                # Never read repository evidence that already has no bounded
+                # assessment opportunity left.  Reserving the terminal
+                # allowance makes this unreachable under the shipped policy;
+                # it stays as the explicit fail-closed statement of the rule.
+                state = _transition(state, GroundingLifecycleState.INSUFFICIENT)
+                return self._result(
+                    state,
+                    GroundingLifecycleState.INSUFFICIENT,
+                    GroundingTerminalReason.BUDGET_EXHAUSTED,
+                )
             state = _transition(state, GroundingLifecycleState.REQUESTING)
             try:
                 state = self._execute_request(state, next_action)
@@ -1256,11 +1366,7 @@ class GroundingCoordinator:
                     provider_request_id,
                     payload=next_action.normalized_payload,
                 )
-                if (
-                    correction_turns == 0
-                    and state.budget.provider_requests
-                    < self.config.max_provider_requests
-                ):
+                if correction_turns == 0 and self._exploration_remaining(state) > 0:
                     correction_turns += 1
                     continue
                 state = _transition(state, GroundingLifecycleState.INSUFFICIENT)

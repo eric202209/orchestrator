@@ -173,11 +173,14 @@ class Settings(BaseSettings):
     PLANNING_BACKEND: Optional[str] = None
     EXECUTION_BACKEND: Optional[str] = None
     # PHASE35-PGI3: provider-injected typed grounding remains fail-safe off.
-    # Limits are intentionally unset until an operator-approved run contract
-    # supplies them; no experimental turn count is a production default.
+    # PHASE35-BPR1 deployment policy.  The provider-request limit bounds
+    # exploration/corrective turns only; the coordinator additionally reserves
+    # exactly one non-renewable terminal-assessment turn, so the truthful total
+    # provider ceiling is this value plus one.  The coordinator stays inert
+    # until ENABLE_TYPED_GROUNDING_COORDINATOR is turned on.
     ENABLE_TYPED_GROUNDING_COORDINATOR: bool = False
-    TYPED_GROUNDING_MAX_STEPS: Optional[int] = None
-    TYPED_GROUNDING_MAX_PROVIDER_REQUESTS: Optional[int] = None
+    TYPED_GROUNDING_MAX_STEPS: Optional[int] = 2
+    TYPED_GROUNDING_MAX_PROVIDER_REQUESTS: Optional[int] = 2
     # Opt-in deployment contract for machines that intentionally expose one
     # direct inference runtime and one generation model to every lifecycle
     # role.  False preserves the existing role-specific GX10 configuration.

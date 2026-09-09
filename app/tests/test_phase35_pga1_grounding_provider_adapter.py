@@ -113,7 +113,7 @@ def _context(tmp_path: Path, *, provider=None) -> GroundingDecisionContext:
         workspace_identity=str(tmp_path.resolve()),
         snapshot_identity="snapshot-1",
         max_steps=4,
-        max_provider_requests=4,
+        max_exploration_provider_requests=4,
         operator_task="Find the implementation for the requested behavior.",
         orientation_advisory={"candidate_paths": ["app/example.py"]},
     )

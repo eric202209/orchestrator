@@ -180,7 +180,8 @@ class GroundingRunConfig:
     workspace_identity: str
     snapshot_identity: str
     max_steps: int
-    max_provider_requests: int
+    max_exploration_provider_requests: int
+    max_terminal_assessment_requests: int = 1
     budget_limits: GroundingBudgetLimits = GroundingBudgetLimits()
     operator_task: str = ""
     orientation_advisory: Mapping[str, Any] = field(default_factory=dict)
@@ -197,16 +198,27 @@ class GroundingRunConfig:
             raise ValueError("max_steps must be an integer")
         if self.max_steps <= 0:
             raise ValueError("max_steps must be positive")
-        if not isinstance(self.max_provider_requests, int) or isinstance(
-            self.max_provider_requests, bool
+        if not isinstance(self.max_exploration_provider_requests, int) or isinstance(
+            self.max_exploration_provider_requests, bool
         ):
-            raise ValueError("max_provider_requests must be an integer")
-        if self.max_provider_requests <= 0:
-            raise ValueError("max_provider_requests must be positive")
+            raise ValueError("max_exploration_provider_requests must be an integer")
+        if self.max_exploration_provider_requests <= 0:
+            raise ValueError("max_exploration_provider_requests must be positive")
+        if self.max_terminal_assessment_requests != 1:
+            raise ValueError("max_terminal_assessment_requests must be exactly 1")
         if not isinstance(self.mechanical_skip, bool):
             raise ValueError("mechanical_skip must be boolean")
         object.__setattr__(
             self, "orientation_advisory", _freeze(self.orientation_advisory)
+        )
+
+    @property
+    def max_total_provider_requests(self) -> int:
+        """Truthful ceiling on provider invocations of every kind in one run."""
+
+        return (
+            self.max_exploration_provider_requests
+            + self.max_terminal_assessment_requests
         )
 
 
@@ -245,6 +257,19 @@ class GroundingCoordinatorState:
         )
 
 
+class GroundingProviderTurnMode(str, Enum):
+    """Lifecycle role the coordinator fixes before it invokes the provider."""
+
+    #: May request one repository action, assess, correct, or terminate.
+    EXPLORATION = "EXPLORATION"
+    #: Spends the reserved non-renewable allowance; may only terminate.
+    TERMINAL_ASSESSMENT = "TERMINAL_ASSESSMENT"
+
+    @property
+    def terminal_only(self) -> bool:
+        return self is GroundingProviderTurnMode.TERMINAL_ASSESSMENT
+
+
 @dataclass(frozen=True, slots=True)
 class GroundingDecisionContext:
     """Provider input: original task is separate from typed grounding state."""
@@ -252,6 +277,7 @@ class GroundingDecisionContext:
     state: GroundingCoordinatorState
     rendered_grounding_state: str
     operator_task: str
+    turn_mode: GroundingProviderTurnMode = GroundingProviderTurnMode.EXPLORATION
 
 
 @dataclass(frozen=True, slots=True)

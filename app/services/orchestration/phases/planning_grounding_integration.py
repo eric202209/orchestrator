@@ -55,14 +55,15 @@ def run_typed_grounding_for_planning(
     max_steps = getattr(ctx, "grounding_max_steps", None)
     if max_steps is None:
         max_steps = settings.TYPED_GROUNDING_MAX_STEPS
-    max_provider_requests = getattr(ctx, "grounding_max_provider_requests", None)
-    if max_provider_requests is None:
-        max_provider_requests = settings.TYPED_GROUNDING_MAX_PROVIDER_REQUESTS
+    max_exploration_provider_requests = getattr(
+        ctx, "grounding_max_provider_requests", None
+    )
+    if max_exploration_provider_requests is None:
+        max_exploration_provider_requests = (
+            settings.TYPED_GROUNDING_MAX_PROVIDER_REQUESTS
+        )
     mechanical_skip = bool(getattr(ctx, "grounding_mechanical_skip", False))
-    if mechanical_skip:
-        max_steps = max_steps or 4
-        max_provider_requests = max_provider_requests or 2
-    if max_steps is None or max_provider_requests is None:
+    if max_steps is None or max_exploration_provider_requests is None:
         raise ValueError("typed grounding requires explicit run limits")
 
     project_dir = Path(ctx.orchestration_state.project_dir).resolve()
@@ -127,7 +128,7 @@ def run_typed_grounding_for_planning(
         workspace_identity=workspace_identity,
         snapshot_identity=snapshot_identity,
         max_steps=int(max_steps),
-        max_provider_requests=int(max_provider_requests),
+        max_exploration_provider_requests=int(max_exploration_provider_requests),
         operator_task=str(ctx.prompt or ""),
         provider_name=provider_name,
         model_name=model_name,

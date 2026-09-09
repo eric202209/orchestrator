@@ -53,7 +53,7 @@ def _coordinator(
     provider: ScriptedProvider,
     *,
     max_steps: int = 4,
-    max_provider_requests: int = 8,
+    max_exploration_provider_requests: int = 8,
     snapshot_supplier=None,
 ):
     snapshot = "snapshot-1"
@@ -63,7 +63,7 @@ def _coordinator(
         workspace_identity=str(root.resolve()),
         snapshot_identity=snapshot,
         max_steps=max_steps,
-        max_provider_requests=max_provider_requests,
+        max_exploration_provider_requests=max_exploration_provider_requests,
         operator_task="Find the implementation for the requested behavior.",
         snapshot_identity_supplier=snapshot_supplier,
     )
@@ -194,7 +194,9 @@ def test_case_c_exact_duplicate_negative_is_a_signal_not_an_action(tmp_path):
         )
 
     provider = ScriptedProvider([first, duplicate, stop])
-    result = _coordinator(root, provider, max_steps=2, max_provider_requests=4).run()
+    result = _coordinator(
+        root, provider, max_steps=2, max_exploration_provider_requests=4
+    ).run()
 
     assert result.terminal_reason is GroundingTerminalReason.INSUFFICIENT_GROUNDING
     assert result.state_projection.observation_outcomes == (
@@ -227,7 +229,9 @@ def test_case_d_action_budget_exhaustion_stops_before_second_repository_action(
         )
 
     provider = ScriptedProvider([first, second])
-    result = _coordinator(root, provider, max_steps=1, max_provider_requests=3).run()
+    result = _coordinator(
+        root, provider, max_steps=1, max_exploration_provider_requests=3
+    ).run()
 
     assert result.terminal_reason is GroundingTerminalReason.BUDGET_EXHAUSTED
     assert result.state_projection.observation_outcomes == (
@@ -249,7 +253,7 @@ def test_case_e_invalid_request_is_not_a_repository_observation(tmp_path):
         ]
     )
 
-    result = _coordinator(root, provider, max_provider_requests=1).run()
+    result = _coordinator(root, provider, max_exploration_provider_requests=1).run()
 
     assert result.terminal_reason is GroundingTerminalReason.INVALID_MODEL_REQUEST
     assert result.terminal_state.value == "INSUFFICIENT"

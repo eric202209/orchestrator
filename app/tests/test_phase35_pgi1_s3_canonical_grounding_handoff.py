@@ -59,7 +59,7 @@ class _Provider:
         return response(context) if callable(response) else response
 
 
-def _result(root: Path, responses, *, max_provider_requests: int = 4):
+def _result(root: Path, responses, *, max_exploration_provider_requests: int = 4):
     provider = _Provider(responses)
     config = GroundingRunConfig(
         grounding_run_id="slice3-run",
@@ -67,7 +67,7 @@ def _result(root: Path, responses, *, max_provider_requests: int = 4):
         workspace_identity=str(root.resolve()),
         snapshot_identity="snapshot-1",
         max_steps=5,
-        max_provider_requests=max_provider_requests,
+        max_exploration_provider_requests=max_exploration_provider_requests,
         operator_task="Find the implementation.",
     )
     result = GroundingCoordinator(
@@ -142,7 +142,7 @@ def test_not_found_history_is_not_materialized_when_refinement_cites_found(tmp_p
             refine,
             _sufficient,
         ],
-        max_provider_requests=4,
+        max_exploration_provider_requests=4,
     )
 
     context = build_grounding_planning_context(result, project_dir=root)

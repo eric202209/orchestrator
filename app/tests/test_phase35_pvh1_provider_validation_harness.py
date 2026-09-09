@@ -135,7 +135,7 @@ def _run_case(root: Path, label: str, files, responses, *, evaluator_case=None):
         workspace_identity=str(root.resolve()),
         snapshot_identity="pvh1-snapshot",
         max_steps=4,
-        max_provider_requests=4,
+        max_exploration_provider_requests=4,
         operator_task="Find the relevant implementation.",
     )
     result = GroundingCoordinator(
