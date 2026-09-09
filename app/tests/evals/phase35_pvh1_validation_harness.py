@@ -642,6 +642,30 @@ CASE_B_TRUTH = FrozenCaseTruth(
 FROZEN_CASE_TRUTH = {"A": CASE_A_TRUTH, "B": CASE_B_TRUTH}
 
 
+#: The authoritative, orthogonal evaluator metrics.  They replace the single
+#: collapsed ``FOUND_RELEVANT`` boolean as the measure of grounding progress.
+EVALUATOR_TARGET_METRICS = (
+    "target_path_reached",
+    "target_content_inspected",
+    "target_structure_resolved",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ObservationEvaluation:
+    """Evaluator-only per-observation facts.  Never a provider input."""
+
+    observation_id: str
+    action_identity: str
+    outcome: str
+    classification: str
+    target_path_reached: bool
+    target_content_inspected: bool
+    target_structure_resolved: bool
+    bounded_content_length: int = 0
+    structural_identity_present: bool = False
+
+
 def _truth_for_case(case: str) -> FrozenCaseTruth:
     normalized = str(case).strip().upper()
     try:
@@ -653,7 +677,16 @@ def _truth_for_case(case: str) -> FrozenCaseTruth:
 def classify_observation(
     observation: GroundingObservation, truth: FrozenCaseTruth
 ) -> str:
-    """Evaluator-only classification; it is never a provider input."""
+    """Legacy evaluator label, retained for report compatibility only.
+
+    This collapses every acquisition path into one structural-identity-dependent
+    boolean, which PHASE35-TBD1 established is stronger than the production
+    sufficiency contract: production cites and hands off ``inspect_file`` FOUND
+    evidence that carries no ``StructuralIdentity``.  The authoritative
+    evaluator facts are the orthogonal metrics produced by
+    :func:`evaluate_observation`; this function is no longer a success metric.
+    It is never a provider input.
+    """
 
     if observation.outcome is GroundingOutcome.NOT_FOUND:
         return "NOT_FOUND"
@@ -674,24 +707,123 @@ def classify_observation(
     return "FOUND_RELEVANT" if relevant else "FOUND_NON_RELEVANT"
 
 
+def _structure_matches_truth(
+    identity: StructuralIdentity | None, truth: FrozenCaseTruth
+) -> bool:
+    """Exact frozen structural match; path agreement alone is never enough."""
+
+    if identity is None or identity.source_path != truth.source_path:
+        return False
+    if truth.handler_name is not None and not (
+        identity.handler_name == truth.handler_name
+        and identity.http_method == truth.http_method
+        and identity.effective_route_path == truth.effective_route_path
+    ):
+        return False
+    if truth.symbol_names and identity.symbol_name not in truth.symbol_names:
+        return False
+    return True
+
+
+def evaluate_observation(
+    observation: GroundingObservation, truth: FrozenCaseTruth
+) -> "ObservationEvaluation":
+    """Score one retained observation on orthogonal, action-sensitive metrics.
+
+    ``target_path_reached`` records that the frozen path was established.
+    ``target_content_inspected`` records that bounded source evidence for that
+    exact path was retrieved.  ``target_structure_resolved`` records an exact
+    frozen structural match.  They are independent facts, not one ranking, and
+    none of them is ever visible to a provider.
+    """
+
+    if not isinstance(observation, GroundingObservation):
+        raise TypeError("observation must be the production GroundingObservation")
+    action = observation.action_identity
+    found = observation.outcome is GroundingOutcome.FOUND
+    identity = observation.structural_identity
+
+    path_reached = False
+    content_inspected = False
+    structure_resolved = False
+    if found:
+        if action == "search_text":
+            path_reached = truth.source_path in observation.source_paths or any(
+                hit.path == truth.source_path for hit in observation.hits
+            )
+        elif action == "inspect_file":
+            path_reached = truth.source_path in observation.source_paths
+            content_inspected = path_reached
+        elif action == "resolve_structure":
+            path_reached = (
+                identity is not None and identity.source_path == truth.source_path
+            )
+            structure_resolved = _structure_matches_truth(identity, truth)
+
+    return ObservationEvaluation(
+        observation_id=observation.observation_id,
+        action_identity=action,
+        outcome=str(_enum_identity(observation.outcome)),
+        classification=classify_observation(observation, truth),
+        target_path_reached=path_reached,
+        target_content_inspected=content_inspected,
+        target_structure_resolved=structure_resolved,
+        bounded_content_length=len(observation.bounded_content),
+        structural_identity_present=identity is not None,
+    )
+
+
+def _observation_depth(evaluation: "ObservationEvaluation") -> str:
+    if evaluation.target_structure_resolved:
+        return "STRUCTURE_RESOLVED"
+    if evaluation.target_content_inspected:
+        return "CONTENT_INSPECTED"
+    if evaluation.target_path_reached:
+        return "CANDIDATE_ONLY"
+    return "NO_TARGET_EVIDENCE"
+
+
 def evaluate_frozen_case(result: GroundingResult, case: str) -> dict[str, object]:
-    """Compare retained observations to frozen Case A/Case B truth."""
+    """Compare retained observations to frozen Case A/Case B truth.
+
+    Aggregates are a monotonic OR over qualifying observations: once the frozen
+    path, its content, or its structure has genuinely been reached, a later
+    unrelated observation cannot erase that fact.
+    """
 
     truth = _truth_for_case(case)
-    classifications = [
-        {
-            "observation_id": observation.observation_id,
-            "classification": classify_observation(observation, truth),
-        }
-        for observation in result.observations
+    evaluations = [
+        evaluate_observation(observation, truth) for observation in result.observations
     ]
-    first_classification = (
-        classifications[0]["classification"] if classifications else None
-    )
+    observations = [
+        {
+            "observation_id": item.observation_id,
+            "action_identity": item.action_identity,
+            "outcome": item.outcome,
+            "classification": item.classification,
+            "target_path_reached": item.target_path_reached,
+            "target_content_inspected": item.target_content_inspected,
+            "target_structure_resolved": item.target_structure_resolved,
+            "bounded_content_length": item.bounded_content_length,
+            "structural_identity_present": item.structural_identity_present,
+            "depth": _observation_depth(item),
+        }
+        for item in evaluations
+    ]
+    first = evaluations[0] if evaluations else None
+    first_classification = first.classification if first is not None else None
+    first_depth = _observation_depth(first) if first is not None else None
+    # Refinement is measurable whenever the first observation did not already
+    # deliver target evidence depth.  A candidate-only hit on the frozen path
+    # acquires the right candidate and still needs a second action, so it stays
+    # eligible; only content or structure at the target ends eligibility.
     refinement_eligible = bool(
         result.requests
-        and result.observations
-        and first_classification in {"NOT_FOUND", "AMBIGUOUS", "FOUND_NON_RELEVANT"}
+        and evaluations
+        and not (
+            first.target_content_inspected  # type: ignore[union-attr]
+            or first.target_structure_resolved  # type: ignore[union-attr]
+        )
     )
     return {
         "case": truth.case,
@@ -702,9 +834,18 @@ def evaluate_frozen_case(result: GroundingResult, case: str) -> dict[str, object
             "effective_route_path": truth.effective_route_path,
             "symbol_names": list(truth.symbol_names),
         },
-        "observations": classifications,
+        "observations": observations,
         "first_observation_classification": first_classification,
+        "first_observation_depth": first_depth,
         "refinement_eligible": refinement_eligible,
+        "target_path_reached": any(item.target_path_reached for item in evaluations),
+        "target_content_inspected": any(
+            item.target_content_inspected for item in evaluations
+        ),
+        "target_structure_resolved": any(
+            item.target_structure_resolved for item in evaluations
+        ),
+        "legacy_classification_authoritative": False,
     }
 
 
@@ -818,6 +959,10 @@ class ValidationRunRecord:
     next_action_digest: str | None
     hypothesis_changed: bool | None
     evaluator_result: Mapping[str, object] | None
+    target_path_reached: bool | None
+    target_content_inspected: bool | None
+    target_structure_resolved: bool | None
+    first_observation_depth: str | None
     canonical_handoff_result: Mapping[str, object] | None
     repository_cleanliness_result: Mapping[str, object] | None
     serialized_result: Mapping[str, object] | None
@@ -827,6 +972,14 @@ class ValidationRunRecord:
             name: _bounded_json(getattr(self, name))
             for name in self.__dataclass_fields__
         }
+
+
+def _metric(evaluator_result: Mapping[str, Any] | None, name: str) -> bool | None:
+    """Read one aggregate evaluator metric without inventing a default."""
+
+    if evaluator_result is None:
+        return None
+    return bool(evaluator_result.get(name))
 
 
 def build_validation_run_record(
@@ -934,6 +1087,16 @@ def build_validation_run_record(
         evaluator_result=(
             _bounded_json(evaluator_result) if evaluator_result is not None else None
         ),
+        target_path_reached=_metric(evaluator_result, "target_path_reached"),
+        target_content_inspected=_metric(evaluator_result, "target_content_inspected"),
+        target_structure_resolved=_metric(
+            evaluator_result, "target_structure_resolved"
+        ),
+        first_observation_depth=(
+            None
+            if evaluator_result is None
+            else evaluator_result.get("first_observation_depth")
+        ),
         canonical_handoff_result=(
             _bounded_json(canonical_handoff_result)
             if canonical_handoff_result is not None
@@ -963,6 +1126,8 @@ __all__ = [
     "CASE_B_TRUTH",
     "FROZEN_CASE_TRUTH",
     "FrozenCaseTruth",
+    "EVALUATOR_TARGET_METRICS",
+    "ObservationEvaluation",
     "ProviderValidationHarness",
     "RawBoundedCaptureStore",
     "RawCapturedEvent",
@@ -973,6 +1138,7 @@ __all__ = [
     "build_validation_run_record",
     "classify_observation",
     "evaluate_frozen_case",
+    "evaluate_observation",
     "normalize_event_type",
     "serialize_grounding_observation",
     "serialize_grounding_result",
