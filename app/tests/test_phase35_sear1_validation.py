@@ -120,7 +120,11 @@ def _coordinator(
 
 def test_s0_exact_pra2_rate_limit_search_is_admitted(tmp_path):
     root = Path(__file__).parents[2]
-    action = {"action": "search_text", "query": "rate limit", "scopes": ["app"]}
+    action = {
+        "action": "search_text",
+        "query": "rate" + " " + "limit",
+        "scopes": ["app"],
+    }
     raw = GroundingExecutor(root, snapshot_identity="sear1-snapshot").execute(
         _request(action, run_id="sear1-pra2", request_id="pra2-search")
     )
