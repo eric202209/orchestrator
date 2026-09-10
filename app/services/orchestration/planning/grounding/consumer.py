@@ -28,7 +28,13 @@ from app.services.orchestration.validation.path_authority import (
     observe,
 )
 
-from .contracts import GroundingObservation, GroundingOutcome, StructuralIdentity
+from .contracts import (
+    GroundingObservation,
+    GroundingOutcome,
+    StructuralIdentity,
+    is_substantive_observation,
+    substantive_evidence_paths,
+)
 from .coordinator_contracts import (
     GROUNDING_RESULT_SCHEMA_VERSION,
     GroundingLifecycleState,
@@ -292,15 +298,27 @@ def grounding_result_manifest_content(result: GroundingResult) -> dict[str, Any]
 def _manifest_evidence(
     result: GroundingResult,
 ) -> tuple[GroundingPlanningEvidence, ...]:
-    """Build a bounded manifest projection without revalidating live files."""
+    """Build a bounded manifest projection without revalidating live files.
+
+    Only substantive observations project source evidence.  A cited
+    ``search_text`` observation stays visible in the observation history, the
+    citation set and the rendered grounding section, but it contributes no
+    evidence record: its bounded content is one multi-file hit block, so
+    attaching it to a path would claim to be that file's source while actually
+    describing several other files.
+
+    Each surviving record takes its paths from the observation itself rather
+    than from the run-level cited path set, so one observation's bounded content
+    can never be projected onto a path that observation did not read.
+    """
 
     observations = {item.observation_id: item for item in result.observations}
     output: list[GroundingPlanningEvidence] = []
     for observation_id in result.cited_observation_ids:
         observation = observations.get(observation_id)
-        if observation is None:
+        if observation is None or not is_substantive_observation(observation):
             continue
-        for path in result.cited_source_paths or observation.source_paths:
+        for path in substantive_evidence_paths(observation):
             version = observation.source_versions.get(path)
             source_hash = observation.source_hashes.get(path)
             if version is None or source_hash is None:
@@ -522,6 +540,12 @@ def build_grounding_planning_context(
             )
         _revalidate_observation(observation, result=result, root=root)
         cited_observations.append(observation)
+    if not any(is_substantive_observation(item) for item in cited_observations):
+        raise GroundingHandoffError(
+            "insufficient_substantive_evidence",
+            "Planning requires at least one cited inspect_file or positive "
+            "resolve_structure observation; search evidence is candidate only",
+        )
     evidence = _manifest_evidence(result)
     if not evidence:
         raise GroundingHandoffError(
@@ -530,7 +554,11 @@ def build_grounding_planning_context(
         )
     evidence_paths = {item.source_path for item in evidence}
     requested_paths = set(result.cited_source_paths)
-    if requested_paths and requested_paths != evidence_paths:
+    # Nothing may materialize that the model did not cite.  The converse no
+    # longer holds: a citation may legitimately name candidate paths that only
+    # search saw, and those are deliberately left unmaterialized rather than
+    # projected as if they were read source.
+    if requested_paths and not evidence_paths <= requested_paths:
         raise GroundingHandoffError(
             "citation_source_mismatch", "cited source paths are not source-fenced"
         )

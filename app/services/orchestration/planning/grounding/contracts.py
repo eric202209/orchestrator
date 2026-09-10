@@ -622,6 +622,68 @@ class GroundingObservation:
         object.__setattr__(self, "source_hashes", _mapping(self.source_hashes))
 
 
+SUBSTANTIVE_EVIDENCE_ACTIONS = frozenset(
+    {
+        GroundingActionKind.INSPECT_FILE.value,
+        GroundingActionKind.RESOLVE_STRUCTURE.value,
+    }
+)
+
+
+def is_substantive_observation(observation: GroundingObservation) -> bool:
+    """Return whether one observation carries substantive bounded source evidence.
+
+    ``search_text`` is candidate/navigation evidence and is never substantive.
+    Its bounded content is one rendered multi-file hit block, so it is evidence
+    *about* where source might be, not the source of any single file.  Only a
+    FOUND ``inspect_file`` or ``resolve_structure`` observation that actually
+    carries bounded content for a version-fenced path is substantive, and
+    ``resolve_structure`` additionally requires the positive structural identity
+    that fences its region.
+    """
+
+    if not isinstance(observation, GroundingObservation):
+        return False
+    if observation.action_identity not in SUBSTANTIVE_EVIDENCE_ACTIONS:
+        return False
+    if observation.outcome is not GroundingOutcome.FOUND:
+        return False
+    if not observation.bounded_content:
+        return False
+    if not observation.source_paths or not observation.source_versions:
+        return False
+    if observation.action_identity == GroundingActionKind.RESOLVE_STRUCTURE.value:
+        identity = observation.structural_identity
+        if identity is None:
+            return False
+        if identity.source_path not in observation.source_versions:
+            return False
+        if identity.end_byte <= identity.start_byte:
+            return False
+        if identity.start_line <= 0 or identity.end_line < identity.start_line:
+            return False
+    return True
+
+
+def substantive_evidence_paths(observation: GroundingObservation) -> tuple[str, ...]:
+    """Return only the paths whose own bounded source this observation carries.
+
+    A ``resolve_structure`` observation may fence several documents when it
+    walks a mount chain, but its bounded content is the region of exactly one
+    of them.  Attaching that content to the whole chain would repeat the
+    multi-file projection defect that ``search_text`` already caused, so the
+    structural identity alone decides which path owns the content.
+    """
+
+    if not is_substantive_observation(observation):
+        return ()
+    identity = observation.structural_identity
+    if observation.action_identity == GroundingActionKind.RESOLVE_STRUCTURE.value:
+        # is_substantive_observation already proved the identity is present.
+        return () if identity is None else (identity.source_path,)
+    return tuple(observation.source_paths)
+
+
 def observation_from_request(
     request: GroundingRequest,
     *,

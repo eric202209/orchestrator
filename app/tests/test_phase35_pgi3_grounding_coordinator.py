@@ -82,11 +82,7 @@ def test_case_a_direct_success_returns_frozen_result_without_plan_authority(tmp_
 
     def search(_context):
         return GroundingProposal(
-            action_payload={
-                "action": "search_text",
-                "query": "needle",
-                "scopes": ["app"],
-            }
+            action_payload={"action": "inspect_file", "path": "app/sample.py"}
         )
 
     def sufficient(context):
@@ -286,11 +282,7 @@ def test_planning_context_adapter_keeps_operator_task_separate(tmp_path):
     provider = ScriptedProvider(
         [
             lambda _context: GroundingProposal(
-                action_payload={
-                    "action": "search_text",
-                    "query": "needle",
-                    "scopes": ["app"],
-                }
+                action_payload={"action": "inspect_file", "path": "app/sample.py"}
             ),
             lambda context: GroundingProposal(
                 assessment_kind=GroundingAssessmentKind.SUFFICIENT,
@@ -325,11 +317,7 @@ def test_enabled_planning_boundary_accepts_scripted_provider_without_plan_author
     provider = ScriptedProvider(
         [
             lambda _context: GroundingProposal(
-                action_payload={
-                    "action": "search_text",
-                    "query": "needle",
-                    "scopes": ["app"],
-                }
+                action_payload={"action": "inspect_file", "path": "app/sample.py"}
             ),
             lambda context: GroundingProposal(
                 assessment_kind=GroundingAssessmentKind.SUFFICIENT,

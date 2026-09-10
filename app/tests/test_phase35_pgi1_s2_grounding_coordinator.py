@@ -108,7 +108,9 @@ def _sufficient(context):
 
 def test_direct_success_has_explicit_terminal_state_and_citation(tmp_path):
     root = _repo(tmp_path, {"app/sample.py": "needle = True\n"})
-    provider = FakeProvider([_search(), _sufficient])
+    # EPR1: a direct success must cite substantive evidence; the single-turn
+    # lifecycle this test pins is otherwise unchanged.
+    provider = FakeProvider([_inspect(), _sufficient])
 
     result = _coordinator(root, provider).run()
 

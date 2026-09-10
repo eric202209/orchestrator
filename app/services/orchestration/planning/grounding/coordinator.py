@@ -28,6 +28,8 @@ from .contracts import (
     GroundingOutcome,
     GroundingRequest,
     GroundingRequestRejection,
+    SUBSTANTIVE_EVIDENCE_ACTIONS,
+    is_substantive_observation,
     parse_grounding_request,
 )
 from .coordinator_contracts import (
@@ -65,7 +67,11 @@ class _MalformedProviderResponse(ValueError):
 
 
 class _InvalidSufficiency(ValueError):
-    pass
+    """A SUFFICIENT assessment failed one semantic citation contract."""
+
+    def __init__(self, message: str, *, code: str = "invalid_assessment_citations"):
+        self.code = str(code)
+        super().__init__(message)
 
 
 class _BudgetExhausted(RuntimeError):
@@ -74,9 +80,6 @@ class _BudgetExhausted(RuntimeError):
 
 class _SourceVersionChanged(RuntimeError):
     pass
-
-
-_SUBSTANTIVE_EVIDENCE_ACTIONS = frozenset({"inspect_file", "resolve_structure"})
 
 
 @runtime_checkable
@@ -684,13 +687,13 @@ class GroundingCoordinator:
             path
             for prior in state.observation_history
             if (
-                prior.action_identity in _SUBSTANTIVE_EVIDENCE_ACTIONS
+                prior.action_identity in SUBSTANTIVE_EVIDENCE_ACTIONS
                 and prior.budget_delta.distinct_files > 0
             )
             for path in prior.source_paths
         }
         is_substantive = (
-            observation.action_identity in _SUBSTANTIVE_EVIDENCE_ACTIONS
+            observation.action_identity in SUBSTANTIVE_EVIDENCE_ACTIONS
             and observation.budget_delta.distinct_files > 0
         )
         new_files = (
@@ -845,6 +848,17 @@ class GroundingCoordinator:
                 raise _InvalidSufficiency(
                     "cited structural identity is absent from evidence"
                 )
+        # search_text is candidate/navigation evidence.  It may stay cited for
+        # provenance, but it can never be the only thing grounding a task: a
+        # rendered hit block names candidate paths without carrying any file's
+        # source, so a search-only citation would let Planning materialize, and
+        # later derive authority over, paths that were never actually read.
+        if not any(is_substantive_observation(item) for item in cited):
+            raise _InvalidSufficiency(
+                "SUFFICIENT requires at least one cited inspect_file or positive "
+                "resolve_structure observation",
+                code="insufficient_substantive_evidence",
+            )
         self._check_source_versions(state)
 
     def _assessment(
@@ -1494,7 +1508,7 @@ class GroundingCoordinator:
                 self._emit_assessment_validation_failure(
                     state,
                     provider_request_id=provider_request_id,
-                    code="invalid_assessment_citations",
+                    code=exc.code,
                     failure_layer="L7_SEMANTIC_PROTOCOL_STATE",
                     detail=str(exc),
                 )

@@ -131,7 +131,10 @@ def _counts(result):
 
 def test_p0_first_observation_sufficient_leaves_terminal_allowance_unspent(tmp_path):
     root = _repo(tmp_path, FILES)
-    provider = FakeProvider([_search("needle"), _sufficient])
+    # EPR1: the first observation must be substantive for SUFFICIENT to be
+    # legal.  One inspect_file is still exactly one repository action, so the
+    # budget shape this test pins is unchanged.
+    provider = FakeProvider([_inspect(), _sufficient])
 
     result = _coordinator(root, provider).run()
 

@@ -99,11 +99,19 @@ def _manifest(result=None):
 
 
 def test_direct_success_projects_only_cited_found_evidence(tmp_path):
+    """EPR1: a direct success projects the cited *substantive* evidence.
+
+    Before EPR1 this drove a single-path search_text and asserted that the
+    searched path materialized.  That contract is intentionally replaced: the
+    single-path shape hid the ODF1 D1 duplication, and a search citation now
+    carries no source of its own.
+    """
+
     root = _repo(tmp_path, {"app/sample.py": "needle = True\n"})
     result, provider = _result(
         root,
         [
-            {"action": "search_text", "query": "needle", "scopes": ["app"]},
+            {"action": "inspect_file", "path": "app/sample.py"},
             _sufficient,
         ],
     )
@@ -119,10 +127,78 @@ def test_direct_success_projects_only_cited_found_evidence(tmp_path):
     assert [item.relative_path for item in context.source_materialization.files] == [
         "app/sample.py"
     ]
+    assert context.source_materialization.files[0].content == "needle = True\n"
     assert context.source_materialization.files[0].target_hint is None
     assert "## GROUNDING EVIDENCE" in context.grounding_section
     assert "## CITED SOURCE EVIDENCE" in context.cited_source_section
     assert "not operator instruction" in context.grounding_section
+
+
+def test_search_only_success_is_refused_before_planning_materialization(tmp_path):
+    """EPR1 replaces the old search-only success contract (ODF1 D1).
+
+    Multi-path on purpose: the pre-EPR1 projection duplicated one rendered hit
+    block once per cited path, and a single-path fixture could never show it.
+    """
+
+    root = _repo(
+        tmp_path,
+        {f"app/mod{index}.py": "needle = True\n" for index in range(5)},
+    )
+    result, provider = _result(
+        root,
+        [
+            {"action": "search_text", "query": "needle", "scopes": ["app"]},
+            _sufficient,
+        ],
+    )
+
+    # Grounding itself still fails closed: the coordinator refuses to call a
+    # search-only citation SUFFICIENT.
+    assert result.terminal_state is GroundingLifecycleState.INSUFFICIENT
+    assert result.terminal_reason is GroundingTerminalReason.INVALID_MODEL_REQUEST
+    assert provider.calls == 2
+
+    with pytest.raises(GroundingHandoffError) as excinfo:
+        build_grounding_planning_context(result, project_dir=root)
+    assert excinfo.value.code == "result_not_sufficient"
+
+
+def test_search_only_citation_cannot_cross_the_handoff_fence(tmp_path):
+    """The handoff refuses a search-only citation on its own authority."""
+
+    root = _repo(
+        tmp_path,
+        {f"app/mod{index}.py": "needle = True\n" for index in range(5)},
+    )
+    result, _provider = _result(
+        root,
+        [
+            {"action": "search_text", "query": "needle", "scopes": ["app"]},
+            lambda _context: {
+                "decision": "NEED_MORE_EVIDENCE",
+                "next_action": {"action": "inspect_file", "path": "app/mod0.py"},
+                "rationale": "One candidate needs substantive inspection.",
+            },
+            _sufficient,
+        ],
+    )
+    assert result.terminal_state is GroundingLifecycleState.SUFFICIENT
+    search = result.observations[0]
+    assert search.action_identity == "search_text"
+    assert len(search.source_paths) == 5
+
+    # Forge the citation set the coordinator would never emit, so the handoff
+    # gate is proven on its own rather than only behind the coordinator.
+    forged = replace(
+        result,
+        cited_observation_ids=(search.observation_id,),
+        cited_source_paths=search.source_paths,
+    )
+
+    with pytest.raises(GroundingHandoffError) as excinfo:
+        build_grounding_planning_context(forged, project_dir=root)
+    assert excinfo.value.code == "insufficient_substantive_evidence"
 
 
 def test_not_found_history_is_not_materialized_when_refinement_cites_found(tmp_path):

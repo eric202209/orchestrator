@@ -172,6 +172,25 @@ def _sufficient(context):
     }
 
 
+def _sufficient_all(context):
+    """Cite every FOUND observation, navigation and substantive alike.
+
+    EPR1 makes this the ordinary terminal shape: search stays cited for
+    provenance while the substantive observation is what actually grounds the
+    task and what reaches Planning.
+    """
+
+    return {
+        "decision": "SUFFICIENT",
+        "cited_observation_ids": [
+            item.observation_id
+            for item in context.state.observation_history
+            if item.outcome.value == "FOUND"
+        ],
+        "rationale": "The cited bounded observations ground the operator task.",
+    }
+
+
 def _insufficient(context):
     return {"decision": "INSUFFICIENT", "reason": "The evidence remains inadequate."}
 
@@ -192,7 +211,9 @@ def test_c0_no_rejection_leaves_the_correction_allowance_unspent(tmp_path):
 # C1 -------------------------------------------------------------------------
 def test_c1_malformed_first_known_action_reaches_one_correction(tmp_path):
     root = _repo(tmp_path)
-    provider = FakeProvider([SEARCH_NO_SCOPES, SEARCH_OK, _sufficient])
+    provider = FakeProvider(
+        [SEARCH_NO_SCOPES, SEARCH_OK, _need_more(INSPECT_OK), _sufficient]
+    )
 
     result = _coordinator(root, provider).run()
 
@@ -210,8 +231,16 @@ def test_c2_pgv5_b1_shape_becomes_correctable(tmp_path):
     root = _repo(tmp_path)
     provider = FakeProvider(
         # The correction repairs the SAME search_text intent by supplying the
-        # missing scopes; it may not switch to a different hypothesis.
-        [SEARCH_OK, _need_more(SEARCH_NO_SCOPES), _need_more(SEARCH_OK), _sufficient]
+        # missing scopes; it may not switch to a different hypothesis.  EPR1:
+        # the run opens with substantive evidence so the corrected search can
+        # still reach SUFFICIENT; the rejection still lands on the final
+        # exploration turn, which is the B1 shape this test pins.
+        [
+            INSPECT_OK,
+            _need_more(SEARCH_NO_SCOPES),
+            _need_more(SEARCH_OK),
+            _sufficient_all,
+        ]
     )
 
     result = _coordinator(root, provider).run()
@@ -257,7 +286,7 @@ def test_c4_malformed_resolve_structure_field_set_is_correctable(tmp_path):
 # C5 -------------------------------------------------------------------------
 def test_c5_unknown_action_keeps_its_typed_rejection_and_one_correction(tmp_path):
     root = _repo(tmp_path)
-    provider = FakeProvider([UNKNOWN, SEARCH_OK, _sufficient])
+    provider = FakeProvider([UNKNOWN, SEARCH_OK, _need_more(INSPECT_OK), _sufficient])
 
     result = _coordinator(root, provider).run()
 
@@ -435,7 +464,12 @@ def test_c15_a_failed_correction_call_is_still_counted_truthfully(tmp_path):
 def test_c16_corrected_b1_shape_reaches_the_canonical_handoff(tmp_path):
     root = _repo(tmp_path)
     provider = FakeProvider(
-        [SEARCH_OK, _need_more(SEARCH_NO_SCOPES), _need_more(SEARCH_OK), _sufficient]
+        [
+            INSPECT_OK,
+            _need_more(SEARCH_NO_SCOPES),
+            _need_more(SEARCH_OK),
+            _sufficient_all,
+        ]
     )
 
     result = _coordinator(root, provider).run()

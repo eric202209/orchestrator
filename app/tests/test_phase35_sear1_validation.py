@@ -79,6 +79,20 @@ def _need(action):
     }
 
 
+def _sufficient_all(context):
+    """Cite every FOUND observation: navigation alongside substantive."""
+
+    return {
+        "decision": "SUFFICIENT",
+        "cited_observation_ids": [
+            item.observation_id
+            for item in context.state.observation_history
+            if item.outcome.value == "FOUND"
+        ],
+        "rationale": "The bounded repository observations are sufficient.",
+    }
+
+
 def _insufficient(_context):
     return {"decision": "INSUFFICIENT", "reason": "bounded test completion"}
 
@@ -401,15 +415,56 @@ def test_s14_lifecycle_and_repository_action_budget_remain_separate(tmp_path):
     assert result.budget_snapshot.provider_requests == 2
 
 
-def test_s19_search_citation_behavior_is_unchanged(tmp_path):
-    root = _repo(tmp_path, {"app/sample.py": "needle = True\n"})
+def test_s19_search_citation_stays_navigation_evidence_only(tmp_path):
+    """EPR1 intentionally replaces the old s19 materialization expectation.
+
+    Search remains legal, citable and visible as navigation provenance.  What
+    changes is that it no longer becomes source material: the inspected file
+    owns the materialized content, and the four paths that only search saw
+    contribute nothing.
+    """
+
+    root = _repo(
+        tmp_path,
+        {f"app/mod{index}.py": "needle = True\n" for index in range(5)},
+    )
     result, _provider = _coordinator(
         root,
-        [{"action": "search_text", "query": "needle", "scopes": ["app"]}, _sufficient],
+        [
+            {"action": "search_text", "query": "needle", "scopes": ["app"]},
+            _need({"action": "inspect_file", "path": "app/mod0.py"}),
+            _sufficient_all,
+        ],
     )
+
+    search, inspection = result.observations
+    assert search.action_identity == "search_text"
+    assert len(search.source_paths) == 5
+
     context = build_grounding_planning_context(result, project_dir=root)
-    assert context.cited_observations[0].action_identity == "search_text"
-    assert context.source_materialization.files[0].relative_path == "app/sample.py"
+
+    # Navigation provenance survives the handoff.
+    cited = {item.action_identity for item in context.cited_observations}
+    assert cited == {"search_text", "inspect_file"}
+    assert "search_text" in context.grounding_section
+
+    # Source material comes only from the substantive observation.
+    assert [item.source_path for item in context.cited_source_evidence] == [
+        "app/mod0.py"
+    ]
+    assert all(
+        item.observation_id == inspection.observation_id
+        for item in context.cited_source_evidence
+    )
+    files = context.source_materialization.files
+    assert [item.relative_path for item in files] == ["app/mod0.py"]
+    assert files[0].content == "needle = True\n"
+    # The pre-EPR1 projection would have written five records of the rendered
+    # hit block here; the block never reaches Planning at all now.
+    assert "app/mod1.py" not in (files[0].content or "")
+    assert context.source_materialization.materialized_source_bytes == len(
+        b"needle = True\n"
+    )
 
 
 def test_s20_search_does_not_mutate_repository(tmp_path):
