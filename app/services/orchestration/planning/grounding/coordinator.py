@@ -1282,7 +1282,10 @@ class GroundingCoordinator:
                 "outcome": observation.outcome.value,
                 "normalized_request": _plain(request.normalized_payload),
                 "evidence_bytes": observation.budget_delta.source_evidence_bytes,
-                "budget": _plain(observation.budget_cumulative),
+                # The coordinator is authoritative for cumulative accounting:
+                # _append_observation applies substantive path deduplication
+                # before returning the state used by this event.
+                "budget": _plain(state.budget),
             },
         )
         return state
