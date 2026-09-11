@@ -133,9 +133,11 @@ def run_typed_grounding_for_planning(
         provider_name=provider_name,
         model_name=model_name,
         orientation_advisory=(
+            # The provider projection, not the event projection: the counters
+            # alone describe candidate paths the provider never gets to see.
             derive_repository_orientation(
                 project_dir, str(ctx.prompt or "")
-            ).as_details()
+            ).as_provider_advisory()
             if not mechanical_skip
             else {}
         ),

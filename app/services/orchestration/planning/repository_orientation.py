@@ -81,6 +81,20 @@ class RepositoryOrientation:
             "orientation_unavailable_reason": self.unavailable_reason,
         }
 
+    def as_provider_advisory(self) -> dict[str, object]:
+        """Return ``as_details`` plus the already-bounded candidate paths.
+
+        ``as_details`` is the event-detail projection and deliberately carries
+        counters only.  A provider that must choose one bounded query or one
+        inspection needs the path names those counters describe, exactly as the
+        older discovery seam already renders them.  The path list is the same
+        tuple the derivation already bounded by ``ORIENTATION_PATH_LIMIT`` and
+        ``ORIENTATION_BYTE_BUDGET``; nothing here re-derives or re-bounds it,
+        and visibility still grants no authority.
+        """
+
+        return {**self.as_details(), "paths": list(self.paths)}
+
 
 def _unavailable(reason: str) -> RepositoryOrientation:
     return RepositoryOrientation(
