@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict
 
 from app.config import settings
+from app.services.orchestration.diagnostics.outcome_observability import (
+    bounded_exception_message,
+)
 from app.services.orchestration.planning.grounding import (
     GroundingCoordinator,
     GroundingExecutor,
@@ -77,9 +80,11 @@ def run_typed_grounding_for_planning(
     )
 
     def event_sink(event_type: str, details: dict[str, Any]) -> None:
+        resolved_control_state: Any = None
         try:
+            resolved_control_state = ctx.control_state_location
             append_event(
-                project_dir=ctx.control_state_location,
+                project_dir=resolved_control_state,
                 session_id=ctx.session_id,
                 task_id=ctx.task_id,
                 event_type=event_type,
@@ -87,9 +92,19 @@ def run_typed_grounding_for_planning(
                 phase="planning",
                 coordinator="grounding_coordinator",
             )
-        except Exception:
-            ctx.logger.debug(
-                "[ORCHESTRATION] Grounding event persistence failed: %s", event_type
+        except Exception as persistence_error:
+            # Observability must not acquire grounding authority: a journal
+            # failure degrades evidence, it never fails the run.  It must not
+            # be silent either, so this follows the existing R4 observability
+            # precedent and records the bounded diagnostic that identifies
+            # which event was lost and where it was being written.
+            ctx.logger.error(
+                "[ORCHESTRATION] Grounding event persistence failed; "
+                "event_type=%s exception_type=%s control_state=%r detail=%s",
+                event_type,
+                type(persistence_error).__name__,
+                resolved_control_state,
+                bounded_exception_message(persistence_error),
             )
 
     if provider is None and not mechanical_skip:
