@@ -24,6 +24,10 @@ from app.services.agents.agent_backends import (
     resolve_execution_topology,
 )
 from app.services.agents.interfaces import AgentRuntime
+from app.services.agents.provider_deadline import (
+    ProviderDeadline,
+    invoke_with_provider_deadline,
+)
 from app.services.agents.providers import get_runtime_factory
 from app.services.agents.runtime_configuration import (
     BackendRole,
@@ -1234,7 +1238,22 @@ def invoke_runtime_prompt(
     if no_output_timeout_seconds is not None:
         invoke_kwargs["no_output_timeout_seconds"] = no_output_timeout_seconds
     try:
-        result = asyncio.run(runtime.invoke_prompt(prompt, **invoke_kwargs))
+        logical_deadline = (
+            ProviderDeadline.start(timeout_seconds)
+            if session_prefix in {"grounding", "reflection"}
+            else None
+        )
+        if logical_deadline is not None:
+            diagnostics_context.update(logical_deadline.diagnostics())
+        if logical_deadline is None:
+            result = asyncio.run(runtime.invoke_prompt(prompt, **invoke_kwargs))
+        else:
+            result = asyncio.run(
+                invoke_with_provider_deadline(
+                    lambda: runtime.invoke_prompt(prompt, **invoke_kwargs),
+                    deadline=logical_deadline,
+                )
+            )
         result = dict(result or {})
         runtime_diagnostics = dict(result.get("runtime_diagnostics") or {})
         runtime_diagnostics.update(diagnostics_context)
@@ -1254,8 +1273,12 @@ def invoke_runtime_prompt(
         )
         return result
     except Exception as exc:
-        runtime_diagnostics = dict(getattr(exc, "runtime_diagnostics", {}) or {})
+        exception_diagnostics = dict(getattr(exc, "runtime_diagnostics", {}) or {})
+        runtime_diagnostics = dict(exception_diagnostics)
         runtime_diagnostics.update(diagnostics_context)
+        for key in ("timed_out", "timeout_boundary", "timeout_classification"):
+            if key in exception_diagnostics:
+                runtime_diagnostics[key] = exception_diagnostics[key]
         runtime_diagnostics["duration_seconds"] = round(
             time.monotonic() - started_at, 3
         )

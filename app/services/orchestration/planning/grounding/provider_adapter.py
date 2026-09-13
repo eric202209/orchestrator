@@ -140,6 +140,27 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _timeout_telemetry(
+    response: PlanningResponse | None,
+    provider_diagnostics: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    diagnostic_details = provider_diagnostics
+    if diagnostic_details is None and response is not None:
+        diagnostic_details = response.diagnostics.details
+    if not isinstance(diagnostic_details, Mapping):
+        return {}
+    return {
+        key: _json_safe(diagnostic_details[key])
+        for key in (
+            "configured_logical_timeout_seconds",
+            "effective_logical_deadline_seconds",
+            "effective_transport_timeout_seconds",
+            "timeout_classification",
+        )
+        if key in diagnostic_details
+    }
+
+
 def _wire_examples(after_observation: bool, terminal_only: bool = False) -> str:
     if terminal_only:
         examples = TERMINAL_ASSESSMENT_WIRE_EXAMPLES
@@ -493,6 +514,7 @@ class PlanningGroundingProviderAdapter:
         failure_classification: str | None,
         detail: str | None,
         started_at: float,
+        provider_diagnostics: Mapping[str, Any] | None = None,
     ) -> None:
         top_level_type, top_level_fields = _candidate_shape(payload)
         candidate_hash, candidate_length, candidate_prefix = _candidate_diagnostic(
@@ -544,6 +566,7 @@ class PlanningGroundingProviderAdapter:
                 "candidate_sha256": candidate_hash,
                 "candidate_length": candidate_length,
                 "candidate_prefix": candidate_prefix,
+                **_timeout_telemetry(response, provider_diagnostics),
             }
         )
 
@@ -596,6 +619,12 @@ class PlanningGroundingProviderAdapter:
                 failure_classification=code,
                 detail=str(exc),
                 started_at=started_at,
+                provider_diagnostics=(
+                    exc.diagnostics.details
+                    if exc.diagnostics is not None
+                    and isinstance(exc.diagnostics.details, Mapping)
+                    else None
+                ),
             )
             raise GroundingProviderError(f"{code}: {str(exc)[:240]}") from exc
         except Exception as exc:

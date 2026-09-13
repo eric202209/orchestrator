@@ -230,6 +230,11 @@ def _normalized_diagnostics(value: Any) -> dict[str, Any]:
         "adaptation_profile",
         "timeout_seconds",
         "provider_deadline_seconds",
+        "configured_logical_timeout_seconds",
+        "effective_logical_deadline_seconds",
+        "effective_transport_timeout_seconds",
+        "cleanup_grace_seconds",
+        "timeout_classification",
     )
     return {key: value[key] for key in supported_fields if key in value}
 

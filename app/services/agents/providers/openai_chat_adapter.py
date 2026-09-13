@@ -453,6 +453,13 @@ class OpenAIChatCompletionsRuntime:
             transport_timeout = (
                 effective_timeout if exact_contract else effective_timeout + 30
             )
+            provider_diagnostics.update(
+                {
+                    "configured_logical_timeout_seconds": effective_timeout,
+                    "effective_logical_deadline_seconds": effective_timeout,
+                    "effective_transport_timeout_seconds": transport_timeout,
+                }
+            )
             async with httpx.AsyncClient(timeout=transport_timeout) as client:
                 provider_diagnostics["provider_invocation_started"] = True
                 response = await client.post(
@@ -511,8 +518,10 @@ class OpenAIChatCompletionsRuntime:
                     )
         except httpx.TimeoutException as exc:
             error = AgentRuntimeError(
-                f"OpenAI-compatible chat request timed out after {effective_timeout}s."
+                f"OpenAI-compatible chat request timed out after {effective_timeout}s "
+                f"(logical deadline; transport timeout {transport_timeout}s)."
             )
+            error.provider_failure_classification = "provider_timeout"
             error.runtime_diagnostics = {
                 **provider_diagnostics,
                 "timed_out": True,

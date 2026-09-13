@@ -8,6 +8,8 @@ Orchestration decisions live here. Algorithm helpers remain in failure_flow.py.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 import logging
 from datetime import UTC, datetime
@@ -43,12 +45,39 @@ from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.services.workspace.control_state_paths import control_state_of
+from app.services.agents.provider_deadline import (
+    ProviderDeadline,
+    invoke_with_provider_deadline,
+)
 
 # A session that already reached a terminal state must never be re-armed by an
 # automatic recovery rerun queued from a late failure of its last execution.
 _TERMINAL_SESSION_STATUSES = frozenset(
     {"stopped", "completed", "cancelled", "failed", "archived"}
 )
+REFLECTION_PROVIDER_TIMEOUT_SECONDS = 60
+
+
+def _invoke_reflection_prompt(
+    runtime: Any,
+    prompt: str,
+    *,
+    timeout_seconds: float = REFLECTION_PROVIDER_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Invoke failure-only reflection under one total logical deadline."""
+
+    deadline = ProviderDeadline.start(timeout_seconds)
+    return asyncio.run(
+        invoke_with_provider_deadline(
+            lambda: runtime.invoke_prompt(
+                prompt,
+                timeout_seconds=timeout_seconds,
+                source_brain="local",
+                session_prefix="reflection",
+            ),
+            deadline=deadline,
+        )
+    )
 
 
 class FailureCoordinator:
@@ -154,9 +183,6 @@ class FailureCoordinator:
         _failure_event = None
         _recovery_decision = None
         try:
-            import asyncio
-            import concurrent.futures
-
             from app.services.orchestration.recovery.failure_classifier import (
                 FailureClassifier,
             )
@@ -179,13 +205,10 @@ class FailureCoordinator:
                 def _reflection_llm_callable(_prompt: str) -> str:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
                         _res = _ex.submit(
-                            asyncio.run,
-                            _runtime.invoke_prompt(
-                                _prompt,
-                                timeout_seconds=60,
-                                source_brain="local",
-                                session_prefix="reflection",
-                            ),
+                            _invoke_reflection_prompt,
+                            _runtime,
+                            _prompt,
+                            timeout_seconds=REFLECTION_PROVIDER_TIMEOUT_SECONDS,
                         ).result()
                     return str(_res.get("output", ""))
 
