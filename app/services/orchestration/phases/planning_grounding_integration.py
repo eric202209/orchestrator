@@ -111,15 +111,12 @@ def run_typed_grounding_for_planning(
         from app.services.planning.providers import create_planning_provider
 
         planning_provider = create_planning_provider(ctx.db)
-        configured_timeout = int(
-            getattr(ctx, "timeout_seconds", GROUNDING_PROVIDER_TIMEOUT_SECONDS)
-            or GROUNDING_PROVIDER_TIMEOUT_SECONDS
-        )
+        # Grounding owns a fixed provider policy.  The generic context timeout
+        # is also used by Planning and may remain lower without changing this
+        # independent Grounding deadline.
         provider = PlanningGroundingProviderAdapter(
             planning_provider,
-            timeout_seconds=min(
-                max(1, configured_timeout), GROUNDING_PROVIDER_TIMEOUT_SECONDS
-            ),
+            timeout_seconds=GROUNDING_PROVIDER_TIMEOUT_SECONDS,
             event_sink=event_sink,
         )
     if provider is None and not mechanical_skip:

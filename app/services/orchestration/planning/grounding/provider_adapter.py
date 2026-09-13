@@ -31,7 +31,7 @@ from .coordinator import (
 from .coordinator_contracts import GroundingDecisionContext
 
 
-GROUNDING_PROVIDER_TIMEOUT_SECONDS = 180
+GROUNDING_PROVIDER_TIMEOUT_SECONDS = 240
 MAX_CAPTURED_CANDIDATE_PREFIX = 256
 MAX_CAPTURED_FAILURE_DETAIL = 500
 

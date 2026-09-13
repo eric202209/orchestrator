@@ -11,6 +11,10 @@ import pytest
 
 from app.services.agents import agent_runtime
 from app.services.agents.interfaces import AgentRuntimeError
+from app.services.agents.provider_deadline import (
+    ProviderDeadline,
+    TRANSPORT_TIMEOUT_MARGIN_SECONDS,
+)
 from app.services.agents.providers import openai_chat_adapter
 from app.services.agents.providers.openai_chat_adapter import (
     OpenAIChatCompletionsRuntime,
@@ -24,6 +28,7 @@ from app.services.orchestration.planning.grounding import (
     GroundingProviderError,
     GroundingRunConfig,
     GroundingTaskReference,
+    GROUNDING_PROVIDER_TIMEOUT_SECONDS,
     PlanningGroundingProviderAdapter,
 )
 from app.services.planning.providers.openclaw import OpenClawPlanningProvider
@@ -67,7 +72,7 @@ def _invoke_runtime_with_fake(monkeypatch, runtime, *, timeout_seconds=0.05):
     )
 
 
-def _grounding_context(tmp_path, provider):
+def _grounding_context(tmp_path, provider, *, provider_timeout_seconds=1):
     config = GroundingRunConfig(
         grounding_run_id="pt2-run",
         task_reference=GroundingTaskReference(task_id="pt2-task"),
@@ -79,7 +84,9 @@ def _grounding_context(tmp_path, provider):
     )
     coordinator = GroundingCoordinator(
         executor=GroundingExecutor(tmp_path, snapshot_identity="pt2-snapshot"),
-        provider=PlanningGroundingProviderAdapter(provider, timeout_seconds=1),
+        provider=PlanningGroundingProviderAdapter(
+            provider, timeout_seconds=provider_timeout_seconds
+        ),
         config=config,
     )
     return GroundingDecisionContext(
@@ -176,6 +183,53 @@ def test_grounding_fast_provider_success_is_preserved(monkeypatch):
     assert result["output"] == "fast"
 
 
+def test_grounding_production_policy_defaults_to_240_and_derives_270():
+    adapter = PlanningGroundingProviderAdapter(OpenClawPlanningProvider(None))
+    deadline = ProviderDeadline.start(adapter.timeout_seconds)
+
+    assert GROUNDING_PROVIDER_TIMEOUT_SECONDS == 240
+    assert adapter.timeout_seconds == 240
+    assert TRANSPORT_TIMEOUT_MARGIN_SECONDS == 30
+    assert deadline.logical_timeout_seconds == 240
+    assert deadline.transport_timeout_seconds == 270
+
+
+def test_grounding_production_policy_reaches_event_telemetry(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_invoke(_db, _prompt, **kwargs):
+        captured.update(kwargs)
+        return {
+            "status": "completed",
+            "output": '{"action":"inspect_file","path":"app/example.py"}',
+            "runtime_diagnostics": {
+                **ProviderDeadline.start(kwargs["timeout_seconds"]).diagnostics(),
+                "timed_out": False,
+                "diagnostic_category": "provider_success",
+            },
+        }
+
+    monkeypatch.setattr(
+        "app.services.planning.providers.openclaw.invoke_runtime_prompt",
+        fake_invoke,
+    )
+    events = []
+    provider = OpenClawPlanningProvider(None)
+    adapter = PlanningGroundingProviderAdapter(
+        provider,
+        event_sink=lambda _kind, details: events.append(details),
+    )
+
+    proposal = adapter.decide(_grounding_context(tmp_path, provider))
+
+    assert proposal.action_payload["action"] == "inspect_file"
+    assert captured["timeout_seconds"] == 240
+    details = events[-1]
+    assert details["configured_logical_timeout_seconds"] == 240
+    assert details["effective_logical_deadline_seconds"] == 240
+    assert details["effective_transport_timeout_seconds"] == 270
+
+
 def test_openai_chat_transport_margin_and_timeout_classification(monkeypatch):
     _ImmediateTimeoutClient.timeouts.clear()
     monkeypatch.setattr(
@@ -190,6 +244,20 @@ def test_openai_chat_transport_margin_and_timeout_classification(monkeypatch):
     assert diagnostics["configured_logical_timeout_seconds"] == 1
     assert diagnostics["effective_logical_deadline_seconds"] == 1
     assert diagnostics["effective_transport_timeout_seconds"] == 31
+
+
+def test_openai_chat_production_grounding_policy_uses_270_transport(monkeypatch):
+    _ImmediateTimeoutClient.timeouts.clear()
+    monkeypatch.setattr(
+        openai_chat_adapter.httpx, "AsyncClient", _ImmediateTimeoutClient
+    )
+    error = _chat_timeout(_chat_runtime(), timeout_seconds=240)
+
+    assert _ImmediateTimeoutClient.timeouts == [270]
+    assert error.provider_failure_classification == "provider_timeout"
+    assert error.runtime_diagnostics["configured_logical_timeout_seconds"] == 240
+    assert error.runtime_diagnostics["effective_logical_deadline_seconds"] == 240
+    assert error.runtime_diagnostics["effective_transport_timeout_seconds"] == 270
 
 
 def test_reflection_logical_deadline_wins_over_padded_wait():

@@ -476,6 +476,9 @@ def test_normal_typed_path_selects_durable_adapter_without_external_injection(
     assert result.terminal_state is GroundingLifecycleState.SUFFICIENT
     assert len(provider.requests) == 2
     assert provider.requests[0].artifact_kind is PlanningArtifactKind.GROUNDING
+    assert all(
+        request.runtime_options.timeout_seconds == 240 for request in provider.requests
+    )
     assert not hasattr(ctx, "grounding_decision_provider")
 
 
