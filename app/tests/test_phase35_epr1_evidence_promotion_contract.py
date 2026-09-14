@@ -35,6 +35,7 @@ from app.services.orchestration.planning.grounding import (
     build_grounding_planning_context,
 )
 from app.services.orchestration.planning.grounding.contracts import (
+    MAX_OBSERVATION_BYTES,
     GroundingBudgetLimits,
     is_substantive_observation,
     substantive_evidence_paths,
@@ -43,6 +44,7 @@ from app.services.orchestration.planning.semantic_target_inventory import (
     build_semantic_target_inventory,
 )
 from app.services.orchestration.planning.source_materialization import (
+    MAX_RELEVANT_FILES,
     MAX_SOURCE_CONTENT_TOTAL_CHARS,
 )
 
@@ -267,15 +269,40 @@ def test_t5_multi_path_search_never_duplicates_source_materialization(tmp_path):
     assert len(paths) == len(set(paths))
 
 
-def test_t10_total_source_byte_bound_is_unchanged(tmp_path):
+def test_t10_total_source_byte_bound_is_coherent_with_the_evidence_carried(tmp_path):
+    """PHASE36-SB1: the handoff declares Grounding's budget, not the planner's.
+
+    This previously asserted ``maximum_total_source_bytes == 5000``, the
+    planner-prompt default the handoff silently inherited.  PA1 proved that
+    default is not the governing budget on this path: Grounding bounds evidence
+    per observation at ``MAX_OBSERVATION_BYTES`` (8192), so the same object
+    could declare a 5000-byte cap while legitimately carrying 8192 bytes, and
+    the post-Plan fence then rejected every mutating Plan.  The assertion held
+    here only because this fixture materializes 58 bytes.
+
+    The durable property is coherence: whatever bound the handoff declares, the
+    evidence it carries must respect it.
+    """
+
     root = _wide_repo(tmp_path)
     result, _provider = _run(root, [SEARCH, _need(INSPECT), _sufficient_all])
     context = build_grounding_planning_context(result, project_dir=root)
 
+    # The planner-prompt default still exists; it simply no longer governs the
+    # canonical Grounding handoff.
     assert MAX_SOURCE_CONTENT_TOTAL_CHARS == 5000
     materialization = context.source_materialization
-    assert materialization.maximum_total_source_bytes == 5000
-    assert materialization.materialized_source_bytes <= 5000
+    assert materialization.maximum_bytes_per_file == MAX_OBSERVATION_BYTES
+    assert (
+        materialization.maximum_total_source_bytes
+        == MAX_RELEVANT_FILES * MAX_OBSERVATION_BYTES
+    )
+    assert (
+        materialization.materialized_source_bytes
+        <= materialization.maximum_total_source_bytes
+    )
+    for item in materialization.files:
+        assert item.included_source_bytes <= materialization.maximum_bytes_per_file
 
 
 # T6 / T7 --------------------------------------------------------------------

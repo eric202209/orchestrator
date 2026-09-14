@@ -14,6 +14,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from app.services.orchestration.planning.source_materialization import (
+    MAX_RELEVANT_FILES,
     SOURCE_STATUS_EXISTING,
     SPAN_PRIMARY_TARGET,
     MaterializedSourceFile,
@@ -29,6 +30,7 @@ from app.services.orchestration.validation.path_authority import (
 )
 
 from .contracts import (
+    MAX_OBSERVATION_BYTES,
     GroundingObservation,
     GroundingOutcome,
     StructuralIdentity,
@@ -486,9 +488,22 @@ def _materialize_evidence(
         if previous is None or (previous.spans == () and record.spans):
             records[item.source_path] = record
     values = tuple(records[path] for path in sorted(records))
+    # PHASE36-SB1: declare the budget this producer actually used.  Grounding
+    # bounds evidence per observation (MAX_OBSERVATION_BYTES) and owns no
+    # separate aggregate byte budget, so the binding limits on this path are the
+    # per-record bound and the record count; the aggregate is their product.
+    # The total must also cover the records the post-Plan fence itself adds when
+    # it self-grounds a mutation target the Plan named but Grounding did not
+    # cite, which is why it is stated over the record-count bound rather than
+    # over the records present here.  Leaving these fields implicit made them
+    # fall back to the unrelated planner-prompt defaults (2000/5000), which the
+    # fence then enforced against evidence those defaults never governed.
     return PlannerSourceMaterialization(
         workspace_identity=str(root),
         files=values,
+        maximum_files=MAX_RELEVANT_FILES,
+        maximum_bytes_per_file=MAX_OBSERVATION_BYTES,
+        maximum_total_source_bytes=MAX_RELEVANT_FILES * MAX_OBSERVATION_BYTES,
         materialized_source_bytes=sum(item.included_source_bytes for item in values),
     )
 

@@ -471,6 +471,19 @@ def ground_post_plan_source_materialization(
             additions.append(record)
 
     merged = _merge_materialization(source_materialization, tuple(additions))
+    # PHASE36-SB1: the producer declares the budget it used and the fence
+    # verifies it.  The total bound was already checked here; the per-file bound
+    # was only ever propagated into re-materialization, so an inbound record
+    # could exceed its own declared cap unnoticed.  Both declared caps are now
+    # verified against the evidence actually carried.
+    for item in merged.files:
+        if item.included_source_bytes > merged.maximum_bytes_per_file:
+            return _failure(
+                source_materialization,
+                POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE,
+                path=item.relative_path,
+                detail="materialized source exceeds the declared per-file byte bound",
+            )
     if merged.materialized_source_bytes > merged.maximum_total_source_bytes:
         return _failure(
             source_materialization,
