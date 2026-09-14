@@ -144,9 +144,9 @@ def test_s0_exact_pra2_rate_limit_search_is_admitted(tmp_path):
     )
 
     assert raw.outcome is GroundingOutcome.FOUND
-    assert raw.result_count == 16
-    assert len(raw.source_paths) == 7
-    assert len(raw.bounded_content) == 1998
+    assert raw.result_count == 17
+    assert len(raw.source_paths) == 8
+    assert len(raw.bounded_content) == 2105
     assert raw.budget_delta.repository_actions == 1
     assert raw.budget_delta.distinct_files == 0
     assert raw.budget_delta.positive_regions == 0

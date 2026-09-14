@@ -86,7 +86,7 @@ CASE_C = GroundingFixture(
     name="CASE_C_retired_project_shape",
     task_text=(
         "Allow callers to include retired projects when browsing projects while "
-        "preserving the current default behavior."
+        "preserving the current default."
     ),
     expected_path="app/api/v1/endpoints/projects.py",
     expected_regions=((3894, 5598),),
