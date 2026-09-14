@@ -72,6 +72,10 @@ from .integrity import (
     pre_existing_source_files,
     scan_test_file_changes,
 )
+from app.services.orchestration.planning.behavioral_repair_contract import (
+    BEHAVIORAL_REPAIR_MISSING_IMPLEMENTATION_CHANGE,
+    evaluate_behavioral_repair_contract,
+)
 from app.services.orchestration.planning.task_bootstrap_contract import (
     BootstrapTaskType,
     build_task1_bootstrap_contract,
@@ -2410,6 +2414,34 @@ class ValidatorService:
                     + "; ".join(task1_bootstrap_contract.violations[:4])
                 )
 
+        # Phase36-PC1: a grounded behavioral repair cannot be satisfied by tests
+        # alone.  Evidence is taken exclusively from executable mutating
+        # operations -- never from step descriptions or ``expected_files``.
+        behavioral_repair_contract = None
+        if profile != "verification" and stage_allows_materialization:
+            behavioral_repair_contract = evaluate_behavioral_repair_contract(
+                plan=plan,
+                task_text=" ".join(
+                    str(value or "") for value in (title, description, task_prompt)
+                ),
+                source_materialization=source_materialization,
+                # The validator owns the bounded shell-write vocabulary; the
+                # contract only classifies the paths it resolves.
+                additional_mutation_paths=sorted(materialized_targets),
+            )
+            details["behavioral_repair_contract"] = behavioral_repair_contract.to_dict()
+            if not behavioral_repair_contract.passed:
+                repairable.append(
+                    f"{BEHAVIORAL_REPAIR_MISSING_IMPLEMENTATION_CHANGE}: the task "
+                    "asks for existing behavior to be corrected and the relevant "
+                    "implementation source is grounded, but every mutating "
+                    "operation targets a test/verification artifact "
+                    "(test_only_mutation_paths: "
+                    f"{behavioral_repair_contract.test_only_mutation_paths[:5]}; "
+                    "grounded_implementation_paths: "
+                    f"{behavioral_repair_contract.grounded_implementation_paths[:5]})"
+                )
+
         negative_existing_checks = cls._plan_negative_existing_file_checks(
             plan, project_dir
         )
@@ -2741,6 +2773,8 @@ class ValidatorService:
             semantic_violation_codes.append("python_source_syntax_invalid")
         if task1_bootstrap_contract and task1_bootstrap_contract.violation_codes:
             semantic_violation_codes.extend(task1_bootstrap_contract.violation_codes)
+        if behavioral_repair_contract and behavioral_repair_contract.violation_codes:
+            semantic_violation_codes.extend(behavioral_repair_contract.violation_codes)
         if semantic_violation_codes:
             details["semantic_violation_codes"] = list(
                 dict.fromkeys(semantic_violation_codes)

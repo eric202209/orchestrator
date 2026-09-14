@@ -381,6 +381,7 @@ No prose. No markdown fences. No plan.json. No explanation.
 9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
 10. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command, and must prove behavior or content using current workspace evidence.
 11. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
+12. When the task asks you to correct existing product behavior, tests are verification, not the repair. The plan must include an `ops` mutation of the implementation, configuration, or data that actually changes the behavior; a plan whose only mutations are test files does not complete such a task.
 
 **Execution Profile Rules:**
 {execution_profile_rules}
