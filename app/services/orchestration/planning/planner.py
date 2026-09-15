@@ -1746,7 +1746,7 @@ class PlannerService:
                 fenced=fenced,
             )
         except Exception as exc:
-            logger.debug(
+            _logger.debug(
                 "[ORCHESTRATION] Planning repair response evidence verdict unavailable: %s",
                 exc,
             )
