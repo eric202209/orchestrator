@@ -302,6 +302,25 @@ class PlanningSessionCommitRequest(BaseModel):
 
 
 # Session Schemas
+class OrchestrationStateResponse(BaseModel):
+    """Backward-compatible typed projection of durable lifecycle authority."""
+
+    current_phase: Optional[str] = None
+    terminal_reason: Optional[str] = None
+    attempt_status: Optional[str] = None
+    attempt_failure_reason: Optional[str] = None
+    continuation_pending: bool = False
+    continuation_kind: Optional[str] = None
+    retry_count: Optional[int] = 0
+    retry_eta: Optional[datetime] = None
+    logical_terminal: bool = False
+    quiescent: bool = False
+    last_transition_at: Optional[datetime] = None
+    coordinator: Optional[str] = None
+    allowed_actions: List[str] = Field(default_factory=list)
+    is_terminal: bool = False
+
+
 class SessionBase(BaseModel):
     name: str
     description: Optional[str] = None
@@ -358,11 +377,16 @@ class SessionResponse(SessionBase):
     created_at: datetime
     updated_at: Optional[datetime] = None
     instance_id: Optional[str] = None
+    continuation_task_id: Optional[int] = None
+    continuation_kind: Optional[str] = None
+    continuation_retry_count: int = 0
+    continuation_retry_eta: Optional[datetime] = None
+    lifecycle_updated_at: Optional[datetime] = None
     deleted_at: Optional[datetime] = None
     model_lane_label: Optional[str] = None
     model_lane_metadata: Optional[dict[str, Any]] = None
     failure_category: Optional[str] = None
-    orchestration_state: Optional[Dict[str, Any]] = None
+    orchestration_state: Optional[OrchestrationStateResponse] = None
 
 
 # Log Entry Schemas

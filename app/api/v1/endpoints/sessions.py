@@ -153,7 +153,12 @@ router = APIRouter()
 DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS = 1800
 
 
-def _set_session_task_projection(db: Session, session: SessionModel) -> SessionModel:
+def _set_session_task_projection(
+    db: Session,
+    session: SessionModel,
+    *,
+    latest_task_execution: Optional[TaskExecution] = None,
+) -> SessionModel:
     """Expose the latest canonical SessionTask identity without a second FK."""
 
     latest_link = (
@@ -163,6 +168,9 @@ def _set_session_task_projection(db: Session, session: SessionModel) -> SessionM
         .first()
     )
     session.task_id = latest_link.task_id if latest_link else None
+    session.orchestration_state = _derive_orchestration_state_block(
+        db, session, latest_task_execution=latest_task_execution
+    )
     return session
 
 
@@ -516,10 +524,7 @@ def get_session(
     response.log_count = log_count
     response.task_count = len(session_tasks)
     response.failure_category = failure_category
-    response.orchestration_state = _derive_orchestration_state_block(
-        db, session, latest_task_execution=latest_execution
-    )
-    _set_session_task_projection(db, response)
+    _set_session_task_projection(db, response, latest_task_execution=latest_execution)
 
     return response
 

@@ -139,7 +139,16 @@ class Session(Base):
     description = Column(Text, nullable=True)
     status = Column(
         String(50), default="pending"
-    )  # pending, running, paused, stopped, completed
+    )  # pending, running, recovering, retry_pending, paused, stopped, completed
+    # Phase 36 lifecycle-authority metadata.  Continuation and terminality are
+    # derived by the read-side authority; these columns are additive evidence
+    # for later writer slices and are not client-mutable session flags.
+    continuation_task_id = Column(Integer, nullable=True)
+    continuation_kind = Column(String(64), nullable=True)
+    continuation_retry_count = Column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    continuation_retry_eta = Column(DateTime(timezone=True), nullable=True)
     execution_mode = Column(String(20), default="automatic")
     # Set only after the session-create dogfood admission gate passes. This is
     # an execution authority marker, not a client-selectable queue override.
@@ -152,6 +161,7 @@ class Session(Base):
     resumed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    lifecycle_updated_at = Column(DateTime(timezone=True), nullable=True)
     # Soft delete tracking to prevent ID reuse issues
     deleted_at = Column(DateTime(timezone=True), nullable=True)
     last_alert_level = Column(String(20), nullable=True)

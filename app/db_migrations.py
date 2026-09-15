@@ -4771,6 +4771,68 @@ def _migration_055_task_intent_mode(engine: Engine) -> None:
             )
 
 
+def _migration_056_session_lifecycle_authority(engine: Engine) -> None:
+    """Add additive Session lifecycle-authority metadata and safe backfills."""
+
+    if "sessions" not in _table_names(engine):
+        return
+
+    existing_columns = {
+        column["name"] for column in inspect(engine).get_columns("sessions")
+    }
+    additions = (
+        (
+            "continuation_task_id",
+            "ALTER TABLE sessions ADD COLUMN continuation_task_id INTEGER",
+        ),
+        (
+            "continuation_kind",
+            "ALTER TABLE sessions ADD COLUMN continuation_kind VARCHAR(64)",
+        ),
+        (
+            "continuation_retry_count",
+            "ALTER TABLE sessions ADD COLUMN continuation_retry_count "
+            "INTEGER NOT NULL DEFAULT 0",
+        ),
+        (
+            "continuation_retry_eta",
+            "ALTER TABLE sessions ADD COLUMN continuation_retry_eta DATETIME",
+        ),
+        (
+            "lifecycle_updated_at",
+            "ALTER TABLE sessions ADD COLUMN lifecycle_updated_at DATETIME",
+        ),
+    )
+
+    with engine.begin() as connection:
+        for column_name, statement in additions:
+            if column_name not in existing_columns:
+                connection.execute(text(statement))
+
+        # Historical rows receive only deterministic defaults.  In particular,
+        # paused status is not treated as evidence of a historical retry.
+        connection.execute(
+            text(
+                "UPDATE sessions SET continuation_retry_count = 0 "
+                "WHERE continuation_retry_count IS NULL"
+            )
+        )
+
+        timestamp_sources = [
+            column_name
+            for column_name in ("updated_at", "created_at")
+            if column_name in existing_columns
+        ]
+        if timestamp_sources:
+            connection.execute(
+                text(
+                    "UPDATE sessions SET lifecycle_updated_at = COALESCE("
+                    + ", ".join(timestamp_sources)
+                    + ") WHERE lifecycle_updated_at IS NULL"
+                )
+            )
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -5058,6 +5120,11 @@ MIGRATIONS: tuple[Migration, ...] = (
         version="055_task_intent_mode",
         description="Add typed Task intent mode for bounded create-only planning",
         upgrade=_migration_055_task_intent_mode,
+    ),
+    Migration(
+        version="056_session_lifecycle_authority",
+        description="Add additive Session continuation and lifecycle timestamps",
+        upgrade=_migration_056_session_lifecycle_authority,
     ),
 )
 

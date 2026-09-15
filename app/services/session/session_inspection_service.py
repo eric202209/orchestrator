@@ -42,6 +42,9 @@ from app.services.orchestration.state.session_state import (
     mark_session_paused,
     normalize_session_status,
 )
+from app.services.orchestration.lifecycle.authority import (
+    derive_lifecycle_authority,
+)
 from app.services.orchestration.policy import get_policy_profile
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.observability.log_utils import deduplicate_logs
@@ -105,110 +108,17 @@ def _latest_execution_backend(db: Session, session_id: int) -> str | None:
     return getattr(execution, "backend_id", None) if execution else None
 
 
-# ── Orchestration-state derivation tables ─────────────────────────────────────
-
-_STATUS_TO_PHASE: Dict[str, Optional[str]] = {
-    "pending": None,
-    "running": "step_executing",
-    "paused": "awaiting_input",
-    "awaiting_input": "awaiting_input",
-    "stopped": "cancelled",
-    "cancelled": "cancelled",
-    "canceled": "cancelled",
-    "failed": "failed",
-    "done": "done",
-    "completed": "done",
-}
-
-_TERMINAL_PHASES: frozenset = frozenset({"done", "failed", "cancelled"})
-
-_PHASE_TO_COORDINATOR: Dict[str, str] = {
-    "step_executing": "ExecutionCoordinator",
-    "awaiting_input": "ExecutionCoordinator",
-}
-
-_STATUS_TO_ALLOWED_ACTIONS: Dict[str, List[str]] = {
-    "pending": ["view_logs", "view_timeline", "start_session"],
-    "running": ["view_logs", "view_timeline", "pause_session", "stop_session"],
-    "paused": ["view_logs", "view_timeline", "resume_session", "stop_session"],
-    "awaiting_input": ["view_logs", "view_timeline", "submit_guidance", "stop_session"],
-    "stopped": ["view_logs", "view_timeline", "resume_session", "start_session"],
-    "cancelled": ["view_logs", "view_timeline", "resume_session", "start_session"],
-    "canceled": ["view_logs", "view_timeline", "resume_session", "start_session"],
-    "failed": [
-        "view_logs",
-        "view_timeline",
-        "resume_session",
-        "retry_task",
-        "start_session",
-    ],
-    "done": ["view_logs", "view_timeline", "start_session"],
-    "completed": ["view_logs", "view_timeline", "start_session"],
-}
-
-
 def derive_orchestration_state_block(
     db: Session,
     session: SessionModel,
     *,
     latest_task_execution: Optional[TaskExecution] = None,
 ) -> Dict[str, Any]:
-    """Derive the operator-facing orchestration state block from session status.
+    """Delegate the operator projection to the single lifecycle authority."""
 
-    Returns a server-derived block with no DB columns written and no runtime
-    behaviour changed.  All fields are derived from existing session state and
-    task execution records.
-    """
-    status = str(session.status or "")
-    current_phase = _STATUS_TO_PHASE.get(status)
-
-    terminal_reason: Optional[str] = None
-    if latest_task_execution is not None and latest_task_execution.failure_category:
-        latest_execution_status = (
-            latest_task_execution.status.value
-            if hasattr(latest_task_execution.status, "value")
-            else str(latest_task_execution.status or "")
-        )
-        if latest_execution_status in {"failed", "cancelled", "canceled"}:
-            terminal_reason = (
-                str(latest_task_execution.failure_category).strip() or None
-            )
-    if current_phase in _TERMINAL_PHASES:
-        if terminal_reason is None and latest_task_execution is not None:
-            terminal_reason = (
-                str(latest_task_execution.failure_category).strip() or None
-                if latest_task_execution.failure_category
-                else None
-            )
-        if terminal_reason is None:
-            failed_exec = (
-                db.query(TaskExecution)
-                .filter(
-                    TaskExecution.session_id == session.id,
-                    TaskExecution.failure_category.isnot(None),
-                )
-                .order_by(
-                    TaskExecution.completed_at.desc().nullslast(),
-                    TaskExecution.id.desc(),
-                )
-                .first()
-            )
-            if failed_exec:
-                terminal_reason = str(failed_exec.failure_category).strip() or None
-
-    coordinator = _PHASE_TO_COORDINATOR.get(current_phase) if current_phase else None
-    is_terminal = current_phase in _TERMINAL_PHASES if current_phase else False
-    allowed_actions = list(
-        _STATUS_TO_ALLOWED_ACTIONS.get(status, ["view_logs", "view_timeline"])
-    )
-
-    return {
-        "current_phase": current_phase,
-        "terminal_reason": terminal_reason,
-        "coordinator": coordinator,
-        "is_terminal": is_terminal,
-        "allowed_actions": allowed_actions,
-    }
+    return derive_lifecycle_authority(
+        db, session, latest_task_execution=latest_task_execution
+    ).as_projection()
 
 
 def _latest_validation_evidence(

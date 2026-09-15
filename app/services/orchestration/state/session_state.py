@@ -13,6 +13,8 @@ from app.services.orchestration.state.persistence import set_session_alert
 class SessionStatus(str, Enum):
     PENDING = "pending"
     RUNNING = "running"
+    RECOVERING = "recovering"
+    RETRY_PENDING = "retry_pending"
     PAUSED = "paused"
     AWAITING_INPUT = "awaiting_input"
     STOPPED = "stopped"
