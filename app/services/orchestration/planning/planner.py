@@ -78,6 +78,7 @@ from app.services.orchestration.planning.repair_evidence import (
 from app.services.observability.planning_provider_evidence import (
     begin_planning_provider_evidence_from_runtime,
     inspect_chat_completion_response,
+    PlanningRepairResponseEvidence,
 )
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
@@ -1722,6 +1723,35 @@ class PlannerService:
         return candidate if isinstance(parsed, list) else None
 
     @staticmethod
+    def _record_repair_provider_evidence_contract(
+        evidence_path: Optional[str],
+        *,
+        status: str,
+        input_content: str,
+        normalized_content: Optional[str] = None,
+        reason: Optional[str] = None,
+        fenced: Optional[bool] = None,
+    ) -> None:
+        """Append the Planner boundary verdict without changing its decision."""
+
+        if not evidence_path:
+            return
+        try:
+            evidence = PlanningRepairResponseEvidence.load(evidence_path)
+            evidence.record_planner_contract(
+                status=status,
+                input_content=input_content,
+                normalized_content=normalized_content,
+                reason=reason,
+                fenced=fenced,
+            )
+        except Exception as exc:
+            logger.debug(
+                "[ORCHESTRATION] Planning repair response evidence verdict unavailable: %s",
+                exc,
+            )
+
+    @staticmethod
     async def _invoke_repair_prompt(
         runtime_service: Any,
         repair_prompt: str,
@@ -1729,6 +1759,8 @@ class PlannerService:
         lock_diagnostics_out: Optional[Dict[str, Any]] = None,
         diagnostic_context: Optional[Dict[str, Any]] = None,
         allow_registry_fallback: bool = True,
+        response_evidence_path: Optional[str] = None,
+        response_evidence_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
 
@@ -1744,6 +1776,8 @@ class PlannerService:
             temperature=0.0,
             reasoning_enabled=(not settings.PLANNING_REPAIR_DISABLE_THINKING),
             stream=False,
+            provider_response_evidence_path=response_evidence_path,
+            provider_response_evidence_correlation_id=response_evidence_correlation_id,
         )
 
         repair_runtime = None
@@ -2561,6 +2595,8 @@ class PlannerService:
         planner_contract: Optional[Dict[str, Any]] = None,
         source_materialization: Any = None,
         grounding_planning_context: Any = None,
+        provider_response_evidence_path: Optional[str] = None,
+        provider_response_evidence_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         repair_build_started_at = time.monotonic()
         logger.warning(
@@ -2834,6 +2870,10 @@ class PlannerService:
                         repair_timeout,
                         lock_diagnostics_out=repair_lock_diagnostics,
                         diagnostic_context=stale_replace_diagnostic_context,
+                        response_evidence_path=provider_response_evidence_path,
+                        response_evidence_correlation_id=(
+                            provider_response_evidence_correlation_id
+                        ),
                     ),
                     timeout=repair_timeout,
                 )
@@ -2864,6 +2904,13 @@ class PlannerService:
                     "repair returned markdown-fenced JSON; expected bare JSON array"
                     if is_fenced
                     else "repair returned prose; expected bare JSON array"
+                )
+                cls._record_repair_provider_evidence_contract(
+                    provider_response_evidence_path,
+                    status="rejected",
+                    input_content=repair_output_text,
+                    reason=contract_reason,
+                    fenced=is_fenced,
                 )
                 diagnostics = {
                     **runtime_diagnostics,
@@ -2902,6 +2949,13 @@ class PlannerService:
                     contract_reason,
                     diagnostics,
                 )
+            cls._record_repair_provider_evidence_contract(
+                provider_response_evidence_path,
+                status="accepted",
+                input_content=repair_output_text,
+                normalized_content=normalized_repair_output_text,
+                fenced=repair_output_text.lstrip().startswith("```"),
+            )
             if normalized_repair_output_text != repair_output_text:
                 result["output"] = normalized_repair_output_text
                 emit_live(
@@ -3082,6 +3136,10 @@ class PlannerService:
                         workspace_identity=workspace_identity,
                         planner_contract=planner_contract,
                         grounding_planning_context=grounding_planning_context,
+                        provider_response_evidence_path=provider_response_evidence_path,
+                        provider_response_evidence_correlation_id=(
+                            provider_response_evidence_correlation_id
+                        ),
                     )
                 timeout_exc = PlanningRepairNoOutputTimeout(
                     (

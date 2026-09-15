@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -513,9 +514,380 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     _write_text(path, json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
 
 
+_EVIDENCE_SECRET_KEY_RE = re.compile(
+    r"(?:api[_-]?key|access[_-]?token|authorization|bearer|cookie|credential|"
+    r"password|secret|token)",
+    re.IGNORECASE,
+)
+_EVIDENCE_SECRET_TEXT_PATTERNS = (
+    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    re.compile(
+        r"(?i)((?:api[_-]?key|access[_-]?token|password|secret|token)\s*[:=]\s*)"
+        r"([^\s,;\"']+)"
+    ),
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+)
+
+
+def _redact_evidence_value(value: Any) -> tuple[Any, bool]:
+    """Return a deterministic evidence copy without credential-like values."""
+
+    if isinstance(value, Mapping):
+        redacted = False
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if _EVIDENCE_SECRET_KEY_RE.search(key_text):
+                result[key_text] = "<redacted>"
+                redacted = True
+                continue
+            safe_item, item_redacted = _redact_evidence_value(item)
+            result[key_text] = safe_item
+            redacted = redacted or item_redacted
+        return result, redacted
+    if isinstance(value, (list, tuple)):
+        items = []
+        redacted = False
+        for item in value:
+            safe_item, item_redacted = _redact_evidence_value(item)
+            items.append(safe_item)
+            redacted = redacted or item_redacted
+        return items, redacted
+    if isinstance(value, bytes):
+        return "<redacted-bytes>", True
+    if isinstance(value, str):
+        result = value
+        redacted = False
+        for pattern in _EVIDENCE_SECRET_TEXT_PATTERNS:
+            updated = pattern.sub(
+                lambda match: (
+                    match.group(1) + "<redacted>"
+                    if match.lastindex and match.lastindex >= 1
+                    else "<redacted>"
+                ),
+                result,
+            )
+            redacted = redacted or updated != result
+            result = updated
+        return result, redacted
+    return value, False
+
+
+def _evidence_serialized(value: Any) -> str:
+    try:
+        return json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _evidence_representation(value: Any, *, retained: bool = True) -> dict[str, Any]:
+    serialized = _evidence_serialized(value)
+    safe_value, redacted = _redact_evidence_value(value)
+    safe_serialized = _evidence_serialized(safe_value)
+    representation = {
+        "retained": retained,
+        "redacted": redacted,
+        "length": len(serialized),
+        "sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        "retained_length": len(safe_serialized) if retained else 0,
+        "retained_sha256": (
+            hashlib.sha256(safe_serialized.encode("utf-8")).hexdigest()
+            if retained
+            else None
+        ),
+    }
+    if retained:
+        representation["value"] = safe_value
+    return representation
+
+
+class PlanningRepairResponseEvidence:
+    """Explicit, bounded response capture for one Planning repair call.
+
+    This is intentionally separate from the existing always-on lifecycle
+    evidence recorder. A caller supplies a unique path to opt in. Every write
+    is best-effort so evidence persistence cannot alter provider output,
+    parser behavior, or Planning authority; persistence errors are exposed in
+    the diagnostic summary and mark the artifact incomplete when writable.
+    """
+
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        correlation_id: str | None,
+        backend: str | None,
+        model: str | None,
+        role: str | None,
+        endpoint: str | None,
+        logical_timeout_seconds: float | int | None,
+        transport_timeout_seconds: float | int | None,
+    ) -> None:
+        self.path = Path(path)
+        self._persistence_errors: list[str] = []
+        self.document: dict[str, Any] = {
+            "schema_version": "planning_repair_provider_response_evidence.v1",
+            "capture_enabled": True,
+            "capture_scope": "planning_repair",
+            "correlation": {
+                "provider_call_id": str(correlation_id or uuid.uuid4().hex),
+            },
+            "provider": {
+                "backend": backend,
+                "model": model,
+                "role": role,
+                "endpoint_class": safe_endpoint_class(endpoint),
+                "http_status": None,
+                "finish_reason": None,
+                "usage": None,
+                "provider_request_correlation_id": None,
+            },
+            "request": {},
+            "representations": {
+                "raw_http_bytes": {
+                    "retained": False,
+                    "redacted": False,
+                    "sha256": None,
+                    "length": 0,
+                    "representation": "RAW_HTTP_BYTES",
+                },
+                "provider_envelope": {
+                    "retained": True,
+                    "representation": "REDACTED_PROVIDER_ENVELOPE_METADATA",
+                },
+                "assistant_content": {
+                    "retained": False,
+                    "representation": "RAW_ASSISTANT_CONTENT",
+                },
+                "extracted_content": {
+                    "retained": False,
+                    "representation": "ADAPTER_EXTRACTED_CONTENT",
+                },
+                "adapter_normalized_content": {
+                    "retained": False,
+                    "representation": "ADAPTER_NORMALIZED_CONTENT",
+                },
+                "planner_visible_content": {
+                    "retained": False,
+                    "representation": "PLANNER_VISIBLE_CONTENT",
+                },
+            },
+            "normalization": {
+                "transformed": False,
+                "classification": "not_reached",
+            },
+            "planner_output_contract": {
+                "status": "not_reached",
+            },
+            "timing": {
+                "request_started_utc": _utc_now(),
+                "response_received_utc": None,
+                "request_finished_utc": None,
+                "logical_timeout_seconds": logical_timeout_seconds,
+                "transport_timeout_seconds": transport_timeout_seconds,
+            },
+            "error": None,
+            "evidence_persistence": {
+                "status": "pending",
+                "errors": [],
+            },
+        }
+
+    @classmethod
+    def load(cls, path: str | Path) -> "PlanningRepairResponseEvidence":
+        """Load one adapter-created artifact for the Planner verdict update."""
+
+        instance = cls.__new__(cls)
+        instance.path = Path(path)
+        instance._persistence_errors = []
+        instance.document = json.loads(instance.path.read_text(encoding="utf-8"))
+        return instance
+
+    @property
+    def correlation_id(self) -> str:
+        return str(self.document["correlation"]["provider_call_id"])
+
+    @property
+    def persistence_errors(self) -> list[str]:
+        return list(self._persistence_errors)
+
+    def _persist(self) -> None:
+        self.document["evidence_persistence"] = {
+            "status": "incomplete" if self._persistence_errors else "complete",
+            "errors": list(self._persistence_errors),
+        }
+        try:
+            _write_json(self.path, self.document)
+        except Exception as exc:  # pragma: no cover - exercised through callers
+            message = f"{type(exc).__name__}: {str(exc)[:240]}"
+            if message not in self._persistence_errors:
+                self._persistence_errors.append(message)
+
+    def start(self, *, prompt: str, payload_keys: list[str]) -> None:
+        self.document["request"] = {
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "prompt_chars": len(prompt),
+            "payload_keys": sorted(str(key) for key in payload_keys),
+        }
+        self._persist()
+
+    def record_http_response(
+        self, *, status_code: int | None, content_type: str | None, raw_body: bytes
+    ) -> None:
+        self.document["provider"]["http_status"] = status_code
+        self.document["timing"]["response_received_utc"] = _utc_now()
+        self.document["representations"]["raw_http_bytes"] = {
+            "retained": False,
+            "redacted": False,
+            "representation": "RAW_HTTP_BYTES",
+            "sha256": hashlib.sha256(raw_body).hexdigest(),
+            "length": len(raw_body),
+            "content_type": str(content_type or "")[:255] or None,
+            "retention_reason": "raw HTTP bytes are not durably retained; parsed evidence is captured separately",
+        }
+        self._persist()
+
+    def record_envelope(self, body: Any, *, request_correlation_id: Any = None) -> None:
+        observed = inspect_chat_completion_response(body)
+        self.document["provider"].update(
+            {
+                "finish_reason": observed.get("finish_reason"),
+                "usage": observed.get("usage"),
+                "provider_request_correlation_id": (
+                    str(
+                        request_correlation_id
+                        or observed.get("provider_request_correlation_id")
+                    )[:255]
+                    if (
+                        request_correlation_id
+                        or observed.get("provider_request_correlation_id")
+                    )
+                    else None
+                ),
+            }
+        )
+        choices = body.get("choices") if isinstance(body, Mapping) else None
+        self.document["representations"]["provider_envelope"] = {
+            "retained": True,
+            "representation": "REDACTED_PROVIDER_ENVELOPE_METADATA",
+            "keys": (
+                sorted(str(key) for key in body) if isinstance(body, Mapping) else []
+            ),
+            "choice_count": len(choices) if isinstance(choices, list) else 0,
+            "assistant_roles": [
+                str((choice.get("message") or {}).get("role"))
+                for choice in (choices or [])
+                if isinstance(choice, Mapping)
+                and isinstance(choice.get("message"), Mapping)
+            ],
+            "model": (
+                str(body.get("model"))[:255]
+                if isinstance(body, Mapping) and body.get("model") is not None
+                else None
+            ),
+            "id": (
+                str(body.get("id"))[:255]
+                if isinstance(body, Mapping) and body.get("id") is not None
+                else None
+            ),
+            "usage": observed.get("usage"),
+            "finish_reason": observed.get("finish_reason"),
+        }
+        self._persist()
+
+    def record_content_stages(
+        self,
+        *,
+        assistant_content: Any,
+        extracted_content: Any,
+        adapter_normalized_content: Any,
+        planner_visible_content: Any,
+        transformed: bool,
+        classification: str,
+    ) -> None:
+        representations = self.document["representations"]
+        representations["assistant_content"] = {
+            **_evidence_representation(assistant_content),
+            "source_representation": "RAW_ASSISTANT_CONTENT",
+            "representation": "REDACTED_ASSISTANT_CONTENT",
+        }
+        representations["extracted_content"] = {
+            **_evidence_representation(extracted_content),
+            "source_representation": "ADAPTER_EXTRACTED_CONTENT",
+            "representation": "REDACTED_ADAPTER_EXTRACTED_CONTENT",
+        }
+        representations["adapter_normalized_content"] = {
+            **_evidence_representation(adapter_normalized_content),
+            "source_representation": "ADAPTER_NORMALIZED_CONTENT",
+            "representation": "REDACTED_ADAPTER_NORMALIZED_CONTENT",
+        }
+        representations["planner_visible_content"] = {
+            **_evidence_representation(planner_visible_content),
+            "source_representation": "PLANNER_VISIBLE_CONTENT",
+            "representation": "REDACTED_PLANNER_VISIBLE_CONTENT",
+        }
+        self.document["normalization"] = {
+            "transformed": bool(transformed),
+            "classification": str(classification),
+        }
+        self._persist()
+
+    def record_planner_contract(
+        self,
+        *,
+        status: str,
+        input_content: Any,
+        normalized_content: Any = None,
+        reason: str | None = None,
+        fenced: bool | None = None,
+    ) -> None:
+        self.document["planner_output_contract"] = {
+            "status": str(status),
+            "reason": str(reason)[:500] if reason else None,
+            "fenced": fenced,
+            "input": _evidence_representation(input_content),
+            "normalized": (
+                _evidence_representation(normalized_content)
+                if normalized_content is not None
+                else None
+            ),
+        }
+        self._persist()
+
+    def complete(self) -> None:
+        self.document["timing"]["request_finished_utc"] = _utc_now()
+        if not self._persistence_errors:
+            self.document["evidence_persistence"]["status"] = "complete"
+        self._persist()
+
+    def fail(self, exception: BaseException, *, response_received: bool) -> None:
+        self.document["timing"]["request_finished_utc"] = _utc_now()
+        self.document["error"] = {
+            "type": type(exception).__name__,
+            "message": _redact_evidence_value(str(exception))[0],
+            "response_received": bool(response_received),
+        }
+        self._persist()
+
+    def diagnostics(self) -> dict[str, Any]:
+        return {
+            "enabled": True,
+            "path": str(self.path),
+            "provider_call_id": self.correlation_id,
+            "persistence_status": (
+                "incomplete" if self._persistence_errors else "complete"
+            ),
+            "persistence_errors": list(self._persistence_errors),
+        }
+
+
 __all__ = [
     "MAX_RETAINED_PROMPT_CHARS",
     "PlanningProviderEvidence",
+    "PlanningRepairResponseEvidence",
     "begin_planning_provider_evidence",
     "begin_planning_provider_evidence_from_runtime",
     "inspect_chat_completion_response",

@@ -48,6 +48,11 @@ class RuntimeInvocationOptions:
     # Semantic structured-output request. Provider adapters translate this
     # into their supported wire representation; ordinary invocations omit it.
     response_schema: Mapping[str, object] | None = None
+    # Explicit, off-by-default evidence capture. These fields are consumed by
+    # adapters only as a side-channel and must never affect the provider wire
+    # payload or the value returned to the caller.
+    provider_response_evidence_path: str | None = None
+    provider_response_evidence_correlation_id: str | None = None
 
     def __post_init__(self) -> None:
         for field_name in ("timeout_seconds", "no_output_timeout_seconds"):
@@ -60,6 +65,16 @@ class RuntimeInvocationOptions:
             raise ValueError("temperature must be between -2 and 2")
         if self.stream is True:
             raise ValueError("streaming invocation options are not supported")
+        if self.provider_response_evidence_path is not None:
+            if not str(self.provider_response_evidence_path).strip():
+                raise ValueError(
+                    "provider_response_evidence_path must be non-empty when provided"
+                )
+        if self.provider_response_evidence_correlation_id is not None:
+            if not str(self.provider_response_evidence_correlation_id).strip():
+                raise ValueError(
+                    "provider_response_evidence_correlation_id must be non-empty when provided"
+                )
 
         raw_options = dict(self.extra_provider_options or {})
         for key in raw_options:

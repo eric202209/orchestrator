@@ -38,6 +38,9 @@ from app.services.model_adaptation import (
 from app.services.orchestration.planning.discovery_contract_capture import (
     DiscoveryContractCapture,
 )
+from app.services.observability.planning_provider_evidence import (
+    PlanningRepairResponseEvidence,
+)
 
 
 _STEP_SYSTEM = """You are a precise software development assistant.
@@ -424,6 +427,30 @@ class OpenAIChatCompletionsRuntime:
             f"{self._invocation_base_url(invocation_options)}" "/chat/completions"
         )
         capture = DiscoveryContractCapture.from_metadata(diagnostic_metadata)
+        repair_response_evidence = None
+        if (
+            invocation_options is not None
+            and invocation_options.provider_response_evidence_path
+        ):
+            repair_response_evidence = PlanningRepairResponseEvidence(
+                invocation_options.provider_response_evidence_path,
+                correlation_id=invocation_options.provider_response_evidence_correlation_id,
+                backend=self.backend_descriptor.name,
+                model=self._model_name(),
+                role=self.backend_role,
+                endpoint=request_url,
+                logical_timeout_seconds=effective_timeout,
+                transport_timeout_seconds=(
+                    effective_timeout if exact_contract else effective_timeout + 30
+                ),
+            )
+            repair_response_evidence.start(
+                prompt=user,
+                payload_keys=sorted(payload),
+            )
+            provider_diagnostics["provider_response_evidence"] = (
+                repair_response_evidence.diagnostics()
+            )
         adaptation_profile = (
             self.runtime_configuration.adaptation_profile
             if self.runtime_configuration is not None
@@ -468,6 +495,14 @@ class OpenAIChatCompletionsRuntime:
                     json=payload,
                 )
                 provider_diagnostics["provider_response_received"] = True
+                if repair_response_evidence is not None:
+                    repair_response_evidence.record_http_response(
+                        status_code=getattr(response, "status_code", None),
+                        content_type=(getattr(response, "headers", {}) or {}).get(
+                            "content-type"
+                        ),
+                        raw_body=getattr(response, "content", b"") or b"",
+                    )
                 if capture is not None:
                     capture.record_http_response(
                         status_code=response.status_code,
@@ -499,6 +534,15 @@ class OpenAIChatCompletionsRuntime:
                             else None
                         ),
                     )
+                if repair_response_evidence is not None:
+                    response_headers = getattr(response, "headers", {}) or {}
+                    repair_response_evidence.record_envelope(
+                        body,
+                        request_correlation_id=(
+                            response_headers.get("x-request-id")
+                            or response_headers.get("request-id")
+                        ),
+                    )
                 response.raise_for_status()
                 raw_message_content = _raw_chat_completion_content(body)
                 if capture is not None:
@@ -516,7 +560,33 @@ class OpenAIChatCompletionsRuntime:
                     capture.record_normalized_content(
                         _normalize_chat_content_value(raw_message_content)
                     )
+                if repair_response_evidence is not None:
+                    planner_visible_content = (
+                        content if exact_contract else _strip_thinking(content)
+                    )
+                    repair_response_evidence.record_content_stages(
+                        assistant_content=raw_message_content,
+                        extracted_content=content,
+                        adapter_normalized_content=content,
+                        planner_visible_content=planner_visible_content,
+                        transformed=(planner_visible_content != content),
+                        classification=(
+                            "unchanged_exact_contract"
+                            if planner_visible_content == content
+                            else "thinking_removed_before_planner"
+                        ),
+                    )
         except httpx.TimeoutException as exc:
+            if repair_response_evidence is not None:
+                repair_response_evidence.fail(
+                    exc,
+                    response_received=bool(
+                        provider_diagnostics.get("provider_response_received")
+                    ),
+                )
+                provider_diagnostics["provider_response_evidence"] = (
+                    repair_response_evidence.diagnostics()
+                )
             error = AgentRuntimeError(
                 f"OpenAI-compatible chat request timed out after {effective_timeout}s "
                 f"(logical deadline; transport timeout {transport_timeout}s)."
@@ -530,6 +600,16 @@ class OpenAIChatCompletionsRuntime:
             }
             raise error from exc
         except httpx.HTTPError as exc:
+            if repair_response_evidence is not None:
+                repair_response_evidence.fail(
+                    exc,
+                    response_received=bool(
+                        provider_diagnostics.get("provider_response_received")
+                    ),
+                )
+                provider_diagnostics["provider_response_evidence"] = (
+                    repair_response_evidence.diagnostics()
+                )
             error = AgentRuntimeError(f"OpenAI-compatible chat request failed: {exc}")
             error.runtime_diagnostics = {
                 **provider_diagnostics,
@@ -539,6 +619,16 @@ class OpenAIChatCompletionsRuntime:
             }
             raise error from exc
         except Exception as exc:
+            if repair_response_evidence is not None:
+                repair_response_evidence.fail(
+                    exc,
+                    response_received=bool(
+                        provider_diagnostics.get("provider_response_received")
+                    ),
+                )
+                provider_diagnostics["provider_response_evidence"] = (
+                    repair_response_evidence.diagnostics()
+                )
             setattr(
                 exc,
                 "runtime_diagnostics",
@@ -551,6 +641,11 @@ class OpenAIChatCompletionsRuntime:
             )
             raise
 
+        if repair_response_evidence is not None:
+            repair_response_evidence.complete()
+            provider_diagnostics["provider_response_evidence"] = (
+                repair_response_evidence.diagnostics()
+            )
         self._last_response_shape_observability = _response_shape_observability(
             body, content
         )
