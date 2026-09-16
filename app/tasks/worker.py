@@ -11,7 +11,7 @@ import json
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from app.celery_app import celery_app
 from app.models import (
     LogEntry,
@@ -162,8 +162,12 @@ from app.services.orchestration.state.session_state import (
     mark_session_running,
 )
 from app.services.orchestration.lifecycle.transitions import (
+    ContinuationIdentity,
+    LifecycleTransitionError,
     finalize_logical_failure,
     revoke_autonomous_continuation,
+    schedule_continuation,
+    validate_continuation,
 )
 from app.services.workspace.project_mutation_lock import project_mutation_lock
 from app.services.observability import (
@@ -383,6 +387,7 @@ def execute_orchestration_task(
         )
     )
     continuation_claimed = False
+    capacity_retry_scheduled = False
 
     # Phase 23D-3: if this worker process is force-terminated (SIGTERM, e.g.
     # via the intervention/pause path's `revoke_session_celery_tasks
@@ -667,9 +672,316 @@ def execute_orchestration_task(
             )
 
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
+        task_execution = get_task_execution(db, task_execution_id)
         claim_ok = False
         claim_reason = "unclaimed"
         claim_started_at = None
+
+        # Capacity admission happens before logical execution claim.  A
+        # capacity-blocked delivery therefore remains pending/retry_pending
+        # instead of exposing Session=running while it only waits for a slot.
+        _capacity_backend = get_backend_descriptor(_resolved_execution_backend)
+        _capacity_governed = (
+            _capacity_backend.capabilities.max_parallel_sessions is not None
+        )
+        if _capacity_governed:
+            if is_e3_continuation_dispatch:
+                _continuation_identity = ContinuationIdentity(
+                    session_id=session_id,
+                    instance_id=expected_session_instance_id,
+                    continuation_task_id=continuation_task_id,
+                    continuation_kind=continuation_kind,
+                    task_execution_id=task_execution_id,
+                    retry_count=continuation_retry_count,
+                )
+                _preflight = validate_continuation(db, _continuation_identity)
+                if not _preflight.accepted:
+                    db.rollback()
+                    return _emit_dispatch_rejected(
+                        reason=_preflight.reason,
+                        log_message=(
+                            "[ORCHESTRATION] Rejected capacity continuation before "
+                            f"slot acquisition: {_preflight.reason}"
+                        ),
+                        db=db,
+                        session=session,
+                        session_id=session_id,
+                        task_id=task_id,
+                        task_execution_id=task_execution_id,
+                        dispatch_project_dir=dispatch_project_dir,
+                        expected_session_instance_id=expected_session_instance_id,
+                        celery_task_id=getattr(
+                            getattr(self, "request", None), "id", None
+                        ),
+                        queue_latency_seconds=queue_latency_seconds,
+                        queued_event=queued_event,
+                        emit_live=emit_live,
+                        runtime_selection=runtime_selection,
+                        continuation_dispatch=True,
+                        continuation_task_id=continuation_task_id,
+                        continuation_kind=continuation_kind,
+                        continuation_retry_count=continuation_retry_count,
+                    )
+
+            try:
+                from app.services.agents.backend_concurrency import (
+                    acquire_backend_slot,
+                    build_owner_evidence,
+                    make_redis_client,
+                )
+
+                _backend_slot_redis = make_redis_client()
+                _backend_slot_backend_id = _capacity_backend.name
+                (
+                    _slot_worker_instance_id,
+                    _slot_worker_hostname,
+                    _slot_process_start_identity,
+                    _slot_worker_pid,
+                ) = _runtime_worker_identity()
+                _backend_slot_acquired = acquire_backend_slot(
+                    _backend_slot_redis,
+                    _capacity_backend.name,
+                    session_id,
+                    max_slots=settings.LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS,
+                    # Phase 22B-1X1: retain the existing owner evidence so a
+                    # force-terminated worker's slot can be reconciled.
+                    owner_evidence=build_owner_evidence(
+                        session_id=session_id,
+                        task_execution_id=task_execution_id,
+                        worker_hostname=_slot_worker_hostname,
+                        worker_pid=_slot_worker_pid,
+                        worker_process_start_identity=_slot_process_start_identity,
+                    ),
+                )
+            except Exception as _redis_exc:
+                logger.warning(
+                    "[ORCHESTRATION] Redis slot acquisition error (non-fatal, proceeding): %s",
+                    _redis_exc,
+                )
+                _backend_slot_acquired = True  # preserve existing fail-open policy
+
+            if not _backend_slot_acquired:
+                if task_execution is not None:
+                    update_execution_failure_metadata(
+                        db,
+                        task_execution.id,
+                        failure_category="backend_capacity_limit",
+                        backend_id=_capacity_backend.name,
+                    )
+                capacity_retry_count, capacity_retry_exhausted = (
+                    backend_capacity_retry_state(
+                        getattr(self, "request", None),
+                        BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+                    )
+                )
+                if (
+                    is_e3_continuation_dispatch
+                    and continuation_kind == "backend_capacity"
+                    and continuation_retry_count != capacity_retry_count
+                ):
+                    db.rollback()
+                    return _emit_dispatch_rejected(
+                        reason="capacity_retry_count_mismatch",
+                        log_message=(
+                            "[ORCHESTRATION] Rejected capacity continuation with "
+                            "mismatched Celery retry count"
+                        ),
+                        db=db,
+                        session=session,
+                        session_id=session_id,
+                        task_id=task_id,
+                        task_execution_id=task_execution_id,
+                        dispatch_project_dir=dispatch_project_dir,
+                        expected_session_instance_id=expected_session_instance_id,
+                        celery_task_id=getattr(
+                            getattr(self, "request", None), "id", None
+                        ),
+                        queue_latency_seconds=queue_latency_seconds,
+                        queued_event=queued_event,
+                        emit_live=emit_live,
+                        runtime_selection=runtime_selection,
+                        continuation_dispatch=True,
+                        continuation_task_id=continuation_task_id,
+                        continuation_kind=continuation_kind,
+                        continuation_retry_count=continuation_retry_count,
+                    )
+                emit_live(
+                    "ERROR" if capacity_retry_exhausted else "WARN",
+                    (
+                        f"[ORCHESTRATION] Backend '{_capacity_backend.name}' at capacity; "
+                        + (
+                            "retry budget exhausted"
+                            if capacity_retry_exhausted
+                            else "retrying dispatch"
+                        )
+                    ),
+                    metadata={
+                        "phase": "slot_acquisition",
+                        "reason": "backend_capacity_limit",
+                        "backend_id": _capacity_backend.name,
+                        "failure_category": "backend_capacity_limit",
+                        "retry_count": capacity_retry_count,
+                        "max_retries": BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+                        "retry_budget_exhausted": capacity_retry_exhausted,
+                    },
+                )
+                capacity_failure_reason = (
+                    f"Backend '{_capacity_backend.name}' remained at capacity after "
+                    f"{BACKEND_CAPACITY_RETRY_MAX_RETRIES} retries"
+                )
+                if capacity_retry_exhausted:
+                    finalize_logical_failure(
+                        db,
+                        session,
+                        task_execution=task_execution,
+                        failure_reason=capacity_failure_reason,
+                    )
+                    db.commit()
+                    return {
+                        "status": "failed",
+                        "reason": "backend_capacity_limit",
+                        "retry_budget_exhausted": True,
+                    }
+
+                prepare_backend_capacity_retry(
+                    task=task,
+                    session_task_link=session_task_link,
+                    task_execution=task_execution,
+                    backend_id=_capacity_backend.name,
+                )
+                capacity_retry_eta = datetime.now(timezone.utc) + timedelta(seconds=15)
+                try:
+                    capacity_identity = schedule_continuation(
+                        db,
+                        session,
+                        task_id=task_id,
+                        task_execution=task_execution,
+                        continuation_kind="backend_capacity",
+                        retry_count=capacity_retry_count + 1,
+                        retry_eta=capacity_retry_eta,
+                    )
+                except LifecycleTransitionError as capacity_transition_error:
+                    if (
+                        capacity_transition_error.reason
+                        != "capacity_wait_active_execution"
+                    ):
+                        raise
+                    # Another delivery won the logical claim while this
+                    # worker was waiting for capacity.  There is no retry to
+                    # schedule and no failed attempt to write; release is
+                    # handled by finally and reject this duplicate safely.
+                    db.rollback()
+                    return _emit_dispatch_rejected(
+                        reason=capacity_transition_error.reason,
+                        log_message=(
+                            "[ORCHESTRATION] Rejected capacity wait because "
+                            "another execution is active"
+                        ),
+                        db=db,
+                        session=session,
+                        session_id=session_id,
+                        task_id=task_id,
+                        task_execution_id=task_execution_id,
+                        dispatch_project_dir=dispatch_project_dir,
+                        expected_session_instance_id=expected_session_instance_id,
+                        celery_task_id=getattr(
+                            getattr(self, "request", None), "id", None
+                        ),
+                        queue_latency_seconds=queue_latency_seconds,
+                        queued_event=queued_event,
+                        emit_live=emit_live,
+                        runtime_selection=runtime_selection,
+                        continuation_dispatch=is_e3_continuation_dispatch,
+                        continuation_task_id=continuation_task_id,
+                        continuation_kind=continuation_kind,
+                        continuation_retry_count=continuation_retry_count,
+                    )
+                # The lifecycle commit is deliberately separate from broker
+                # publication.  Event persistence may fail independently but
+                # must never be the only durable source of retry intent.
+                db.commit()
+                # From this point onward the committed marker is the source
+                # of truth even if event/log persistence or broker
+                # publication fails.
+                capacity_retry_scheduled = True
+                capacity_queued_event_id = queued_event_id
+                if dispatch_project_dir:
+                    try:
+                        capacity_event = _append_orchestration_event(
+                            project_dir=dispatch_project_dir,
+                            session_id=session_id,
+                            task_id=task_id,
+                            event_type=EventType.TASK_QUEUED,
+                            details={
+                                "dispatch_kind": "e4_backend_capacity",
+                                "session_instance_id": capacity_identity.instance_id,
+                                "continuation_task_id": capacity_identity.continuation_task_id,
+                                "continuation_kind": capacity_identity.continuation_kind,
+                                "continuation_retry_count": capacity_identity.retry_count,
+                                "task_execution_id": capacity_identity.task_execution_id,
+                                "backend_id": _capacity_backend.name,
+                                "retry_eta": capacity_retry_eta.isoformat(),
+                            },
+                        )
+                        capacity_queued_event_id = (capacity_event or {}).get(
+                            "event_id", capacity_queued_event_id
+                        )
+                    except Exception as _capacity_event_error:
+                        logger.warning(
+                            "[E4] Capacity continuation event persistence failed: %s",
+                            _capacity_event_error,
+                        )
+                try:
+                    emit_live(
+                        "WARN",
+                        "[ORCHESTRATION] Backend capacity continuation committed",
+                        metadata={
+                            "phase": "slot_acquisition",
+                            "dispatch_kind": "e4_backend_capacity",
+                            "backend_id": _capacity_backend.name,
+                            "continuation_task_id": capacity_identity.continuation_task_id,
+                            "continuation_kind": capacity_identity.continuation_kind,
+                            "continuation_retry_count": capacity_identity.retry_count,
+                            "task_execution_id": capacity_identity.task_execution_id,
+                            "retry_eta": capacity_retry_eta.isoformat(),
+                        },
+                    )
+                except Exception as _capacity_log_error:
+                    logger.warning(
+                        "[E4] Capacity continuation log persistence failed: %s",
+                        _capacity_log_error,
+                    )
+                db.commit()
+                request_kwargs = getattr(getattr(self, "request", None), "kwargs", None)
+                if isinstance(request_kwargs, dict):
+                    capacity_retry_kwargs = dict(request_kwargs)
+                else:
+                    capacity_retry_kwargs = {
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "prompt": prompt,
+                        "timeout_seconds": timeout_seconds,
+                        "context": context,
+                        "resume_checkpoint_name": resume_checkpoint_name,
+                        "planning_backend_override": planning_backend_override,
+                        "planning_escalation_metadata": planning_escalation_metadata,
+                    }
+                capacity_retry_kwargs.update(
+                    {
+                        "expected_session_instance_id": capacity_identity.instance_id,
+                        "task_execution_id": capacity_identity.task_execution_id,
+                        "queued_event_id": capacity_queued_event_id,
+                        "continuation_task_id": capacity_identity.continuation_task_id,
+                        "continuation_kind": capacity_identity.continuation_kind,
+                        "continuation_retry_count": capacity_identity.retry_count,
+                    }
+                )
+                raise self.retry(
+                    countdown=15,
+                    max_retries=BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+                    kwargs=capacity_retry_kwargs,
+                )
+
         if is_e3_continuation_dispatch:
             claim_result = _claim_continuation_for_worker(
                 db=db,
@@ -1201,120 +1513,9 @@ def execute_orchestration_task(
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
         task_execution = get_task_execution(db, task_execution_id)
 
-        # --- Backend concurrency slot acquisition ---
-        _eff_backend = _resolved_execution_backend
-        _bd = get_backend_descriptor(_eff_backend)
-        if _bd.capabilities.max_parallel_sessions is not None:
-            try:
-                from app.services.agents.backend_concurrency import (
-                    acquire_backend_slot,
-                    build_owner_evidence,
-                    make_redis_client,
-                )
-
-                _backend_slot_redis = make_redis_client()
-                _backend_slot_backend_id = _bd.name
-                (
-                    _slot_worker_instance_id,
-                    _slot_worker_hostname,
-                    _slot_process_start_identity,
-                    _slot_worker_pid,
-                ) = _runtime_worker_identity()
-                _backend_slot_acquired = acquire_backend_slot(
-                    _backend_slot_redis,
-                    _bd.name,
-                    session_id,
-                    max_slots=settings.LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS,
-                    # Phase 22B-1X1: record who owns this slot so a slot left
-                    # behind by a force-terminated worker can be proven stale
-                    # instead of blocking capacity until the key TTL.
-                    owner_evidence=build_owner_evidence(
-                        session_id=session_id,
-                        task_execution_id=task_execution_id,
-                        worker_hostname=_slot_worker_hostname,
-                        worker_pid=_slot_worker_pid,
-                        worker_process_start_identity=_slot_process_start_identity,
-                    ),
-                )
-            except Exception as _redis_exc:
-                logger.warning(
-                    "[ORCHESTRATION] Redis slot acquisition error (non-fatal, proceeding): %s",
-                    _redis_exc,
-                )
-                _backend_slot_acquired = True  # fail open on Redis unavailability
-            if not _backend_slot_acquired:
-                if task_execution is not None:
-                    update_execution_failure_metadata(
-                        db,
-                        task_execution.id,
-                        failure_category="backend_capacity_limit",
-                        backend_id=_bd.name,
-                    )
-                capacity_retry_count, capacity_retry_exhausted = (
-                    backend_capacity_retry_state(
-                        getattr(self, "request", None),
-                        BACKEND_CAPACITY_RETRY_MAX_RETRIES,
-                    )
-                )
-                emit_live(
-                    "ERROR" if capacity_retry_exhausted else "WARN",
-                    (
-                        f"[ORCHESTRATION] Backend '{_bd.name}' at capacity; "
-                        + (
-                            "retry budget exhausted"
-                            if capacity_retry_exhausted
-                            else "retrying dispatch"
-                        )
-                    ),
-                    metadata={
-                        "phase": "slot_acquisition",
-                        "reason": "backend_capacity_limit",
-                        "backend_id": _bd.name,
-                        "failure_category": "backend_capacity_limit",
-                        "retry_count": capacity_retry_count,
-                        "max_retries": BACKEND_CAPACITY_RETRY_MAX_RETRIES,
-                        "retry_budget_exhausted": capacity_retry_exhausted,
-                    },
-                )
-                if capacity_retry_exhausted:
-                    mark_execution_failed(
-                        task=task,
-                        session_task_link=session_task_link,
-                        task_execution=task_execution,
-                        error_message=(
-                            f"Backend '{_bd.name}' remained at capacity after "
-                            f"{BACKEND_CAPACITY_RETRY_MAX_RETRIES} retries"
-                        ),
-                        completed_at=datetime.now(timezone.utc),
-                        workspace_status=(
-                            "in_progress" if task.task_subfolder else "not_created"
-                        ),
-                    )
-                    if session is not None:
-                        mark_session_paused(
-                            session,
-                            alert_level="error",
-                            alert_message=(
-                                f"Backend '{_bd.name}' is at capacity and retry "
-                                "budget was exhausted"
-                            )[:2000],
-                        )
-                    db.commit()
-                    return {
-                        "status": "failed",
-                        "reason": "backend_capacity_limit",
-                        "retry_budget_exhausted": True,
-                    }
-                prepare_backend_capacity_retry(
-                    task=task,
-                    session_task_link=session_task_link,
-                    task_execution=task_execution,
-                    backend_id=_bd.name,
-                )
-                db.commit()
-                raise self.retry(
-                    countdown=15, max_retries=BACKEND_CAPACITY_RETRY_MAX_RETRIES
-                )
+        # Backend capacity was acquired before this logical claim.  Keeping
+        # the slot across the claim and execution is unchanged; the move only
+        # prevents a capacity wait from being represented as Session=running.
 
         mark_execution_running(
             task=task,
@@ -2554,6 +2755,60 @@ def execute_orchestration_task(
 
         if isinstance(exc, _CeleryRetry):
             raise
+        if capacity_retry_scheduled and session is not None:
+            # The E4 marker is committed before ``self.retry``.  A broker or
+            # Celery publication failure therefore must not fall through to
+            # FailureCoordinator, whose ordinary exception writer could
+            # overwrite the still-recoverable capacity wait.
+            try:
+                db.rollback()
+                current_session = (
+                    db.query(SessionModel).filter(SessionModel.id == session_id).first()
+                )
+                if current_session is not None:
+                    db.add(
+                        LogEntry(
+                            session_id=session_id,
+                            session_instance_id=current_session.instance_id,
+                            task_id=task_id,
+                            task_execution_id=task_execution_id,
+                            level="ERROR",
+                            message=(
+                                "E4 backend capacity publication failed after "
+                                "retry_pending commit"
+                            ),
+                            log_metadata=json.dumps(
+                                {
+                                    "dispatch_kind": "e4_backend_capacity",
+                                    "backend_id": _resolved_execution_backend,
+                                    "continuation_task_id": continuation_task_id
+                                    or task_id,
+                                    "continuation_kind": "backend_capacity",
+                                    "continuation_retry_count": getattr(
+                                        current_session,
+                                        "continuation_retry_count",
+                                        None,
+                                    ),
+                                    "task_execution_id": task_execution_id,
+                                    "error": str(exc),
+                                }
+                            ),
+                        )
+                    )
+                    db.commit()
+            except Exception:
+                db.rollback()
+            logger.error(
+                "[E4] Backend capacity publication failed after durable retry "
+                "intent for session %s task %s: %s",
+                session_id,
+                task_id,
+                exc,
+            )
+            return {
+                "status": "ignored",
+                "reason": "backend_capacity_publication_failed",
+            }
         if (
             is_e3_continuation_dispatch
             and not continuation_claimed

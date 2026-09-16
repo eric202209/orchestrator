@@ -1,8 +1,8 @@
 """E2 lifecycle transition and generation-fence primitives.
 
 E3 wires the ordinary FailureCoordinator/recovery writers and their worker
-dispatches through these primitives.  Capacity retry remains a separate
-legacy writer until E4.
+dispatches through these primitives.  E4 also routes backend-capacity
+continuations through the same authority and generation fence.
 
 Commit ownership belongs to the caller by default.  Passing ``commit=True``
 is an explicit convenience for callers that own the whole transition.  No
@@ -529,7 +529,9 @@ def schedule_continuation(
     """Durably schedule a pending continuation without touching a broker.
 
     Preconditions: Session is ``recovering`` or already ``retry_pending``;
-    the task belongs to the Session and any supplied execution is PENDING.
+    a backend-capacity continuation may also be scheduled from ``pending`` or
+    ``running`` before its first queued execution claim; the task belongs to
+    the Session and any supplied execution is PENDING.
     Rows mutated: a pending TaskExecution, its SessionTask/Task facts, and
     Session continuation metadata/status.  The current instance is required
     to remain unchanged.  The caller owns commit/rollback unless requested;
@@ -538,8 +540,6 @@ def schedule_continuation(
 
     session_id = _session_id(session)
     status = normalize_session_status(getattr(session, "status", None))
-    if status not in {"recovering", "retry_pending"}:
-        raise LifecycleTransitionError("session_not_recovering")
 
     if (
         task_id is not None
@@ -559,6 +559,10 @@ def schedule_continuation(
     if not kind:
         kind = "automatic_recovery"
     kind = _validate_kind(kind)
+    if status not in {"recovering", "retry_pending"} and not (
+        status in {"pending", "running"} and kind == "backend_capacity"
+    ):
+        raise LifecycleTransitionError("session_not_recovering")
     current_count = getattr(session, "continuation_retry_count", 0) or 0
     count = current_count if retry_count is None else retry_count
     count = _validate_retry_count(count)
@@ -592,6 +596,23 @@ def schedule_continuation(
                 task_id=resolved_task_id,
                 status=TaskStatus.PENDING,
             )
+
+    if status == "running" and kind == "backend_capacity":
+        # A legacy first dispatch can discover capacity is unavailable after
+        # queue admission but before its execution claim.  Permit that narrow
+        # conversion only while the supplied execution is still pending and
+        # no competing execution/link/task is active.  A duplicate arriving
+        # after another worker claimed the task therefore cannot resurrect a
+        # running generation as retry_pending.
+        if (
+            any(
+                row.id != task_execution.id
+                for row in _active_executions(db, session_id)
+            )
+            or _active_session_links(db, session_id)
+            or _active_linked_tasks(db, session_id)
+        ):
+            raise LifecycleTransitionError("capacity_wait_active_execution")
 
     link = _latest_link(db, session_id=session_id, task_id=resolved_task_id)
     if link is None:
@@ -767,6 +788,114 @@ def claim_continuation(
         session_id=identity.session_id,
         task_id=identity.continuation_task_id,
         task_execution_id=identity.task_execution_id,
+    )
+
+
+def validate_continuation(
+    db: DbSession,
+    identity: ContinuationIdentity,
+) -> TransitionResult:
+    """Validate a continuation before resource acquisition without claiming it.
+
+    E4 uses this read-only preflight before taking a backend slot.  The final
+    conditional ``claim_continuation`` remains mandatory because an operator
+    pause, duplicate delivery, or competing execution may win the race after
+    this validation and before the slot is acquired.
+    """
+
+    if not isinstance(identity, ContinuationIdentity):
+        return _result_rejected(session_id=None, reason="continuation_identity_invalid")
+    try:
+        kind = _validate_kind(identity.continuation_kind)
+        count = _validate_retry_count(identity.retry_count)
+    except LifecycleTransitionError as exc:
+        return _result_rejected(
+            session_id=identity.session_id,
+            task_id=identity.continuation_task_id,
+            task_execution_id=identity.task_execution_id,
+            reason=exc.reason,
+        )
+    if not identity.instance_id or identity.task_execution_id is None:
+        return _result_rejected(
+            session_id=identity.session_id,
+            task_id=identity.continuation_task_id,
+            task_execution_id=identity.task_execution_id,
+            reason="continuation_identity_incomplete",
+        )
+
+    try:
+        db.flush()
+        session = (
+            db.query(SessionModel)
+            .filter(SessionModel.id == identity.session_id)
+            .first()
+        )
+        if session is None:
+            return _result_rejected(
+                session_id=identity.session_id,
+                task_id=identity.continuation_task_id,
+                task_execution_id=identity.task_execution_id,
+                reason="session_missing",
+            )
+        if (
+            normalize_session_status(getattr(session, "status", None))
+            != "retry_pending"
+            or session.instance_id != identity.instance_id
+            or session.continuation_task_id != identity.continuation_task_id
+            or session.continuation_kind != kind
+            or session.continuation_retry_count != count
+        ):
+            return _result_rejected(
+                session_id=identity.session_id,
+                task_id=identity.continuation_task_id,
+                task_execution_id=identity.task_execution_id,
+                reason="stale_or_duplicate_continuation",
+            )
+        execution = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.id == identity.task_execution_id,
+                TaskExecution.session_id == identity.session_id,
+                TaskExecution.task_id == identity.continuation_task_id,
+            )
+            .first()
+        )
+        if execution is None or execution.status != TaskStatus.PENDING:
+            return _result_rejected(
+                session_id=identity.session_id,
+                task_id=identity.continuation_task_id,
+                task_execution_id=identity.task_execution_id,
+                reason="continuation_attempt_not_pending",
+            )
+        if any(
+            row.id != execution.id
+            for row in _active_executions(db, identity.session_id)
+        ):
+            return _result_rejected(
+                session_id=identity.session_id,
+                task_id=identity.continuation_task_id,
+                task_execution_id=identity.task_execution_id,
+                reason="autonomous_execution_already_active",
+            )
+        if _active_session_links(db, identity.session_id) or _active_linked_tasks(
+            db, identity.session_id
+        ):
+            return _result_rejected(
+                session_id=identity.session_id,
+                task_id=identity.continuation_task_id,
+                task_execution_id=identity.task_execution_id,
+                reason="autonomous_execution_already_active",
+            )
+    except Exception:
+        db.rollback()
+        raise
+    return TransitionResult(
+        accepted=True,
+        reason="valid",
+        session_id=identity.session_id,
+        task_id=identity.continuation_task_id,
+        task_execution_id=identity.task_execution_id,
+        continuation_identity=identity,
     )
 
 
@@ -968,6 +1097,7 @@ __all__ = [
     "admit_autonomous_execution",
     "enter_recovering",
     "schedule_continuation",
+    "validate_continuation",
     "claim_continuation",
     "revoke_autonomous_continuation",
     "finalize_logical_failure",

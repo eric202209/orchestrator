@@ -29,6 +29,7 @@ from .transitions import (
     revoke_autonomous_continuation,
     schedule_continuation,
     start_new_generation,
+    validate_continuation,
 )
 
 __all__ = [
@@ -56,4 +57,5 @@ __all__ = [
     "revoke_autonomous_continuation",
     "schedule_continuation",
     "start_new_generation",
+    "validate_continuation",
 ]
