@@ -184,14 +184,30 @@ def derive_repository_orientation(
     task_description: str,
     *,
     explicit_paths: Iterable[str] = (),
+    excluded_path_prefixes: Iterable[str] = (),
 ) -> RepositoryOrientation:
-    """Derive the advisory candidate surface for the current request only."""
+    """Derive the advisory candidate surface for the current request only.
+
+    Excluded prefixes are applied before candidate ordering and truncation so
+    a caller's narrower read scope receives the same deterministic budget as
+    the full repository surface.
+    """
 
     tracked = tracked_product_paths(Path(project_dir))
     if tracked is None:
         return _unavailable(ORIENTATION_UNAVAILABLE_NOT_GIT)
-    tracked_set = set(tracked)
-    lowered = [(value, value.lower()) for value in tracked]
+    excluded_prefixes = tuple(
+        prefix
+        for prefix in excluded_path_prefixes
+        if isinstance(prefix, str) and prefix
+    )
+    scoped_tracked = tuple(
+        value
+        for value in tracked
+        if not any(value.startswith(prefix) for prefix in excluded_prefixes)
+    )
+    tracked_set = set(scoped_tracked)
+    lowered = [(value, value.lower()) for value in scoped_tracked]
 
     candidates: list[str] = []
     seen: set[str] = set()

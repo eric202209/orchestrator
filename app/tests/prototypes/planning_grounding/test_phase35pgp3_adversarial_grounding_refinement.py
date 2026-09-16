@@ -6,9 +6,9 @@ constants below.
 
 One mechanical difference from the PGP2 contract: `scope_paths` is bounded by
 Git-tracked repository scope rather than by the advisory orientation list,
-because orientation is truncated at 39 entries and does not contain the
-implementation for this task. Without that change the expected region is
-unreachable and the refinement question cannot be asked at all.
+because the bounded orientation does not contain the implementation for this
+task. Without that change the expected region is unreachable and the
+refinement question cannot be asked at all.
 """
 
 from __future__ import annotations

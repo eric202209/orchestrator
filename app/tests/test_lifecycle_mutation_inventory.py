@@ -39,7 +39,7 @@ AUDITED_LIFECYCLE_FILES = [
 EXPECTED_SESSION_CALLS = {
     "app/tasks/worker.py": {
         "mark_session_failed": 1,
-        "mark_session_paused": 4,
+        "mark_session_paused": 3,
         "mark_session_running": 1,
     },
     "app/tasks/worker_support/dispatch.py": {

@@ -69,7 +69,11 @@ def source_version(raw: bytes) -> str:
 def derive_orientation(project_dir: Path, task_text: str) -> P.Orientation:
     """Deterministic orientation, reusing the existing production function."""
 
-    derived = derive_repository_orientation(project_dir, task_text)
+    derived = derive_repository_orientation(
+        project_dir,
+        task_text,
+        excluded_path_prefixes=(PROTOTYPE_SCOPE_EXCLUSION_PREFIX,),
+    )
     paths = tuple(
         path
         for path in derived.paths
