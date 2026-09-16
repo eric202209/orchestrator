@@ -473,7 +473,11 @@ def test_operator_pause_and_natural_failure_have_distinct_projection_causes(
 
     assert category == "operator_paused"
     assert "Session paused by operator." in reasons
-    assert state["terminal_reason"] == "planning_repair_timeout"
+    # E5 keeps the failed attempt's cause separate from logical terminality:
+    # an operator-paused Session is nonterminal even when its latest attempt
+    # failed during planning repair.
+    assert state["attempt_failure_reason"] == "planning_repair_timeout"
+    assert state["terminal_reason"] is None
     timeline_events = [
         event for phase in timeline["phases"] for event in phase["events"]
     ]
