@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from app.models import LogEntry, Session as SessionModel, SessionState, TaskCheckpoint
-from app.services.orchestration.state import mark_session_resumed
+from app.services.orchestration.state import mark_session_paused, mark_session_resumed
 from app.services.orchestration.lifecycle.transitions import (
     revoke_autonomous_continuation,
 )
@@ -148,6 +148,13 @@ class ResumeSessionService:
                 resulting_status="paused",
                 reason=reason or "Operator requested pause",
                 changed_at=paused_at,
+            )
+            # Keep the legacy mutation call site stable while the E2 primitive
+            # remains the owner of generation fencing and attempt cleanup.
+            mark_session_paused(
+                self.session_model,
+                paused_at=paused_at,
+                is_active=False,
             )
 
             # Save checkpoint before pausing

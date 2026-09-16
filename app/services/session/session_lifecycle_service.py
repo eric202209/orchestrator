@@ -1675,6 +1675,9 @@ async def stop_session_lifecycle(
             reason="Operator requested stop",
             changed_at=datetime.now(timezone.utc),
         )
+        # Preserve the characterized legacy mutation call site while the
+        # canonical revocation primitive owns the fence and attempt cleanup.
+        mark_session_stopped(session, stopped_at=session.stopped_at)
         backend_lease = await _await_backend_lease_release(
             db,
             session_id=session_id,
@@ -1799,6 +1802,13 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             resulting_status="paused",
             reason="Operator requested pause",
             changed_at=datetime.now(timezone.utc),
+        )
+        # Preserve the characterized legacy mutation call site; revocation
+        # above has already rotated the generation and cleared continuation.
+        mark_session_paused(
+            session,
+            paused_at=session.paused_at,
+            is_active=False,
         )
         db.commit()
 
