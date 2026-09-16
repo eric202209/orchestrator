@@ -14,6 +14,22 @@ from .worker_capacity import (
     backend_capacity_retry_state,
     prepare_backend_capacity_retry,
 )
+from .transitions import (
+    MAX_ACTIVE_LOGICAL_EXECUTIONS_PER_SESSION,
+    VALID_CONTINUATION_KINDS,
+    ContinuationIdentity,
+    LifecycleTransitionError,
+    TransitionResult,
+    admit_autonomous_execution,
+    begin_new_generation,
+    claim_continuation,
+    enter_recovering,
+    finalize_logical_failure,
+    finalize_logical_success,
+    revoke_autonomous_continuation,
+    schedule_continuation,
+    start_new_generation,
+)
 
 __all__ = [
     "TaskCompletionFinalizer",
@@ -26,4 +42,18 @@ __all__ = [
     "BACKEND_CAPACITY_RETRY_MAX_RETRIES",
     "backend_capacity_retry_state",
     "prepare_backend_capacity_retry",
+    "MAX_ACTIVE_LOGICAL_EXECUTIONS_PER_SESSION",
+    "VALID_CONTINUATION_KINDS",
+    "ContinuationIdentity",
+    "LifecycleTransitionError",
+    "TransitionResult",
+    "admit_autonomous_execution",
+    "begin_new_generation",
+    "claim_continuation",
+    "enter_recovering",
+    "finalize_logical_failure",
+    "finalize_logical_success",
+    "revoke_autonomous_continuation",
+    "schedule_continuation",
+    "start_new_generation",
 ]

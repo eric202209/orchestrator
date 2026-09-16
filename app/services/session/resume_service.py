@@ -6,11 +6,14 @@ Handles pausing, resuming, and checkpoint management.
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from sqlalchemy.orm import Session
 from app.models import LogEntry, Session as SessionModel, SessionState, TaskCheckpoint
-from app.services.orchestration.state import mark_session_paused, mark_session_resumed
+from app.services.orchestration.state import mark_session_resumed
+from app.services.orchestration.lifecycle.transitions import (
+    revoke_autonomous_continuation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,10 +141,13 @@ class ResumeSessionService:
         """Pause current session and save state"""
         try:
             # Update session status
-            mark_session_paused(
+            paused_at = datetime.now(timezone.utc)
+            revoke_autonomous_continuation(
+                self.db,
                 self.session_model,
-                paused_at=datetime.utcnow(),
-                is_active=self.session_model.is_active,
+                resulting_status="paused",
+                reason=reason or "Operator requested pause",
+                changed_at=paused_at,
             )
 
             # Save checkpoint before pausing

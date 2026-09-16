@@ -51,6 +51,9 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_pending,
     reset_active_attempts_for_session_stop,
 )
+from app.services.orchestration.lifecycle.transitions import (
+    revoke_autonomous_continuation,
+)
 from app.services.orchestration.state.session_state import (
     clear_session_alert,
     mark_session_failed,
@@ -1636,7 +1639,6 @@ async def stop_session_lifecycle(
             )
             await runtime.stop_session()
 
-        mark_session_stopped(session, stopped_at=datetime.now(timezone.utc))
         _running_link = (
             db.query(SessionTask)
             .filter(
@@ -1664,6 +1666,14 @@ async def stop_session_lifecycle(
             db,
             session=session,
             next_status=TaskStatus.PENDING,
+        )
+        db.flush()
+        revoke_autonomous_continuation(
+            db,
+            session,
+            resulting_status="stopped",
+            reason="Operator requested stop",
+            changed_at=datetime.now(timezone.utc),
         )
         backend_lease = await _await_backend_lease_release(
             db,
@@ -1777,19 +1787,18 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             )
             await runtime.pause_session()
 
-        pause_transition = resolve_session_transition(
-            normalize_session_status(session.status),
-            "pause",
-        )
-        mark_session_paused(
-            session,
-            paused_at=datetime.now(timezone.utc),
-            is_active=pause_transition.is_active,
-        )
         reset_count = _reset_running_session_tasks(
             db,
             session_id=session_id,
             next_status=TaskStatus.PENDING,
+        )
+        db.flush()
+        revoke_autonomous_continuation(
+            db,
+            session,
+            resulting_status="paused",
+            reason="Operator requested pause",
+            changed_at=datetime.now(timezone.utc),
         )
         db.commit()
 
