@@ -160,6 +160,10 @@ from app.services.orchestration.state.session_state import (
     mark_session_paused,
     mark_session_running,
 )
+from app.services.orchestration.lifecycle.transitions import (
+    finalize_logical_failure,
+    revoke_autonomous_continuation,
+)
 from app.services.workspace.project_mutation_lock import project_mutation_lock
 from app.services.observability import (
     build_text_trace_payload,
@@ -204,6 +208,7 @@ from celery.signals import worker_ready
 from app.tasks.worker_support.worker_helpers import (
     _apply_checkpoint_payload,
     _build_base_project_context,
+    _claim_continuation_for_worker,
     _claim_queued_task_for_worker,
     _coerce_utc_datetime,
     _decode_context_snapshot_object,
@@ -310,6 +315,9 @@ def execute_orchestration_task(
     expected_session_instance_id: Optional[str] = None,
     task_execution_id: Optional[int] = None,
     queued_event_id: Optional[str] = None,
+    continuation_task_id: Optional[int] = None,
+    continuation_kind: Optional[str] = None,
+    continuation_retry_count: Optional[int] = None,
     planning_backend_override: Optional[str] = None,
     planning_escalation_metadata: Optional[Dict[str, Any]] = None,
 ):
@@ -365,6 +373,15 @@ def execute_orchestration_task(
     # one; only non-canonical task-subfolder dispatch leaves it None.
     _runtime_context: Optional[RuntimeExecutorContext] = None
     runtime_service = None
+    is_e3_continuation_dispatch = any(
+        value is not None
+        for value in (
+            continuation_task_id,
+            continuation_kind,
+            continuation_retry_count,
+        )
+    )
+    continuation_claimed = False
 
     # Phase 23D-3: if this worker process is force-terminated (SIGTERM, e.g.
     # via the intervention/pause path's `revoke_session_celery_tasks
@@ -412,6 +429,10 @@ def execute_orchestration_task(
         if not session or not task:
             raise ValueError("Session or task not found")
 
+        # E3 is opt-in at the dispatch boundary. Legacy dispatches remain
+        # compatible, while any delivery carrying continuation metadata must
+        # take the strict identity fence and may not create a replacement
+        # TaskExecution when its exact identity is absent.
         intent_mode = normalize_task_intent(getattr(task, "intent_mode", None))
 
         planner_contract = None
@@ -437,7 +458,7 @@ def execute_orchestration_task(
         _resolved_execution_backend = execution_configuration.backend_name
         resolved_planning_backend = planning_configuration.backend_name
 
-        if task_execution_id is None:
+        if task_execution_id is None and not is_e3_continuation_dispatch:
             task_execution = create_task_execution(
                 db,
                 session_id=session_id,
@@ -604,14 +625,16 @@ def execute_orchestration_task(
                     ).total_seconds(),
                     3,
                 )
-        stale_dispatch_reason = _should_reject_stale_dispatch_claim(
-            dispatch_project_dir=dispatch_project_dir,
-            session_id=session_id,
-            task_id=task_id,
-            queued_event=queued_event,
-            queue_latency_seconds=queue_latency_seconds,
-            resume_checkpoint_name=resume_checkpoint_name,
-        )
+        stale_dispatch_reason = None
+        if not is_e3_continuation_dispatch:
+            stale_dispatch_reason = _should_reject_stale_dispatch_claim(
+                dispatch_project_dir=dispatch_project_dir,
+                session_id=session_id,
+                task_id=task_id,
+                queued_event=queued_event,
+                queue_latency_seconds=queue_latency_seconds,
+                resume_checkpoint_name=resume_checkpoint_name,
+            )
         if stale_dispatch_reason:
             task_execution = get_task_execution(db, task_execution_id)
             if (
@@ -639,36 +662,65 @@ def execute_orchestration_task(
                 queued_event=queued_event,
                 emit_live=emit_live,
                 runtime_selection=runtime_selection,
+                continuation_dispatch=False,
             )
 
         session_task_link = _get_latest_session_task_link(db, session_id, task_id)
         claim_ok = False
         claim_reason = "unclaimed"
         claim_started_at = None
-        for claim_attempt in range(1):
-            session = (
-                db.query(SessionModel).filter(SessionModel.id == session_id).first()
+        if is_e3_continuation_dispatch:
+            claim_result = _claim_continuation_for_worker(
+                db=db,
+                session_id=session_id,
+                task_id=task_id,
+                instance_id=expected_session_instance_id,
+                continuation_task_id=continuation_task_id,
+                continuation_kind=continuation_kind,
+                task_execution_id=task_execution_id,
+                retry_count=continuation_retry_count,
             )
-            task = db.query(Task).filter(Task.id == task_id).first()
-            session_task_link = _get_latest_session_task_link(db, session_id, task_id)
-            if not session or not task:
-                claim_reason = "session_or_task_not_found"
-                break
-            claim_ok, claim_reason, claim_started_at, session_task_link = (
-                _claim_queued_task_for_worker(
-                    db=db,
-                    session=session,
-                    task=task,
-                    session_task_link=session_task_link,
-                    expected_session_instance_id=expected_session_instance_id,
+            claim_ok = claim_result.accepted
+            claim_reason = claim_result.reason
+            if claim_ok:
+                continuation_claimed = True
+                session = (
+                    db.query(SessionModel).filter(SessionModel.id == session_id).first()
                 )
-            )
-            if claim_ok or claim_reason == "session_instance_changed":
-                break
+                task = db.query(Task).filter(Task.id == task_id).first()
+                task_execution = get_task_execution(db, task_execution_id)
+                session_task_link = _get_latest_session_task_link(
+                    db, session_id, task_id
+                )
+                claim_started_at = datetime.now(timezone.utc)
+        else:
+            for claim_attempt in range(1):
+                session = (
+                    db.query(SessionModel).filter(SessionModel.id == session_id).first()
+                )
+                task = db.query(Task).filter(Task.id == task_id).first()
+                session_task_link = _get_latest_session_task_link(
+                    db, session_id, task_id
+                )
+                if not session or not task:
+                    claim_reason = "session_or_task_not_found"
+                    break
+                claim_ok, claim_reason, claim_started_at, session_task_link = (
+                    _claim_queued_task_for_worker(
+                        db=db,
+                        session=session,
+                        task=task,
+                        session_task_link=session_task_link,
+                        expected_session_instance_id=expected_session_instance_id,
+                    )
+                )
+                if claim_ok or claim_reason == "session_instance_changed":
+                    break
         if not claim_ok:
             task_execution = get_task_execution(db, task_execution_id)
             if (
-                claim_reason == "task_not_claimable:running"
+                not is_e3_continuation_dispatch
+                and claim_reason == "task_not_claimable:running"
                 and task_execution is not None
                 and task_execution.status == TaskStatus.RUNNING
             ):
@@ -684,7 +736,8 @@ def execute_orchestration_task(
                     stale_after_seconds=2100,
                 )
             elif (
-                task_execution is not None
+                not is_e3_continuation_dispatch
+                and task_execution is not None
                 and task_execution.status == TaskStatus.PENDING
             ):
                 mark_execution_cancelled(
@@ -708,6 +761,10 @@ def execute_orchestration_task(
                 queued_event=queued_event,
                 emit_live=emit_live,
                 runtime_selection=runtime_selection,
+                continuation_dispatch=is_e3_continuation_dispatch,
+                continuation_task_id=continuation_task_id,
+                continuation_kind=continuation_kind,
+                continuation_retry_count=continuation_retry_count,
             )
 
         claimed_details = _build_claimed_details(
@@ -719,6 +776,9 @@ def execute_orchestration_task(
             queue_latency_seconds=queue_latency_seconds,
             queued_event=queued_event,
             runtime_selection=runtime_selection,
+            continuation_task_id=continuation_task_id,
+            continuation_kind=continuation_kind,
+            continuation_retry_count=continuation_retry_count,
         )
         if dispatch_project_dir:
             _append_orchestration_event(
@@ -2452,18 +2512,34 @@ def execute_orchestration_task(
             except Exception:
                 pass
             if failure_reason == TerminalReason.VERIFICATION_FAILED:
-                mark_session_failed(
-                    session,
-                    failed_at=datetime.now(timezone.utc),
-                    alert_level="error",
-                    alert_message=failure_reason[:2000],
-                )
+                if is_e3_continuation_dispatch:
+                    finalize_logical_failure(
+                        db,
+                        session,
+                        task_execution=task_execution,
+                        failure_reason=failure_reason,
+                    )
+                else:
+                    mark_session_failed(
+                        session,
+                        failed_at=datetime.now(timezone.utc),
+                        alert_level="error",
+                        alert_message=failure_reason[:2000],
+                    )
             else:
-                mark_session_paused(
-                    session,
-                    alert_level="error",
-                    alert_message=failure_reason[:2000],
-                )
+                if is_e3_continuation_dispatch:
+                    revoke_autonomous_continuation(
+                        db,
+                        session,
+                        resulting_status="paused",
+                        reason=failure_reason[:2000],
+                    )
+                else:
+                    mark_session_paused(
+                        session,
+                        alert_level="error",
+                        alert_message=failure_reason[:2000],
+                    )
             db.commit()
         elif step_loop_result.get("status") == "completed":
             _emit_task1_product_event(
@@ -2477,6 +2553,56 @@ def execute_orchestration_task(
 
         if isinstance(exc, _CeleryRetry):
             raise
+        if (
+            is_e3_continuation_dispatch
+            and not continuation_claimed
+            and session is not None
+        ):
+            # A continuation delivery is already represented durably by its
+            # retry_pending marker.  Provider/bootstrap/claim-storage errors
+            # before the strict claim must not enter the generic attempt
+            # failure writer, which could turn a still-recoverable delivery
+            # into a false logical terminal.  Retain the committed marker for
+            # reconciliation and make the infrastructure failure inspectable.
+            try:
+                db.rollback()
+                current_session = (
+                    db.query(SessionModel).filter(SessionModel.id == session_id).first()
+                )
+                if current_session is not None:
+                    db.add(
+                        LogEntry(
+                            session_id=session_id,
+                            session_instance_id=current_session.instance_id,
+                            task_id=task_id,
+                            task_execution_id=task_execution_id,
+                            level="ERROR",
+                            message="E3 continuation failed before strict claim",
+                            log_metadata=json.dumps(
+                                {
+                                    "dispatch_kind": "e3_continuation",
+                                    "continuation_task_id": continuation_task_id,
+                                    "continuation_kind": continuation_kind,
+                                    "continuation_retry_count": continuation_retry_count,
+                                    "task_execution_id": task_execution_id,
+                                    "error": str(exc),
+                                }
+                            ),
+                        )
+                    )
+                    db.commit()
+            except Exception:
+                db.rollback()
+            logger.error(
+                "[E3] Continuation delivery failed before strict claim for session %s task %s: %s",
+                session_id,
+                task_id,
+                exc,
+            )
+            return {
+                "status": "ignored",
+                "reason": "continuation_claim_not_completed",
+            }
         try:
             _fail_cat = classify_failure(
                 str(exc),

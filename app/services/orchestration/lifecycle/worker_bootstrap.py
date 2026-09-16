@@ -164,6 +164,9 @@ def build_claimed_details(
     queue_latency_seconds: Optional[float],
     queued_event: Optional[Dict[str, Any]],
     runtime_selection: Dict[str, Any],
+    continuation_task_id: Optional[int] = None,
+    continuation_kind: Optional[str] = None,
+    continuation_retry_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Build the TASK_CLAIMED event/log details dict."""
 
@@ -175,6 +178,16 @@ def build_claimed_details(
         "project_dir": str(dispatch_project_dir) if dispatch_project_dir else None,
         "queue_latency_seconds": queue_latency_seconds,
         "queued_event_id": (queued_event or {}).get("event_id"),
+        **(
+            {
+                "dispatch_kind": "e3_continuation",
+                "continuation_task_id": continuation_task_id,
+                "continuation_kind": continuation_kind,
+                "continuation_retry_count": continuation_retry_count,
+            }
+            if continuation_kind is not None
+            else {}
+        ),
         **runtime_selection,
     }
 

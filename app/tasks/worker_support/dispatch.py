@@ -26,6 +26,11 @@ from app.services.observability.runtime_identity import (
 )
 from app.services.orchestration.run_state import finalize_attempt_planning_failure
 from app.services.orchestration.state.session_state import mark_session_paused
+from app.services.orchestration.lifecycle.transitions import (
+    ContinuationIdentity,
+    TransitionResult,
+    claim_continuation,
+)
 
 from .common import _parse_event_timestamp
 from .execution_state import _clear_orphaned_running_state_without_active_execution
@@ -155,6 +160,75 @@ def _find_queued_event_for_dispatch(
     )
 
 
+def _claim_continuation_for_worker(
+    *,
+    db: Session,
+    session_id: int,
+    instance_id: Optional[str],
+    continuation_task_id: Optional[int],
+    continuation_kind: Optional[str],
+    task_execution_id: Optional[int],
+    retry_count: Optional[int],
+    task_id: Optional[int] = None,
+) -> TransitionResult:
+    """Route an E3 delivery through the strict E2 continuation fence."""
+
+    if any(
+        value is None
+        for value in (
+            instance_id,
+            continuation_task_id,
+            continuation_kind,
+            task_execution_id,
+            retry_count,
+        )
+    ):
+        return TransitionResult(
+            accepted=False,
+            reason="continuation_identity_incomplete",
+            session_id=session_id,
+            task_id=continuation_task_id,
+            task_execution_id=task_execution_id,
+        )
+    if task_id is not None and task_id != continuation_task_id:
+        return TransitionResult(
+            accepted=False,
+            reason="continuation_task_id_mismatch",
+            session_id=session_id,
+            task_id=task_id,
+            task_execution_id=task_execution_id,
+        )
+    if (
+        not isinstance(instance_id, str)
+        or not instance_id.strip()
+        or isinstance(continuation_task_id, bool)
+        or not isinstance(continuation_task_id, int)
+        or continuation_task_id <= 0
+        or isinstance(task_execution_id, bool)
+        or not isinstance(task_execution_id, int)
+        or task_execution_id <= 0
+        or isinstance(retry_count, bool)
+        or not isinstance(retry_count, int)
+        or retry_count < 0
+    ):
+        return TransitionResult(
+            accepted=False,
+            reason="continuation_identity_invalid",
+            session_id=session_id,
+            task_id=continuation_task_id,
+            task_execution_id=task_execution_id,
+        )
+    identity = ContinuationIdentity(
+        session_id=session_id,
+        instance_id=instance_id,
+        continuation_task_id=continuation_task_id,
+        continuation_kind=str(continuation_kind),
+        task_execution_id=task_execution_id,
+        retry_count=retry_count,
+    )
+    return claim_continuation(db, identity, commit=True)
+
+
 def _claim_queued_task_for_worker(
     *,
     db: Session,
@@ -247,6 +321,11 @@ def _emit_dispatch_rejected(
     queued_event: Optional[Dict[str, Any]],
     emit_live: Any,
     runtime_selection: Optional[Dict[str, Any]] = None,
+    continuation_identity: Optional[ContinuationIdentity] = None,
+    continuation_dispatch: bool = False,
+    continuation_task_id: Optional[int] = None,
+    continuation_kind: Optional[str] = None,
+    continuation_retry_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     runtime_identity = runtime_selection or _runtime_selection_details(
         db,
@@ -260,6 +339,33 @@ def _emit_dispatch_rejected(
         "celery_task_id": celery_task_id,
         "queue_latency_seconds": queue_latency_seconds,
         "queued_event_id": (queued_event or {}).get("event_id"),
+        **(
+            {
+                "dispatch_kind": "e3_continuation",
+                "continuation_task_id": (
+                    continuation_identity.continuation_task_id
+                    if continuation_identity is not None
+                    else continuation_task_id
+                ),
+                "continuation_kind": (
+                    continuation_identity.continuation_kind
+                    if continuation_identity is not None
+                    else continuation_kind
+                ),
+                "continuation_retry_count": (
+                    continuation_identity.retry_count
+                    if continuation_identity is not None
+                    else continuation_retry_count
+                ),
+                "task_execution_id": (
+                    continuation_identity.task_execution_id
+                    if continuation_identity is not None
+                    else task_execution_id
+                ),
+            }
+            if continuation_identity is not None or continuation_dispatch
+            else {}
+        ),
         **runtime_identity,
     }
     if dispatch_project_dir:
@@ -270,6 +376,13 @@ def _emit_dispatch_rejected(
             event_type=EventType.TASK_DISPATCH_REJECTED,
             details=reject_details,
         )
+    if continuation_dispatch:
+        # An E3 delivery has already been fenced by its durable continuation
+        # identity. Rejection must not invoke the legacy orphan/terminal
+        # cleanup, which would turn a stale delivery into a new lifecycle
+        # write.
+        emit_live("WARN", log_message, metadata=reject_details)
+        return {"status": "ignored", "reason": reason}
     terminalized = False
     latest_queued_event = _find_queued_event_for_dispatch(
         dispatch_project_dir=dispatch_project_dir,

@@ -1,8 +1,8 @@
 """Canonical read-side lifecycle authority for Orchestrator Sessions.
 
-This module is intentionally read-only.  E1 establishes durable representation
-and a single projection owner; writer transitions remain in their existing
-runtime paths until later Phase 36 slices.
+This module is intentionally read-only. E1 establishes durable representation
+and a single projection owner; E3 now routes ordinary failure/recovery/retry
+writes through the E2 transitions while later slices migrate other writers.
 """
 
 from __future__ import annotations

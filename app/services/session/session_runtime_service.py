@@ -18,6 +18,7 @@ from app.models import (
     Session as SessionModel,
     SessionTask,
     Task,
+    TaskExecution,
     TaskStatus,
 )
 from app.services.orchestration.events.event_types import EventType
@@ -35,6 +36,10 @@ from app.services.orchestration.state.session_state import (
     mark_session_paused,
     mark_session_running,
     mark_session_stopped,
+)
+from app.services.orchestration.lifecycle.transitions import (
+    LifecycleTransitionError,
+    schedule_continuation,
 )
 from app.config import settings
 from app.services.agents.agent_backends import (
@@ -451,8 +456,31 @@ def queue_task_for_session(
     planning_escalation_metadata: Optional[Dict[str, Any]] = None,
     planner_contract: Optional[Dict[str, Any]] = None,
     isolated_retry: bool = False,
+    continuation_kind: Optional[str] = None,
+    continuation_retry_count: Optional[int] = None,
+    continuation_retry_eta: Optional[datetime] = None,
+    recovery_error_message: Optional[str] = None,
 ) -> Dict[str, Any]:
     from app.tasks.worker import execute_orchestration_task
+
+    e3_continuation_dispatch = (
+        continuation_kind is not None or continuation_retry_count is not None
+    )
+    if e3_continuation_dispatch and (
+        continuation_kind is None or continuation_retry_count is None
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="E3 continuation dispatch requires kind and retry count",
+        )
+    if e3_continuation_dispatch and session.status not in {
+        "recovering",
+        "retry_pending",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail="E3 continuation dispatch requires a recovering session",
+        )
 
     task = (
         db.query(Task)
@@ -569,11 +597,29 @@ def queue_task_for_session(
         {"planner_contract": planner_contract} if planner_contract is not None else None
     )
     prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
-
-    mark_session_running(
-        session, started_at=session.started_at or datetime.now(timezone.utc)
-    )
-    clear_session_alert(session)
+    if e3_continuation_dispatch:
+        if recovery_error_message:
+            task.workspace_status = "changes_requested"
+            task.error_message = recovery_error_message
+        try:
+            continuation_identity = schedule_continuation(
+                db,
+                session,
+                task_execution=task_execution,
+                continuation_task_id=task.id,
+                continuation_kind=continuation_kind,
+                retry_count=continuation_retry_count,
+                retry_eta=continuation_retry_eta,
+            )
+        except LifecycleTransitionError as exc:
+            db.rollback()
+            raise HTTPException(status_code=409, detail=exc.reason) from exc
+    else:
+        continuation_identity = None
+        mark_session_running(
+            session, started_at=session.started_at or datetime.now(timezone.utc)
+        )
+        clear_session_alert(session)
 
     event_project_dir = project_control_state_location(
         Path(task_workspace["workspace_path"]),
@@ -600,6 +646,17 @@ def queue_task_for_session(
             "planning_backend_override": planning_backend_override,
             "planning_escalation": planning_escalation_metadata,
             "planner_contract": planner_contract,
+            **(
+                {
+                    "dispatch_kind": "e3_continuation",
+                    "continuation_task_id": continuation_identity.continuation_task_id,
+                    "continuation_kind": continuation_identity.continuation_kind,
+                    "continuation_retry_count": continuation_identity.retry_count,
+                    "task_execution_id": continuation_identity.task_execution_id,
+                }
+                if continuation_identity is not None
+                else {}
+            ),
             **build_runtime_identity_projection(
                 db,
                 task_execution=task_execution,
@@ -620,8 +677,52 @@ def queue_task_for_session(
             planning_backend_override=planning_backend_override,
             planning_escalation_metadata=planning_escalation_metadata,
             context=planner_context,
+            **(
+                {
+                    "continuation_task_id": continuation_identity.continuation_task_id,
+                    "continuation_kind": continuation_identity.continuation_kind,
+                    "continuation_retry_count": continuation_identity.retry_count,
+                }
+                if continuation_identity is not None
+                else {}
+            ),
         )
     except Exception as exc:
+        if continuation_identity is not None:
+            # TASK_QUEUED and retry_pending were committed before the broker
+            # call. Keep the marker for reconciliation instead of converting
+            # a lost delivery into a false logical failure.
+            db.rollback()
+            session = (
+                db.query(SessionModel).filter(SessionModel.id == session.id).first()
+            )
+            task = db.query(Task).filter(Task.id == task.id).first()
+            task_execution = (
+                db.query(TaskExecution)
+                .filter(TaskExecution.id == task_execution.id)
+                .first()
+            )
+            db.add(
+                LogEntry(
+                    session_id=session.id,
+                    session_instance_id=session.instance_id,
+                    task_id=task.id,
+                    task_execution_id=task_execution.id,
+                    level="ERROR",
+                    message="E3 continuation publication failed after retry_pending commit",
+                    log_metadata=json.dumps(
+                        {
+                            "dispatch_kind": "e3_continuation",
+                            "continuation_kind": continuation_identity.continuation_kind,
+                            "continuation_retry_count": continuation_identity.retry_count,
+                            "task_execution_id": continuation_identity.task_execution_id,
+                            "error": str(exc),
+                        }
+                    ),
+                )
+            )
+            db.commit()
+            raise
         completed_at = datetime.now(timezone.utc)
         mark_task_attempt_failed(
             task=task,
@@ -675,6 +776,15 @@ def queue_task_for_session(
                     "plan_position": getattr(task, "plan_position", None),
                     "execution_mode": session.execution_mode,
                     "cleared_saved_plan": should_clear_saved_plan,
+                    **(
+                        {
+                            "dispatch_kind": "e3_continuation",
+                            "continuation_kind": continuation_identity.continuation_kind,
+                            "continuation_retry_count": continuation_identity.retry_count,
+                        }
+                        if continuation_identity is not None
+                        else {}
+                    ),
                 }
             ),
         )
@@ -687,6 +797,16 @@ def queue_task_for_session(
         "task_execution_id": task_execution.id,
         "celery_id": result.id,
         "plan_position": getattr(task, "plan_position", None),
+        **(
+            {
+                "dispatch_kind": "e3_continuation",
+                "continuation_kind": continuation_identity.continuation_kind,
+                "continuation_retry_count": continuation_identity.retry_count,
+                "continuation_task_id": continuation_identity.continuation_task_id,
+            }
+            if continuation_identity is not None
+            else {}
+        ),
     }
 
 

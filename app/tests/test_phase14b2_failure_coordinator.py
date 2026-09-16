@@ -140,7 +140,7 @@ def _seed_ctx(db_session, *, execution_mode="manual", plan_position=None):
 
 
 # ---------------------------------------------------------------------------
-# 1. Terminal failure path — task marked failed, session paused, exc re-raised
+# 1. Terminal failure path — task marked failed, session logically failed, exc re-raised
 # ---------------------------------------------------------------------------
 
 
@@ -162,7 +162,7 @@ def test_terminal_failure_marks_task_failed_and_reraises(db_session):
     db_session.refresh(task)
     db_session.refresh(session)
     assert task.status == TaskStatus.FAILED
-    assert session.status == "paused"
+    assert session.status == "failed"
 
 
 @pytest.mark.parametrize(
@@ -201,7 +201,7 @@ def test_planning_terminal_failures_terminalize_every_product_record(
     assert task.completed_at is not None
     assert link.completed_at == task.completed_at
     assert execution.completed_at == task.completed_at
-    assert session.status == "paused"
+    assert session.status == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +324,7 @@ def test_retry_blocked_by_restore_failure_pauses_session(db_session, monkeypatch
 
 
 # ---------------------------------------------------------------------------
-# 4. Session paused path — other_active_execution=False -> mark_session_paused
+# 4. Stable logical failure path — other_active_execution=False -> final failure
 # ---------------------------------------------------------------------------
 
 
@@ -344,7 +344,7 @@ def test_no_other_active_execution_pauses_session(db_session):
         )
 
     db_session.refresh(session)
-    assert session.status == "paused"
+    assert session.status == "failed"
 
 
 # ---------------------------------------------------------------------------

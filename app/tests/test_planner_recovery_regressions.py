@@ -22,6 +22,8 @@ from app.services.orchestration.types import OrchestrationRunContext
 from app.schemas.knowledge import KnowledgeContext, KnowledgeItemRef, RecommendedAction
 from app.services.planning.planner_service import PlannerService
 from app.services.session.session_runtime_service import build_task_execution_prompt
+from app.services.orchestration.lifecycle.transitions import schedule_continuation
+from app.services.orchestration.run_state import mark_task_attempt_pending
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 
 
@@ -388,8 +390,32 @@ def test_handle_task_failure_queues_one_automatic_recovery_for_failed_ordered_ta
 
     queued: list[int] = []
 
-    def fake_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+    def fake_queue_task_for_session(
+        *, db, session, task_id, continuation_kind, continuation_retry_count, **_kwargs
+    ):
         queued.append(task_id)
+        execution = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.session_id == session.id,
+                TaskExecution.task_id == task_id,
+            )
+            .order_by(TaskExecution.id.desc())
+            .first()
+        )
+        recovery_task = db.query(Task).filter(Task.id == task_id).one()
+        mark_task_attempt_pending(task=recovery_task, task_execution=execution)
+        recovery_task.workspace_status = "changes_requested"
+        schedule_continuation(
+            db,
+            session,
+            task_execution=execution,
+            continuation_task_id=task_id,
+            continuation_kind=continuation_kind,
+            retry_count=continuation_retry_count,
+        )
+        recovery_task.workspace_status = "changes_requested"
+        recovery_task.error_message = _kwargs.get("recovery_error_message")
         return {"task_id": task_id}
 
     ctx = OrchestrationRunContext(
@@ -436,7 +462,7 @@ def test_handle_task_failure_queues_one_automatic_recovery_for_failed_ordered_ta
     assert task.status == TaskStatus.PENDING
     assert task.workspace_status == "changes_requested"
     assert "Automatic recovery requested" in (task.error_message or "")
-    assert session.status == "running"
+    assert session.status == "retry_pending"
     assert session.is_active is True
 
 
@@ -576,7 +602,7 @@ def test_auto_recovery_queue_failure_preserves_original_error_and_execution(
     db_session.commit()
     db_session.refresh(execution)
 
-    def failing_queue_task_for_session(*, db, session, task_id, timeout_seconds=1800):
+    def failing_queue_task_for_session(*, db, session, task_id, **_kwargs):
         raise RuntimeError("broker unavailable")
 
     ctx = OrchestrationRunContext(
@@ -716,7 +742,7 @@ def test_celery_retry_leaves_task_pending_so_claim_can_succeed(db_session):
     assert (
         task.status == TaskStatus.PENDING
     ), f"task.status={task.status!r} — retry will fail with task_not_claimable:running"
-    assert session.status == "running"
+    assert session.status == "retry_pending"
     assert session.is_active is True
 
 
@@ -816,7 +842,8 @@ def test_retryable_failure_restores_workspace_before_celery_retry(db_session, tm
         "Restored workspace snapshot before retrying failed task" in args[4]
         for args, _kwargs in live_logs
     )
-    assert getattr(retry_task, "retry_kwargs", {}) == {}
+    assert retry_task.retry_kwargs["kwargs"]["continuation_kind"] == "celery_retry"
+    assert retry_task.retry_kwargs["kwargs"]["task_execution_id"] == execution.id
 
 
 def test_retryable_failure_terminalizes_when_retry_restore_reports_dirty_workspace(
@@ -1030,7 +1057,7 @@ def test_planning_lock_wait_timeout_terminalizes_execution_without_retry(db_sess
 
     assert task.status == TaskStatus.FAILED
     assert task.completed_at is not None
-    assert session.status == "paused"
+    assert session.status == "failed"
     assert session.is_active is False
     assert task_execution.status == TaskStatus.FAILED
     assert task_execution.completed_at is not None
@@ -1147,7 +1174,7 @@ def test_phase7f_bounded_debug_timeout_terminalizes_without_retry_or_restore(
     assert task.completed_at is not None
     assert link.completed_at is not None
     assert execution.completed_at is not None
-    assert session.status == "paused"
+    assert session.status == "failed"
     assert session.is_active is False
 
 
@@ -1286,8 +1313,8 @@ def test_ordinary_backend_timeout_still_retries_and_restores_workspace(
 
     assert restore_calls == [("retryable task failure", {"force_restore": True})]
     assert task.status == TaskStatus.PENDING
-    assert session.status == "running"
-    assert execution.status == TaskStatus.FAILED
+    assert session.status == "retry_pending"
+    assert execution.status == TaskStatus.PENDING
 
 
 def test_project_mutation_lock_conflict_terminalizes_without_pausing_active_session(

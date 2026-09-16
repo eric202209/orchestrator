@@ -20,6 +20,7 @@ from app.services.orchestration.coordinators.failure_coordinator import (
     FailureCoordinator,
 )
 from app.services.orchestration.events.event_types import EventType
+from app.services.orchestration.lifecycle.transitions import schedule_continuation
 from app.services.orchestration.types import OrchestrationRunContext
 
 
@@ -102,7 +103,33 @@ def _seed_context(db_session, *, execution_mode="automatic"):
 def test_failure_evidence_is_captured_before_automatic_recovery_return(db_session):
     ctx, _session, _task, execution = _seed_context(db_session)
     evidence_logs = []
-    queue_fn = MagicMock()
+
+    def queue_fn(*, db, session, task_id, **kwargs):
+        recovery_execution = TaskExecution(
+            session_id=session.id,
+            task_id=task_id,
+            attempt_number=(
+                db.query(TaskExecution)
+                .filter(
+                    TaskExecution.session_id == session.id,
+                    TaskExecution.task_id == task_id,
+                )
+                .count()
+                + 1
+            ),
+            status=TaskStatus.PENDING,
+        )
+        db.add(recovery_execution)
+        db.flush()
+        schedule_continuation(
+            db,
+            session,
+            task_execution=recovery_execution,
+            continuation_task_id=task_id,
+            continuation_kind=kwargs["continuation_kind"],
+            retry_count=kwargs["continuation_retry_count"],
+        )
+        return {"task_id": task_id, "task_execution_id": recovery_execution.id}
 
     def capture_log(*args, **kwargs):
         evidence_logs.append((args, kwargs))
@@ -119,7 +146,7 @@ def test_failure_evidence_is_captured_before_automatic_recovery_return(db_sessio
     )
 
     assert result is None
-    queue_fn.assert_called_once()
+    assert ctx.session.status == "retry_pending"
     evidence = next(
         kwargs["metadata"]
         for _args, kwargs in evidence_logs

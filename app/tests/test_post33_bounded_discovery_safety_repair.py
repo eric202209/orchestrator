@@ -375,7 +375,7 @@ def test_2r_openclaw_timeout_shape_stays_terminal_through_worker_policy(
     db_session.refresh(task)
     db_session.refresh(execution)
     assert queue == []
-    assert session.status == "paused"
+    assert session.status == "failed"
     assert task.status.value == "failed"
     assert execution.status.value == "failed"
     assert execution.failure_category == "discovery_terminal_failure"
@@ -407,7 +407,7 @@ def test_failure_coordinator_cannot_retry_terminal_discovery_failure(db_session)
     db_session.refresh(task)
     db_session.refresh(execution)
     assert queue == []
-    assert session.status == "paused"
+    assert session.status == "failed"
     assert task.status.value == "failed"
     assert execution.status.value == "failed"
     assert execution.failure_category == "discovery_terminal_failure"

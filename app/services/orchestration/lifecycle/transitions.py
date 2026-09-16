@@ -1,8 +1,8 @@
 """E2 lifecycle transition and generation-fence primitives.
 
-The functions in this module are deliberately not wired into the legacy
-failure/retry writers yet.  They provide the durable write contract that those
-writers will adopt in the following Phase 36 slices.
+E3 wires the ordinary FailureCoordinator/recovery writers and their worker
+dispatches through these primitives.  Capacity retry remains a separate
+legacy writer until E4.
 
 Commit ownership belongs to the caller by default.  Passing ``commit=True``
 is an explicit convenience for callers that own the whole transition.  No

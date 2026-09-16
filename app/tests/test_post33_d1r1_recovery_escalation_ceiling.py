@@ -37,6 +37,7 @@ from app.models import (
 )
 from app.services.orchestration.error_handler import EnhancedErrorHandler
 from app.services.orchestration.phases.failure_flow import handle_task_failure
+from app.services.orchestration.lifecycle.transitions import schedule_continuation
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.session.execution_policy import (
     automatic_recovery_rerun_allowed,
@@ -195,25 +196,33 @@ def _run_failure(db, ctx, *, self_task, reason, queued):
     def fake_queue_task_for_session(*, db, session, task_id, **_kwargs):
         # Production queue_task_for_session creates a fresh TaskExecution;
         # mirror that so the durable episode counter advances realistically.
-        db.add(
-            TaskExecution(
-                session_id=session.id,
-                task_id=task_id,
-                attempt_number=(
-                    db.query(TaskExecution)
-                    .filter(
-                        TaskExecution.session_id == session.id,
-                        TaskExecution.task_id == task_id,
-                    )
-                    .count()
-                    + 1
-                ),
-                status=TaskStatus.PENDING,
-            )
+        execution = TaskExecution(
+            session_id=session.id,
+            task_id=task_id,
+            attempt_number=(
+                db.query(TaskExecution)
+                .filter(
+                    TaskExecution.session_id == session.id,
+                    TaskExecution.task_id == task_id,
+                )
+                .count()
+                + 1
+            ),
+            status=TaskStatus.PENDING,
+        )
+        db.add(execution)
+        db.flush()
+        schedule_continuation(
+            db,
+            session,
+            task_execution=execution,
+            continuation_task_id=task_id,
+            continuation_kind=_kwargs["continuation_kind"],
+            retry_count=_kwargs["continuation_retry_count"],
         )
         db.commit()
         queued.append(task_id)
-        return {"task_id": task_id}
+        return {"task_id": task_id, "task_execution_id": execution.id}
 
     raised = None
     try:
@@ -333,7 +342,7 @@ def test_window4_post_repair_validation_failure_does_not_schedule_celery_retry(
     assert execution.failure_category == "planning_contract_violation"
     assert execution.status == TaskStatus.FAILED
     assert task.status == TaskStatus.FAILED
-    assert session.status == "paused"
+    assert session.status == "failed"
     assert (
         db_session.query(TaskExecution).filter(TaskExecution.task_id == task.id).count()
         == 1
@@ -418,7 +427,7 @@ def test_n_terminal_state_is_truthful_after_deterministic_failure(db_session):
     assert D1_FAILURE_REASON in (task.error_message or "")
     assert execution.status == TaskStatus.FAILED
     assert execution.failure_category == "planning_contract_violation"
-    assert session.status == "paused"
+    assert session.status == "failed"
     assert session.last_alert_level == "error"
     # K: FAILED is the state the operator manual-retry endpoint accepts.
     assert task.status in {TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.DONE}

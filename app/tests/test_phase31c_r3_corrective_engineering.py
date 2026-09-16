@@ -29,6 +29,7 @@ from app.models import (
 from app.services.orchestration.coordinators.failure_coordinator import (
     FailureCoordinator,
 )
+from app.services.orchestration.lifecycle.transitions import schedule_continuation
 from app.services.orchestration.planning.repair_prompts import (
     PLANNING_REPAIR_INTACT_PLAN_MAX_CHARS,
     PLANNING_REPAIR_MAX_MALFORMED_OUTPUT_CHARS,
@@ -263,13 +264,41 @@ def test_retry_exempt_capability_failure_does_not_queue_automatic_recovery(
 
 def test_generic_execution_failure_still_queues_one_automatic_recovery(db_session):
     ctx, session, task = _seed_auto_ctx(db_session)
-    queue_fn = MagicMock()
+
+    def queue_fn(*, db, session, task_id, **kwargs):
+        execution = TaskExecution(
+            session_id=session.id,
+            task_id=task_id,
+            attempt_number=(
+                db.query(TaskExecution)
+                .filter(
+                    TaskExecution.session_id == session.id,
+                    TaskExecution.task_id == task_id,
+                )
+                .count()
+                + 1
+            ),
+            status=TaskStatus.PENDING,
+        )
+        db.add(execution)
+        db.flush()
+        schedule_continuation(
+            db,
+            session,
+            task_execution=execution,
+            continuation_task_id=task_id,
+            continuation_kind=kwargs["continuation_kind"],
+            retry_count=kwargs["continuation_retry_count"],
+        )
+        return {"task_id": task_id, "task_execution_id": execution.id}
+
     exc = RuntimeError("step 2 raised AssertionError in generated code")
 
     result = _run_handle_failure(ctx, exc, queue_fn)
 
     assert result is None
-    queue_fn.assert_called_once()
+    db_session.refresh(session)
+    assert session.status == "retry_pending"
 
 
 # ---------------------------------------------------------------------------

@@ -80,8 +80,8 @@ EXPECTED_SESSION_CALLS = {
         "mark_session_paused": 5,
     },
     "app/services/orchestration/coordinators/failure_coordinator.py": {
-        "mark_session_paused": 3,
-        "mark_session_running": 3,
+        "mark_session_paused": 4,
+        "mark_session_running": 2,
     },
     "app/services/orchestration/phases/completion_flow.py": {
         "mark_session_paused": 3,
@@ -137,7 +137,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
     },
     "app/services/orchestration/coordinators/failure_coordinator.py": {
         "mark_task_attempt_failed": 3,
-        "mark_task_attempt_pending": 2,
+        "mark_task_attempt_pending": 1,
     },
     "app/services/orchestration/phases/completion_flow.py": {
         "mark_task_attempt_failed": 2,

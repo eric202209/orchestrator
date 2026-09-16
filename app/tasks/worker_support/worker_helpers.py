@@ -9,6 +9,7 @@ from .context import (
     _inject_progress_notes_into_context,
 )
 from .dispatch import (
+    _claim_continuation_for_worker,
     _claim_queued_task_for_worker,
     _emit_dispatch_rejected,
     _find_queued_event_for_dispatch,
@@ -25,6 +26,7 @@ from .workspace import _restore_workspace_snapshot_if_needed
 __all__ = [
     "_apply_checkpoint_payload",
     "_build_base_project_context",
+    "_claim_continuation_for_worker",
     "_claim_queued_task_for_worker",
     "_coerce_utc_datetime",
     "_decode_context_snapshot_object",
