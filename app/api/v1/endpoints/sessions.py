@@ -564,6 +564,8 @@ def update_session(
     )
     db.commit()
 
+    _set_session_task_projection(db, db_session)
+
     return db_session
 
 

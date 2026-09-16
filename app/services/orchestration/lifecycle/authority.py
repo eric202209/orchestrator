@@ -28,7 +28,10 @@ _STATUS_TO_PHASE: dict[str, str | None] = {
     "running": "step_executing",
     "recovering": "recovering",
     "retry_pending": "retry_pending",
-    "paused": "awaiting_input",
+    # Operator pause is a distinct public lifecycle phase.  It is deliberately
+    # not folded into awaiting_input: the former revokes autonomous work while
+    # the latter represents an outstanding human intervention.
+    "paused": "paused",
     "awaiting_input": "awaiting_input",
     "stopped": "cancelled",
     "cancelled": "cancelled",
@@ -46,6 +49,7 @@ _CONTINUATION_STATUSES = frozenset({"recovering", "retry_pending"})
 
 _PHASE_TO_COORDINATOR = {
     "step_executing": "ExecutionCoordinator",
+    "paused": "ExecutionCoordinator",
     "awaiting_input": "ExecutionCoordinator",
     "recovering": "FailureCoordinator",
     "retry_pending": "FailureCoordinator",
@@ -372,19 +376,8 @@ def derive_lifecycle_authority(
 
     terminal_reason = None
     reason_query_ambiguous = False
-    if status in _TERMINAL_STATUSES and logical_terminal:
+    if status in {"failed", "stopped", "cancelled", "canceled"} and logical_terminal:
         terminal_reason, reason_query_ambiguous = _failure_reason(db, session, latest)
-    elif (
-        status == "paused"
-        and not continuation_pending
-        and not malformed
-        and attempt_status in {"failed", "cancelled", "canceled"}
-    ):
-        # A manual pause is non-terminal, but it can preserve a failed task
-        # attempt.  Keep that natural failure cause available to projections;
-        # the pause cause is surfaced independently by stop-reason extraction.
-        terminal_reason = attempt_failure_reason
-
     # A query failure does not manufacture terminality, but it does make the
     # physical/logical quiescence answer unsafe.
     if latest_query_ambiguous or reason_query_ambiguous:

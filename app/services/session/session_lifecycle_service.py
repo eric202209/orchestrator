@@ -54,6 +54,7 @@ from app.services.orchestration.run_state import (
 from app.services.orchestration.lifecycle.transitions import (
     revoke_autonomous_continuation,
 )
+from app.services.orchestration.lifecycle.authority import derive_lifecycle_authority
 from app.services.orchestration.state.session_state import (
     clear_session_alert,
     mark_session_failed,
@@ -83,6 +84,20 @@ _ORPHANED_PLANNING_RECOVERY_SECONDS = 120
 _STALE_RUNNING_SESSION_SWEEP_SECONDS = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS + 300
 _EXPLICIT_TASK_ID_RE = re.compile(r"\btask\s*#?(\d+)\b", re.IGNORECASE)
 _BACKEND_LEASE_POLL_INTERVAL_SECONDS = 0.1
+
+
+def _with_lifecycle_projection(
+    db: Session,
+    session: SessionModel,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Add the canonical operator projection to lifecycle action results."""
+
+    result = dict(payload)
+    result["orchestration_state"] = derive_lifecycle_authority(
+        db, session
+    ).as_projection()
+    return result
 
 
 def _coerce_naive_utc_datetime(value: datetime | None) -> datetime | None:
@@ -1537,12 +1552,16 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         )
         db.commit()
 
-        return {
-            "status": "started",
-            "session_key": session_key,
-            "session_id": session_id,
-            "message": f"Session '{session.name}' started successfully",
-        }
+        return _with_lifecycle_projection(
+            db,
+            session,
+            {
+                "status": "started",
+                "session_key": session_key,
+                "session_id": session_id,
+                "message": f"Session '{session.name}' started successfully",
+            },
+        )
     except HTTPException:
         db.rollback()
         raise
@@ -1579,14 +1598,26 @@ async def stop_session_lifecycle(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.status == "stopped":
-        return {
-            "status": "stopped",
-            "session_id": session_id,
-            "initiated_by": initiated_by or "unknown",
-            "source": source or "unspecified",
-            "message": f"Session '{session.name}' is already stopped",
-        }
-    if session.status not in ["running", "paused", "active", "awaiting_input"]:
+        return _with_lifecycle_projection(
+            db,
+            session,
+            {
+                "status": "stopped",
+                "session_id": session_id,
+                "initiated_by": initiated_by or "unknown",
+                "source": source or "unspecified",
+                "message": f"Session '{session.name}' is already stopped",
+            },
+        )
+    normalized_status = normalize_session_status(session.status)
+    if normalized_status not in [
+        "running",
+        "paused",
+        "active",
+        "awaiting_input",
+        "recovering",
+        "retry_pending",
+    ]:
         raise HTTPException(status_code=400, detail="Session is not running")
     stop_transition = resolve_session_transition(
         normalize_session_status(session.status),
@@ -1625,11 +1656,18 @@ async def stop_session_lifecycle(
             checkpoint_name = None
 
         revoked_ids = revoke_session_celery_tasks(db, session_id, terminate=True)
-        backend_lease = await _await_backend_lease_release(
-            db,
-            session_id=session_id,
+        backend_lease = (
+            {"status": "not_owned", "backend_id": None}
+            if normalized_status == "retry_pending"
+            else await _await_backend_lease_release(
+                db,
+                session_id=session_id,
+            )
         )
-        if not force:
+        # A queued autonomous continuation has no live provider session to
+        # stop.  Revocation below is the authoritative action and fences the
+        # delayed delivery.  Keep the runtime stop for active generations.
+        if not force and normalized_status != "retry_pending":
             runtime = create_agent_runtime(
                 db,
                 session_id,
@@ -1678,9 +1716,13 @@ async def stop_session_lifecycle(
         # Preserve the characterized legacy mutation call site while the
         # canonical revocation primitive owns the fence and attempt cleanup.
         mark_session_stopped(session, stopped_at=session.stopped_at)
-        backend_lease = await _await_backend_lease_release(
-            db,
-            session_id=session_id,
+        backend_lease = (
+            {"status": "not_owned", "backend_id": None}
+            if normalized_status == "retry_pending"
+            else await _await_backend_lease_release(
+                db,
+                session_id=session_id,
+            )
         )
         db.commit()
 
@@ -1707,13 +1749,17 @@ async def stop_session_lifecycle(
         )
         db.commit()
 
-        return {
-            "status": "stopped",
-            "session_id": session_id,
-            "initiated_by": initiated_by or "unknown",
-            "source": source or "unspecified",
-            "message": f"Session '{session.name}' stopped successfully",
-        }
+        return _with_lifecycle_projection(
+            db,
+            session,
+            {
+                "status": "stopped",
+                "session_id": session_id,
+                "initiated_by": initiated_by or "unknown",
+                "source": source or "unspecified",
+                "message": f"Session '{session.name}' stopped successfully",
+            },
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -1740,7 +1786,14 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    if session.status not in ["running", "paused", "active"]:
+    normalized_status = normalize_session_status(session.status)
+    if normalized_status not in [
+        "running",
+        "paused",
+        "active",
+        "recovering",
+        "retry_pending",
+    ]:
         raise HTTPException(status_code=400, detail="Session is not running")
 
     try:
@@ -1769,26 +1822,31 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
                 step_results=latest_checkpoint.get("step_results", []),
             )
         except Exception:
-            latest_execution = _latest_task_execution(db, session_id)
-            latest_session_task = (
-                db.query(SessionTask)
-                .filter(SessionTask.session_id == session_id)
-                .order_by(
-                    SessionTask.started_at.desc().nullslast(), SessionTask.id.desc()
+            # retry_pending has no live runtime to pause.  Its durable marker
+            # is revoked below, which is also what fences its stale delivery.
+            if normalized_status == "retry_pending":
+                latest_execution = None
+            else:
+                latest_execution = _latest_task_execution(db, session_id)
+                latest_session_task = (
+                    db.query(SessionTask)
+                    .filter(SessionTask.session_id == session_id)
+                    .order_by(
+                        SessionTask.started_at.desc().nullslast(), SessionTask.id.desc()
+                    )
+                    .first()
                 )
-                .first()
-            )
-            runtime = create_agent_runtime(
-                db,
-                session_id,
-                latest_session_task.task_id if latest_session_task else None,
-                use_demo_mode=False,
-                role=BackendRole.EXECUTION,
-                backend_override=(
-                    latest_execution.backend_id if latest_execution else None
-                ),
-            )
-            await runtime.pause_session()
+                runtime = create_agent_runtime(
+                    db,
+                    session_id,
+                    latest_session_task.task_id if latest_session_task else None,
+                    use_demo_mode=False,
+                    role=BackendRole.EXECUTION,
+                    backend_override=(
+                        latest_execution.backend_id if latest_execution else None
+                    ),
+                )
+                await runtime.pause_session()
 
         reset_count = _reset_running_session_tasks(
             db,
@@ -1831,11 +1889,15 @@ async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
         )
         db.commit()
 
-        return {
-            "status": "paused",
-            "session_id": session_id,
-            "message": f"Session '{session.name}' paused successfully",
-        }
+        return _with_lifecycle_projection(
+            db,
+            session,
+            {
+                "status": "paused",
+                "session_id": session_id,
+                "message": f"Session '{session.name}' paused successfully",
+            },
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -1887,13 +1949,17 @@ async def request_human_intervention_lifecycle(
         initiated_by=initiated_by,
     )
 
-    return {
-        "status": "awaiting_input",
-        "session_id": session_id,
-        "intervention_id": req.id,
-        "intervention_type": req.intervention_type,
-        "message": f"Session '{session.name}' is now waiting for human input",
-    }
+    return _with_lifecycle_projection(
+        db,
+        session,
+        {
+            "status": "awaiting_input",
+            "session_id": session_id,
+            "intervention_id": req.id,
+            "intervention_type": req.intervention_type,
+            "message": f"Session '{session.name}' is now waiting for human input",
+        },
+    )
 
 
 async def resume_session_lifecycle(
@@ -2123,33 +2189,37 @@ async def resume_session_lifecycle(
         )
         db.commit()
 
-        return {
-            "status": "resumed",
-            "session_id": session_id,
-            "requested_checkpoint_name": requested_checkpoint_name,
-            "resolved_checkpoint_name": resolved_checkpoint_name,
-            "restore_fidelity": restore_fidelity,
-            "message": (
-                (
-                    f"Session '{session.name}' resumed successfully"
-                    + (
-                        f" using resolved checkpoint '{resolved_checkpoint_name}' instead of '{requested_checkpoint_name}'"
-                        if requested_checkpoint_name
-                        and requested_checkpoint_name != resolved_checkpoint_name
-                        else (
-                            f" using checkpoint '{resolved_checkpoint_name}'"
-                            if resolved_checkpoint_name
-                            else " from the current workspace"
+        return _with_lifecycle_projection(
+            db,
+            session,
+            {
+                "status": "resumed",
+                "session_id": session_id,
+                "requested_checkpoint_name": requested_checkpoint_name,
+                "resolved_checkpoint_name": resolved_checkpoint_name,
+                "restore_fidelity": restore_fidelity,
+                "message": (
+                    (
+                        f"Session '{session.name}' resumed successfully"
+                        + (
+                            f" using resolved checkpoint '{resolved_checkpoint_name}' instead of '{requested_checkpoint_name}'"
+                            if requested_checkpoint_name
+                            and requested_checkpoint_name != resolved_checkpoint_name
+                            else (
+                                f" using checkpoint '{resolved_checkpoint_name}'"
+                                if resolved_checkpoint_name
+                                else " from the current workspace"
+                            )
                         )
                     )
-                )
-                if resume_has_progress
-                else (
-                    f"Session '{session.name}' resumed by queueing a fresh run from the current workspace because "
-                    f"no execution progress to replay was available"
-                )
-            ),
-        }
+                    if resume_has_progress
+                    else (
+                        f"Session '{session.name}' resumed by queueing a fresh run from the current workspace because "
+                        f"no execution progress to replay was available"
+                    )
+                ),
+            },
+        )
     except HTTPException:
         raise
     except Exception as exc:

@@ -96,11 +96,11 @@ def test_running_session_returns_step_executing(db_session):
     assert block["coordinator"] == "ExecutionCoordinator"
 
 
-def test_paused_session_returns_awaiting_input(db_session):
+def test_paused_session_returns_paused_phase(db_session):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="paused")
     block = derive_orchestration_state_block(db_session, session)
-    assert block["current_phase"] == "awaiting_input"
+    assert block["current_phase"] == "paused"
     assert block["is_terminal"] is False
     assert block["coordinator"] == "ExecutionCoordinator"
 

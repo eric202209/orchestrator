@@ -23,6 +23,7 @@ from app.services.workspace.project_isolation_service import (
 )
 from app.services.observability.log_stream import LogStreamService
 from app.services.session.orchestration_event_bus import orchestration_event_bus
+from app.services.orchestration.lifecycle.authority import derive_lifecycle_authority
 from app.services.observability.streaming_health import (
     record_stream_error,
     register_stream_connection,
@@ -38,6 +39,22 @@ from app.services.workspace.control_state_paths import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _stream_lifecycle_authority(db: Session, session: SessionModel):
+    """Read the stream lifecycle from the canonical authority."""
+
+    return derive_lifecycle_authority(db, session)
+
+
+def _stream_is_terminal(db: Session, session: SessionModel) -> bool:
+    """Return the sole terminal predicate used by public session streams."""
+
+    return _stream_lifecycle_authority(db, session).logical_terminal
+
+
+def _stream_lifecycle_projection(db: Session, session: SessionModel) -> dict[str, Any]:
+    return _stream_lifecycle_authority(db, session).as_projection()
 
 
 def _resolve_event_stream_location(
@@ -351,6 +368,7 @@ async def stream_session_logs(
             "type": "connected",
             "session_id": session_id,
             "session_instance_id": session.instance_id,
+            "orchestration_state": _stream_lifecycle_projection(db, session),
             "timestamp": datetime.utcnow().isoformat(),
             "heartbeat_interval": 30,
         }
@@ -410,8 +428,6 @@ async def stream_session_logs(
 
     logger.info("Sent %s initial logs, starting main loop...", len(recent_logs))
 
-    _TERMINAL_STATUSES = frozenset({"stopped", "paused", "completed", "failed"})
-
     async def heartbeat_sender() -> None:
         try:
             while True:
@@ -434,6 +450,7 @@ async def stream_session_logs(
             poll_db = create_db_session()
             session_is_terminal = False
             terminal_status = None
+            lifecycle_projection = None
             alert_level = None
             alert_message = None
             try:
@@ -443,6 +460,10 @@ async def stream_session_logs(
                     .first()
                 )
                 if current_session:
+                    lifecycle_authority = _stream_lifecycle_authority(
+                        poll_db, current_session
+                    )
+                    lifecycle_projection = lifecycle_authority.as_projection()
                     query = poll_db.query(LogEntry).filter(
                         LogEntry.session_id == session_id,
                         LogEntry.id > last_log_id,
@@ -514,10 +535,7 @@ async def stream_session_logs(
                                 )
 
                     # Detect terminal state after draining all pending logs
-                    if (
-                        not current_session.is_active
-                        and current_session.status in _TERMINAL_STATUSES
-                    ):
+                    if lifecycle_authority.logical_terminal:
                         session_is_terminal = True
                         terminal_status = current_session.status
                         alert_level = getattr(current_session, "last_alert_level", None)
@@ -533,6 +551,7 @@ async def stream_session_logs(
                         "type": "session_ended",
                         "session_id": session_id,
                         "status": terminal_status,
+                        "orchestration_state": lifecycle_projection,
                         "alert_level": alert_level,
                         "alert_message": alert_message,
                         "timestamp": datetime.utcnow().isoformat(),
@@ -592,13 +611,12 @@ async def stream_session_status(
         {
             "type": "connected",
             "session_id": session_id,
+            "orchestration_state": _stream_lifecycle_projection(db, session),
             "timestamp": datetime.utcnow().isoformat(),
             "heartbeat_interval": 30,
             "status_interval": 2,
         }
     )
-
-    _TERMINAL_STATUSES_STATUS = frozenset({"stopped", "paused", "completed", "failed"})
 
     async def status_sender() -> None:
         last_snapshot: Optional[Dict[str, Any]] = None
@@ -622,6 +640,9 @@ async def stream_session_status(
                     )
                     break
 
+                lifecycle_authority = _stream_lifecycle_authority(poll_db, current)
+                lifecycle_projection = lifecycle_authority.as_projection()
+
                 snapshot = {
                     "id": current.id,
                     "status": current.status,
@@ -643,6 +664,7 @@ async def stream_session_status(
                     ),
                     "alert_level": getattr(current, "last_alert_level", None),
                     "alert_message": getattr(current, "last_alert_message", None),
+                    "orchestration_state": lifecycle_projection,
                 }
 
                 if snapshot != last_snapshot:
@@ -657,15 +679,13 @@ async def stream_session_status(
                     last_snapshot = snapshot
 
                 # Signal terminal state so the frontend stops waiting
-                if (
-                    not current.is_active
-                    and current.status in _TERMINAL_STATUSES_STATUS
-                ):
+                if lifecycle_authority.logical_terminal:
                     await websocket.send_json(
                         {
                             "type": "session_terminal",
                             "session_id": session_id,
                             "status": current.status,
+                            "orchestration_state": lifecycle_projection,
                             "alert_level": getattr(current, "last_alert_level", None),
                             "alert_message": getattr(
                                 current, "last_alert_message", None

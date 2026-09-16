@@ -57,6 +57,18 @@ _SESSION_TRANSITION_POLICY: dict[tuple[str, str], SessionTransition] = {
         is_active=False,
         timestamp_policy="paused_at",
     ),
+    ("recovering", "pause"): SessionTransition(
+        allowed=True,
+        result_status="paused",
+        is_active=False,
+        timestamp_policy="paused_at",
+    ),
+    ("retry_pending", "pause"): SessionTransition(
+        allowed=True,
+        result_status="paused",
+        is_active=False,
+        timestamp_policy="paused_at",
+    ),
     ("paused", "resume"): SessionTransition(
         allowed=True,
         result_status="running",
@@ -75,6 +87,18 @@ _SESSION_TRANSITION_POLICY: dict[tuple[str, str], SessionTransition] = {
         is_active=True,
     ),
     ("running", "stop"): SessionTransition(
+        allowed=True,
+        result_status="stopped",
+        is_active=False,
+        timestamp_policy="stopped_at",
+    ),
+    ("recovering", "stop"): SessionTransition(
+        allowed=True,
+        result_status="stopped",
+        is_active=False,
+        timestamp_policy="stopped_at",
+    ),
+    ("retry_pending", "stop"): SessionTransition(
         allowed=True,
         result_status="stopped",
         is_active=False,

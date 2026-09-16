@@ -94,7 +94,10 @@ from fastapi.responses import StreamingResponse
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
-from app.services.session.session_stream_service import mobile_sse_event_generator
+from app.services.session.session_stream_service import (
+    _stream_is_terminal,
+    mobile_sse_event_generator,
+)
 from app.services.observability.streaming_health import (
     record_stream_error,
     register_stream_connection,
@@ -109,6 +112,7 @@ from app.services.session.session_inspection_service import (
     load_session_checkpoint_payload,
     refresh_session_dispatch_watchdog_alert,
 )
+from app.services.orchestration.lifecycle.authority import derive_lifecycle_authority
 from app.services.session.session_lifecycle_service import (
     pause_session_lifecycle,
     resume_session_lifecycle,
@@ -639,6 +643,9 @@ def list_sessions(
                 "project_id": s.project_id,
                 "started_at": s.started_at.isoformat() if s.started_at else None,
                 "stopped_at": s.stopped_at.isoformat() if s.stopped_at else None,
+                "orchestration_state": derive_lifecycle_authority(
+                    db, s
+                ).as_projection(),
             }
             for s in sessions
         ]
@@ -1186,6 +1193,10 @@ async def create_mobile_session(
         task_id=body.task_id,
     )
     result = create_session(session=session_create, db=db, current_user=None)
+    if isinstance(result, dict):
+        orchestration_state = result.get("orchestration_state")
+    else:
+        orchestration_state = getattr(result, "orchestration_state", None)
     return {
         "session_id": result["id"] if isinstance(result, dict) else result.id,
         "status": (
@@ -1198,6 +1209,7 @@ async def create_mobile_session(
             if isinstance(result, dict)
             else getattr(result, "name", body.name)
         ),
+        "orchestration_state": orchestration_state,
     }
 
 
@@ -1238,7 +1250,6 @@ async def mobile_log_stream(
 
     await websocket.accept()
     register_stream_connection("mobile_session_logs")
-    TERMINAL_STATES = {"stopped", "failed", "done", "completed", "error"}
     last_log_id = 0
     try:
         while True:
@@ -1254,7 +1265,7 @@ async def mobile_log_stream(
                     }
                 )
                 break
-            if _status_value(session.status).lower() in TERMINAL_STATES:
+            if _stream_is_terminal(db, session):
                 break
 
             new_logs = (
