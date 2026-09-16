@@ -374,6 +374,16 @@ def derive_lifecycle_authority(
     reason_query_ambiguous = False
     if status in _TERMINAL_STATUSES and logical_terminal:
         terminal_reason, reason_query_ambiguous = _failure_reason(db, session, latest)
+    elif (
+        status == "paused"
+        and not continuation_pending
+        and not malformed
+        and attempt_status in {"failed", "cancelled", "canceled"}
+    ):
+        # A manual pause is non-terminal, but it can preserve a failed task
+        # attempt.  Keep that natural failure cause available to projections;
+        # the pause cause is surfaced independently by stop-reason extraction.
+        terminal_reason = attempt_failure_reason
 
     # A query failure does not manufacture terminality, but it does make the
     # physical/logical quiescence answer unsafe.
