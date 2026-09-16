@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime, timezone
 from app.celery_app import celery_app
 from app.models import (
+    LogEntry,
     Session as SessionModel,
     SessionTask,
     Task,
