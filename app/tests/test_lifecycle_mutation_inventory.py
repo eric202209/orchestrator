@@ -61,9 +61,10 @@ EXPECTED_SESSION_CALLS = {
         "mark_session_paused": 3,
         "mark_session_running": 1,
     },
+    # BR1 routed both legacy resume call sites through the canonical lifecycle
+    # service, so the compatibility endpoints no longer mutate status directly.
     "app/services/session/resume_service.py": {
         "mark_session_paused": 1,
-        "mark_session_resumed": 2,
     },
     "app/services/orchestration/phases/execution_loop.py": {
         "mark_session_paused": 4,

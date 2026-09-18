@@ -34,6 +34,9 @@ from app.services.orchestration.run_state.transitions import (
     mark_task_attempt_running,
     reset_active_attempts_for_session_stop,
 )
+from app.services.orchestration.lifecycle.authority import (
+    derive_continuation_pending,
+)
 from app.services.orchestration.state.session_state import normalize_session_status
 from app.services.tasks.execution import create_task_execution
 
@@ -48,6 +51,9 @@ _STABLE_TERMINAL_STATUSES = frozenset(
     {"failed", "completed", "done", "stopped", "cancelled", "canceled"}
 )
 _REVOCATION_STATUSES = frozenset({"paused", "stopped", "cancelled", "canceled"})
+# The two nonterminal phases in which an autonomous continuation, rather than an
+# operator or the scheduler, owns the current generation.
+_CONTINUATION_OWNED_STATUSES = frozenset({"recovering", "retry_pending"})
 
 
 class LifecycleTransitionError(ValueError):
@@ -270,6 +276,99 @@ def _result_rejected(
         session_id=session_id,
         task_id=task_id,
         task_execution_id=task_execution_id,
+    )
+
+
+def autonomous_continuation_owns_generation(session: SessionModel) -> bool:
+    """Return whether autonomous continuation owns the Session's generation.
+
+    This is the single shared admission predicate for the operator- and
+    scheduler-initiated paths (ordinary task admission, direct runtime start,
+    replan, legacy resume, retained-workspace cleanup).  It answers only from
+    canonical lifecycle truth: the two nonterminal continuation phases and the
+    E1 durable continuation marker.  It deliberately says nothing about
+    ``running``, pause, or stable terminality, which keep their existing
+    per-path Product policy.
+    """
+
+    status = normalize_session_status(getattr(session, "status", None))
+    if status in _CONTINUATION_OWNED_STATUSES:
+        return True
+    return derive_continuation_pending(session)
+
+
+def admit_fresh_logical_execution(
+    db: DbSession,
+    session: SessionModel,
+    *,
+    expected_instance_id: str | None = None,
+    commit: bool = False,
+    changed_at: datetime | None = None,
+) -> TransitionResult:
+    """Atomically reserve one fresh, non-autonomous execution for a Session.
+
+    Fresh work is admitted only when no autonomous continuation owns the
+    generation.  A ``pending`` Session is claimed with the same conditional
+    ``pending -> running`` UPDATE that :func:`admit_autonomous_execution` uses,
+    so two competing fresh admissions against one generation cannot both win;
+    every other admissible status keeps its existing Product policy and is
+    decided by the caller.
+
+    The caller owns commit/rollback unless ``commit=True``.  The helper creates
+    no attempt rows and publishes no work.
+    """
+
+    session_id = _session_id(session)
+    instance_id = _ensure_instance_id(session)
+    if expected_instance_id is not None and expected_instance_id != instance_id:
+        return _result_rejected(
+            session_id=session_id, reason="session_instance_changed"
+        )
+    if autonomous_continuation_owns_generation(session):
+        return _result_rejected(
+            session_id=session_id,
+            reason="autonomous_continuation_owns_generation",
+        )
+
+    status = normalize_session_status(getattr(session, "status", None))
+    changed_at = _now(changed_at)
+    # Preserve caller-owned transaction composition: a preceding explicit
+    # generation transition may have changed the in-memory Session fence.
+    db.flush()
+    filters = [
+        SessionModel.id == session_id,
+        SessionModel.instance_id == instance_id,
+        SessionModel.status.notin_(sorted(_CONTINUATION_OWNED_STATUSES)),
+        SessionModel.continuation_kind.is_(None),
+        SessionModel.continuation_task_id.is_(None),
+    ]
+    values: dict[Any, Any] = {SessionModel.lifecycle_updated_at: changed_at}
+    claims_generation = status == "pending"
+    if claims_generation:
+        filters.append(SessionModel.status == "pending")
+        values[SessionModel.status] = "running"
+        values[SessionModel.is_active] = True
+    updated = (
+        db.query(SessionModel)
+        .filter(*filters)
+        .update(values, synchronize_session=False)
+    )
+    if updated != 1:
+        return _result_rejected(
+            session_id=session_id, reason="fresh_admission_race_lost"
+        )
+
+    # Keep the caller's identity-map instance coherent with the conditional
+    # UPDATE so the postcondition is observable before commit.
+    if claims_generation:
+        session.status = "running"
+        session.is_active = True
+    session.lifecycle_updated_at = changed_at
+    _commit(db, commit)
+    return TransitionResult(
+        accepted=True,
+        reason="fresh_admission_admitted",
+        session_id=session_id,
     )
 
 
@@ -1095,6 +1194,8 @@ __all__ = [
     "ContinuationIdentity",
     "TransitionResult",
     "admit_autonomous_execution",
+    "admit_fresh_logical_execution",
+    "autonomous_continuation_owns_generation",
     "enter_recovering",
     "schedule_continuation",
     "validate_continuation",

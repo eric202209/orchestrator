@@ -28,6 +28,9 @@ from app.models import (
     SessionTask,
     TaskStatus,
 )
+from app.services.orchestration.lifecycle.transitions import (
+    autonomous_continuation_owns_generation,
+)
 from .session_lookup import get_session_or_404
 
 logger = logging.getLogger(__name__)
@@ -346,6 +349,19 @@ def trigger_replan(db: DBSession, session_id: int) -> dict:
     Returns dict with planning_session_id and message.
     """
     session = get_session_or_404(db, session_id)
+
+    # A failed attempt is not a logical failure. While an autonomous
+    # continuation still owns the generation, replanning would start provider
+    # Planning concurrently with live recovery, so refuse before any failure
+    # summary record or PlanningSession is created.
+    if autonomous_continuation_owns_generation(session):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Session is completing an autonomous continuation; replan is "
+                "unavailable until that continuation ends."
+            ),
+        )
 
     project = (
         db.query(Project)

@@ -106,6 +106,8 @@ async def pause_session(
 
         return PauseResponse(**result)
 
+    except HTTPException:
+        raise
     except ResumeError as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
@@ -142,10 +144,12 @@ async def resume_session(
             )
 
         # Resume the session
-        result = service.resume_session(start_from_step=request.start_from_step)
+        result = await service.resume_session(start_from_step=request.start_from_step)
 
         return ResumeResponse(**result)
 
+    except HTTPException:
+        raise
     except ResumeError as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
@@ -180,6 +184,8 @@ async def retry_failed_step(
 
         return RetryStepResponse(**result)
 
+    except HTTPException:
+        raise
     except ResumeError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
     except Exception as e:

@@ -12,7 +12,18 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models import Project, Task, TaskCheckpoint, TaskExecution, TaskStatus
+from app.models import (
+    Project,
+    Session as SessionModel,
+    SessionTask,
+    Task,
+    TaskCheckpoint,
+    TaskExecution,
+    TaskStatus,
+)
+from app.services.orchestration.lifecycle.transitions import (
+    autonomous_continuation_owns_generation,
+)
 from app.services.orchestration.state.persistence import load_accepted_path_authority
 from app.services.orchestration.validation.candidate_checks import (
     candidate_delta_identity,
@@ -880,6 +891,27 @@ class BaselinePromotionService:
             "promoted_task_count": promoted_task_count,
         }
 
+    def _task_workspace_owned_by_continuation(self, task_id: int) -> bool:
+        """Return whether a live continuation still owns this task's workspace.
+
+        Attempt status alone cannot answer this: an attempt can be failed or
+        pending while the canonical lifecycle says autonomous continuation
+        still owns the Session generation.
+        """
+
+        sessions = (
+            self.db.query(SessionModel)
+            .join(SessionTask, SessionTask.session_id == SessionModel.id)
+            .filter(
+                SessionTask.task_id == task_id,
+                SessionModel.deleted_at.is_(None),
+            )
+            .all()
+        )
+        return any(
+            autonomous_continuation_owns_generation(session) for session in sessions
+        )
+
     def cleanup_retained_task_workspaces(
         self,
         project: Project,
@@ -968,6 +1000,11 @@ class BaselinePromotionService:
                 continue
             if task_status == TaskStatus.RUNNING:
                 skipped.append({**record, "reason": "running_task"})
+                continue
+            if self._task_workspace_owned_by_continuation(task.id):
+                # A failed or pending attempt is not the end of logical work:
+                # a live continuation still needs this workspace.
+                skipped.append({**record, "reason": "session_continuation_live"})
                 continue
             if workspace_status not in eligible_statuses:
                 skipped.append({**record, "reason": "status_not_selected"})

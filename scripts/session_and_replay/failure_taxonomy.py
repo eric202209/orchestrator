@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 DONE_STATUSES = {"completed", "done", "success", "succeeded"}
@@ -89,6 +90,44 @@ def status_key(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
+_CONTINUATION_ROW_FIELDS = (
+    "status",
+    "continuation_task_id",
+    "continuation_kind",
+    "continuation_retry_count",
+    "continuation_retry_eta",
+)
+
+
+def continuation_owns_session(session_row: dict[str, Any]) -> bool:
+    """Return whether a live continuation still owns this Session generation.
+
+    These reports read raw rows, so the row is adapted to the attribute shape
+    the canonical lifecycle authority reads.  The logical decision itself is
+    not reimplemented here: it stays with the accepted lifecycle owner, so a
+    failed attempt is never mistaken for a final Session outcome.
+    """
+
+    from app.services.orchestration.lifecycle.transitions import (
+        autonomous_continuation_owns_generation,
+    )
+
+    fields = {field: session_row.get(field) for field in _CONTINUATION_ROW_FIELDS}
+    fields["continuation_retry_eta"] = _as_datetime(fields["continuation_retry_eta"])
+    return autonomous_continuation_owns_generation(SimpleNamespace(**fields))
+
+
+def _as_datetime(value: Any) -> Any:
+    """Coerce a stored timestamp to the datetime the authority validates."""
+
+    if not isinstance(value, str):
+        return value
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+
+
 def failure_class(metadata: dict[str, Any]) -> str:
     envelope = metadata.get("debug_feedback_envelope")
     if not isinstance(envelope, dict):
@@ -133,6 +172,11 @@ def terminal_class(
     task_executions: list[dict[str, Any]],
     metadata_rows: list[dict[str, Any]],
 ) -> str:
+    if continuation_owns_session(session):
+        # Attempt-level failure evidence must not be reported as the Session's
+        # terminal class while autonomous continuation is still live.
+        return status_key(session.get("status")) or "unknown"
+
     reason = latest_terminal_reason(metadata_rows)
     if reason:
         return reason
@@ -283,6 +327,11 @@ def outcome_class(
                     return "stuck_or_manual_db_cleanup"
             except Exception:
                 pass
+        return "in_progress"
+
+    # A failed attempt under a live continuation is not a final Session
+    # outcome; it must not be counted as failed or stuck.
+    if continuation_owns_session(session_row):
         return "in_progress"
 
     final_task_executions = _latest_task_executions(task_executions)

@@ -8,10 +8,12 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 from app.models import LogEntry, Session as SessionModel, SessionState, TaskCheckpoint
-from app.services.orchestration.state import mark_session_paused, mark_session_resumed
+from app.services.orchestration.state import mark_session_paused
 from app.services.orchestration.lifecycle.transitions import (
+    autonomous_continuation_owns_generation,
     revoke_autonomous_continuation,
 )
 
@@ -197,14 +199,35 @@ class ResumeSessionService:
             self.db.rollback()
             raise ResumeError(f"Failed to pause session: {str(e)}")
 
-    def resume_session(self, start_from_step: Optional[int] = None) -> Dict[str, Any]:
-        """Resume session from saved state"""
+    async def resume_session(
+        self, start_from_step: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Resume session from saved state through the canonical lifecycle.
+
+        The legacy compatibility contract (preconditions and response shape) is
+        preserved, but the accepted generation transition and work dispatch are
+        owned by :func:`resume_session_lifecycle`. This endpoint no longer
+        manufactures a ``running`` status by itself.
+        """
+        from app.services.session.session_lifecycle_service import (
+            resume_session_lifecycle,
+        )
+
         try:
             # Load saved state
             state_data = self.load_state()
 
             if not state_data or not state_data["is_resumable"]:
                 raise ResumeError("No valid state to resume from. Starting fresh.")
+
+            if autonomous_continuation_owns_generation(self.session_model):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Session is completing an autonomous continuation; it "
+                        "cannot be resumed until that continuation ends."
+                    ),
+                )
 
             # Determine start step
             if (
@@ -217,10 +240,8 @@ class ResumeSessionService:
                 current_step = state_data["current_step"]
                 logger.info(f"Resuming from last checkpoint: {current_step}")
 
-            # Update session status
-            mark_session_resumed(self.session_model, resumed_at=datetime.utcnow())
-
-            self.db.commit()
+            await resume_session_lifecycle(self.db, self.session_id)
+            self.db.refresh(self.session_model)
 
             result = {
                 "success": True,
@@ -237,7 +258,7 @@ class ResumeSessionService:
 
             return result
 
-        except ResumeError:
+        except (ResumeError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to resume session: {str(e)}")
@@ -306,10 +327,20 @@ class ResumeSessionService:
             if not state_data or step_number >= state_data["total_steps"]:
                 raise ResumeError(f"Invalid step number: {step_number}")
 
-            # Update session to indicate retry mode
-            mark_session_resumed(self.session_model, resumed_at=datetime.utcnow())
-            self.db.commit()
+            if autonomous_continuation_owns_generation(self.session_model):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Session is completing an autonomous continuation; a "
+                        "step retry cannot be prepared until that continuation "
+                        "ends."
+                    ),
+                )
 
+            # This compatibility endpoint never dispatched work, so it must not
+            # manufacture a running status either. It only reports that the
+            # requested step is a valid retry target; the accepted generation
+            # transition and dispatch belong to the canonical resume path.
             result = {
                 "success": True,
                 "session_id": self.session_id,
@@ -322,7 +353,7 @@ class ResumeSessionService:
 
             return result
 
-        except ResumeError:
+        except (ResumeError, HTTPException):
             raise
         except Exception as e:
             logger.error(f"Failed to prepare retry: {str(e)}")

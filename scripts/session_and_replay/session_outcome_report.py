@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.session_and_replay.failure_taxonomy import (  # noqa: E402
     FAILED_EXECUTION_STATUSES,
+    continuation_owns_session,
     TERMINAL_REASON_PRIORITY,
     TERMINAL_SESSION_STATUSES,
     latest_terminal_reason,
@@ -267,10 +268,14 @@ def _session_report(
         for row in task_executions
         if _status(row.get("status")) in FAILED_EXECUTION_STATUSES
     )
+    continuation_live = continuation_owns_session(session)
     is_terminal = terminal != "DONE" and _status(session.get("status")) in (
         TERMINAL_SESSION_STATUSES | {"failed"}
     )
     is_terminal = is_terminal or (terminal != "DONE" and failed_execution_count > 0)
+    # Session-level terminality is canonical lifecycle truth, not attempt
+    # evidence: a live continuation means logical work has not ended.
+    is_terminal = is_terminal and not continuation_live
     failure_summary_explains = bool(
         failure_summary or evidence["diagnostic_reason"] or terminal == "DONE"
     )
@@ -312,6 +317,7 @@ def _session_report(
             "with_task_execution_id": runtime_logs["with_execution_id"] or 0,
             "missing_task_execution_id": runtime_logs["missing_execution_id"] or 0,
         },
+        "continuation_pending": continuation_live,
         "task_execution_count": len(task_executions),
         "failed_task_execution_count": failed_execution_count,
         "terminal": is_terminal,
@@ -488,6 +494,8 @@ def build_report(
         """
         select s.id, s.project_id, s.name, s.status, s.is_active,
                s.created_at, s.started_at, s.stopped_at,
+               s.continuation_task_id, s.continuation_kind,
+               s.continuation_retry_count, s.continuation_retry_eta,
                p.name as project_name, p.workspace_path
         from sessions s
         left join projects p on p.id = s.project_id

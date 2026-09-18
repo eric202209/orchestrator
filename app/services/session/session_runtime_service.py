@@ -39,6 +39,8 @@ from app.services.orchestration.state.session_state import (
 )
 from app.services.orchestration.lifecycle.transitions import (
     LifecycleTransitionError,
+    admit_fresh_logical_execution,
+    autonomous_continuation_owns_generation,
     schedule_continuation,
 )
 from app.config import settings
@@ -447,6 +449,28 @@ def build_task_execution_prompt(task: Task) -> str:
     )
 
 
+class FreshAdmissionRejected(Exception):
+    """Fresh admission was refused by the canonical lifecycle authority."""
+
+    DETAILS = {
+        "autonomous_continuation_owns_generation": (
+            "Session is completing an autonomous continuation; fresh work "
+            "cannot start until that continuation ends."
+        ),
+        "fresh_admission_race_lost": (
+            "Another execution was admitted for this session generation first."
+        ),
+        "session_instance_changed": (
+            "Session generation changed while admitting fresh work."
+        ),
+    }
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        self.detail = self.DETAILS.get(reason, reason)
+        super().__init__(self.detail)
+
+
 def queue_task_for_session(
     db: Session,
     session: SessionModel,
@@ -482,6 +506,19 @@ def queue_task_for_session(
             detail="E3 continuation dispatch requires a recovering session",
         )
 
+    if not e3_continuation_dispatch and autonomous_continuation_owns_generation(
+        session
+    ):
+        # Fail fast on the canonical lifecycle reason before any workspace or
+        # attempt side effect. The atomic reservation below re-checks the same
+        # predicate inside the admission lock.
+        raise HTTPException(
+            status_code=409,
+            detail=FreshAdmissionRejected.DETAILS[
+                "autonomous_continuation_owns_generation"
+            ],
+        )
+
     task = (
         db.query(Task)
         .filter(Task.id == task_id, Task.project_id == session.project_id)
@@ -506,7 +543,9 @@ def queue_task_for_session(
             SessionTask.task_id == task.id,
             SessionTask.status == TaskStatus.RUNNING,
             SessionModel.deleted_at.is_(None),
-            SessionModel.status.in_(["pending", "running", "active"]),
+            SessionModel.status.in_(
+                ["pending", "running", "active", "recovering", "retry_pending"]
+            ),
         )
         .first()
     )
@@ -550,6 +589,14 @@ def queue_task_for_session(
             session_id=session.id,
             task_id=task.id,
         ):
+            if not e3_continuation_dispatch:
+                # Fresh work may not compete with an autonomous continuation
+                # that already owns this generation. The reservation runs
+                # inside the admission lock and is committed before the lock
+                # is released, so a concurrent caller cannot also win.
+                admission = admit_fresh_logical_execution(db, session)
+                if not admission.accepted:
+                    raise FreshAdmissionRejected(admission.reason)
             task_workspace = ensure_task_workspace(db, session, task.id)
             session_task_link = (
                 db.query(SessionTask)
@@ -582,6 +629,9 @@ def queue_task_for_session(
             # uncommitted; otherwise a concurrent caller can pass the same
             # active-execution query.
             db.commit()
+    except FreshAdmissionRejected as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
     except ProjectExecutionSerializationConflict as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc

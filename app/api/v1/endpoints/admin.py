@@ -175,6 +175,8 @@ def get_outcome_rates(
             """
             select s.id, s.project_id, s.name, s.status, s.is_active,
                    s.created_at, s.started_at, s.stopped_at,
+                   s.continuation_task_id, s.continuation_kind,
+                   s.continuation_retry_count, s.continuation_retry_eta,
                    p.name as project_name, p.workspace_path
             from sessions s
             left join projects p on p.id = s.project_id

@@ -13,6 +13,9 @@ from sqlalchemy.orm import Session
 
 from app.models import LogEntry, Session as SessionModel, SessionTask, TaskStatus
 from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
+from app.services.orchestration.lifecycle.transitions import (
+    autonomous_continuation_owns_generation,
+)
 from app.services.orchestration.run_state import (
     mark_task_attempt_cancelled,
     mark_task_attempt_done,
@@ -44,6 +47,17 @@ async def start_session_payload(
             detail=(
                 "Session already has active execution in progress. "
                 "Stop it before starting another direct execution."
+            ),
+        )
+    # A direct runtime launch is fresh work: it must obey the same lifecycle
+    # admission rule as ordinary task admission and never start a parallel
+    # runtime while an autonomous continuation owns the generation.
+    if autonomous_continuation_owns_generation(session):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Session is completing an autonomous continuation; a direct "
+                "runtime cannot start until that continuation ends."
             ),
         )
 
