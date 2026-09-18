@@ -276,6 +276,7 @@ def _role_resolution(db: DbSession | None) -> dict[str, Any]:
     try:
         from app.services.agents.agent_runtime import (
             BackendRole,
+            RuntimeCapabilityError,
             resolve_runtime_configuration,
         )
     except Exception:  # noqa: BLE001
@@ -284,6 +285,24 @@ def _role_resolution(db: DbSession | None) -> dict[str, Any]:
     for role in BackendRole:
         try:
             resolution[role.value] = resolve_runtime_configuration(db, role).to_dict()
+        except RuntimeCapabilityError as exc:
+            if (
+                role is BackendRole.COMPLETION_REPAIR
+                and exc.code == "provider_model_unavailable"
+            ):
+                # Completion repair is an optional lane and is intentionally
+                # unconfigured on the CI/default profile. That is readable
+                # configuration, not missing evidence; preserve the state in
+                # the manifest without making the whole manifest unverifiable.
+                resolution[role.value] = {
+                    "status": "UNCONFIGURED",
+                    "reason": str(exc),
+                }
+            else:
+                resolution[role.value] = {
+                    "status": UNREADABLE,
+                    "reason": f"{type(exc).__name__}",
+                }
         except Exception as exc:  # noqa: BLE001
             resolution[role.value] = {
                 "status": UNREADABLE,

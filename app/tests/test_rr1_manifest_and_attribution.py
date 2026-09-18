@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from app.config import settings
 from app.services.research.rr1.attribution import (
     INTEGRITY_OK,
     INTEGRITY_UNATTRIBUTED_PROVIDER_CALL,
@@ -298,6 +299,20 @@ class TestDriftDetector:
         assert report.verdict == MATCH
         assert report.launch_permitted is True
         assert report.drifted_fields == ()
+        assert report.unverifiable_fields == ()
+
+    def test_unconfigured_optional_completion_role_is_readable(
+        self, db_session, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "COMPLETION_REPAIR_BACKEND", None)
+        monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "")
+
+        manifest = capture_treatment_manifest(repo_root=REPO_ROOT, db=db_session)
+        role = manifest["provider_role_resolution"]["completion_repair"]
+
+        assert role["status"] == "UNCONFIGURED"
+        report = compare_to_manifest(manifest, copy.deepcopy(manifest))
+        assert report.verdict == MATCH
         assert report.unverifiable_fields == ()
 
     @pytest.mark.parametrize(
