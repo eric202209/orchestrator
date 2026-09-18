@@ -109,6 +109,14 @@ PRIMARY_CATEGORY_MARKERS = {
 
 def primary_test_category(item: pytest.Item) -> str:
     """Return the one ownership category for a collected backend test."""
+    explicit_categories = [
+        category
+        for category in PRIMARY_CATEGORY_MARKERS
+        if item.get_closest_marker(category)
+    ]
+    if explicit_categories:
+        return explicit_categories[0]
+
     module_name = item.path.name.lower()
 
     if item.get_closest_marker("live"):

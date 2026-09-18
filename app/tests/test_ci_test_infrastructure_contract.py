@@ -23,6 +23,11 @@ class _CollectedItem:
         ("test_start_script_scheduler_singleton.py", (), "deployment"),
         ("test_session_transition_policy.py", (), "product_contract"),
         ("test_service_integration.py", ("integration",), "integration_contract"),
+        (
+            "test_manifest.py",
+            ("integration", "critical_regression"),
+            "critical_regression",
+        ),
         ("test_provider_certification.py", (), "evidence_historical"),
         ("test_legacy_compat.py", (), "compatibility"),
         ("test_anything.py", ("live",), "live_validation"),
