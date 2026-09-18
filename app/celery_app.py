@@ -57,6 +57,13 @@ celery_app.conf.update(
             "schedule": timedelta(minutes=15),
             "kwargs": {},
         },
+        # E8: restore transport for durable continuations whose broker
+        # delivery was lost after the retry_pending commit.
+        "reconcile-stranded-continuation-deliveries": {
+            "task": "app.tasks.maintenance.sweep_stranded_continuation_deliveries",
+            "schedule": timedelta(minutes=5),
+            "kwargs": {},
+        },
     },
 )
 
@@ -78,13 +85,19 @@ def _record_orphan_sweep_dispatch(sender=None, headers=None, **_kwargs) -> None:
     """Persist Beat/publisher dispatch evidence for the canonical sweep."""
 
     from app.services.observability.maintenance_observability import (
+        CONTINUATION_SWEEP_SCHEDULE_ID,
+        CONTINUATION_SWEEP_TASK_NAME,
         MAINTENANCE_DISPATCHED,
         ORPHAN_SWEEP_SCHEDULE_ID,
         ORPHAN_SWEEP_TASK_NAME,
         record_maintenance_event,
     )
 
-    if sender != ORPHAN_SWEEP_TASK_NAME:
+    schedule_ids = {
+        ORPHAN_SWEEP_TASK_NAME: ORPHAN_SWEEP_SCHEDULE_ID,
+        CONTINUATION_SWEEP_TASK_NAME: CONTINUATION_SWEEP_SCHEDULE_ID,
+    }
+    if sender not in schedule_ids:
         return
     headers = headers or {}
     invocation_id = str(headers.get("id") or "")
@@ -109,10 +122,11 @@ def _record_orphan_sweep_dispatch(sender=None, headers=None, **_kwargs) -> None:
             event_type=MAINTENANCE_DISPATCHED,
             invocation_id=invocation_id,
             observed_at=observed_at,
+            task_name=sender,
             schedule_identity=(
                 dispatch_source
                 if dispatch_source != "celery_publisher"
-                else ORPHAN_SWEEP_SCHEDULE_ID
+                else schedule_ids[sender]
             ),
             dispatch_source=dispatch_source,
             scheduled_at=scheduled_at or observed_at,

@@ -749,6 +749,58 @@ def schedule_continuation(
     )
 
 
+def resolve_continuation_identity(
+    db: DbSession,
+    session: SessionModel,
+) -> ContinuationIdentity | None:
+    """Rebuild the durable continuation identity from Session state alone.
+
+    Session persists the continuation task, kind and retry count but not the
+    attempt row id, so the pending attempt is resolved with exactly the rule
+    :func:`schedule_continuation` used to choose it: the newest PENDING
+    TaskExecution for that Session and continuation task.  Reconstruction is
+    read-only and returns ``None`` when no valid durable identity exists, so
+    callers never invent one.
+    """
+
+    session_id = getattr(session, "id", None)
+    if not isinstance(session_id, int):
+        return None
+    if not derive_continuation_pending(session):
+        return None
+    task_id = getattr(session, "continuation_task_id", None)
+    if not isinstance(task_id, int) or task_id <= 0:
+        return None
+    try:
+        kind = _validate_kind(getattr(session, "continuation_kind", None))
+        count = _validate_retry_count(getattr(session, "continuation_retry_count", 0))
+    except LifecycleTransitionError:
+        return None
+    instance_id = getattr(session, "instance_id", None)
+    if not instance_id:
+        return None
+    execution = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.session_id == session_id,
+            TaskExecution.task_id == task_id,
+            TaskExecution.status == TaskStatus.PENDING,
+        )
+        .order_by(TaskExecution.id.desc())
+        .first()
+    )
+    if execution is None:
+        return None
+    return ContinuationIdentity(
+        session_id=session_id,
+        instance_id=instance_id,
+        continuation_task_id=task_id,
+        continuation_kind=kind,
+        task_execution_id=execution.id,
+        retry_count=count,
+    )
+
+
 def claim_continuation(
     db: DbSession,
     identity: ContinuationIdentity,
@@ -1200,6 +1252,7 @@ __all__ = [
     "schedule_continuation",
     "validate_continuation",
     "claim_continuation",
+    "resolve_continuation_identity",
     "revoke_autonomous_continuation",
     "finalize_logical_failure",
     "finalize_logical_success",

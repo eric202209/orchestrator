@@ -339,6 +339,17 @@ class Settings(BaseSettings):
     # Celery Task Queue
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
+
+    # E8 lost-continuation-delivery reconciliation.  A durable retry_pending
+    # marker becomes reconciliation-eligible only after its own
+    # continuation_retry_eta plus this grace, so a legitimately delayed
+    # delivery keeps its intended time.  The suppression window bounds how
+    # long one recorded republication keeps a second reconciler from
+    # publishing the same durable identity again.
+    CONTINUATION_RECONCILIATION_GRACE_SECONDS: int = 180
+    CONTINUATION_RECONCILIATION_REPUBLISH_SUPPRESSION_SECONDS: int = 900
+    CONTINUATION_RECONCILIATION_INSPECT_TIMEOUT_SECONDS: float = 1.5
+    CONTINUATION_RECONCILIATION_MAX_CANDIDATES: int = 50
     CHECKPOINT_DIR: str = str(BASE_DIR / "checkpoints")
     CANDIDATE_CONTENT_DIR: str = str(BASE_DIR / "candidate-content")
 

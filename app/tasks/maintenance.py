@@ -18,6 +18,8 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_running,
 )
 from app.services.observability.maintenance_observability import (
+    CONTINUATION_SWEEP_SCHEDULE_ID,
+    CONTINUATION_SWEEP_TASK_NAME,
     MAINTENANCE_COMPLETED,
     MAINTENANCE_FAILED,
     MAINTENANCE_RECEIVED,
@@ -199,6 +201,95 @@ def sweep_orphaned_running_sessions(
             duration_seconds=time.monotonic() - started_monotonic,
         )
         logger.error("Orphaned running session sweep failed: %s", exc)
+        raise self.retry(exc=exc, max_retries=3)
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True)
+def sweep_stranded_continuation_deliveries(
+    self,
+    grace_seconds: Optional[int] = None,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """E8: restore lost transport for durable, past-due continuations.
+
+    The sweep never changes Session lifecycle state. A candidate it cannot
+    safely republish stays exactly as it is: retry_pending, continuation
+    pending, nonterminal.
+    """
+
+    from app.services.orchestration.lifecycle.continuation_recovery import (
+        reconcile_stranded_continuations,
+    )
+
+    db = get_db_session()
+    request = getattr(self, "request", None)
+    invocation_id = str(getattr(request, "id", None) or uuid.uuid4())
+    worker_identity = getattr(request, "hostname", None)
+    started_monotonic = time.monotonic()
+
+    def _record(event_type: str, **kwargs: Any) -> None:
+        try:
+            record_maintenance_event(
+                db,
+                event_type=event_type,
+                invocation_id=invocation_id,
+                task_name=CONTINUATION_SWEEP_TASK_NAME,
+                schedule_identity=CONTINUATION_SWEEP_SCHEDULE_ID,
+                worker_identity=worker_identity,
+                **kwargs,
+            )
+            db.commit()
+        except Exception as record_exc:
+            db.rollback()
+            logger.warning(
+                "Continuation sweep observability record failed event=%s: %s",
+                event_type,
+                record_exc,
+            )
+
+    try:
+        _record(MAINTENANCE_RECEIVED, dispatch_source="celery_worker")
+        _record(MAINTENANCE_STARTED)
+        decision_records: list[Dict[str, Any]] = []
+        result = reconcile_stranded_continuations(
+            db,
+            grace_seconds=grace_seconds,
+            limit=limit,
+            decision_records=decision_records,
+        )
+        counts = {
+            "inspected_continuation_count": result["inspected_count"],
+            **{
+                f"{outcome.lower()}_count": value
+                for outcome, value in result["counts"].items()
+            },
+        }
+        status = (
+            "completed_with_errors"
+            if counts.get("reconciliation_error_count")
+            else "completed"
+        )
+        _record(
+            MAINTENANCE_COMPLETED,
+            counts=counts,
+            duration_seconds=time.monotonic() - started_monotonic,
+            decision_evidence=decision_records,
+        )
+        return {
+            "status": status,
+            **counts,
+            "republished_session_ids": result["republished_session_ids"],
+        }
+    except Exception as exc:
+        _record(
+            MAINTENANCE_FAILED,
+            error_category=exc.__class__.__name__,
+            error_timestamp=datetime.now(UTC),
+            duration_seconds=time.monotonic() - started_monotonic,
+        )
+        logger.error("Stranded continuation delivery sweep failed: %s", exc)
         raise self.retry(exc=exc, max_retries=3)
     finally:
         db.close()

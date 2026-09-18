@@ -14,6 +14,15 @@ from app.services.orchestration.run_state import EXECUTION_PROGRESS_METADATA_KEY
 
 ORPHAN_SWEEP_TASK_NAME = "app.tasks.maintenance.sweep_orphaned_running_sessions"
 ORPHAN_SWEEP_SCHEDULE_ID = "recover-orphaned-running-sessions"
+CONTINUATION_SWEEP_TASK_NAME = (
+    "app.tasks.maintenance.sweep_stranded_continuation_deliveries"
+)
+CONTINUATION_SWEEP_SCHEDULE_ID = "reconcile-stranded-continuation-deliveries"
+
+_SWEEP_LABELS = {
+    ORPHAN_SWEEP_TASK_NAME: "orphan sweep",
+    CONTINUATION_SWEEP_TASK_NAME: "continuation delivery sweep",
+}
 MAINTENANCE_FRESHNESS_SECONDS = 2100
 
 MAINTENANCE_DISPATCHED = "MAINTENANCE_DISPATCHED"
@@ -76,7 +85,7 @@ def record_maintenance_event(
 
     row = LogEntry(
         level="ERROR" if event_type == MAINTENANCE_FAILED else "INFO",
-        message=f"[{event_type}] orphan sweep",
+        message=f"[{event_type}] {_SWEEP_LABELS.get(task_name, task_name)}",
         log_metadata=json.dumps(metadata, sort_keys=True),
         created_at=observed,
     )
