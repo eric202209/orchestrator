@@ -8,10 +8,14 @@ Every case is provider-free and uses injected inspectors, never a real broker.
 
 from __future__ import annotations
 
+import json
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+
+import app.services.research.rr1.physical as rr1_physical
 
 from app.models import (
     Project,
@@ -40,16 +44,22 @@ from app.services.research.rr1.harness import (
 from app.services.research.rr1.manifest import DRIFT, MATCH, UNVERIFIABLE
 from app.services.research.rr1.physical import (
     PHYSICAL_STATE_UNCERTAIN,
+    PHYSICAL_SIGNALS,
     PHYSICALLY_BUSY,
     PHYSICALLY_RELEASED,
     RunPhysicalIdentity,
     SIGNAL_CELERY_ACTIVE,
     SIGNAL_RUNTIME_OWNER,
+    SIGNAL_WORKSPACE_MUTATION_LOCK,
     SignalProbe,
     classify,
     observe_physical_release,
     probe_celery_channels,
     probe_runtime_owner,
+)
+from app.services.workspace.project_mutation_lock import (
+    _lock_path_for_project_root,
+    project_mutation_lock,
 )
 from app.services.research.rr1.state_machine import (
     EVIDENCE_FINALIZATION,
@@ -155,6 +165,18 @@ def _quiesce(db, session, task, link, execution, *, status="done"):
 
 
 class TestPhysicalClassification:
+    def test_frozen_physical_signal_set_has_seven_signals(self):
+        assert len(PHYSICAL_SIGNALS) == 7
+        assert set(PHYSICAL_SIGNALS) == {
+            "celery_active",
+            "celery_reserved",
+            "celery_scheduled",
+            "backend_capacity_slot",
+            "runtime_owner",
+            "workspace_mutation_or_lock",
+            "pending_continuation_delivery",
+        }
+
     def test_busy_wins_over_uncertain(self):
         assert (
             classify(
@@ -223,6 +245,182 @@ class TestPhysicalClassification:
             db_session, RunPhysicalIdentity(session_id=session.id)
         )
         assert probe.present is False
+
+    def test_matching_live_workspace_lock_blocks_physical_release(
+        self, db_session, tmp_path
+    ):
+        project, session, task, link, execution = _seed(db_session, tmp_path)
+        _quiesce(db_session, session, task, link, execution)
+        identity = RunPhysicalIdentity(session_id=session.id, task_id=task.id)
+        inspector = _Inspector(active=_empty(), reserved=_empty(), scheduled=_empty())
+
+        with project_mutation_lock(
+            project_id=project.id,
+            project_root=Path(project.workspace_path),
+            operation="rr1-test-live-lock",
+            owner=f"session:{session.id}:task:{task.id}:execution:test",
+            wait_timeout_seconds=0,
+        ):
+            observation = observe_physical_release(
+                db_session,
+                identity,
+                observed_at=T0,
+                inspector=inspector,
+            )
+
+        assert observation.state == PHYSICALLY_BUSY
+        workspace_probe = next(
+            probe
+            for probe in observation.probes
+            if probe.name == SIGNAL_WORKSPACE_MUTATION_LOCK
+        )
+        assert workspace_probe.present is True
+
+    def test_no_matching_workspace_lock_is_released(self, db_session, tmp_path):
+        project, session, task, link, execution = _seed(db_session, tmp_path)
+        _quiesce(db_session, session, task, link, execution)
+        observation = observe_physical_release(
+            db_session,
+            RunPhysicalIdentity(session_id=session.id, task_id=task.id),
+            observed_at=T0,
+            inspector=_Inspector(
+                active=_empty(), reserved=_empty(), scheduled=_empty()
+            ),
+        )
+
+        assert observation.state == PHYSICALLY_RELEASED
+        workspace_probe = next(
+            probe
+            for probe in observation.probes
+            if probe.name == SIGNAL_WORKSPACE_MUTATION_LOCK
+        )
+        assert workspace_probe.present is False
+
+    def test_unrelated_workspace_lock_is_not_attributed_to_run(
+        self, db_session, tmp_path
+    ):
+        _, session, task, link, execution = _seed(db_session, tmp_path)
+        _quiesce(db_session, session, task, link, execution)
+        unrelated_root = tmp_path / "unrelated-workspace"
+        unrelated_root.mkdir()
+
+        with project_mutation_lock(
+            project_id=999,
+            project_root=unrelated_root,
+            operation="rr1-test-unrelated-lock",
+            owner="unrelated-run",
+            wait_timeout_seconds=0,
+        ):
+            observation = observe_physical_release(
+                db_session,
+                RunPhysicalIdentity(session_id=session.id, task_id=task.id),
+                observed_at=T0,
+                inspector=_Inspector(
+                    active=_empty(), reserved=_empty(), scheduled=_empty()
+                ),
+            )
+
+        assert observation.state == PHYSICALLY_RELEASED
+
+    def test_stale_matching_workspace_lock_uses_product_reclaim_semantics(
+        self, db_session, tmp_path
+    ):
+        project, session, task, link, execution = _seed(db_session, tmp_path)
+        _quiesce(db_session, session, task, link, execution)
+        project_root = Path(project.workspace_path).resolve()
+        lock_path = _lock_path_for_project_root(project_root)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(
+            json.dumps(
+                {
+                    "project_id": project.id,
+                    "resolved_project_root": str(project_root),
+                    "pid": 99_999_999,
+                    "created_at_epoch": time.time(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            observation = observe_physical_release(
+                db_session,
+                RunPhysicalIdentity(session_id=session.id, task_id=task.id),
+                observed_at=T0,
+                inspector=_Inspector(
+                    active=_empty(), reserved=_empty(), scheduled=_empty()
+                ),
+            )
+        finally:
+            lock_path.unlink(missing_ok=True)
+            lock_path.parent.rmdir()
+            lock_path.parent.parent.rmdir()
+
+        assert observation.state == PHYSICALLY_RELEASED
+        workspace_probe = next(
+            probe
+            for probe in observation.probes
+            if probe.name == SIGNAL_WORKSPACE_MUTATION_LOCK
+        )
+        assert workspace_probe.present is False
+        assert workspace_probe.detail == "product_stale_lock_reclaimable"
+
+    def test_workspace_probe_is_observational(self, db_session, tmp_path):
+        project, session, task, link, execution = _seed(db_session, tmp_path)
+        _quiesce(db_session, session, task, link, execution)
+        workspace = Path(project.workspace_path)
+        before = {
+            "session": (
+                session.status,
+                session.continuation_task_id,
+                session.instance_id,
+            ),
+            "task": (task.status, task.current_step, task.error_message),
+            "link": (link.status, link.started_at, link.completed_at),
+            "execution": (
+                execution.status,
+                execution.worker_pid,
+                execution.worker_hostname,
+                execution.runtime_lease_id,
+            ),
+            "workspace_entries": sorted(
+                str(path.relative_to(workspace)) for path in workspace.rglob("*")
+            ),
+        }
+
+        observation = observe_physical_release(
+            db_session,
+            RunPhysicalIdentity(session_id=session.id, task_id=task.id),
+            observed_at=T0,
+            inspector=_Inspector(
+                active=_empty(), reserved=_empty(), scheduled=_empty()
+            ),
+        )
+        db_session.refresh(session)
+        db_session.refresh(task)
+        db_session.refresh(link)
+        db_session.refresh(execution)
+        after = {
+            "session": (
+                session.status,
+                session.continuation_task_id,
+                session.instance_id,
+            ),
+            "task": (task.status, task.current_step, task.error_message),
+            "link": (link.status, link.started_at, link.completed_at),
+            "execution": (
+                execution.status,
+                execution.worker_pid,
+                execution.worker_hostname,
+                execution.runtime_lease_id,
+            ),
+            "workspace_entries": sorted(
+                str(path.relative_to(workspace)) for path in workspace.rglob("*")
+            ),
+        }
+
+        assert observation.state == PHYSICALLY_RELEASED
+        assert after == before
+        assert not (workspace / ".agent").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +524,117 @@ class TestPhysicalDrainStabilization:
         assert observer.physical_window.first_observed_at is None
         assert observer.next_run_eligible is False
 
+    def test_workspace_lock_appearing_during_stabilization_resets_release(
+        self, db_session, tmp_path
+    ):
+        project, session, task, link, execution = _seed(db_session, tmp_path)
+        observer = self._observer(session, task)
+        _quiesce(db_session, session, task, link, execution)
+        observer.observe(db_session, session, at=T0 + timedelta(seconds=1))
+        drained = _Inspector(active=_empty(), reserved=_empty(), scheduled=_empty())
+        observer.observe(
+            db_session, session, at=T0 + timedelta(seconds=2), inspector=drained
+        )
+
+        with project_mutation_lock(
+            project_id=project.id,
+            project_root=Path(project.workspace_path),
+            operation="rr1-test-race-lock",
+            owner=f"session:{session.id}:task:{task.id}:execution:race",
+            wait_timeout_seconds=0,
+        ):
+            state = observer.observe(
+                db_session,
+                session,
+                at=T0 + timedelta(seconds=10),
+                inspector=drained,
+            )
+        assert state == WAITING_FOR_PHYSICAL_RELEASE
+        assert observer.physical_window.stable is False
+        assert observer.next_run_eligible is False
+
+        assert (
+            observer.observe(
+                db_session,
+                session,
+                at=T0 + timedelta(seconds=11),
+                inspector=drained,
+            )
+            == PHYSICAL_RELEASE_STABILIZING
+        )
+        assert (
+            observer.observe(
+                db_session,
+                session,
+                at=T0 + timedelta(seconds=40),
+                inspector=drained,
+            )
+            == PHYSICAL_RELEASE_STABILIZING
+        )
+        assert (
+            observer.observe(
+                db_session,
+                session,
+                at=T0 + timedelta(seconds=41),
+                inspector=drained,
+            )
+            == EVIDENCE_FINALIZATION
+        )
+
+    def test_workspace_release_stabilization_starts_after_lock_disappears(
+        self, db_session, tmp_path
+    ):
+        project, session, task, link, execution = _seed(db_session, tmp_path)
+        observer = self._observer(session, task)
+        _quiesce(db_session, session, task, link, execution)
+        observer.observe(db_session, session, at=T0 + timedelta(seconds=1))
+        drained = _Inspector(active=_empty(), reserved=_empty(), scheduled=_empty())
+
+        with project_mutation_lock(
+            project_id=project.id,
+            project_root=Path(project.workspace_path),
+            operation="rr1-test-lock-disappears",
+            owner=f"session:{session.id}:task:{task.id}:execution:disappears",
+            wait_timeout_seconds=0,
+        ):
+            assert (
+                observer.observe(
+                    db_session,
+                    session,
+                    at=T0 + timedelta(seconds=2),
+                    inspector=drained,
+                )
+                == WAITING_FOR_PHYSICAL_RELEASE
+            )
+
+        assert (
+            observer.observe(
+                db_session,
+                session,
+                at=T0 + timedelta(seconds=20),
+                inspector=drained,
+            )
+            == PHYSICAL_RELEASE_STABILIZING
+        )
+        assert (
+            observer.observe(
+                db_session,
+                session,
+                at=T0 + timedelta(seconds=49),
+                inspector=drained,
+            )
+            == PHYSICAL_RELEASE_STABILIZING
+        )
+        assert (
+            observer.observe(
+                db_session,
+                session,
+                at=T0 + timedelta(seconds=50),
+                inspector=drained,
+            )
+            == EVIDENCE_FINALIZATION
+        )
+
 
 # ---------------------------------------------------------------------------
 # Section 10 / 26 -- physical uncertainty fails closed
@@ -333,6 +642,28 @@ class TestPhysicalDrainStabilization:
 
 
 class TestPhysicalUncertainty:
+    def test_workspace_lock_inspection_failure_is_uncertain(
+        self, db_session, tmp_path, monkeypatch
+    ):
+        _, session, task, link, execution = _seed(db_session, tmp_path)
+        _quiesce(db_session, session, task, link, execution)
+
+        def fail_lock_path(_project_root):
+            raise OSError("workspace lock unavailable")
+
+        monkeypatch.setattr(rr1_physical, "_lock_path_for_project_root", fail_lock_path)
+        observation = observe_physical_release(
+            db_session,
+            RunPhysicalIdentity(session_id=session.id, task_id=task.id),
+            observed_at=T0,
+            inspector=_Inspector(
+                active=_empty(), reserved=_empty(), scheduled=_empty()
+            ),
+        )
+
+        assert observation.state == PHYSICAL_STATE_UNCERTAIN
+        assert SIGNAL_WORKSPACE_MUTATION_LOCK in observation.uncertain_signals
+
     def test_logical_endpoint_stable_but_inspection_unavailable_blocks_next_run(
         self, db_session, tmp_path
     ):

@@ -14,6 +14,7 @@ closed: the next research run must not launch (§10).
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Iterable
@@ -21,10 +22,17 @@ from typing import Any, Iterable
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session as DbSession
 
-from app.models import TaskExecution, TaskStatus
+from app.models import Project, Session as SessionModel, TaskExecution, TaskStatus
 from app.services.orchestration.lifecycle.continuation_recovery import (
     ORCHESTRATION_TASK_NAME,
     _iter_inspected_requests,
+)
+from app.services.workspace.project_isolation_service import (
+    resolve_project_workspace_path,
+)
+from app.services.workspace.project_mutation_lock import (
+    _lock_can_be_reclaimed,
+    _lock_path_for_project_root,
 )
 
 PHYSICALLY_BUSY = "PHYSICALLY_BUSY"
@@ -36,20 +44,16 @@ SIGNAL_CELERY_RESERVED = "celery_reserved"
 SIGNAL_CELERY_SCHEDULED = "celery_scheduled"
 SIGNAL_BACKEND_SLOT = "backend_capacity_slot"
 SIGNAL_RUNTIME_OWNER = "runtime_owner"
+SIGNAL_WORKSPACE_MUTATION_LOCK = "workspace_mutation_or_lock"
 SIGNAL_CONTINUATION_DELIVERY = "pending_continuation_delivery"
 
-#: Only signals that exist and are meaningful in the current architecture.
-#: Workspace mutation/lock state is deliberately absent: at this baseline the
-#: orchestrator holds no durable per-run workspace lock that can be probed
-#: independently of the runtime owner, so claiming it would manufacture
-#: evidence.  Workspace overlap is enforced structurally instead, by the
-#: isolation rule in ``harness``.
 PHYSICAL_SIGNALS = (
     SIGNAL_CELERY_ACTIVE,
     SIGNAL_CELERY_RESERVED,
     SIGNAL_CELERY_SCHEDULED,
     SIGNAL_BACKEND_SLOT,
     SIGNAL_RUNTIME_OWNER,
+    SIGNAL_WORKSPACE_MUTATION_LOCK,
     SIGNAL_CONTINUATION_DELIVERY,
 )
 
@@ -241,6 +245,129 @@ def probe_runtime_owner(db: DbSession, identity: RunPhysicalIdentity) -> SignalP
     return SignalProbe(SIGNAL_RUNTIME_OWNER, False)
 
 
+def probe_workspace_mutation_or_lock(
+    db: DbSession, identity: RunPhysicalIdentity
+) -> SignalProbe:
+    """Inspect the Product's canonical project mutation lock read-only.
+
+    The lock path is derived from the Session's ProjectRoot, so a lock in an
+    unrelated workspace is never attributed to this run.  The Product lock's
+    own reclaim rule is reused: a live PID is busy, a dead/stale owner is
+    released, and an unreadable or identity-mismatched lock is uncertain.
+    This probe never reclaims, creates, or removes a lock.
+    """
+
+    try:
+        session = (
+            db.query(SessionModel)
+            .filter(SessionModel.id == identity.session_id)
+            .first()
+        )
+        if session is None:
+            return SignalProbe(
+                SIGNAL_WORKSPACE_MUTATION_LOCK, None, "session_not_found"
+            )
+        project = db.query(Project).filter(Project.id == session.project_id).first()
+        if project is None:
+            return SignalProbe(
+                SIGNAL_WORKSPACE_MUTATION_LOCK, None, "project_not_found"
+            )
+        project_root = resolve_project_workspace_path(
+            project.workspace_path,
+            project.name,
+            db=db,
+        ).resolve()
+        lock_path = _lock_path_for_project_root(project_root)
+    except Exception as exc:  # noqa: BLE001 - measurement must fail closed
+        return SignalProbe(
+            SIGNAL_WORKSPACE_MUTATION_LOCK,
+            None,
+            f"identity_inspection_error:{type(exc).__name__}",
+        )
+
+    try:
+        lock_path.stat()
+    except FileNotFoundError:
+        return SignalProbe(SIGNAL_WORKSPACE_MUTATION_LOCK, False, "lock_absent")
+    except OSError as exc:
+        return SignalProbe(
+            SIGNAL_WORKSPACE_MUTATION_LOCK,
+            None,
+            f"lock_stat_error:{type(exc).__name__}",
+        )
+
+    try:
+        metadata = json.loads(lock_path.read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        metadata = None
+        metadata_error = f"lock_read_error:{type(exc).__name__}"
+    else:
+        metadata_error = None
+
+    if not isinstance(metadata, dict):
+        # Match the Product stale-lock rule for an old unreadable lock, but
+        # remain uncertain while a fresh unreadable lock could still belong
+        # to a live mutation.
+        try:
+            stale = _lock_can_be_reclaimed(
+                lock_path,
+                now=time.time(),
+                stale_after_seconds=6 * 60 * 60,
+            )
+        except OSError:
+            stale = False
+        if stale:
+            return SignalProbe(
+                SIGNAL_WORKSPACE_MUTATION_LOCK,
+                False,
+                "product_stale_lock_reclaimable",
+            )
+        return SignalProbe(
+            SIGNAL_WORKSPACE_MUTATION_LOCK,
+            None,
+            metadata_error or "lock_metadata_invalid",
+        )
+
+    expected_root = str(project_root)
+    observed_root = str(metadata.get("resolved_project_root") or "").strip()
+    if metadata.get("project_id") != project.id or observed_root != expected_root:
+        return SignalProbe(
+            SIGNAL_WORKSPACE_MUTATION_LOCK,
+            None,
+            "lock_identity_mismatch",
+        )
+
+    try:
+        stale = _lock_can_be_reclaimed(
+            lock_path,
+            now=time.time(),
+            stale_after_seconds=6 * 60 * 60,
+        )
+    except OSError as exc:
+        return SignalProbe(
+            SIGNAL_WORKSPACE_MUTATION_LOCK,
+            None,
+            f"stale_lock_inspection_error:{type(exc).__name__}",
+        )
+    if stale:
+        return SignalProbe(
+            SIGNAL_WORKSPACE_MUTATION_LOCK,
+            False,
+            "product_stale_lock_reclaimable",
+        )
+    if "pid" not in metadata:
+        return SignalProbe(
+            SIGNAL_WORKSPACE_MUTATION_LOCK,
+            None,
+            "lock_owner_pid_missing",
+        )
+    return SignalProbe(
+        SIGNAL_WORKSPACE_MUTATION_LOCK,
+        True,
+        "product_lock_owner_live_or_not_reclaimable",
+    )
+
+
 def probe_continuation_delivery(
     db: DbSession,
     identity: RunPhysicalIdentity,
@@ -326,6 +453,7 @@ def observe_physical_release(
     )
     probes.append(probe_backend_slot(identity, redis_client=redis_client))
     probes.append(probe_runtime_owner(db, identity))
+    probes.append(probe_workspace_mutation_or_lock(db, identity))
     probes.append(probe_continuation_delivery(db, identity, inspector=inspector))
     return PhysicalReleaseObservation(
         state=classify(probes),
