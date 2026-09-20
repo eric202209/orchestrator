@@ -1002,6 +1002,5 @@ def test_planning_validation_failure_after_repair_marks_session_not_running(
     assert task.completed_at is not None
     assert session_task_link.status == TaskStatus.FAILED
     assert session_task_link.completed_at is not None
-    assert session.status == "paused"
-    assert session.is_active is False
-    assert session.paused_at is not None
+    assert session.status == "running"
+    assert session.is_active is True

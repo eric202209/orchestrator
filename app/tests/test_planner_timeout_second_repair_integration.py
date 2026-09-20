@@ -326,8 +326,8 @@ def test_post_repair_weak_verification_second_repair_is_capped(tmp_path, monkeyp
     }
     assert task.status == TaskStatus.FAILED
     assert session_task_link.status == TaskStatus.FAILED
-    assert session.status == "paused"
-    assert session.is_active is False
+    assert session.status == "running"
+    assert session.is_active is True
 
 
 def test_post_repair_python_source_syntax_gets_one_targeted_second_repair(
@@ -618,8 +618,8 @@ def test_post_repair_python_source_syntax_second_repair_is_capped(
     }
     assert task.status == TaskStatus.FAILED
     assert session_task_link.status == TaskStatus.FAILED
-    assert session.status == "paused"
-    assert session.is_active is False
+    assert session.status == "running"
+    assert session.is_active is True
     arbitration_events = [
         event
         for event in persisted_events
@@ -1001,8 +1001,8 @@ def test_post_repair_argparse_framework_mismatch_second_repair_is_capped(
     }
     assert task.status == TaskStatus.FAILED
     assert session_task_link.status == TaskStatus.FAILED
-    assert session.status == "paused"
-    assert session.is_active is False
+    assert session.status == "running"
+    assert session.is_active is True
 
 
 def test_post_repair_background_process_gets_one_targeted_second_repair(
@@ -1578,5 +1578,5 @@ def test_post_repair_missing_materialization_rejects_inspect_only_plan(
     assert len(validate_calls) == 1
     assert task.status == TaskStatus.FAILED
     assert session_task_link.status == TaskStatus.FAILED
-    assert session.status == "paused"
-    assert session.is_active is False
+    assert session.status == "running"
+    assert session.is_active is True

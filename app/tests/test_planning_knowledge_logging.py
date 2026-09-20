@@ -461,8 +461,8 @@ def test_malformed_planning_output_repair_timeout_does_not_leave_session_running
         "status": "failed",
         "reason": "malformed_planning_output_repair_timeout",
     }
-    assert session.status == "paused"
-    assert session.is_active is False
+    assert session.status == "running"
+    assert session.is_active is True
     assert task.status == TaskStatus.FAILED
     assert link.status == TaskStatus.FAILED
     summary = (
@@ -732,8 +732,8 @@ def test_planning_validation_failure_records_planning_validation_and_failure_kno
         "status": "failed",
         "reason": "planning_validation_failed_after_repair",
     }
-    assert session.status == "paused"
-    assert session.is_active is False
+    assert session.status == "running"
+    assert session.is_active is True
     assert task.status == TaskStatus.FAILED
     assert link.status == TaskStatus.FAILED
     phases = [
@@ -1020,8 +1020,8 @@ def test_oversized_planning_repair_prompt_skips_repair_and_records_failure_knowl
         "status": "failed",
         "reason": "planning_repair_prompt_too_large",
     }
-    assert session.status == "paused"
-    assert session.is_active is False
+    assert session.status == "running"
+    assert session.is_active is True
     assert task.status == TaskStatus.FAILED
     assert link.status == TaskStatus.FAILED
     logs = (

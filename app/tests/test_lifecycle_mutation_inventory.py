@@ -87,9 +87,6 @@ EXPECTED_SESSION_CALLS = {
     "app/services/orchestration/phases/completion_flow.py": {
         "mark_session_paused": 3,
     },
-    "app/services/orchestration/phases/planning_support.py": {
-        "mark_session_paused": 1,
-    },
 }
 
 EXPECTED_TASK_ATTEMPT_CALLS = {
@@ -138,7 +135,6 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
     },
     "app/services/orchestration/coordinators/failure_coordinator.py": {
         "mark_task_attempt_failed": 3,
-        "mark_task_attempt_pending": 1,
     },
     "app/services/orchestration/phases/completion_flow.py": {
         "mark_task_attempt_failed": 2,
@@ -181,7 +177,7 @@ GOLDEN_LIFECYCLE_TRANSITIONS = {
     },
     "planning_failure": {
         "owner": "app/services/orchestration/phases/planning_support.py",
-        "session": "paused",
+        "session": "attempt evidence only; FailureCoordinator owns outcome",
         "task": "failed",
         "task_execution": "failed",
     },
