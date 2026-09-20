@@ -413,6 +413,39 @@ class FailureCoordinator:
                     task_id,
                     transition_error.reason,
                 )
+                # Recovery admission is a branch-owning lifecycle decision.
+                # Never continue into retry preparation after it rejects: that
+                # was the CA1 path that reset the attempt to PENDING while the
+                # Execution Session remained incompatible with continuation.
+                db.rollback()
+                current_session = (
+                    db.query(type(session)).filter(type(session).id == session_id).one()
+                )
+                current_execution = (
+                    db.query(TaskExecution)
+                    .filter(TaskExecution.id == task_execution_id)
+                    .one()
+                )
+                current_status = status_value(current_session.status)
+                if current_status not in {
+                    "paused",
+                    "stopped",
+                    "cancelled",
+                    "canceled",
+                    "completed",
+                    "failed",
+                }:
+                    finalize_logical_failure(
+                        db,
+                        current_session,
+                        task_execution=current_execution,
+                        failure_reason=(
+                            f"recovery admission failed: {transition_error.reason}; "
+                            f"original failure: {exc}"
+                        ),
+                        commit=True,
+                    )
+                raise exc
 
         # ── Phase 17A/17B: classify failure + route through recovery registry ───
         try:
@@ -713,36 +746,61 @@ class FailureCoordinator:
                 db.commit()
                 write_project_state_snapshot_fn(db, project, task, session_id)
                 return
-            mark_task_attempt_pending(
-                task=task,
-                session_task_link=session_task_link,
-                workspace_status=(
-                    "in_progress" if task.task_subfolder else "not_created"
-                ),
-                error_message=(
-                    None
-                    if retry_workspace_restored
-                    else (
-                        "Retry requires checkpoint resume because the workspace could "
-                        "not be restored cleanly after failure."
-                    )
-                ),
-                task_execution=task_execution,
-            )
             retry_delay = getattr(self_task, "default_retry_delay", None)
             retry_eta = None
             if isinstance(retry_delay, (int, float)) and retry_delay >= 0:
                 retry_eta = datetime.now(UTC) + timedelta(seconds=retry_delay)
-            retry_identity = schedule_continuation(
-                db,
-                session,
-                task_execution=task_execution,
-                continuation_task_id=task.id,
-                continuation_kind="celery_retry",
-                retry_count=retry_count + 1,
-                retry_eta=retry_eta,
-                commit=True,
-            )
+            try:
+                # The pending reset and durable continuation marker share the
+                # schedule_continuation transaction.  A pre-marker exception
+                # is rolled back and compensated before this worker exits.
+                retry_identity = schedule_continuation(
+                    db,
+                    session,
+                    task_execution=task_execution,
+                    continuation_task_id=task.id,
+                    continuation_kind="celery_retry",
+                    retry_count=retry_count + 1,
+                    retry_eta=retry_eta,
+                    commit=True,
+                )
+            except Exception as scheduling_error:
+                db.rollback()
+                current_session = (
+                    db.query(type(session)).filter(type(session).id == session_id).one()
+                )
+                current_execution = (
+                    db.query(TaskExecution)
+                    .filter(TaskExecution.id == task_execution_id)
+                    .one()
+                )
+                marker_committed = bool(
+                    status_value(current_session.status) == "retry_pending"
+                    and getattr(current_session, "continuation_task_id", None)
+                    == task_id
+                    and getattr(current_session, "continuation_kind", None)
+                )
+                if not marker_committed and status_value(
+                    current_session.status
+                ) not in {
+                    "paused",
+                    "stopped",
+                    "cancelled",
+                    "canceled",
+                    "completed",
+                    "failed",
+                }:
+                    finalize_logical_failure(
+                        db,
+                        current_session,
+                        task_execution=current_execution,
+                        failure_reason=(
+                            f"continuation scheduling failed before durable intent: "
+                            f"{scheduling_error}"
+                        ),
+                        commit=True,
+                    )
+                raise
             retry_kwargs = self._stamp_retry_dispatch_provenance(
                 self_task=self_task,
                 retry_kwargs=retry_kwargs,

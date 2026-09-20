@@ -675,7 +675,12 @@ def schedule_continuation(
         _validate_execution_belongs(
             task_execution, session_id=session_id, task_id=resolved_task_id
         )
-        if task_execution.status != TaskStatus.PENDING:
+        # A recovering attempt is durably FAILED until this canonical
+        # transition atomically binds its reset to retry_pending intent.  Do
+        # not require callers to expose a standalone PENDING mutation first.
+        if task_execution.status != TaskStatus.PENDING and not (
+            status == "recovering" and task_execution.status == TaskStatus.FAILED
+        ):
             raise LifecycleTransitionError("continuation_attempt_not_pending")
     else:
         task_execution = (

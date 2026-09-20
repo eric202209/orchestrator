@@ -45,7 +45,6 @@ from app.services.orchestration.phases.post_plan_source_grounding import (
 )
 from app.services.orchestration.run_state import mark_task_attempt_failed
 from app.services.orchestration.state.persistence import append_orchestration_event
-from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.types import OrchestrationRunContext, ReasoningArtifact
 from app.services.orchestration.validation.validator import (
     MAX_PLANNING_COMMAND_CHARS,
@@ -3042,13 +3041,11 @@ def _finalize_planning_terminal_failure(
         error_message=failure_reason,
         completed_at=completed_at,
     )
-    if ctx.session:
-        mark_session_paused(
-            ctx.session,
-            alert_level="error",
-            alert_message=failure_reason[:2000],
-            paused_at=completed_at,
-        )
+    # Planning owns the exhausted-attempt evidence, not the Execution Session
+    # outcome.  The worker raises the terminal Planning result through the
+    # outer FailureCoordinator, which alone decides recovery, intentional
+    # operator pause, or logical failure.  Committing ``paused`` here used to
+    # make that later canonical recovery transition illegal (CA1/ER2).
     ctx.db.commit()
     if generate_failure_summary:
         try:

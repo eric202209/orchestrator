@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import shutil
 import signal
 import subprocess
@@ -171,7 +172,13 @@ class Certification:
         )
         link = SessionTask(session=session, task=task, status=TaskStatus.RUNNING)
         execution = TaskExecution(
-            session=session, task=task, attempt_number=1, status=TaskStatus.RUNNING
+            session=session,
+            task=task,
+            attempt_number=1,
+            status=TaskStatus.RUNNING,
+            worker_pid=os.getpid(),
+            worker_hostname=socket.gethostname(),
+            worker_process_start_identity="er2-certification-owner",
         )
         db.add_all([project, session, task, link, execution])
         db.commit()
@@ -212,6 +219,16 @@ class Certification:
             commit=True,
         )
         db.refresh(session)
+        db.refresh(execution)
+        ownership_released = {
+            "worker_pid": execution.worker_pid,
+            "worker_hostname": execution.worker_hostname,
+            "worker_process_start_identity": (execution.worker_process_start_identity),
+            "heartbeat_at": execution.heartbeat_at,
+        }
+        assert all(
+            value is None for value in ownership_released.values()
+        ), ownership_released
         _log(
             "stranded",
             session_status=session.status,
@@ -219,6 +236,7 @@ class Certification:
             retry_count=session.continuation_retry_count,
             instance_id=identity.instance_id,
             task_execution_id=identity.task_execution_id,
+            runtime_ownership=ownership_released,
         )
         return identity
 
@@ -351,6 +369,61 @@ class Certification:
         assert rejected.accepted is False, outcome
         assert session.instance_id != stale.instance_id, outcome
         self.results["stale_generation"] = outcome
+        return outcome
+
+    def certify_unrecoverable_finalization(self, db):
+        """Canonical logical failure is terminal and owns no live runtime."""
+
+        from app.models import Session as SessionModel, TaskExecution, TaskStatus
+        from app.services.orchestration.lifecycle.authority import (
+            derive_lifecycle_authority,
+        )
+        from app.services.orchestration.lifecycle.transitions import (
+            finalize_logical_failure,
+        )
+
+        session = db.get(SessionModel, self.created["session_id"])
+        finalize_logical_failure(
+            db,
+            session,
+            failure_reason="ER2 certification unrecoverable failure",
+            commit=True,
+        )
+        executions = (
+            db.query(TaskExecution).filter(TaskExecution.session_id == session.id).all()
+        )
+        authority = derive_lifecycle_authority(db, session)
+        outcome = {
+            "session_status": session.status,
+            "logical_terminal": authority.logical_terminal,
+            "continuation_pending": authority.continuation_pending,
+            "active_executions": sum(
+                row.status in {TaskStatus.PENDING, TaskStatus.RUNNING}
+                for row in executions
+            ),
+            "runtime_owner_rows": sum(
+                any(
+                    value is not None
+                    for value in (
+                        row.worker_pid,
+                        row.worker_hostname,
+                        row.worker_process_start_identity,
+                        row.heartbeat_at,
+                    )
+                )
+                for row in executions
+                if row.status != TaskStatus.RUNNING
+            ),
+        }
+        _log("unrecoverable_finalization", **outcome)
+        assert outcome == {
+            "session_status": "failed",
+            "logical_terminal": True,
+            "continuation_pending": False,
+            "active_executions": 0,
+            "runtime_owner_rows": 0,
+        }, outcome
+        self.results["unrecoverable_finalization"] = outcome
         return outcome
 
     # -- helpers ----------------------------------------------------------
@@ -544,6 +617,7 @@ def main() -> int:
         identity = certification.strand(db, session, execution)
         certification.certify_republish_and_claim(db, session, identity)
         certification.certify_stale_generation(db)
+        certification.certify_unrecoverable_finalization(db)
         _log("certification", result="PASS", **certification.results)
         status = 0
     except Exception as exc:  # noqa: BLE001

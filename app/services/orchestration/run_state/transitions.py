@@ -12,6 +12,38 @@ from app.models import SessionTask, Task, TaskExecution, TaskStatus
 from app.services.execution.process_identity import current_process_start_identity
 
 
+def _release_task_execution_runtime_ownership(
+    task_execution: TaskExecution | None,
+    *,
+    released_at: datetime | None = None,
+    reason: str,
+) -> None:
+    """End current runtime ownership while retaining immutable lease history."""
+
+    if task_execution is None:
+        return
+    released_at = released_at or datetime.now(timezone.utc)
+    task_execution.worker_pid = None
+    task_execution.worker_hostname = None
+    if hasattr(task_execution, "worker_process_start_identity"):
+        task_execution.worker_process_start_identity = None
+    task_execution.heartbeat_at = None
+
+    lease = getattr(task_execution, "runtime_lease", None)
+    if lease is not None and getattr(lease, "lease_status", None) == "active":
+        lease.lease_status = "released"
+        lease.released_at = released_at
+        lease.release_reason = reason
+        lease.closed_at = released_at
+        lease.closure_reason = reason
+        if hasattr(lease, "closed_worker_instance_id"):
+            lease.closed_worker_instance_id = lease.worker_instance_id
+        if hasattr(lease, "closed_ownership_fencing_token"):
+            lease.closed_ownership_fencing_token = lease.ownership_fencing_token
+        if hasattr(lease, "updated_at"):
+            lease.updated_at = released_at
+
+
 def _workspace_status_for_attempt_status(
     task: Task,
     status: TaskStatus,
@@ -113,6 +145,10 @@ def mark_task_attempt_pending(
         if reset_started_at:
             task_execution.started_at = None
         task_execution.completed_at = None
+        _release_task_execution_runtime_ownership(
+            task_execution,
+            reason="attempt_pending_handoff",
+        )
 
 
 def mark_task_attempt_failed(
@@ -166,6 +202,11 @@ def mark_task_attempt_failed(
     if task_execution:
         task_execution.status = TaskStatus.FAILED
         task_execution.completed_at = task_execution.completed_at or completed_at
+        _release_task_execution_runtime_ownership(
+            task_execution,
+            released_at=completed_at,
+            reason="attempt_failed",
+        )
     return completed_at
 
 
@@ -191,6 +232,11 @@ def mark_task_attempt_cancelled(
     if task_execution:
         task_execution.status = TaskStatus.CANCELLED
         task_execution.completed_at = task_execution.completed_at or completed_at
+        _release_task_execution_runtime_ownership(
+            task_execution,
+            released_at=completed_at,
+            reason="attempt_cancelled",
+        )
     return completed_at
 
 
@@ -214,6 +260,11 @@ def mark_task_attempt_done(
     if task_execution:
         task_execution.status = TaskStatus.DONE
         task_execution.completed_at = task_execution.completed_at or completed_at
+        _release_task_execution_runtime_ownership(
+            task_execution,
+            released_at=completed_at,
+            reason="attempt_completed",
+        )
     return completed_at
 
 
@@ -356,6 +407,11 @@ def reset_active_attempts_for_session_stop(
         else:
             execution.status = TaskStatus.CANCELLED
             execution.completed_at = execution.completed_at or now
+            _release_task_execution_runtime_ownership(
+                execution,
+                released_at=now,
+                reason="session_pause",
+            )
         if getattr(execution, "failure_category", None) is None:
             execution.failure_category = "manual_stop"
 

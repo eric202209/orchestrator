@@ -1437,7 +1437,9 @@ def test_project_mutation_lock_conflict_terminalizes_without_pausing_active_sess
     assert "project_mutation_lock_conflict" in (terminal_log.log_metadata or "")
 
 
-def test_initial_planning_timeout_terminalizes_task_execution(db_session, monkeypatch):
+def test_initial_planning_timeout_records_attempt_without_preempting_outer_lifecycle(
+    db_session, monkeypatch
+):
     project = Project(name="Planning Timeout Project")
     db_session.add(project)
     db_session.commit()
@@ -1519,7 +1521,9 @@ def test_initial_planning_timeout_terminalizes_task_execution(db_session, monkey
 
     assert task.status == TaskStatus.FAILED
     assert task.completed_at is not None
-    assert session.status == "paused"
-    assert session.is_active is False
+    # Planning owns the exhausted attempt evidence.  FailureCoordinator owns
+    # the later recover / intentional-pause / terminal Session decision.
+    assert session.status == "running"
+    assert session.is_active is True
     assert task_execution.status == TaskStatus.FAILED
     assert task_execution.completed_at is not None
