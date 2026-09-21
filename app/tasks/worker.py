@@ -169,6 +169,9 @@ from app.services.orchestration.lifecycle.transitions import (
     schedule_continuation,
     validate_continuation,
 )
+from app.services.orchestration.lifecycle.terminal_handoff import (
+    terminal_attempt_handoff_from_planning_result,
+)
 from app.services.workspace.project_mutation_lock import project_mutation_lock
 from app.services.observability import (
     build_text_trace_payload,
@@ -1079,6 +1082,11 @@ def execute_orchestration_task(
                 continuation_kind=continuation_kind,
                 continuation_retry_count=continuation_retry_count,
             )
+
+        # ER4: freeze the generation this dispatch actually claimed. Every
+        # later lifecycle handoff is fenced on this exact value so an old
+        # worker cannot reconcile a newer Session generation.
+        _claimed_session_instance_id = session.instance_id
 
         claimed_details = _build_claimed_details(
             session_instance_id=session.instance_id,
@@ -2548,11 +2556,14 @@ def execute_orchestration_task(
                     planning_phase_result.get("failure_category")
                     == "discovery_terminal_failure"
                 ):
-                    # The bounded discovery stage has already persisted the
-                    # terminal Task/Session/TaskExecution projection. Return
-                    # through the normal finally cleanup without converting
-                    # the result into a generic exception, which would enter
-                    # Reflection or an automatic retry/requeue.
+                    # Phase 36 ER4: the bounded discovery stage persisted the
+                    # terminal *attempt* evidence only -- it does not own the
+                    # Session outcome.  Commit the attempt failure metadata,
+                    # then hand the terminal result to the existing outer
+                    # worker failure boundary so FailureCoordinator performs
+                    # the canonical lifecycle reconciliation exactly once.
+                    # Returning here used to leave the Session running with no
+                    # continuation and no live owner (CA2).
                     if task_execution_id is not None:
                         update_execution_failure_metadata(
                             db,
@@ -2561,7 +2572,12 @@ def execute_orchestration_task(
                             backend_id=_resolved_execution_backend,
                         )
                         db.commit()
-                    return planning_phase_result
+                    raise terminal_attempt_handoff_from_planning_result(
+                        planning_phase_result,
+                        session_id=session_id,
+                        task_execution_id=task_execution_id,
+                        expected_session_instance_id=_claimed_session_instance_id,
+                    )
                 raise RuntimeError(
                     str(planning_phase_result.get("reason") or "planning_failed")
                 )

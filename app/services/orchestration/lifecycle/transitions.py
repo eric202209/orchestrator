@@ -203,6 +203,67 @@ def _validate_execution_belongs(
         raise LifecycleTransitionError("task_execution_task_mismatch")
 
 
+def assert_expected_lifecycle_identity(
+    db: DbSession,
+    session: SessionModel,
+    *,
+    expected_instance_id: str | None = None,
+    expected_task_execution_id: int | None = None,
+    task_execution: TaskExecution | None = None,
+    changed_at: datetime | None = None,
+) -> None:
+    """Fence a lifecycle transition on the exact claimed generation/attempt.
+
+    ER4: a terminal or recovering handoff produced by an old worker must not
+    reconcile a newer Session generation or a different attempt.  The
+    generation check is a conditional ``UPDATE`` executed inside the caller's
+    open lifecycle transaction, so the comparison is authoritative rather
+    than an unlocked pre-check: the row is matched and touched atomically, and
+    a concurrent generation rotation makes it match zero rows.
+
+    This carries no policy.  It only rejects stale ownership so the existing
+    owners keep their authority.
+    """
+
+    if expected_instance_id is None and expected_task_execution_id is None:
+        return
+    session_id = _session_id(session)
+    changed_at = _now(changed_at)
+
+    if expected_instance_id is not None:
+        matched = (
+            db.query(SessionModel)
+            .filter(
+                SessionModel.id == session_id,
+                SessionModel.instance_id == expected_instance_id,
+            )
+            .update(
+                {SessionModel.lifecycle_updated_at: changed_at},
+                synchronize_session=False,
+            )
+        )
+        if not matched:
+            raise LifecycleTransitionError("stale_session_generation")
+        session.lifecycle_updated_at = changed_at
+
+    if expected_task_execution_id is not None:
+        if task_execution is None or task_execution.id != expected_task_execution_id:
+            raise LifecycleTransitionError("stale_task_execution")
+        _validate_execution_belongs(task_execution, session_id=session_id)
+        current_id = (
+            db.query(TaskExecution.id)
+            .filter(
+                TaskExecution.session_id == session_id,
+                TaskExecution.task_id == task_execution.task_id,
+            )
+            .order_by(TaskExecution.id.desc())
+            .limit(1)
+            .scalar()
+        )
+        if current_id is not None and current_id != expected_task_execution_id:
+            raise LifecycleTransitionError("superseded_task_execution")
+
+
 def _active_executions(db: DbSession, session_id: int) -> list[TaskExecution]:
     return (
         db.query(TaskExecution)
@@ -548,6 +609,8 @@ def enter_recovering(
     retry_count: int = 0,
     retry_eta: datetime | None = None,
     failure_reason: str | None = None,
+    expected_instance_id: str | None = None,
+    expected_task_execution_id: int | None = None,
     commit: bool = False,
     changed_at: datetime | None = None,
 ) -> ContinuationIdentity:
@@ -580,6 +643,16 @@ def enter_recovering(
         raise LifecycleTransitionError("attempt_not_recoverable")
 
     changed_at = _now(changed_at)
+    # ER4: fence the recovery admission on the exact claimed generation and
+    # attempt before any state is written.
+    assert_expected_lifecycle_identity(
+        db,
+        session,
+        expected_instance_id=expected_instance_id,
+        expected_task_execution_id=expected_task_execution_id,
+        task_execution=task_execution,
+        changed_at=changed_at,
+    )
     task, link = _task_for_execution(db, task_execution)
     mark_task_attempt_failed(
         task=task,
@@ -1117,6 +1190,8 @@ def finalize_logical_failure(
     *,
     task_execution: TaskExecution | None = None,
     failure_reason: str | None = None,
+    expected_instance_id: str | None = None,
+    expected_task_execution_id: int | None = None,
     commit: bool = False,
     changed_at: datetime | None = None,
 ) -> str:
@@ -1126,10 +1201,22 @@ def finalize_logical_failure(
     are cancelled, continuation metadata is cleared, Session becomes failed,
     and the instance is rotated.  No broker/event publication is performed;
     commit ownership remains with the caller unless requested.
+
+    ER4: when an expected generation/attempt identity is supplied, the
+    transition is fenced on it inside this transaction and a stale owner is
+    rejected instead of overwriting authoritative newer state.
     """
 
     session_id = _session_id(session)
     changed_at = _now(changed_at)
+    assert_expected_lifecycle_identity(
+        db,
+        session,
+        expected_instance_id=expected_instance_id,
+        expected_task_execution_id=expected_task_execution_id,
+        task_execution=task_execution,
+        changed_at=changed_at,
+    )
     if task_execution is not None:
         _validate_execution_belongs(task_execution, session_id=session_id)
         task, link = _task_for_execution(db, task_execution)

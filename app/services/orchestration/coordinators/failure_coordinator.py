@@ -89,6 +89,53 @@ def _invoke_reflection_prompt(
     )
 
 
+# Session states an operator or an already-completed generation owns.  A
+# fenced terminal handoff from an older owner never overwrites one of these.
+_AUTHORITATIVE_CONCURRENT_STATUSES = frozenset(
+    {"paused", "stopped", "cancelled", "canceled", "completed", "failed"}
+)
+
+
+def _finalize_logical_failure_fenced(
+    db,
+    session,
+    *,
+    task_execution,
+    failure_reason: str,
+    expected_instance_id: Optional[str],
+    expected_task_execution_id: Optional[int],
+    commit: bool,
+    logger,
+) -> bool:
+    """Terminalize only while this owner still holds the claimed identity.
+
+    ER4: the canonical lifecycle transition performs the authoritative
+    expected-generation/expected-attempt comparison inside its own
+    transaction.  When it rejects, an authoritative concurrent winner (an
+    operator action or a successor generation) owns the Session and this old
+    owner must not overwrite it.
+    """
+
+    try:
+        finalize_logical_failure(
+            db,
+            session,
+            task_execution=task_execution,
+            failure_reason=failure_reason,
+            expected_instance_id=expected_instance_id,
+            expected_task_execution_id=expected_task_execution_id,
+            commit=commit,
+        )
+        return True
+    except LifecycleTransitionError as fence_error:
+        db.rollback()
+        logger.warning(
+            "[ER4] Stale terminal handoff refused by lifecycle fence: %s",
+            fence_error.reason,
+        )
+        return False
+
+
 class FailureCoordinator:
     """Single orchestration boundary for task failure handling.
 
@@ -234,6 +281,22 @@ class FailureCoordinator:
         )
         max_retries = int(getattr(self_task, "max_retries", 0) or 0)
         runtime_diagnostics = getattr(exc, "runtime_diagnostics", None) or {}
+        # ER4: a typed terminal-attempt handoff carries the exact generation
+        # and attempt its worker claimed.  Ordinary failures carry neither, so
+        # their existing behaviour is unchanged.
+        expected_instance_id = getattr(exc, "expected_session_instance_id", None)
+        expected_task_execution_id = getattr(exc, "expected_task_execution_id", None)
+        # The Session state this coordinator *entered* with, read before any
+        # transition below mutates it.  A fenced handoff that arrives to find
+        # an already authoritative operator/terminal state must preserve it
+        # rather than pause, reopen, or terminalize it (ER4 sections 11-12).
+        entry_session_status = (
+            status_value(getattr(session, "status", None)) if session else None
+        )
+        fenced_authoritative_state = bool(
+            expected_instance_id is not None
+            and entry_session_status in _AUTHORITATIVE_CONCURRENT_STATUSES
+        )
         is_discovery_terminal_failure = bool(
             getattr(exc, "failure_category", None) == "discovery_terminal_failure"
             or "canonical_workspace_pollution_detected" in str(exc)
@@ -403,6 +466,8 @@ class FailureCoordinator:
                     continuation_kind=e3_continuation_kind,
                     retry_count=retry_count,
                     failure_reason=str(exc),
+                    expected_instance_id=expected_instance_id,
+                    expected_task_execution_id=expected_task_execution_id,
                     commit=True,
                 )
                 recovery_started = True
@@ -435,7 +500,7 @@ class FailureCoordinator:
                     "completed",
                     "failed",
                 }:
-                    finalize_logical_failure(
+                    _finalize_logical_failure_fenced(
                         db,
                         current_session,
                         task_execution=current_execution,
@@ -443,7 +508,10 @@ class FailureCoordinator:
                             f"recovery admission failed: {transition_error.reason}; "
                             f"original failure: {exc}"
                         ),
+                        expected_instance_id=expected_instance_id,
+                        expected_task_execution_id=expected_task_execution_id,
                         commit=True,
+                        logger=logger,
                     )
                 raise exc
 
@@ -588,7 +656,7 @@ class FailureCoordinator:
         )
 
         other_active_execution = other_active_before_recovery
-        if session:
+        if session and not fenced_authoritative_state:
             if recovery_started:
                 # E3 has already committed the authoritative recovering state.
                 # In particular, do not translate an attempt failure into the
@@ -790,7 +858,7 @@ class FailureCoordinator:
                     "completed",
                     "failed",
                 }:
-                    finalize_logical_failure(
+                    _finalize_logical_failure_fenced(
                         db,
                         current_session,
                         task_execution=current_execution,
@@ -798,7 +866,10 @@ class FailureCoordinator:
                             f"continuation scheduling failed before durable intent: "
                             f"{scheduling_error}"
                         ),
+                        expected_instance_id=expected_instance_id,
+                        expected_task_execution_id=expected_task_execution_id,
                         commit=True,
+                        logger=logger,
                     )
                 raise
             retry_kwargs = self._stamp_retry_dispatch_provenance(
@@ -1041,12 +1112,17 @@ class FailureCoordinator:
                 current_session_status == "paused"
                 and not recovery_started
                 and not knowledge_halted
+                and not fenced_authoritative_state
             ):
-                finalize_logical_failure(
+                _finalize_logical_failure_fenced(
                     db,
                     session,
                     task_execution=task_execution,
                     failure_reason=str(exc),
+                    expected_instance_id=expected_instance_id,
+                    expected_task_execution_id=expected_task_execution_id,
+                    commit=False,
+                    logger=logger,
                 )
 
         db.commit()
