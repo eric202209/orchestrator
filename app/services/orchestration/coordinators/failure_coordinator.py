@@ -45,6 +45,7 @@ from app.services.tasks.execution import create_task_execution
 from app.services.orchestration.state.persistence import (
     record_live_log,
     save_orchestration_checkpoint,
+    set_session_alert,
 )
 from app.services.orchestration.state.session_state import (
     mark_session_paused,
@@ -296,6 +297,13 @@ class FailureCoordinator:
         fenced_authoritative_state = bool(
             expected_instance_id is not None
             and entry_session_status in _AUTHORITATIVE_CONCURRENT_STATUSES
+        )
+        # ER5: a fenced handoff may be stale, and intermediate commits below
+        # (record_live_log) would make any unfenced Session, Task, or
+        # SessionTask write durable before the fence runs.  Its only lifecycle
+        # writer is therefore the fenced finalize_logical_failure transition.
+        fenced_handoff = (
+            expected_instance_id is not None or expected_task_execution_id is not None
         )
         is_discovery_terminal_failure = bool(
             getattr(exc, "failure_category", None) == "discovery_terminal_failure"
@@ -628,9 +636,12 @@ class FailureCoordinator:
         if not session_task_link:
             session_task_link = get_latest_session_task_link_fn(db, session_id, task_id)
         completed_at = datetime.now(UTC)
+        # A fenced handoff's Task/SessionTask facts were committed by Planning
+        # and may since belong to a successor continuation; only its own
+        # attempt row is marked here.
         mark_task_attempt_failed(
-            task=task,
-            session_task_link=session_task_link,
+            task=None if fenced_handoff else task,
+            session_task_link=None if fenced_handoff else session_task_link,
             task_execution=task_execution,
             error_message=str(exc),
             completed_at=completed_at,
@@ -641,11 +652,11 @@ class FailureCoordinator:
 
         error_str = str(exc).lower()
         if "json" in error_str or "parse" in error_str:
-            if task:
+            if task and not fenced_handoff:
                 task.error_message += "\nDiagnosis: JSON parsing error detected"
                 task.error_message += "\nSuggested fix: Check AI agent response format"
         elif "empty" in error_str:
-            if task:
+            if task and not fenced_handoff:
                 task.error_message += "\nDiagnosis: Empty response from AI agent"
                 task.error_message += "\nSuggested fix: Retry with more specific prompt"
 
@@ -656,7 +667,7 @@ class FailureCoordinator:
         )
 
         other_active_execution = other_active_before_recovery
-        if session and not fenced_authoritative_state:
+        if session and not fenced_handoff:
             if recovery_started:
                 # E3 has already committed the authoritative recovering state.
                 # In particular, do not translate an attempt failure into the
@@ -671,7 +682,7 @@ class FailureCoordinator:
                     session, alert_level="error", alert_message=alert_message[:2000]
                 )
 
-        if is_timeout and task:
+        if is_timeout and task and not fenced_handoff:
             task.error_message += " (Task timed out after 5 minutes)"
             task.error_message += "\nSuggested fix: Break task into smaller steps"
 
@@ -1097,11 +1108,14 @@ class FailureCoordinator:
                         alert_message="Workspace restore failed; operator review required",
                     )
             elif other_active_execution:
-                mark_session_running(
-                    session,
-                    alert_level="warning",
-                    alert_message=alert_message[:2000],
-                )
+                # A fenced handoff cannot prove it still owns the generation
+                # that execution runs in, so it leaves that Session untouched.
+                if not fenced_handoff:
+                    mark_session_running(
+                        session,
+                        alert_level="warning",
+                        alert_message=alert_message[:2000],
+                    )
             elif current_session_status not in {
                 "paused",
                 "stopped",
@@ -1114,7 +1128,7 @@ class FailureCoordinator:
                 and not knowledge_halted
                 and not fenced_authoritative_state
             ):
-                _finalize_logical_failure_fenced(
+                finalized = _finalize_logical_failure_fenced(
                     db,
                     session,
                     task_execution=task_execution,
@@ -1124,6 +1138,10 @@ class FailureCoordinator:
                     commit=False,
                     logger=logger,
                 )
+                if finalized and fenced_handoff:
+                    # Same transaction as the fence, so the operator alert the
+                    # legacy pause used to carry lands only for the owner.
+                    set_session_alert(session, "error", alert_message[:2000])
 
         db.commit()
         write_project_state_snapshot_fn(db, project, task, session_id)
