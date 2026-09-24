@@ -36,6 +36,7 @@ from app.services.orchestration.run_state import (
 from app.services.orchestration.lifecycle.transitions import (
     ContinuationIdentity,
     LifecycleTransitionError,
+    assert_expected_lifecycle_identity,
     enter_recovering,
     finalize_logical_failure,
     revoke_autonomous_continuation,
@@ -132,6 +133,43 @@ def _finalize_logical_failure_fenced(
         db.rollback()
         logger.warning(
             "[ER4] Stale terminal handoff refused by lifecycle fence: %s",
+            fence_error.reason,
+        )
+        return False
+
+
+def _lifecycle_identity_still_owned(
+    db,
+    session,
+    *,
+    task_execution,
+    expected_instance_id: Optional[str],
+    expected_task_execution_id: Optional[int],
+    action: str,
+    logger,
+) -> bool:
+    """Hold the ER4 fence before an owner-only side effect.
+
+    ER6: the conditional ``UPDATE`` stays uncommitted in the caller's
+    transaction, so a successor generation cannot commit its rotation while
+    the side effect that follows runs.  A rejection means a successor owns the
+    Session and its workspace; the stale owner's staged work is discarded.
+    """
+
+    try:
+        assert_expected_lifecycle_identity(
+            db,
+            session,
+            expected_instance_id=expected_instance_id,
+            expected_task_execution_id=expected_task_execution_id,
+            task_execution=task_execution,
+        )
+        return True
+    except LifecycleTransitionError as fence_error:
+        db.rollback()
+        logger.warning(
+            "[ER6] Stale terminal handoff refused before %s: %s",
+            action,
             fence_error.reason,
         )
         return False
@@ -1061,13 +1099,26 @@ class FailureCoordinator:
                     db.commit()
 
         workspace_restore_failed = False
+        restore_requested = bool(
+            project
+            and orchestration_state
+            and restore_workspace_snapshot_if_needed
+            and should_restore_workspace
+        )
+        if restore_requested and fenced_handoff:
+            # A stale handoff's pre-run snapshot must never be written over a
+            # workspace its successor generation may already be changing.
+            restore_requested = _lifecycle_identity_still_owned(
+                db,
+                session,
+                task_execution=task_execution,
+                expected_instance_id=expected_instance_id,
+                expected_task_execution_id=expected_task_execution_id,
+                action="workspace restore",
+                logger=logger,
+            )
         try:
-            if (
-                project
-                and orchestration_state
-                and restore_workspace_snapshot_if_needed
-                and should_restore_workspace
-            ):
+            if restore_requested:
                 restore_workspace_snapshot_if_needed("task exception")
         except Exception as restore_error:
             workspace_restore_failed = True
@@ -1094,7 +1145,17 @@ class FailureCoordinator:
                 # remains inspectable and nonterminal for E8 reconciliation.
                 pass
             elif workspace_restore_failed:
-                if recovery_started:
+                if fenced_handoff and not _lifecycle_identity_still_owned(
+                    db,
+                    session,
+                    task_execution=task_execution,
+                    expected_instance_id=expected_instance_id,
+                    expected_task_execution_id=expected_task_execution_id,
+                    action="restore-failure pause",
+                    logger=logger,
+                ):
+                    pass
+                elif recovery_started:
                     revoke_autonomous_continuation(
                         db,
                         session,
