@@ -2112,6 +2112,7 @@ def execute_orchestration_task(
             completion_repair_budget=active_policy.completion_repair_budget,
             workflow_stage=getattr(task, "workflow_stage", None),
             task_execution_id=task_execution_id,
+            claimed_session_instance_id=_claimed_session_instance_id,
             restore_workspace_snapshot_if_needed=restore_workspace_snapshot_if_needed,
             planning_backend=effective_guidance_planning_backend,
             execution_backend=_resolved_execution_backend,

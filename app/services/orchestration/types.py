@@ -350,6 +350,9 @@ class OrchestrationRunContext:
     workflow_profile: str = "default"
     workflow_stage: Optional[str] = None
     task_execution_id: Optional[int] = None
+    # ER8: the Session generation this dispatch claimed (ER4 fence value);
+    # ``session_instance_id`` below reads the live row and may already be newer.
+    claimed_session_instance_id: Optional[str] = None
     restore_workspace_snapshot_if_needed: Optional[Callable[..., Any]] = None
     planning_backend: str = "all"
     planning_adaptation_profile: Optional[str] = None

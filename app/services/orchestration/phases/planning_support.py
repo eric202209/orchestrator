@@ -12,6 +12,10 @@ from typing import Any, Callable, Dict
 
 from app.models import TaskExecution, TaskStatus
 from app.services.orchestration.context.assembly import compress_orchestration_context
+from app.services.orchestration.lifecycle.transitions import (
+    LifecycleTransitionError,
+    assert_expected_lifecycle_identity,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.planning.normalization import (
@@ -3017,6 +3021,38 @@ def classify_planning_failure_taxonomy(
     return "PLAN_VALIDATOR_REJECTED"
 
 
+def _planning_dispatch_owns_generation(ctx: OrchestrationRunContext) -> bool:
+    """Whether this dispatch may still write the shared Task/SessionTask rows.
+
+    ER8: operator pause/resume can admit a successor while the old worker is
+    still in Planning.  The ER4 conditional ``UPDATE`` on the claimed
+    generation is left uncommitted until the finalizer commit, so a successor
+    rotation cannot commit in between.  The attempt's own TaskExecution is
+    always finalized.
+    """
+
+    claimed_instance_id = getattr(ctx, "claimed_session_instance_id", None)
+    if claimed_instance_id is None:
+        return True
+    try:
+        assert_expected_lifecycle_identity(
+            ctx.db,
+            ctx.session,
+            expected_instance_id=claimed_instance_id,
+        )
+        return True
+    except LifecycleTransitionError as fence_error:
+        ctx.logger.warning(
+            "[ER8] Stale Planning finalizer left successor Task/SessionTask "
+            "unchanged session_id=%s task_id=%s task_execution_id=%s: %s",
+            ctx.session_id,
+            ctx.task_id,
+            ctx.task_execution_id,
+            fence_error.reason,
+        )
+        return False
+
+
 def _finalize_planning_terminal_failure(
     *,
     ctx: OrchestrationRunContext,
@@ -3034,9 +3070,10 @@ def _finalize_planning_terminal_failure(
             .filter(TaskExecution.id == ctx.task_execution_id)
             .first()
         )
+    owns_shared_rows = _planning_dispatch_owns_generation(ctx)
     mark_task_attempt_failed(
-        task=ctx.task,
-        session_task_link=ctx.session_task_link,
+        task=ctx.task if owns_shared_rows else None,
+        session_task_link=ctx.session_task_link if owns_shared_rows else None,
         task_execution=task_execution,
         error_message=failure_reason,
         completed_at=completed_at,
