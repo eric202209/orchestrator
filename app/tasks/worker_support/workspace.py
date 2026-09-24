@@ -1,12 +1,16 @@
 """Task Workspace restore helpers for orchestration workers."""
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from app.services.orchestration import should_restore_workspace_on_failure
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.runtime import (
     restore_workspace_after_abort as _restore_workspace_after_abort,
+)
+from app.services.orchestration.lifecycle.transitions import (
+    LifecycleTransitionError,
+    assert_expected_lifecycle_identity,
 )
 from app.services.orchestration.state.persistence import (
     append_orchestration_event as _append_orchestration_event,
@@ -30,6 +34,7 @@ def _restore_workspace_snapshot_if_needed(
     emit_live: Any,
     force_restore: bool = False,
     lock_already_held: bool = False,
+    ownership_fence: Optional[Callable[[], bool]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not project:
         return None
@@ -69,6 +74,21 @@ def _restore_workspace_snapshot_if_needed(
         return {
             "restored": False,
             "reason": "preserved_non_isolation_failure",
+            "target_path": str(orchestration_state.project_dir),
+        }
+    if ownership_fence is not None and not ownership_fence():
+        # ER7: a dispatch whose Session generation was rotated (operator pause
+        # / resume) may still be running; its pre-run snapshot must not be
+        # written over a workspace a successor generation may be changing.
+        logger.warning(
+            "[ORCHESTRATION] Refused workspace restore for task %s after %s: "
+            "this dispatch no longer owns the Session generation",
+            task_id,
+            reason,
+        )
+        return {
+            "restored": False,
+            "reason": "stale_generation_restore_refused",
             "target_path": str(orchestration_state.project_dir),
         }
     restore_result = _restore_workspace_after_abort(
@@ -150,3 +170,50 @@ def _restore_workspace_snapshot_if_needed(
             },
         )
     return restore_result
+
+
+def build_dispatch_workspace_restore(
+    *,
+    db: Any,
+    session: Any,
+    expected_session_instance_id: Optional[str],
+    **restore_kwargs: Any,
+) -> Callable[..., Optional[Dict[str, Any]]]:
+    """Build a dispatch's restore closure, fenced on its claimed generation.
+
+    ER7: operator pause cancels the attempt and rotates the Session generation
+    in the database while the worker may still be running (the SIGTERM revoke
+    is asynchronous).  Before a destructive restore the ER4 conditional
+    ``UPDATE`` is issued and left uncommitted through the restore, so a
+    successor rotation cannot commit meanwhile; a stale dispatch is refused.
+    ``without_generation_fence`` is the unfenced variant for
+    FailureCoordinator, which applies its own ER6 fence.
+    """
+
+    def _owns_generation() -> bool:
+        try:
+            assert_expected_lifecycle_identity(
+                db, session, expected_instance_id=expected_session_instance_id
+            )
+            return True
+        except LifecycleTransitionError as fence_error:
+            db.rollback()
+            logger.warning(
+                "[ER7] Stale dispatch refused workspace restore: %s",
+                fence_error.reason,
+            )
+            return False
+
+    def _restore(reason, force_restore=False, ownership_fence=None):
+        return _restore_workspace_snapshot_if_needed(
+            reason,
+            force_restore=force_restore,
+            ownership_fence=ownership_fence,
+            **restore_kwargs,
+        )
+
+    def restore_workspace_snapshot_if_needed(reason, force_restore=False):
+        return _restore(reason, force_restore, _owns_generation)
+
+    restore_workspace_snapshot_if_needed.without_generation_fence = _restore
+    return restore_workspace_snapshot_if_needed

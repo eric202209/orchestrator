@@ -300,6 +300,13 @@ class FailureCoordinator:
         restore_workspace_snapshot_if_needed = (
             ctx.restore_workspace_snapshot_if_needed if ctx else None
         )
+        # ER7: the dispatch closure fences on its claimed generation; this
+        # coordinator owns its own fence (ER6) and its own rotations.
+        restore_workspace_snapshot_if_needed = getattr(
+            restore_workspace_snapshot_if_needed,
+            "without_generation_fence",
+            restore_workspace_snapshot_if_needed,
+        )
         logger = ctx.logger if ctx else logging.getLogger(__name__)
         error_handler = ctx.error_handler if ctx else None
 

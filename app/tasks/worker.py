@@ -97,6 +97,9 @@ from app.services.orchestration.state.persistence import (
     record_validation_verdict as _record_validation_verdict,
     save_orchestration_checkpoint as _save_orchestration_checkpoint,
 )
+from app.tasks.worker_support.workspace import (
+    build_dispatch_workspace_restore as _build_dispatch_workspace_restore,
+)
 from app.services.orchestration.execution.runtime import (
     build_runtime_executor_context as _build_runtime_executor_context,
     dispose_runtime_workspace_safely as _dispose_runtime_workspace_safely,
@@ -226,7 +229,6 @@ from app.tasks.worker_support.worker_helpers import (
     _get_next_pending_project_task,
     _inject_progress_notes_into_context,
     _parse_event_timestamp,
-    _restore_workspace_snapshot_if_needed,
     _runtime_selection_details,
     _should_reject_stale_dispatch_claim,
     _sync_task_execution_from_task_state,
@@ -1460,21 +1462,20 @@ def execute_orchestration_task(
                     },
                 )
 
-        restore_workspace_snapshot_if_needed = (
-            lambda reason, force_restore=False: _restore_workspace_snapshot_if_needed(
-                reason,
-                project=project,
-                session_id=session_id,
-                task_id=task_id,
-                task_execution_id=task_execution_id,
-                orchestration_state=orchestration_state,
-                policy_profile_name=active_policy.name,
-                runs_in_canonical_baseline=runs_in_canonical_baseline,
-                task_service=task_service,
-                emit_live=emit_live,
-                force_restore=force_restore,
-                lock_already_held=runs_in_canonical_baseline,
-            )
+        restore_workspace_snapshot_if_needed = _build_dispatch_workspace_restore(
+            db=db,
+            session=session,
+            expected_session_instance_id=_claimed_session_instance_id,
+            project=project,
+            session_id=session_id,
+            task_id=task_id,
+            task_execution_id=task_execution_id,
+            orchestration_state=orchestration_state,
+            policy_profile_name=active_policy.name,
+            runs_in_canonical_baseline=runs_in_canonical_baseline,
+            task_service=task_service,
+            emit_live=emit_live,
+            lock_already_held=runs_in_canonical_baseline,
         )
 
         # Check if task has been running too long (safety check).
