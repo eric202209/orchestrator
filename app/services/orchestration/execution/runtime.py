@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -81,7 +81,7 @@ def build_project_state_snapshot(
             "project_name": None,
             "session_id": session_id,
             "status": "unknown",
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "tasks": [],
         }
 
@@ -138,7 +138,7 @@ def build_project_state_snapshot(
         "current_task_id": current_task.id if current_task else None,
         "current_task_title": current_task.title if current_task else None,
         "status": overall_status,
-        "updated_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "failed_or_cancelled_task_ids": [task.id for task in failed_or_cancelled],
         "inconsistent_completed_tasks": inconsistent_pairs,
         "tasks": [

@@ -6,7 +6,7 @@ Implements hard blocks with user approval workflow.
 
 import json
 import logging
-from datetime import timedelta
+from datetime import UTC, timedelta
 from enum import Enum
 from typing import Optional, List, Dict, Any
 from sqlalchemy.orm import Session
@@ -88,7 +88,7 @@ class PermissionApprovalService:
         """
         from datetime import datetime
 
-        expires_at = datetime.utcnow() + timedelta(minutes=expires_in_minutes)
+        expires_at = datetime.now(UTC) + timedelta(minutes=expires_in_minutes)
 
         from app.models import PermissionRequest
 
@@ -216,7 +216,7 @@ class PermissionApprovalService:
 
         request.status = PermissionStatus.APPROVED.value
         request.approved_by = approved_by
-        request.approved_at = datetime.utcnow()
+        request.approved_at = datetime.now(UTC)
 
         if auto_approve_same:
             # Create auto-approve rule (could be stored in separate table)
@@ -368,7 +368,7 @@ class PermissionApprovalService:
         from datetime import datetime, timedelta
 
         # Check for recent approved permissions
-        recent_cutoff = datetime.utcnow() - timedelta(minutes=60)  # Check last hour
+        recent_cutoff = datetime.now(UTC) - timedelta(minutes=60)  # Check last hour
 
         query = self.db.query(PermissionRequest).filter(
             PermissionRequest.project_id == project_id,
@@ -431,7 +431,7 @@ class PermissionApprovalService:
             self.db.query(PermissionRequest)
             .filter(
                 PermissionRequest.status == PermissionStatus.PENDING.value,
-                PermissionRequest.expires_at < datetime.utcnow(),
+                PermissionRequest.expires_at < datetime.now(UTC),
             )
             .update(
                 {"status": PermissionStatus.EXPIRED.value},

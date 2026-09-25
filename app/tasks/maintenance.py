@@ -74,12 +74,12 @@ def process_github_webhook(
 
 @celery_app.task(bind=True, max_retries=5, default_retry_delay=30)
 def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: str):
-    from datetime import datetime as dt
-
     db = None
     try:
-        now = dt.utcnow()
-        schedule_dt = dt.fromisoformat(scheduled_time.replace("Z", "+00:00"))
+        now = datetime.now(UTC)
+        schedule_dt = datetime.fromisoformat(scheduled_time.replace("Z", "+00:00"))
+        if schedule_dt.tzinfo is None:
+            schedule_dt = schedule_dt.replace(tzinfo=UTC)
         if now < schedule_dt:
             delay_seconds = (schedule_dt - now).total_seconds()
             logger.info(
@@ -90,18 +90,18 @@ def scheduled_task_execution(self, task_id: int, scheduled_time: str, prompt: st
         db = get_db_session()
         task = db.query(Task).filter(Task.id == task_id).first()
         if task:
-            mark_task_attempt_running(task=task, started_at=dt.now(timezone.utc))
+            mark_task_attempt_running(task=task, started_at=datetime.now(UTC))
             db.commit()
 
         # TODO: Implement actual scheduled execution
         if task:
-            mark_task_attempt_done(task=task, completed_at=dt.now(timezone.utc))
+            mark_task_attempt_done(task=task, completed_at=datetime.now(UTC))
             db.commit()
 
         return {
             "status": "completed",
             "task_id": task_id,
-            "executed_at": dt.utcnow().isoformat(),
+            "executed_at": datetime.now(UTC).isoformat(),
         }
     except Exception as exc:
         logger.error(f"Scheduled task {task_id} failed: {str(exc)}")
