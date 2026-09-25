@@ -101,6 +101,9 @@ from app.services.orchestration.prompt_optimization import (
     optimize_prompt,
     perf_tracker,
 )
+from app.services.orchestration.planning.discovery_contract_capture import (
+    DiscoveryContractCapture,
+)
 from app.services.workspace.checkpoint_service import CheckpointService, CheckpointError
 from app.services.tasks.tool_tracking import ToolTrackingService
 from app.services.workspace.system_settings import (
@@ -3421,7 +3424,16 @@ class OpenClawSessionService:
                 stdout=stdout_text,
                 stderr=stderr_text,
             )
+            capture = DiscoveryContractCapture.from_metadata(diagnostic_metadata)
+            if capture is not None:
+                capture.record_openclaw_cli_response(
+                    stdout=stdout_text,
+                    stderr=stderr_text,
+                    return_code=return_code,
+                )
             result = self._parse_openclaw_response(completed)
+            if capture is not None:
+                capture.record_runtime_output(result.get("output"))
             if stream_diagnostics:
                 result["runtime_diagnostics"] = {
                     **stream_diagnostics,

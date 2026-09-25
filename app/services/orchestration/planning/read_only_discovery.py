@@ -28,6 +28,10 @@ from app.services.orchestration.planning.repository_orientation import (
     derive_repository_orientation,
     render_repository_orientation,
 )
+from app.services.workspace.control_state_paths import (
+    FAMILY_DISCOVERY_CONTRACT_CAPTURE,
+    control_state_family_dir,
+)
 from app.services.workspace.workspace_paths import (
     HYDRATION_EXCLUDED_NAMES,
     is_hydration_excluded_path,
@@ -319,6 +323,28 @@ def build_discovery_prompt(
     )
 
 
+def _default_discovery_capture_path(ctx: Any) -> Path | None:
+    """Resolve one durable, identity-aware capture path for a discovery turn."""
+
+    try:
+        location = getattr(ctx, "control_state_location", None)
+        session_id = getattr(ctx, "session_id", None)
+        task_id = getattr(ctx, "task_id", None)
+        task_execution_id = getattr(ctx, "task_execution_id", None)
+        if location is None or None in (session_id, task_id, task_execution_id):
+            return None
+        directory = control_state_family_dir(
+            location, FAMILY_DISCOVERY_CONTRACT_CAPTURE
+        )
+        return directory / (
+            f"session_{int(session_id)}_task_{int(task_id)}_"
+            f"execution_{int(task_execution_id)}.json"
+        )
+    except (TypeError, ValueError, OSError):
+        # Observability must never change the discovery authority boundary.
+        return None
+
+
 def parse_discovery_request(output_text: str) -> DiscoveryRequest:
     text = str(output_text or "").strip()
     if not text:
@@ -397,6 +423,18 @@ def run_discovery_stage(
     prompt = build_discovery_prompt(
         ctx.prompt, ctx.orchestration_state.project_context or "", orientation
     )
+    capture_path = capture_path or _default_discovery_capture_path(ctx)
+    if capture_path is not None:
+        try:
+            DiscoveryContractCapture(capture_path).record_discovery_request(
+                user_prompt=prompt,
+                diagnostic_label="PLANNING_DISCOVERY",
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                task_execution_id=ctx.task_execution_id,
+            )
+        except (OSError, TypeError, ValueError):
+            capture_path = None
     emit_phase_event(
         ctx.orchestration_state,
         ctx.emit_live,
@@ -455,6 +493,12 @@ def run_discovery_stage(
             error.provider_failure_classification = provider_classification
         raise error from exc
     if not isinstance(result, dict) or result.get("status") != "completed":
+        if capture_path is not None:
+            try:
+                capture = DiscoveryContractCapture.load(capture_path)
+                capture.record_runtime_output(result)
+            except (OSError, TypeError, ValueError):
+                pass
         detail = ""
         if isinstance(result, dict):
             detail = str(
@@ -479,6 +523,9 @@ def run_discovery_stage(
         else None
     )
     try:
+        if capture_path is not None:
+            capture = DiscoveryContractCapture.load(capture_path)
+            capture.record_runtime_output(result.get("output"))
         parser_input = discovery_output_text(result, extract_structured_text)
         if capture is not None:
             capture.record_parser_input(parser_input)

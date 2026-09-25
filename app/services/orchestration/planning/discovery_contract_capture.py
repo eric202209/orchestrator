@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any, Mapping
 from uuid import uuid4
 
@@ -45,6 +46,17 @@ DISCOVERY_ACTION_SCHEMA: dict[str, Any] = {
     ],
 }
 
+_MAX_CAPTURE_TEXT_CHARS = 100_000
+_SECRET_TEXT_PATTERNS = (
+    re.compile(r"(?i)(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    re.compile(
+        r"(?i)([\"']?(?:api[_-]?key|access[_-]?token|password|secret|token)"
+        r"[\"']?\s*[:=]\s*[\"']?)([^\s,;}\"']+)"
+    ),
+    re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+"),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+)
+
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, Mapping):
@@ -72,6 +84,38 @@ def _redact_headers(headers: Mapping[str, Any]) -> dict[str, str]:
             else str(value)
         )
     return redacted
+
+
+def _capture_text(value: Any) -> dict[str, Any]:
+    text = (
+        value.decode("utf-8", errors="replace")
+        if isinstance(value, bytes)
+        else str(value or "")
+    )
+    original = text
+    redacted = False
+    for pattern in _SECRET_TEXT_PATTERNS:
+        updated = pattern.sub(
+            lambda match: (
+                match.group(1) + "<redacted>"
+                if match.lastindex and match.lastindex >= 1
+                else "<redacted>"
+            ),
+            text,
+        )
+        redacted = redacted or updated != text
+        text = updated
+    truncated = len(text) > _MAX_CAPTURE_TEXT_CHARS
+    retained = text[:_MAX_CAPTURE_TEXT_CHARS]
+    return {
+        "value": retained,
+        "length": len(original),
+        "sha256": hashlib.sha256(original.encode("utf-8")).hexdigest(),
+        "retained_length": len(retained),
+        "retained_sha256": hashlib.sha256(retained.encode("utf-8")).hexdigest(),
+        "redacted": redacted,
+        "truncated": truncated,
+    }
 
 
 class DiscoveryContractCapture:
@@ -167,6 +211,28 @@ class DiscoveryContractCapture:
         }
         self._persist()
 
+    def record_discovery_request(
+        self,
+        *,
+        user_prompt: str,
+        diagnostic_label: str | None,
+        session_id: Any,
+        task_id: Any,
+        task_execution_id: Any,
+    ) -> None:
+        """Record the provider-bound request for any discovery transport."""
+
+        self.document["request"] = {
+            "transport": "discovery_runtime",
+            "diagnostic_label": diagnostic_label,
+            "session_id": session_id,
+            "task_id": task_id,
+            "task_execution_id": task_execution_id,
+            "user_prompt": _capture_text(user_prompt),
+            "expected_output_schema": _json_safe(DISCOVERY_ACTION_SCHEMA),
+        }
+        self._persist()
+
     def record_http_response(
         self,
         *,
@@ -197,6 +263,19 @@ class DiscoveryContractCapture:
         )
         self._persist()
 
+    def record_openclaw_cli_response(
+        self, *, stdout: Any, stderr: Any, return_code: Any
+    ) -> None:
+        """Retain the bounded raw CLI representation before extraction."""
+
+        self.document["response"] = {
+            "transport": "openclaw_cli",
+            "return_code": return_code,
+            "raw_stdout": _capture_text(stdout),
+            "raw_stderr": _capture_text(stderr),
+        }
+        self._persist()
+
     def record_response_decode_failure(self, reason: str) -> None:
         self.document["response"]["json_decode_error"] = str(reason)[:500]
         self._persist()
@@ -211,6 +290,12 @@ class DiscoveryContractCapture:
 
     def record_normalized_content(self, value: Any) -> None:
         self.document["stages"]["normalized_content"] = _json_safe(value)
+        self._persist()
+
+    def record_runtime_output(self, value: Any) -> None:
+        """Retain the runtime result nearest to discovery parsing."""
+
+        self.document["stages"]["runtime_output"] = _capture_text(value)
         self._persist()
 
     def record_parser_input(self, value: str) -> None:
