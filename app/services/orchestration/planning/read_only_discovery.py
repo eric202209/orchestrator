@@ -612,17 +612,21 @@ def materialize_observation_source_context(
     source_cache: dict[str, str] | None = None,
 ) -> Any:
     paths = observation.materialization_paths()
+    # Only search hits locate a region; a read_file body is unselected source
+    # whose literals trivially match that same file. Observed text stays out of
+    # the task description so it gains no task, path, or creation authority.
     hints = (
-        "\n".join(hit.snippet for hit in observation.hits)
+        "\n".join(hit.snippet for hit in observation.hits)[:2000]
         if observation.action == "search_text"
-        else str(observation.content or "")
-    )[:2000]
+        else ""
+    )
     return materialize(
         project_dir,
-        task_description=f"{prompt}\n\n{hints}" if hints else prompt,
+        task_description=prompt,
         planner_contract=planner_contract,
         supporting_paths=paths,
         source_cache=source_cache,
+        observation_hint_text=hints,
     )
 
 

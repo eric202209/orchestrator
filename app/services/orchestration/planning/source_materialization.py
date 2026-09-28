@@ -104,6 +104,18 @@ HINT_TYPE_SYMBOL = "symbol"
 
 _EXACT_HINT_TYPES = (HINT_TYPE_EXACT_CALL, HINT_TYPE_QUOTED_SNIPPET)
 
+HINT_AUTHORITY_TASK_DESCRIPTION = "task_description"
+HINT_AUTHORITY_PLANNER_CONTRACT = "planner_contract"
+# Located by a read-only discovery observation (search hit), never operator input.
+HINT_AUTHORITY_DISCOVERY_OBSERVATION = "discovery_observation"
+
+# Operator/contract hints always outrank observation-located hints.
+_HINT_AUTHORITY_RANK = {
+    HINT_AUTHORITY_TASK_DESCRIPTION: 0,
+    HINT_AUTHORITY_PLANNER_CONTRACT: 0,
+    HINT_AUTHORITY_DISCOVERY_OBSERVATION: 1,
+}
+
 # Deterministic hint-type ranking used when several hints match one file.
 _HINT_TYPE_RANK = {
     HINT_TYPE_EXACT_CALL: 0,
@@ -416,12 +428,15 @@ def extract_source_target_hints(
     task_description: str,
     *,
     planner_contract: Mapping[str, Any] | None = None,
+    observation_text: str = "",
 ) -> tuple[SourceTargetHint, ...]:
     """Extract bounded, high-confidence target hints from authoritative task input.
 
     Only code-shaped literals are retained: exact calls, quoted or backticked
     snippets, and explicitly declared definition names.  Ordinary prose words are
-    never treated as search terms.
+    never treated as search terms.  ``observation_text`` is discovered Product
+    source; its hints keep ``discovery_observation`` authority and never become
+    task or contract authority.
     """
 
     text = str(task_description or "")
@@ -437,8 +452,9 @@ def extract_source_target_hints(
     seen: set[tuple[str, str]] = set()
 
     for authority, body in (
-        ("task_description", text),
-        ("planner_contract", contract_text),
+        (HINT_AUTHORITY_TASK_DESCRIPTION, text),
+        (HINT_AUTHORITY_PLANNER_CONTRACT, contract_text),
+        (HINT_AUTHORITY_DISCOVERY_OBSERVATION, str(observation_text or "")),
     ):
         if not body:
             continue
@@ -874,7 +890,7 @@ def _select_hint_for_source(
     """Return the best (hint, match_start, match_end, match_count) for a file."""
 
     encoded = text.encode("utf-8")
-    ranked: list[tuple[tuple[int, int, int, int], SourceTargetHint, int, int]] = []
+    ranked: list[tuple[tuple[int, int, int, int, int], SourceTargetHint, int, int]] = []
     for index, hint in enumerate(hints):
         needle = hint.text.encode("utf-8")
         if not needle:
@@ -891,6 +907,7 @@ def _select_hint_for_source(
         ranked.append(
             (
                 (
+                    _HINT_AUTHORITY_RANK.get(hint.authority, 1),
                     path_rank,
                     _HINT_TYPE_RANK.get(hint.hint_type, 3),
                     count,
@@ -1034,8 +1051,13 @@ def materialize_planner_source_context(
     maximum_total_source_bytes: int = MAX_SOURCE_CONTENT_TOTAL_CHARS,
     creation_authorized_paths: Iterable[Any] | None = None,
     source_cache: dict[str, str] | None = None,
+    observation_hint_text: str = "",
 ) -> PlannerSourceMaterialization:
-    """Materialize only named paths through the existing bounded source reader."""
+    """Materialize only named paths through the existing bounded source reader.
+
+    ``observation_hint_text`` may locate target regions but never contributes
+    expected paths, creation authority, or task-authority hints.
+    """
 
     root = Path(project_dir).resolve()
     identity = _workspace_identity_text(root, workspace_identity)
@@ -1068,7 +1090,9 @@ def materialize_planner_source_context(
     candidates = _ordered_unique_paths([*expected, *selected_supporting])
     task_text = str(task_description or "")
     target_hints = extract_source_target_hints(
-        task_text, planner_contract=planner_contract
+        task_text,
+        planner_contract=planner_contract,
+        observation_text=observation_hint_text,
     )
     source_cache = source_cache if source_cache is not None else {}
     priorities = _prioritized_source_paths(
