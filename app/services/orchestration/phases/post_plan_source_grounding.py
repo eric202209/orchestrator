@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -278,6 +278,9 @@ def _merge_materialization(
     materialization: PlannerSourceMaterialization,
     additions: tuple[MaterializedSourceFile, ...],
 ) -> PlannerSourceMaterialization:
+    # The candidate Plan was produced before these records existed, so they
+    # are authority for fenced verification but not Planning-visible evidence.
+    additions = tuple(replace(item, planning_visible=False) for item in additions)
     return PlannerSourceMaterialization(
         workspace_identity=materialization.workspace_identity,
         files=(*materialization.files, *additions),

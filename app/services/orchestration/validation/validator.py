@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import re
 import shlex
 import stat
@@ -467,6 +468,83 @@ def _whole_file_replacement_intent(operation: Mapping[str, Any]) -> bool:
     )
 
 
+_TRUNCATING_REDIRECT_RE = re.compile(r"^\d*>(?![>&|])(?P<target>.*)$")
+
+
+def _shell_truncating_write_targets(command: Any) -> list[str]:
+    """Return targets a bounded shell shape replaces wholesale (``>``, ``tee``).
+
+    Appends (``>>``, ``tee -a``) and in-place edits (``sed -i``) are not
+    whole-file replacements and are deliberately excluded.
+    """
+
+    rendered = str(command or "")
+    try:
+        tokens = shlex.split(rendered, posix=True)
+    except ValueError:
+        tokens = rendered.split()
+    targets: list[str] = []
+    for index, token in enumerate(tokens):
+        match = _TRUNCATING_REDIRECT_RE.match(token)
+        if match:
+            target = match.group("target")
+            if not target and index + 1 < len(tokens):
+                target = tokens[index + 1]
+            if target:
+                targets.append(target)
+            continue
+        if token != "tee":
+            continue
+        arguments = []
+        for candidate in tokens[index + 1 :]:
+            if candidate in {"|", ";", "&&", "||"}:
+                break
+            arguments.append(candidate)
+        if any(option in {"-a", "--append"} for option in arguments):
+            continue
+        targets.extend(value for value in arguments if not value.startswith("-"))
+    return list(dict.fromkeys(targets))
+
+
+def _existing_file_rewrite_evidence_failure(
+    record: Any, resolved: ResolvedSource | None
+) -> str | None:
+    """Return why Planning evidence cannot authorize a whole-file rewrite.
+
+    PHASE36-MAINT-GR2: replacing an existing file's entire content requires
+    that the complete current content was the Planning-visible record for the
+    exact path, and that the fenced current file still equals it.  A later
+    read, a filename, a grant, or the file's presence is never evidence.
+    """
+
+    if record is None or getattr(record, "status", None) != SOURCE_STATUS_EXISTING:
+        return "source_not_materialized"
+    if not getattr(record, "planning_visible", True):
+        return "source_not_visible_to_planning"
+    content = getattr(record, "content", None)
+    if not isinstance(content, str) or not getattr(record, "content_hash", None):
+        return "source_content_not_supplied"
+    if (
+        getattr(record, "truncated", False)
+        or getattr(record, "truncated_before", False)
+        or getattr(record, "truncated_after", False)
+    ):
+        return "source_materialization_truncated"
+    content_bytes = content.encode("utf-8")
+    full_bytes = getattr(record, "full_source_bytes", None)
+    if full_bytes is None or full_bytes != len(content_bytes):
+        return "source_materialization_incomplete"
+    if hashlib.sha256(content_bytes).hexdigest() != record.content_hash:
+        return "source_materialization_hash_mismatch"
+    if resolved is None:
+        return "source_version_unverified"
+    if resolved.failure_code is not None:
+        return resolved.failure_code
+    if resolved.full_content != content:
+        return "source_materialization_differs_from_current_source"
+    return None
+
+
 def _plan_creation_authorized_paths(
     plan: List[Dict[str, Any]],
 ) -> set[str]:
@@ -775,6 +853,7 @@ def _source_operation_contract_issues(
         "stale_replace_materialization": [],
         "missing_source_materialization": [],
         "existing_file_write_without_authorization": [],
+        "existing_file_rewrite_without_full_source": [],
         "new_file_write_without_creation_authorization": [],
         "source_materialization_unavailable": [],
         "source_operation_verdicts": [],
@@ -805,6 +884,33 @@ def _source_operation_contract_issues(
             current_content[relative] = resolved.full_content
 
     for index, step in enumerate(plan or [], start=1):
+        for command_index, command in enumerate(step.get("commands") or [], start=1):
+            for target in _shell_truncating_write_targets(command):
+                try:
+                    relative_path = normalize_path_reference(str(target), project_dir)
+                except TaskWorkspaceViolationError:
+                    continue
+                target_path = project_dir / relative_path
+                if (
+                    relative_path == "."
+                    or target_path.suffix.lower() not in SOURCE_EXTENSIONS
+                    or target_path.is_symlink()
+                    or not target_path.is_file()
+                ):
+                    continue
+                evidence_failure = _existing_file_rewrite_evidence_failure(
+                    materialized_source_file(source_materialization, relative_path),
+                    resolved_sources.get(relative_path),
+                )
+                if evidence_failure is not None:
+                    details["existing_file_rewrite_without_full_source"].append(
+                        {
+                            "label": f"step {index} command {command_index} ({relative_path})",
+                            "path": relative_path,
+                            "operation": "shell_overwrite",
+                            "reason": evidence_failure,
+                        }
+                    )
         for operation_index, operation in enumerate(step.get("ops") or [], start=1):
             if not isinstance(operation, dict):
                 continue
@@ -842,6 +948,25 @@ def _source_operation_contract_issues(
                     if not _whole_file_replacement_intent(operation):
                         details["existing_file_write_without_authorization"].append(
                             label
+                        )
+                        continue
+                    # Hash-less evidence is owned by accepted-path authority,
+                    # which fails closed (existing_mutation_source_evidence_missing).
+                    evidence_failure = (
+                        _existing_file_rewrite_evidence_failure(
+                            record, resolved_sources.get(relative_path)
+                        )
+                        if record.content_hash
+                        else None
+                    )
+                    if evidence_failure is not None:
+                        details["existing_file_rewrite_without_full_source"].append(
+                            {
+                                "label": label,
+                                "path": relative_path,
+                                "operation": op_name,
+                                "reason": evidence_failure,
+                            }
                         )
                         continue
                 elif record.status != SOURCE_STATUS_NEW:
@@ -2054,6 +2179,17 @@ class ValidatorService:
                 details["existing_file_write_without_authorization"] = (
                     source_contract_issues["existing_file_write_without_authorization"]
                 )
+            if source_contract_issues["existing_file_rewrite_without_full_source"]:
+                findings = source_contract_issues[
+                    "existing_file_rewrite_without_full_source"
+                ]
+                repairable.append(
+                    "existing_file_rewrite_requires_complete_planning_source: "
+                    "an existing file may be replaced wholesale only when its "
+                    "complete current content was supplied to Planning "
+                    f"(files: {sorted({item['path'] for item in findings})[:5]})"
+                )
+                details["existing_file_rewrite_without_full_source"] = findings[:20]
             if source_contract_issues["new_file_write_without_creation_authorization"]:
                 repairable.append(
                     "new_file_creation_not_authorized: write_file may create only "

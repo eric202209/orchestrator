@@ -179,6 +179,9 @@ class MaterializedSourceFile:
     target_region_eligibility_reason: str | None = None
     target_included: bool = False
     spans: tuple[MaterializedSourceSpan, ...] = field(default_factory=tuple)
+    # PHASE36-MAINT-GR2: False for records added after the Plan that is being
+    # validated was produced (post-Plan grounding); its author never saw them.
+    planning_visible: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
