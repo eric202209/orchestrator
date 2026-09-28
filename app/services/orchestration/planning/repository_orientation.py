@@ -21,9 +21,9 @@ from pathlib import Path
 from typing import Iterable
 
 ORIENTATION_BYTE_BUDGET = 3072
-# Keep one additional bounded candidate visible as the tracked product set
-# grows; the byte budget remains the hard upper bound on the advisory block.
-ORIENTATION_PATH_LIMIT = 41
+# Keep the adversarial candidate visible as the tracked product set grows; the
+# byte budget remains the hard upper bound on the advisory block.
+ORIENTATION_PATH_LIMIT = 44
 ORIENTATION_MIN_LITERAL_CHARS = 4
 ORIENTATION_MAX_LITERALS = 24
 ORIENTATION_GIT_TIMEOUT_SECONDS = 15
