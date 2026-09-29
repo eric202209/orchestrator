@@ -1135,6 +1135,17 @@ class CompletionCoordinator:
                 "accepted_identity_match": candidate_handoff_valid,
             },
         }
+        # Phase 10L: insufficient independent verification may complete the
+        # task, but must not be silently promoted.
+        verification_insufficient = bool(
+            (
+                (completion_validation.details or {}).get("validation_evidence") or {}
+            ).get("verification_insufficient")
+        )
+        review_decision = {
+            **review_decision,
+            "verification_insufficient": verification_insufficient,
+        }
         evaluator_result = None
         if (
             task_change_set
@@ -1157,6 +1168,10 @@ class CompletionCoordinator:
             # Only an explicit evaluator PASS may release auto-publication.
             # UNKNOWN (no valid assessment) and ERROR hold for review.
             evaluator_verdict = (evaluator_result or {}).get("verdict")
+            review_decision = {
+                **review_decision,
+                "evaluator_verdict": evaluator_verdict,
+            }
             if evaluator_verdict != "PASS":
                 evaluator_hold_reason = (
                     "evaluator_needs_review"
@@ -1169,7 +1184,7 @@ class CompletionCoordinator:
                     "outcome": "hold_for_review",
                     "held_for_review": True,
                     "reason": evaluator_hold_reason,
-                    "evaluator_verdict": evaluator_verdict,
+                    "publication_eligible": False,
                 }
                 emit_live(
                     "WARN",
@@ -1180,6 +1195,29 @@ class CompletionCoordinator:
                         "reason": evaluator_hold_reason,
                     },
                 )
+        if (
+            verification_insufficient
+            and not should_hold_for_review
+            and publication_allowed
+            and review_decision.get("outcome") == "auto_promote"
+        ):
+            should_hold_for_review = True
+            review_decision = {
+                **review_decision,
+                "outcome": "hold_for_review",
+                "held_for_review": True,
+                "reason": "verification_insufficient_for_auto_promotion",
+                "publication_eligible": False,
+            }
+            emit_live(
+                "WARN",
+                "[ORCHESTRATION] Verification is insufficient for automatic promotion; holding workspace for review",
+                metadata={
+                    "phase": "evaluation",
+                    "verdict": review_decision.get("evaluator_verdict"),
+                    "reason": "verification_insufficient_for_auto_promotion",
+                },
+            )
         if task_change_set and project and ctx.runtime_workspace_used:
             task_service.retain_workspace_snapshot(
                 project,

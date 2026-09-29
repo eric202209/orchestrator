@@ -279,8 +279,8 @@ def test_r1_r5_explicit_evaluator_pass_preserves_auto_publication(
 def test_s8_r9_smoke_only_warning_with_explicit_pass_still_publishes(
     db_session, tmp_path, monkeypatch
 ):
-    # Pinned current policy (carried gap): Review does not consult the
-    # completion verdict's smoke-only/verification_insufficient warning.
+    # A warning without validation_evidence.verification_insufficient still
+    # publishes; GR8 holds only when that typed flag is set.
     runtime = _Runtime({"output": SUBSTANTIVE_PASS})
     result, _ctx, project_root = _seed_auto_publish(
         db_session,
