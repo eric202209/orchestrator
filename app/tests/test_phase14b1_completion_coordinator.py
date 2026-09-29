@@ -112,6 +112,19 @@ def _make_ctx(tmp_path):
     }
 
     runtime_service = MagicMock()
+
+    # GR7: auto-publication requires an explicit evaluator PASS. Other
+    # prompts keep the plain MagicMock result.
+    def _execute_task(prompt, *args, **kwargs):
+        if "independent QA evaluator" in str(prompt):
+
+            async def _evaluator_pass():
+                return {"output": "VERDICT: PASS"}
+
+            return _evaluator_pass()
+        return MagicMock()
+
+    runtime_service.execute_task.side_effect = _execute_task
     runtime_service.get_backend_metadata.return_value = {
         "backend": "test",
         "model_family": "test",

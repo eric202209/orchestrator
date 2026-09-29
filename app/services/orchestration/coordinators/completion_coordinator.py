@@ -1154,22 +1154,30 @@ class CompletionCoordinator:
                     logger=logger,
                 ),
             )
-            if (evaluator_result or {}).get("verdict") == "NEEDS_REVIEW":
+            # Only an explicit evaluator PASS may release auto-publication.
+            # UNKNOWN (no valid assessment) and ERROR hold for review.
+            evaluator_verdict = (evaluator_result or {}).get("verdict")
+            if evaluator_verdict != "PASS":
+                evaluator_hold_reason = (
+                    "evaluator_needs_review"
+                    if evaluator_verdict == "NEEDS_REVIEW"
+                    else "evaluator_assessment_unavailable"
+                )
                 should_hold_for_review = True
                 review_decision = {
                     **review_decision,
                     "outcome": "hold_for_review",
                     "held_for_review": True,
-                    "reason": "evaluator_needs_review",
-                    "evaluator_verdict": "NEEDS_REVIEW",
+                    "reason": evaluator_hold_reason,
+                    "evaluator_verdict": evaluator_verdict,
                 }
                 emit_live(
                     "WARN",
-                    "[ORCHESTRATION] Evaluator requested review; holding workspace instead of auto-publishing",
+                    "[ORCHESTRATION] Evaluator did not pass the candidate; holding workspace instead of auto-publishing",
                     metadata={
                         "phase": "evaluation",
-                        "verdict": "NEEDS_REVIEW",
-                        "reason": "evaluator_needs_review",
+                        "verdict": evaluator_verdict,
+                        "reason": evaluator_hold_reason,
                     },
                 )
         if task_change_set and project and ctx.runtime_workspace_used:

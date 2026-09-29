@@ -60,6 +60,9 @@ def _complete_task(**kwargs):
 
 class _FakeRuntime:
     async def execute_task(self, prompt, timeout_seconds=None):
+        if "independent QA evaluator" in prompt:
+            # GR7: auto-publication requires an explicit evaluator PASS.
+            return {"output": "VERDICT: PASS"}
         return {"output": "Task summary"}
 
     def get_backend_metadata(self):

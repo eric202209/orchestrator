@@ -1279,6 +1279,11 @@ def _attempt_completion_repair(
     return {"status": "failed", "reason": assessment.error_message}
 
 
+_EVALUATOR_PASS_LINE = re.compile(
+    r"^[\s*_#>-]*VERDICT[\s*_]*:[\s*_]*PASS[\s*_.]*$", re.IGNORECASE | re.MULTILINE
+)
+
+
 def _run_evaluator(
     *,
     runtime_service: Any,
@@ -1292,8 +1297,9 @@ def _run_evaluator(
 
     The evaluator is intentionally separate from the generator: it receives the
     task goal, the execution record, and the summary, then grades the result
-    against concrete criteria. A NEEDS_REVIEW grade is surfaced to callers so
-    auto-publish paths can hold the workspace for review before promotion.
+    against concrete criteria. Any non-PASS verdict (NEEDS_REVIEW, UNKNOWN,
+    ERROR) is surfaced to callers so auto-publish paths can hold the workspace
+    for review before promotion.
     """
     try:
         reasoning_artifact = (
@@ -1353,9 +1359,13 @@ def _run_evaluator(
             if isinstance(eval_result, dict)
             else str(eval_result)
         )
-        verdict = "PASS"
+        # PASS must be stated explicitly by the evaluator.  Empty or
+        # non-assessment output is UNKNOWN, never a Product-defaulted PASS.
+        verdict = "UNKNOWN"
         if "VERDICT: NEEDS_REVIEW" in eval_output.upper():
             verdict = "NEEDS_REVIEW"
+        elif _EVALUATOR_PASS_LINE.search(eval_output):
+            verdict = "PASS"
         log_level = "INFO" if verdict == "PASS" else "WARN"
         emit_live(
             log_level,
