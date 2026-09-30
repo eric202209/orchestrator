@@ -155,6 +155,19 @@ def _resolve_change_set_id(
     return None
 
 
+def _step_changed_files(orchestration_state: Any) -> list[dict[str, Any]]:
+    """GR9: per-step recorded mutations, so the Validator can tell whether a
+    step's verification preceded a later mutation of the Candidate."""
+
+    return [
+        {
+            "step_number": getattr(result, "step_number", None),
+            "files_changed": list(getattr(result, "files_changed", []) or []),
+        }
+        for result in (orchestration_state.execution_results or [])
+    ]
+
+
 def _retain_completion_repair_verification_evidence(
     validation: Any, repair_result: dict[str, Any]
 ) -> None:
@@ -570,6 +583,7 @@ class CompletionCoordinator:
                 "summary_generated": bool(summary_result),
                 "execution_results_count": len(orchestration_state.execution_results),
                 "reported_changed_files": reported_changed_files,
+                "step_changed_files": _step_changed_files(orchestration_state),
                 "candidate_delta_required": True,
                 "run_candidate_checks": True,
                 "include_static_checks": True,
@@ -993,6 +1007,7 @@ class CompletionCoordinator:
                             orchestration_state.execution_results
                         ),
                         "reported_changed_files": reported_changed_files,
+                        "step_changed_files": _step_changed_files(orchestration_state),
                         "change_set": task_change_set,
                         "candidate_delta_required": True,
                         "run_candidate_checks": True,

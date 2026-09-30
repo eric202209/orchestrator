@@ -225,6 +225,49 @@ def _candidate_verification_scope(
     return tuple(sorted(observed_authorized | missing_expected))
 
 
+# GR9: structured ops that change file content.  ``mkdir`` alone changes no
+# behavior and does not invalidate earlier verification.
+_CANDIDATE_MUTATING_FILE_OPS = frozenset(
+    {"write_file", "append_file", "replace_in_file", "delete_file"}
+)
+
+
+def _plan_step_mutation_flags(
+    plan: Optional[List[Dict[str, Any]]],
+    step_changed_files: Any,
+) -> List[bool]:
+    """Per Plan step (in Plan order): whether the step mutated the workspace.
+
+    A step mutates when its accepted Plan carries a content-changing structured
+    op, or when Execution recorded ``files_changed`` for it.  Execution runs
+    Plan steps sequentially and runs each step's declared ``verification``
+    after that step's ops and runtime commands, so Plan order is the runtime
+    order for Plan steps.  Runtime ``files_changed`` is reported/coerced
+    evidence, not an observed workspace diff.
+    """
+
+    runtime_mutated = {
+        entry.get("step_number")
+        for entry in (step_changed_files or [])
+        if isinstance(entry, dict)
+        and entry.get("step_number") is not None
+        and entry.get("files_changed")
+    }
+    flags: List[bool] = []
+    for step in plan or []:
+        has_mutating_op = any(
+            isinstance(op, dict)
+            and str(op.get("op") or "") in _CANDIDATE_MUTATING_FILE_OPS
+            for op in (step.get("ops") or [])
+        )
+        step_number = step.get("step_number")
+        flags.append(
+            has_mutating_op
+            or (step_number is not None and step_number in runtime_mutated)
+        )
+    return flags
+
+
 def is_orchestration_internal_path(relative_path: str) -> bool:
     """True when a canonical-relative path is an Orchestrator-owned artifact.
 
@@ -3257,14 +3300,29 @@ class ValidatorService:
             "regression_test": 4,
         }
         command_quality_by_step: List[Dict[str, Any]] = []
-        for step in plan or []:
+        # GR9: a step's verification applies to the Candidate only when no
+        # later Plan step mutated the workspace before Candidate capture.
+        plan_steps = list(plan or [])
+        step_mutation_flags = _plan_step_mutation_flags(
+            plan_steps, completion_evidence.get("step_changed_files")
+        )
+        for index, step in enumerate(plan_steps):
             command = str(step.get("verification") or "").strip()
             quality = classify_verification_command(command)
+            later_mutations = [
+                plan_steps[later].get("step_number")
+                for later in range(index + 1, len(plan_steps))
+                if step_mutation_flags[later]
+            ]
             command_quality_by_step.append(
                 {
                     "step_number": step.get("step_number"),
                     "command": command,
                     "command_quality": quality,
+                    "applies_to_candidate": not later_mutations,
+                    "invalidated_by_step": (
+                        later_mutations[-1] if later_mutations else None
+                    ),
                 }
             )
         completion_verification_command = str(
@@ -3281,6 +3339,8 @@ class ValidatorService:
                     "command_quality": classify_verification_command(
                         completion_verification_command
                     ),
+                    "applies_to_candidate": True,
+                    "invalidated_by_step": None,
                 }
             )
         best_command_quality = max(
@@ -3288,6 +3348,21 @@ class ValidatorService:
             key=lambda quality: command_quality_rank.get(str(quality), 0),
             default="missing",
         )
+        # GR9: raw quality stays the historical best-declared quality;
+        # sufficiency is judged only from verification that applies to the
+        # Candidate.
+        applicable_command_quality = max(
+            (
+                entry["command_quality"]
+                for entry in command_quality_by_step
+                if entry["applies_to_candidate"]
+            ),
+            key=lambda quality: command_quality_rank.get(str(quality), 0),
+            default="missing",
+        )
+        verification_invalidated_by_later_mutation = command_quality_rank.get(
+            applicable_command_quality, 0
+        ) < command_quality_rank.get(best_command_quality, 0)
         repair_keyword_match = cls.repair_requires_independent_evidence(
             task_prompt, title=title, description=description
         )
@@ -3426,7 +3501,7 @@ class ValidatorService:
             isinstance(behavior_baseline, dict) and behavior_baseline.get("passed")
         )
         has_independent_regression_test = (
-            best_command_quality == "regression_test" and bool(pre_existing_tests)
+            applicable_command_quality == "regression_test" and bool(pre_existing_tests)
         )
         added_files = {
             str(path).replace("\\", "/").lstrip("./")
@@ -3478,6 +3553,10 @@ class ValidatorService:
             semantic_violation_codes.append("test_preservation_violation")
         details["validation_evidence"] = {
             "command_quality": best_command_quality,
+            "applicable_command_quality": applicable_command_quality,
+            "verification_invalidated_by_later_mutation": (
+                verification_invalidated_by_later_mutation
+            ),
             "command_quality_by_step": command_quality_by_step[:20],
             "integrity_findings": integrity_payload[:50],
             "semantic_violation_codes": sorted(set(semantic_violation_codes)),
@@ -3510,18 +3589,20 @@ class ValidatorService:
         ):
             rejected.append("Artifact completion lacks substantive artifact evidence")
         if requires_independent_evidence:
-            if best_command_quality in {"missing", "insufficient"}:
+            if applicable_command_quality in {"missing", "insufficient"}:
                 verification_insufficient = True
                 rejected.append(
-                    "Repair task verification is insufficient: no meaningful independent verification command ran"
+                    "Repair task verification is insufficient: verification ran only before a later mutation of the Candidate"
+                    if verification_invalidated_by_later_mutation
+                    else "Repair task verification is insufficient: no meaningful independent verification command ran"
                 )
-            elif best_command_quality == "smoke_only":
+            elif applicable_command_quality == "smoke_only":
                 verification_insufficient = True
                 warnings.append(
                     "Repair task verification is smoke-only; independent behavioral evidence is weak"
                 )
             elif (
-                best_command_quality == "regression_test"
+                applicable_command_quality == "regression_test"
                 and not has_independent_regression_test
                 and not behavior_baseline_passed
             ):
