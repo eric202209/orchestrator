@@ -42,7 +42,7 @@ NON_REPAIR_TITLE = "Add status helper"
 PYTEST = "python -m pytest tests/test_app.py -q"
 SMOKE = 'python -c "import app"'
 BEHAVIORAL = "python -c \"from app import status; assert status() == 'ready'\""
-# REENTRY-5 steps 3/4: an import-only check that Phase 10L classifies as
+# REENTRY-5 steps 3/4: an import-only check.  Before GR10 it was classified
 # ``behavioral`` because it starts with ``from`` rather than ``import``.
 REENTRY5_IMPORT_CHECK = "python -c \"from app import status; print('imported')\""
 MUTATION = [
@@ -315,10 +315,10 @@ def test_r11_reentry5_exact_shape_no_longer_credits_the_pre_mutation_pytest(
     assert evidence["has_independent_regression_test"] is False
     assert evidence["verification_invalidated_by_later_mutation"] is True
     assert evidence["command_quality_by_step"][1]["invalidated_by_step"] == 3
-    # Carried classifier gap, not GR9: the import-only ``from`` check is
-    # classified ``behavioral``, which Phase 10L/GR8 accept as sufficient.
-    assert evidence["applicable_command_quality"] == "behavioral"
-    assert evidence["verification_insufficient"] is False
+    # GR10 closed the carried classifier gap: the import-only ``from`` check
+    # is ``smoke_only``, so repair-task sufficiency is no longer met.
+    assert evidence["applicable_command_quality"] == "smoke_only"
+    assert evidence["verification_insufficient"] is True
 
 
 def _reentry5_smoke_verdict(tmp_path):

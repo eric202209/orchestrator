@@ -6,6 +6,7 @@ import ast
 import builtins
 import hashlib
 import re
+import shlex
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal, Optional
@@ -240,6 +241,49 @@ def pre_existing_source_files(
     return sorted(results)
 
 
+_PYTHON_EXECUTABLE = re.compile(r"(?:^|/)python(?:3(?:\.\d+)?)?$")
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _is_inline_python_import_observation(command: str) -> bool:
+    """GR10: a lone ``python -c`` whose program only imports and prints.
+
+    Such a command demonstrates loadability, not behavior (Phase 10L:
+    ``smoke_only`` is an import check).  The program is parsed, never run;
+    any other statement (assert, raise, conditional, other call) leaves the
+    command to the existing rules.
+    """
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    while tokens and _ENV_ASSIGNMENT.match(tokens[0]):
+        tokens = tokens[1:]
+    if len(tokens) != 3 or tokens[1] != "-c":
+        return False
+    if not _PYTHON_EXECUTABLE.search(tokens[0]):
+        return False
+    try:
+        body = ast.parse(tokens[2]).body
+    except (SyntaxError, ValueError):
+        return False
+    has_import = False
+    for node in body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            has_import = True
+            continue
+        if (
+            isinstance(node, ast.Expr)
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "print"
+        ):
+            continue
+        return False
+    return has_import
+
+
 def classify_verification_command(command: Optional[str]) -> CommandQuality:
     text = str(command or "").strip().lower()
     if not text:
@@ -254,6 +298,8 @@ def classify_verification_command(command: Optional[str]) -> CommandQuality:
     if re.search(r"\bpy_compile\b|\bpython(?:3)?\s+-c\s+['\"]\s*import\b", text):
         if "unittest.main" in text and "discover" not in text:
             return "insufficient"
+        return "smoke_only"
+    if _is_inline_python_import_observation(str(command)):
         return "smoke_only"
     if "python -m unittest" in text or "python3 -m unittest" in text:
         return "regression_test"
