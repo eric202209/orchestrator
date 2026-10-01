@@ -307,6 +307,7 @@ def _repair_planning_output(
         planner_contract=ctx.planner_contract,
         source_materialization=getattr(ctx, "planner_source_materialization", None),
         grounding_planning_context=getattr(ctx, "grounding_planning_context", None),
+        read_only_observation=getattr(ctx, "read_only_observation", None),
     )
 
 

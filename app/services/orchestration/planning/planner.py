@@ -2597,6 +2597,7 @@ class PlannerService:
         grounding_planning_context: Any = None,
         provider_response_evidence_path: Optional[str] = None,
         provider_response_evidence_correlation_id: Optional[str] = None,
+        read_only_observation: Any = None,
     ) -> Dict[str, Any]:
         repair_build_started_at = time.monotonic()
         logger.warning(
@@ -2640,24 +2641,24 @@ class PlannerService:
                     )
                     if block
                 )
-        if _compact_no_output_retry:
-            repair_prompt = cls.build_compact_planning_repair_prompt(
-                malformed_output,
-                rejection_reasons=rejection_reasons,
-                prompt_profile=prompt_profile,
-                guidance_block=guidance_block,
-                workspace_identity=workspace_identity,
-                planner_contract=planner_contract,
-            )
-            repair_prompt_metadata: Dict[str, Any] = {
-                "source_api_contract_available": False,
-                "source_api_contract_included": False,
-                "source_api_contract_chars": 0,
-                "source_api_contract_compacted": False,
-                "source_api_contract_omitted_reason": "compact_no_output_retry",
-            }
-        else:
-            repair_prompt_result = cls.build_planning_repair_prompt_with_metadata(
+
+        def _build_repair_prompt(current_guidance_block: str):
+            if _compact_no_output_retry:
+                return cls.build_compact_planning_repair_prompt(
+                    malformed_output,
+                    rejection_reasons=rejection_reasons,
+                    prompt_profile=prompt_profile,
+                    guidance_block=current_guidance_block,
+                    workspace_identity=workspace_identity,
+                    planner_contract=planner_contract,
+                ), {
+                    "source_api_contract_available": False,
+                    "source_api_contract_included": False,
+                    "source_api_contract_chars": 0,
+                    "source_api_contract_compacted": False,
+                    "source_api_contract_omitted_reason": "compact_no_output_retry",
+                }
+            built = cls.build_planning_repair_prompt_with_metadata(
                 task_description,
                 malformed_output,
                 project_dir,
@@ -2668,11 +2669,43 @@ class PlannerService:
                 workspace_has_existing_files=workspace_has_existing_files,
                 knowledge_context=knowledge_context,
                 workspace_identity=workspace_identity,
-                guidance_block=guidance_block,
+                guidance_block=current_guidance_block,
                 planner_contract=planner_contract,
             )
-            repair_prompt = repair_prompt_result.prompt
-            repair_prompt_metadata = dict(repair_prompt_result.metadata)
+            return built.prompt, dict(built.metadata)
+
+        # GR12: the repair continues the Planning attempt whose Plan it repairs,
+        # so it keeps that attempt's read-only observation, rendered with the
+        # same advisory label (never source or mutation authority).  It is
+        # dropped, not allowed to fail the repair, when it would exceed the
+        # existing repair prompt budget.
+        observation_block = render_discovery_observation(read_only_observation)
+        observation_omitted_reason = None
+        if observation_block and "## READ-ONLY OBSERVATION" not in guidance_block:
+            observed_guidance_block = "\n\n".join(
+                block for block in (guidance_block, observation_block) if block
+            )
+            repair_prompt, repair_prompt_metadata = _build_repair_prompt(
+                observed_guidance_block
+            )
+            if len(repair_prompt) <= _repair_prompt_budget() and not isinstance(
+                repair_prompt_metadata.get("repair_prompt_failure"), dict
+            ):
+                guidance_block = observed_guidance_block
+            else:
+                observation_omitted_reason = "over_budget"
+                repair_prompt, repair_prompt_metadata = _build_repair_prompt(
+                    guidance_block
+                )
+        else:
+            repair_prompt, repair_prompt_metadata = _build_repair_prompt(guidance_block)
+        repair_prompt_metadata["read_only_observation_included"] = (
+            "## READ-ONLY OBSERVATION" in repair_prompt
+        )
+        if observation_omitted_reason:
+            repair_prompt_metadata["read_only_observation_omitted_reason"] = (
+                observation_omitted_reason
+            )
         repair_prompt_metadata.setdefault("prompt_stage", "P2_SELECTED_PROMPT")
         repair_projection_failure = repair_prompt_metadata.get("repair_prompt_failure")
         if isinstance(repair_projection_failure, dict):
