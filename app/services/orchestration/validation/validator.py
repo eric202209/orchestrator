@@ -176,6 +176,7 @@ from .rules.core_file_ops import (
     _step_is_readonly_inspection,
 )
 from .rules.core_execution_capability import (
+    command_requires_mutation,
     plan_steps_without_execution_channel,
 )
 from .rules.core_paths import (
@@ -1116,6 +1117,7 @@ class ValidatorService:
     """Deterministic plan and completion validation."""
 
     _iter_candidate_files = staticmethod(_iter_candidate_files)
+    _command_requires_mutation = staticmethod(command_requires_mutation)
     _find_nested_expected_file_matches = staticmethod(
         _find_nested_expected_file_matches
     )

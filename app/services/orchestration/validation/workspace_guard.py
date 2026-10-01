@@ -853,6 +853,15 @@ def has_recent_file_activity(project_dir: Path, since_epoch: float) -> bool:
     return False
 
 
+_SCOPE_NOISE_SUFFIXES = frozenset({".lock", ".log"})
+_SCOPE_NOISE_NAMES = frozenset({"package-lock.json", "yarn.lock", "pnpm-lock.yaml"})
+
+
+def _is_scope_noise(rel_path: str) -> bool:
+    path = Path(rel_path)
+    return path.name in _SCOPE_NOISE_NAMES or path.suffix in _SCOPE_NOISE_SUFFIXES
+
+
 def detect_scope_violations(
     project_dir: Path,
     expected_files: List[str],
@@ -866,8 +875,6 @@ def detect_scope_violations(
     input.  ``expected_files`` remains a compatibility input for observation
     callers outside the accepted-plan execution path.
     """
-    _NOISE_SUFFIXES = {".lock", ".log"}
-    _NOISE_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml"}
     if accepted_path_authority is None:
         allowed = {Path(str(f).lstrip("./")).as_posix() for f in (expected_files or [])}
     else:
@@ -887,13 +894,34 @@ def detect_scope_violations(
         normalized = rel_path.lstrip("./")
         if normalized in allowed:
             continue
-        if Path(rel_path).name in _NOISE_NAMES:
-            continue
-        if Path(rel_path).suffix in _NOISE_SUFFIXES:
+        if _is_scope_noise(rel_path):
             continue
         if rel_path not in pre_checksum or pre_checksum[rel_path] != checksum:
             violations.append(rel_path)
     return sorted(violations)
+
+
+def detect_post_structured_op_mutations(
+    project_dir: Path, post_ops_checksum: Dict[str, str]
+) -> List[str]:
+    """GR11: paths changed since the step's structured ops were applied.
+
+    ``post_ops_checksum`` is taken after ``execute_file_ops`` and before the
+    free-form runtime dispatch, so any change here was made by the runtime,
+    not by the admitted structured operation.  Same noise exclusions as
+    ``detect_scope_violations``.
+    """
+    post_checksum = compute_workspace_checksum(project_dir)
+    changed: List[str] = []
+    for rel_path, checksum in post_checksum.items():
+        if _is_scope_noise(rel_path):
+            continue
+        if post_ops_checksum.get(rel_path) != checksum:
+            changed.append(rel_path)
+    for rel_path in post_ops_checksum:
+        if rel_path not in post_checksum and not _is_scope_noise(rel_path):
+            changed.append(rel_path)
+    return sorted(changed)
 
 
 def summarize_step_changes(

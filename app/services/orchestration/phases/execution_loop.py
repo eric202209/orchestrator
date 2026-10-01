@@ -132,6 +132,7 @@ from app.services.orchestration.validation.path_authority import PathAuthorityEr
 from app.services.orchestration.validation.workspace_guard import (
     TaskOperationContractViolation,
     compute_workspace_checksum,
+    detect_post_structured_op_mutations,
     detect_scope_violations,
     summarize_step_changes,
 )
@@ -667,6 +668,7 @@ def execute_step_loop(
             expected_files = step.get("expected_files", [])
 
         scope_violations: list = []
+        post_structured_op_mutations: list = []
         pre_step_checksum: dict = {}
         pre_step_file_snapshot: dict = {}
 
@@ -882,6 +884,21 @@ def execute_step_loop(
                         if local_shell_result is not None:
                             step_result = local_shell_result
                         else:
+                            # GR11: the structured ops are this step's mutation
+                            # authority.  Unless a command is itself an explicit
+                            # mutation form, the free-form runtime must not
+                            # change the workspace after them.
+                            post_structured_op_checksum = (
+                                compute_workspace_checksum(
+                                    orchestration_state.project_dir
+                                )
+                                if step_ops
+                                and not any(
+                                    ValidatorService._command_requires_mutation(command)
+                                    for command in step_commands
+                                )
+                                else None
+                            )
                             execution_prompt = assemble_execution_prompt(ctx, step)
                             step_timeout_seconds = determine_step_timeout(
                                 timeout_seconds=timeout_seconds,
@@ -929,6 +946,13 @@ def execute_step_loop(
                                 step_result = dispatch_outcome.step_result
                                 runtime_backend_result = (
                                     dispatch_outcome.runtime_backend_result
+                                )
+                            if post_structured_op_checksum is not None:
+                                post_structured_op_mutations = (
+                                    detect_post_structured_op_mutations(
+                                        orchestration_state.project_dir,
+                                        post_structured_op_checksum,
+                                    )
                                 )
             else:
                 step_result = {
@@ -1159,18 +1183,39 @@ def execute_step_loop(
                     },
                 )
 
-        if scope_violations:
-            authority_error = {
-                "code": "observed_path_outside_authority",
-                "message": "Execution mutated a path absent from AcceptedPathAuthority",
-                "paths": scope_violations[:20],
-            }
-            terminal_message = (
-                f"Execution observed mutation outside accepted authority on step "
-                f"{step_index + 1}: {', '.join(scope_violations[:20])}"
-            )
+        if scope_violations or post_structured_op_mutations:
+            if scope_violations:
+                authority_error = {
+                    "code": "observed_path_outside_authority",
+                    "message": "Execution mutated a path absent from AcceptedPathAuthority",
+                    "paths": scope_violations[:20],
+                }
+                terminal_message = (
+                    f"Execution observed mutation outside accepted authority on step "
+                    f"{step_index + 1}: {', '.join(scope_violations[:20])}"
+                )
+                terminal_status = "observed_scope_violation"
+                terminal_reason = "execution_observed_scope_violation"
+                observed_paths = scope_violations
+            else:
+                authority_error = {
+                    "code": "runtime_mutation_after_structured_ops",
+                    "message": (
+                        "Free-form runtime changed the workspace after this "
+                        "step's admitted structured operations"
+                    ),
+                    "paths": post_structured_op_mutations[:20],
+                }
+                terminal_message = (
+                    f"Execution runtime mutated the workspace after the admitted "
+                    f"structured operations on step {step_index + 1}: "
+                    f"{', '.join(post_structured_op_mutations[:20])}"
+                )
+                terminal_status = "post_structured_op_mutation"
+                terminal_reason = "execution_post_structured_op_mutation"
+                observed_paths = post_structured_op_mutations
             observed_files = sorted(
-                set(step_result.get("files_changed", []) or []) | set(scope_violations)
+                set(step_result.get("files_changed", []) or []) | set(observed_paths)
             )
             step_result["error"] = terminal_message
             step_record = StepResult(
@@ -1206,11 +1251,14 @@ def execute_step_loop(
                     parent_event_id=(step_started_event or {}).get("event_id"),
                     details={
                         "phase": "executing",
-                        "status": "observed_scope_violation",
+                        "status": terminal_status,
                         "step_index": step_index + 1,
                         "failure_category": "validation_failure",
                         "authority_identity": accepted_path_authority.authority_identity,
                         "observed_scope_violations": scope_violations[:20],
+                        "post_structured_op_mutations": post_structured_op_mutations[
+                            :20
+                        ],
                     },
                 )
                 write_orchestration_state_snapshot(
@@ -1237,12 +1285,13 @@ def execute_step_loop(
             write_project_state_snapshot_fn(db, project, task, session_id)
             return {
                 "status": "failed",
-                "reason": "execution_observed_scope_violation",
+                "reason": terminal_reason,
                 "failure_category": "validation_failure",
                 "authority_identity": accepted_path_authority.authority_identity,
                 "authority_error": authority_error,
                 "execution_output": step_output,
                 "observed_scope_violations": scope_violations,
+                "post_structured_op_mutations": post_structured_op_mutations,
             }
 
         step_record = StepResult(
