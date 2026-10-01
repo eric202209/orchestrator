@@ -2104,6 +2104,40 @@ def build_compact_planning_repair_prompt(
         nested_workspace_guidance,
     )
 
+    def _compose_observation_preserving_prompt() -> str:
+        """Keep both GR12 evidence blocks inside the compact repair envelope.
+
+        The ordinary compact contract is intentionally self-contained, but its
+        fixed guidance is too large when canonical materialization and the
+        bounded discovery observation are both present.  In that case the
+        evidence blocks are the valuable context; retain them verbatim and use
+        a smaller, equivalent repair contract around them.
+        """
+
+        reason_lines = "\n".join(
+            f"- {str(reason or '')[:100]}" for reason in (rejection_reasons or [])[:4]
+        )
+        return f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
+No prose or markdown. Repair the rejected plan; preserve valid steps.
+
+{guidance_block}
+Bad:
+{compact_invalid_output_excerpt(malformed_output)[:300]}
+
+Validation errors:
+{reason_lines or '- malformed or non-runnable planning output'}
+
+Rules: return 3 to 4 JSON step objects with description, commands, verification, expected_files, and optional ops. Use only supplied evidence and relative paths. Keep source materialization and advisory observation separate. Do not fabricate whole-file replacements; use grounded ops. Every mutation needs real verification. JSON only."""
+
+    if "## READ-ONLY OBSERVATION" in guidance_block:
+        observation_prompt = _apply_profile(
+            _compose_observation_preserving_prompt().rstrip(),
+            prompt_profile,
+            apply_prompt_profile,
+        )
+        if len(observation_prompt) <= effective_repair_prompt_max_chars():
+            return observation_prompt
+
     def _compose(
         *,
         output_chars: int,
