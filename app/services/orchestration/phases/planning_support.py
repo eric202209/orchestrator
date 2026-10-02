@@ -45,6 +45,7 @@ from app.services.orchestration.phases.planning_guidance_enforcement import (
     collect_repair_guidance_block as _collect_repair_guidance,
 )
 from app.services.orchestration.phases.post_plan_source_grounding import (
+    FAILURE_CLASS_PLAN_TARGET_UNGROUNDABLE,
     ground_post_plan_source_materialization,
 )
 from app.services.orchestration.run_state import mark_task_attempt_failed
@@ -1279,12 +1280,42 @@ def _abort_repeated_physical_src_import_repair(
     }
 
 
+POST_PLAN_GROUNDING_REJECTED_AFTER_REPAIR = "post_plan_grounding_rejected_after_repair"
+
+
+def _post_plan_grounding_repair_reasons(plan: Any, grounding: Any) -> list[str]:
+    """State the admission failure; never name the file or edit to choose."""
+
+    path = grounding.failure_path or "an existing file"
+    operations = sorted(
+        {
+            str(operation.get("op"))
+            for step in (plan if isinstance(plan, list) else [])
+            if isinstance(step, dict)
+            for operation in (step.get("ops") or [])
+            if isinstance(operation, dict)
+            and operation.get("op")
+            and operation.get("path") == grounding.failure_path
+        }
+    )
+    proposed = "/".join(operations) if operations else "mutation"
+    # Each line stays within the compact repair prompt's 100-char reason cut.
+    return [
+        f"{grounding.failure_code}: Plan mutates {path}",
+        f"That existing file has no complete authoritative source; {proposed} cannot be admitted",
+        "Use a Plan supported by the supplied source evidence, or meet existing grounding requirements",
+    ]
+
+
 def _ground_post_plan_sources_or_abort_missing(
     *,
     ctx: OrchestrationRunContext,
     retry_state: Any,
     output_text: str,
-) -> dict[str, str] | None:
+    planning_timeout_seconds: int | None = None,
+    prompt_profile: str = "default",
+    repair_planning_output: Callable[..., Dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
     grounding = ground_post_plan_source_materialization(
         ctx.orchestration_state.plan,
         project_dir=ctx.orchestration_state.project_dir,
@@ -1298,6 +1329,62 @@ def _ground_post_plan_sources_or_abort_missing(
             failure_reason += f" for {grounding.failure_path}"
         if grounding.failure_detail:
             failure_reason += f": {grounding.failure_detail}"
+        # GR13: a Plan that nominated an ungroundable existing file is a Plan
+        # defect.  It stays fail-closed for admission, but owns one pass of the
+        # existing bounded repair funnel with the unchanged evidence context.
+        # The repaired Plan is re-grounded on the next loop iteration; a second
+        # rejection is terminal and deterministic (never a blind task retry).
+        plan_target_ungroundable = (
+            grounding.failure_class == FAILURE_CLASS_PLAN_TARGET_UNGROUNDABLE
+        )
+        if (
+            plan_target_ungroundable
+            and repair_planning_output is not None
+            and planning_timeout_seconds is not None
+            and not retry_state.repair_prompt_used
+        ):
+            emit_phase_event(
+                ctx.orchestration_state,
+                ctx.emit_live,
+                level="WARN",
+                phase="planning",
+                message=(
+                    "[ORCHESTRATION] Post-Plan source grounding rejected the "
+                    "Plan's mutation target; starting bounded repair"
+                ),
+                details=grounding.to_dict(),
+            )
+            _emit_planning_diagnostics_contract_violation(
+                ctx,
+                reason=failure_type,
+                contract_violations=[failure_reason],
+                semantic_violation_codes=[failure_type],
+                contract_diagnostics=grounding.to_dict(),
+                output_text=output_text,
+                strategy_info="post_plan_source_grounding",
+            )
+            retry_state.last_repair_reason = failure_type
+            _record_repair_target(
+                retry_state, codes=[failure_type], details=grounding.to_dict()
+            )
+            planning_result = repair_planning_output(
+                ctx=ctx,
+                retry_state=retry_state,
+                planning_timeout_seconds=planning_timeout_seconds,
+                malformed_output=output_text,
+                reason=f"{failure_type}: {failure_reason}",
+                rejection_reasons=_post_plan_grounding_repair_reasons(
+                    ctx.orchestration_state.plan, grounding
+                ),
+                prompt_profile=prompt_profile,
+            )
+            retry_state.repair_prompt_used = True
+            retry_state.consecutive_failures += 1
+            return {"action": "continue", "planning_result": planning_result}
+        terminal_failure_type = failure_type
+        if plan_target_ungroundable:
+            terminal_failure_type = POST_PLAN_GROUNDING_REJECTED_AFTER_REPAIR
+            failure_reason = f"{failure_type}: {failure_reason}"
         ctx.orchestration_state.status = OrchestrationStatus.ABORTED
         ctx.orchestration_state.abort_reason = failure_reason
         emit_phase_event(
@@ -1319,14 +1406,14 @@ def _ground_post_plan_sources_or_abort_missing(
         )
         _finalize_planning_terminal_failure(
             ctx=ctx,
-            failure_type=failure_type,
+            failure_type=terminal_failure_type,
             failure_reason=failure_reason,
         )
         if ctx.restore_workspace_snapshot_if_needed:
             ctx.restore_workspace_snapshot_if_needed(
                 "post-Plan source grounding failed"
             )
-        return {"status": "failed", "reason": failure_type}
+        return {"status": "failed", "reason": terminal_failure_type}
     ctx.planner_source_materialization = grounding.materialization
     return _abort_missing_source_materialization_repair(
         ctx=ctx,
@@ -1986,6 +2073,63 @@ def _emit_planning_diagnostics_contract_violation(
         "[OPENCLAW][PLANNING_DIAGNOSTICS] contract violation detected",
         metadata=metadata,
     )
+
+
+def _immediate_repair_issue_fragments(
+    ctx: OrchestrationRunContext, blocking_repair_issues: dict[str, Any]
+) -> list[str]:
+    """Describe blocking immediate-repair issues for the first repair prompt."""
+
+    issue_fragments: list[str] = []
+    if blocking_repair_issues.get("non_runnable_steps"):
+        issue_fragments.append(
+            "non-runnable pseudo-commands in steps "
+            f"{blocking_repair_issues['non_runnable_steps'][:5]}"
+        )
+    if blocking_repair_issues.get("background_process_steps"):
+        issue_fragments.append(
+            "background processes in steps "
+            f"{blocking_repair_issues['background_process_steps'][:5]}"
+        )
+    if blocking_repair_issues.get("placeholder_only_steps"):
+        issue_fragments.append(
+            "placeholder-only implementation steps in steps "
+            f"{blocking_repair_issues['placeholder_only_steps'][:5]}"
+        )
+    if blocking_repair_issues.get("weak_verification_steps"):
+        issue_fragments.append(
+            "weak verification commands in steps "
+            f"{blocking_repair_issues['weak_verification_steps'][:5]}"
+        )
+    if blocking_repair_issues.get("stale_replace_ops_steps"):
+        issue_fragments.append(
+            "replace_in_file old text not found in workspace in steps "
+            f"{blocking_repair_issues['stale_replace_ops_steps'][:5]}"
+        )
+        issue_fragments.extend(
+            PlannerService.stale_replace_repair_hints(
+                ctx.orchestration_state.plan,
+                ctx.orchestration_state.project_dir,
+            )
+        )
+    if blocking_repair_issues.get("empty_replace_old_text_steps"):
+        issue_fragments.append(
+            "replace_in_file without old text in steps "
+            f"{blocking_repair_issues['empty_replace_old_text_steps'][:5]}"
+        )
+    if blocking_repair_issues.get("test_assertion_loss_ops_steps"):
+        issue_fragments.append(
+            "test file rewrite would remove existing assertions in steps "
+            f"{blocking_repair_issues['test_assertion_loss_ops_steps'][:5]}; "
+            "preserve existing tests and assertion intent"
+        )
+    if blocking_repair_issues.get("test_deletion_ops_steps"):
+        issue_fragments.append(
+            "test file deletion in steps "
+            f"{blocking_repair_issues['test_deletion_ops_steps'][:5]}; "
+            "do not delete existing tests during fallback repair"
+        )
+    return issue_fragments
 
 
 def _semantic_codes_for_immediate_repair_issues(

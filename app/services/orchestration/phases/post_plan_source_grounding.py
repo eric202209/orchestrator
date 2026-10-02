@@ -41,6 +41,12 @@ POST_PLAN_GROUNDING_CAPACITY_EXCEEDED = "POST_PLAN_GROUNDING_CAPACITY_EXCEEDED"
 POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE = "POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE"
 POST_PLAN_GROUNDING_VERSION_STALE = "POST_PLAN_GROUNDING_VERSION_STALE"
 
+# PHASE36-MAINT-GR13: the one failure class that is a defect of the candidate
+# Plan's own choice -- it nominated an existing file for which no complete
+# authoritative source can be built.  Only this class may be handed to the
+# bounded Plan-repair funnel; every other code keeps its existing routing.
+FAILURE_CLASS_PLAN_TARGET_UNGROUNDABLE = "plan_target_ungroundable"
+
 EXISTING_MUTATION_OPS = frozenset(
     {"write_file", "append_file", "replace_in_file", "delete_file"}
 )
@@ -56,6 +62,7 @@ class PostPlanSourceGroundingResult:
     failure_code: str | None = None
     failure_path: str | None = None
     failure_detail: str | None = None
+    failure_class: str | None = None
 
     @property
     def ok(self) -> bool:
@@ -79,6 +86,7 @@ def _failure(
     detail: str | None = None,
     grounded_paths: Iterable[str] = (),
     preflighted_paths: Iterable[str] = (),
+    failure_class: str | None = None,
 ) -> PostPlanSourceGroundingResult:
     return PostPlanSourceGroundingResult(
         materialization=materialization,
@@ -87,6 +95,7 @@ def _failure(
         failure_code=code,
         failure_path=path,
         failure_detail=detail,
+        failure_class=failure_class,
     )
 
 
@@ -470,6 +479,7 @@ def ground_post_plan_source_materialization(
                     POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE,
                     path=target.path.value,
                     detail="deterministic source builder did not return complete evidence",
+                    failure_class=FAILURE_CLASS_PLAN_TARGET_UNGROUNDABLE,
                 )
             additions.append(record)
 
@@ -504,6 +514,7 @@ def ground_post_plan_source_materialization(
 
 __all__ = [
     "EXISTING_MUTATION_OPS",
+    "FAILURE_CLASS_PLAN_TARGET_UNGROUNDABLE",
     "POST_PLAN_GROUNDING_CAPACITY_EXCEEDED",
     "POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE",
     "POST_PLAN_GROUNDING_MISSING",

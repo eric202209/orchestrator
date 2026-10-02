@@ -150,6 +150,7 @@ from app.services.orchestration.phases.planning_support import (
     _retry_with_minimal_prompt as __retry_with_minimal_prompt,
     select_minimal_prompt_first_strategy as __select_minimal_prompt_first_strategy,
     _semantic_codes_for_immediate_repair_issues,
+    _immediate_repair_issue_fragments,
     _should_repair_truncated_single_step_plan,
     _terminal_validation_failure_details,
     _terminal_planning_root_cause,
@@ -1394,7 +1395,15 @@ def execute_planning_phase(
                 ctx=ctx,
                 retry_state=retry_state,
                 output_text=output_text,
+                planning_timeout_seconds=planning_timeout_seconds,
+                prompt_profile=prompt_profile,
+                repair_planning_output=__repair_planning_output,
             )
+            if materialization_result and (
+                materialization_result.get("action") == "continue"
+            ):
+                planning_result = materialization_result["planning_result"]
+                continue
             if materialization_result:
                 return materialization_result
             immediate_repair_issues = PlannerService.find_immediate_repair_step_issues(
@@ -1467,55 +1476,9 @@ def execute_planning_phase(
                         immediate_repair_issues=blocking_repair_issues,
                     )
                 )
-                issue_fragments = []
-                if blocking_repair_issues.get("non_runnable_steps"):
-                    issue_fragments.append(
-                        "non-runnable pseudo-commands in steps "
-                        f"{blocking_repair_issues['non_runnable_steps'][:5]}"
-                    )
-                if blocking_repair_issues.get("background_process_steps"):
-                    issue_fragments.append(
-                        "background processes in steps "
-                        f"{blocking_repair_issues['background_process_steps'][:5]}"
-                    )
-                if blocking_repair_issues.get("placeholder_only_steps"):
-                    issue_fragments.append(
-                        "placeholder-only implementation steps in steps "
-                        f"{blocking_repair_issues['placeholder_only_steps'][:5]}"
-                    )
-                if blocking_repair_issues.get("weak_verification_steps"):
-                    issue_fragments.append(
-                        "weak verification commands in steps "
-                        f"{blocking_repair_issues['weak_verification_steps'][:5]}"
-                    )
-                if blocking_repair_issues.get("stale_replace_ops_steps"):
-                    issue_fragments.append(
-                        "replace_in_file old text not found in workspace in steps "
-                        f"{blocking_repair_issues['stale_replace_ops_steps'][:5]}"
-                    )
-                    issue_fragments.extend(
-                        PlannerService.stale_replace_repair_hints(
-                            ctx.orchestration_state.plan,
-                            ctx.orchestration_state.project_dir,
-                        )
-                    )
-                if blocking_repair_issues.get("empty_replace_old_text_steps"):
-                    issue_fragments.append(
-                        "replace_in_file without old text in steps "
-                        f"{blocking_repair_issues['empty_replace_old_text_steps'][:5]}"
-                    )
-                if blocking_repair_issues.get("test_assertion_loss_ops_steps"):
-                    issue_fragments.append(
-                        "test file rewrite would remove existing assertions in steps "
-                        f"{blocking_repair_issues['test_assertion_loss_ops_steps'][:5]}; "
-                        "preserve existing tests and assertion intent"
-                    )
-                if blocking_repair_issues.get("test_deletion_ops_steps"):
-                    issue_fragments.append(
-                        "test file deletion in steps "
-                        f"{blocking_repair_issues['test_deletion_ops_steps'][:5]}; "
-                        "do not delete existing tests during fallback repair"
-                    )
+                issue_fragments = _immediate_repair_issue_fragments(
+                    ctx, blocking_repair_issues
+                )
                 retry_state.last_repair_reason = "plan_contains_immediate_repair_issues"
                 semantic_violation_codes = _semantic_codes_for_immediate_repair_issues(
                     blocking_repair_issues
