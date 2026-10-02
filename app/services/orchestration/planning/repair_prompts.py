@@ -2104,7 +2104,10 @@ def build_compact_planning_repair_prompt(
         nested_workspace_guidance,
     )
 
-    def _compose_observation_preserving_prompt() -> str:
+    def _compose_observation_preserving_prompt(
+        current_guidance_block: str,
+        reason_limits: tuple[int, ...],
+    ) -> str:
         """Keep both GR12 evidence blocks inside the compact repair envelope.
 
         The ordinary compact contract is intentionally self-contained, but its
@@ -2115,14 +2118,21 @@ def build_compact_planning_repair_prompt(
         """
 
         reason_lines = "\n".join(
-            f"- {str(reason or '')[:100]}" for reason in (rejection_reasons or [])[:4]
+            f"- {str(reason or '')[:reason_limits[index]]}"
+            for index, reason in enumerate((rejection_reasons or [])[:4])
         )
+        malformed_excerpt = compact_invalid_output_excerpt(malformed_output)
+        if len(malformed_excerpt) > 300:
+            malformed_excerpt = (
+                f"{malformed_excerpt[:140]}\n...<truncated>...\n"
+                f"{malformed_excerpt[-140:]}"
+            )
         return f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose or markdown. Repair the rejected plan; preserve valid steps.
 
-{guidance_block}
+{current_guidance_block}
 Bad:
-{compact_invalid_output_excerpt(malformed_output)[:300]}
+{malformed_excerpt}
 
 Validation errors:
 {reason_lines or '- malformed or non-runnable planning output'}
@@ -2130,13 +2140,34 @@ Validation errors:
 Rules: return 3 to 4 JSON step objects with description, commands, verification, expected_files, and optional ops. Use only supplied evidence and relative paths. Keep source materialization and advisory observation separate. Do not fabricate whole-file replacements; use grounded ops. Every mutation needs real verification. JSON only."""
 
     if "## READ-ONLY OBSERVATION" in guidance_block:
-        observation_prompt = _apply_profile(
-            _compose_observation_preserving_prompt().rstrip(),
-            prompt_profile,
-            apply_prompt_profile,
-        )
-        if len(observation_prompt) <= effective_repair_prompt_max_chars():
-            return observation_prompt
+        observation_guidance_candidates = [guidance_block]
+        evidence_sections = []
+        headings = list(re.finditer(r"(?m)^## [^\n]+", guidance_block))
+        for index, heading in enumerate(headings):
+            if heading.group(0) not in {
+                "## CURRENT SOURCE MATERIALIZATION",
+                "## READ-ONLY OBSERVATION",
+            }:
+                continue
+            end = (
+                headings[index + 1].start()
+                if index + 1 < len(headings)
+                else len(guidance_block)
+            )
+            evidence_sections.append(guidance_block[heading.start() : end].strip())
+        if len(evidence_sections) == 2:
+            observation_guidance_candidates.append("\n\n".join(evidence_sections))
+        for observed_guidance in dict.fromkeys(observation_guidance_candidates):
+            for reason_limits in ((100, 100, 100, 100), (100, 50, 50, 50)):
+                observation_prompt = _apply_profile(
+                    _compose_observation_preserving_prompt(
+                        observed_guidance, reason_limits
+                    ).rstrip(),
+                    prompt_profile,
+                    apply_prompt_profile,
+                )
+                if len(observation_prompt) <= effective_repair_prompt_max_chars():
+                    return observation_prompt
 
     def _compose(
         *,
