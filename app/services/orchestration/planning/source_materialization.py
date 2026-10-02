@@ -108,12 +108,17 @@ HINT_AUTHORITY_TASK_DESCRIPTION = "task_description"
 HINT_AUTHORITY_PLANNER_CONTRACT = "planner_contract"
 # Located by a read-only discovery observation (search hit), never operator input.
 HINT_AUTHORITY_DISCOVERY_OBSERVATION = "discovery_observation"
+# Copied from a candidate Plan only as a bounded source locator.  This is not
+# source evidence and never grants mutation authority; post-Plan grounding
+# fences and verifies the resulting record independently.
+HINT_AUTHORITY_PLAN_OPERATION = "plan_operation"
 
 # Operator/contract hints always outrank observation-located hints.
 _HINT_AUTHORITY_RANK = {
     HINT_AUTHORITY_TASK_DESCRIPTION: 0,
     HINT_AUTHORITY_PLANNER_CONTRACT: 0,
     HINT_AUTHORITY_DISCOVERY_OBSERVATION: 1,
+    HINT_AUTHORITY_PLAN_OPERATION: 0,
 }
 
 # Deterministic hint-type ranking used when several hints match one file.
@@ -429,14 +434,16 @@ def extract_source_target_hints(
     *,
     planner_contract: Mapping[str, Any] | None = None,
     observation_text: str = "",
+    additional_hints: Iterable[SourceTargetHint] = (),
 ) -> tuple[SourceTargetHint, ...]:
-    """Extract bounded, high-confidence target hints from authoritative task input.
+    """Extract bounded, high-confidence target hints from task/evidence input.
 
     Only code-shaped literals are retained: exact calls, quoted or backticked
     snippets, and explicitly declared definition names.  Ordinary prose words are
     never treated as search terms.  ``observation_text`` is discovered Product
     source; its hints keep ``discovery_observation`` authority and never become
-    task or contract authority.
+    task or contract authority.  ``additional_hints`` are caller-supplied
+    locators and carry no source or mutation authority of their own.
     """
 
     text = str(task_description or "")
@@ -503,6 +510,19 @@ def extract_source_target_hints(
             )
             if len(hints) >= _MAXIMUM_TARGET_HINTS:
                 return tuple(hints)
+    for hint in additional_hints or ():
+        if not isinstance(hint, SourceTargetHint):
+            continue
+        candidate = hint.text.strip()
+        if not candidate:
+            continue
+        key = (candidate, hint.hint_type)
+        if key in seen:
+            continue
+        seen.add(key)
+        hints.append(hint)
+        if len(hints) >= _MAXIMUM_TARGET_HINTS:
+            break
     return tuple(hints)
 
 
@@ -1052,11 +1072,14 @@ def materialize_planner_source_context(
     creation_authorized_paths: Iterable[Any] | None = None,
     source_cache: dict[str, str] | None = None,
     observation_hint_text: str = "",
+    additional_target_hints: Iterable[SourceTargetHint] = (),
 ) -> PlannerSourceMaterialization:
     """Materialize only named paths through the existing bounded source reader.
 
     ``observation_hint_text`` may locate target regions but never contributes
     expected paths, creation authority, or task-authority hints.
+    ``additional_target_hints`` may locate a post-Plan mutation span but never
+    grants source or mutation authority; callers must re-ground and verify it.
     """
 
     root = Path(project_dir).resolve()
@@ -1093,6 +1116,7 @@ def materialize_planner_source_context(
         task_text,
         planner_contract=planner_contract,
         observation_text=observation_hint_text,
+        additional_hints=additional_target_hints,
     )
     source_cache = source_cache if source_cache is not None else {}
     priorities = _prioritized_source_paths(

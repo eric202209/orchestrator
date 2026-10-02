@@ -10,10 +10,13 @@ from app.services.orchestration.operations.file_ops_contract import (
     normalize_file_op_shape,
 )
 from app.services.orchestration.planning.source_materialization import (
+    HINT_AUTHORITY_PLAN_OPERATION,
+    HINT_TYPE_QUOTED_SNIPPET,
     SOURCE_STATUS_EXISTING,
     SOURCE_STATUS_NEW,
     MaterializedSourceFile,
     PlannerSourceMaterialization,
+    SourceTargetHint,
     materialize_planner_source_context,
     materialized_source_file,
 )
@@ -76,6 +79,7 @@ class PostPlanSourceGroundingResult:
 class _MutationTarget:
     path: CanonicalPath
     operation_names: tuple[str, ...]
+    replace_old_texts: tuple[str, ...] = ()
 
 
 def _failure(
@@ -104,7 +108,7 @@ def _plan_mutation_targets(
 ) -> tuple[tuple[_MutationTarget, ...], PostPlanSourceGroundingResult | None]:
     """Extract only explicit supported file-operation paths from the Plan."""
 
-    by_path: dict[str, tuple[CanonicalPath, list[str]]] = {}
+    by_path: dict[str, tuple[CanonicalPath, list[str], list[str]]] = {}
     if not isinstance(plan, list):
         return (), None
 
@@ -139,14 +143,23 @@ def _plan_mutation_targets(
                 )
             existing = by_path.get(canonical.value)
             if existing is None:
-                by_path[canonical.value] = (canonical, [operation_name])
+                by_path[canonical.value] = (canonical, [operation_name], [])
+                existing = by_path[canonical.value]
             elif operation_name not in existing[1]:
                 existing[1].append(operation_name)
+            if operation_name == "replace_in_file":
+                old_text = normalized.get("old")
+                if isinstance(old_text, str) and old_text:
+                    existing[2].append(old_text)
 
     return (
         tuple(
-            _MutationTarget(path=canonical, operation_names=tuple(operation_names))
-            for canonical, operation_names in by_path.values()
+            _MutationTarget(
+                path=canonical,
+                operation_names=tuple(operation_names),
+                replace_old_texts=tuple(dict.fromkeys(replace_old_texts)),
+            )
+            for canonical, operation_names, replace_old_texts in by_path.values()
         ),
         None,
     )
@@ -281,6 +294,56 @@ def _complete_grounded_record(
     if record.full_source_bytes != len(record.content.encode("utf-8")):
         return False
     return True
+
+
+def _mutation_local_grounded_record(
+    record: MaterializedSourceFile | None,
+    *,
+    target: _MutationTarget,
+    workspace_identity: str,
+    observation: Any,
+) -> bool:
+    """Return whether one bounded span can support a narrow exact replacement.
+
+    The Plan's ``old`` is only a locator here.  The record is hidden from the
+    provider and later version-fenced verification remains the authority.
+    Whole-file operations never call this predicate.
+    """
+
+    if (
+        record is None
+        or record.relative_path != target.path.value
+        or record.workspace_identity != workspace_identity
+        or record.status != SOURCE_STATUS_EXISTING
+        or record.content is None
+        or record.content_hash is None
+        or record.version_identity is None
+        or record.full_source_bytes != observation.byte_length
+        or not record.truncated
+        or not record.target_included
+        or record.target_match_count != 1
+        or len(target.replace_old_texts) != 1
+    ):
+        return False
+    old_text = target.replace_old_texts[0]
+    return record.target_hint == old_text and old_text in record.content
+
+
+def _replacement_target_hints(
+    target: _MutationTarget,
+) -> tuple[SourceTargetHint, ...]:
+    if "replace_in_file" not in target.operation_names:
+        return ()
+    if len(target.replace_old_texts) != 1:
+        return ()
+    return (
+        SourceTargetHint(
+            text=target.replace_old_texts[0],
+            hint_type=HINT_TYPE_QUOTED_SNIPPET,
+            authority=HINT_AUTHORITY_PLAN_OPERATION,
+            target_path=target.path.value,
+        ),
+    )
 
 
 def _merge_materialization(
@@ -464,16 +527,28 @@ def ground_post_plan_source_materialization(
             maximum_bytes_per_file=source_materialization.maximum_bytes_per_file,
             maximum_total_source_bytes=source_materialization.maximum_total_source_bytes,
             source_cache={},
+            additional_target_hints=tuple(
+                hint
+                for target, _ in missing_targets
+                for hint in _replacement_target_hints(target)
+            ),
         )
         grounded_map = grounded.file_map()
         for target, observation in missing_targets:
             record = grounded_map.get(target.path.value)
-            if not _complete_grounded_record(
+            complete = _complete_grounded_record(
                 record,
                 path=target.path.value,
                 workspace_identity=runtime_identity,
                 observation=observation,
-            ):
+            )
+            mutation_local = _mutation_local_grounded_record(
+                record,
+                target=target,
+                workspace_identity=runtime_identity,
+                observation=observation,
+            )
+            if not complete and not mutation_local:
                 return _failure(
                     source_materialization,
                     POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE,

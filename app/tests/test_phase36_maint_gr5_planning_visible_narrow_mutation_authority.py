@@ -197,7 +197,7 @@ def test_r5_evidence_stale_before_validation_is_rejected(tmp_path):
     assert not _validate(root, _plan(_replace()), materialization).accepted
 
 
-def test_r6_post_plan_grounding_of_truncated_target_fails_closed(tmp_path):
+def test_r6_post_plan_grounding_reacquires_truncated_narrow_target(tmp_path):
     root = _workspace(tmp_path)
     initial = materialize_planner_source_context(
         root, task_description=TASK, supporting_paths=()
@@ -208,8 +208,9 @@ def test_r6_post_plan_grounding_of_truncated_target_fails_closed(tmp_path):
         _plan(_replace()), project_dir=root, source_materialization=initial
     )
 
-    assert grounding.failure_code == POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE
-    assert not _validate(root, _plan(_replace()), grounding.materialization).accepted
+    assert grounding.ok, grounding.to_dict()
+    assert grounding.materialization.file_map()[TARGET].planning_visible is False
+    assert _validate(root, _plan(_replace()), grounding.materialization).accepted
 
 
 def test_r6_post_plan_record_supports_narrow_edit_but_never_gr2(tmp_path):
