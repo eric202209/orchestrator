@@ -2128,7 +2128,7 @@ def build_compact_planning_repair_prompt(
                 f"{malformed_excerpt[-140:]}"
             )
         return f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
-No prose or markdown. Repair the rejected plan; preserve valid steps.
+No prose or markdown. Repair the plan.
 
 {current_guidance_block}
 Bad:
@@ -2137,7 +2137,7 @@ Bad:
 Validation errors:
 {reason_lines or '- malformed or non-runnable planning output'}
 
-Rules: return 3 to 4 JSON step objects with description, commands, verification, expected_files, and optional ops. Use only supplied evidence and relative paths. Keep source materialization and advisory observation separate. Do not fabricate whole-file replacements; use grounded ops. Every mutation needs real verification. JSON only."""
+Rules: output 3-4 JSON steps with description, commands, verification, expected_files, and optional ops. Use supplied evidence and relative paths only. Keep source materialization separate from the advisory observation. Never fabricate whole-file replacements. Verify mutations. JSON only."""
 
     if "## READ-ONLY OBSERVATION" in guidance_block:
         observation_guidance_candidates = [guidance_block]
@@ -2158,7 +2158,11 @@ Rules: return 3 to 4 JSON step objects with description, commands, verification,
         if len(evidence_sections) == 2:
             observation_guidance_candidates.append("\n\n".join(evidence_sections))
         for observed_guidance in dict.fromkeys(observation_guidance_candidates):
-            for reason_limits in ((100, 100, 100, 100), (100, 50, 50, 50)):
+            for reason_limits in (
+                (100, 100, 100, 100),
+                (100, 50, 50, 50),
+                (100, 10, 10, 10),
+            ):
                 observation_prompt = _apply_profile(
                     _compose_observation_preserving_prompt(
                         observed_guidance, reason_limits
