@@ -714,6 +714,26 @@ def execute_step_loop(
         )
 
         # Pre-task audit: snapshot workspace before the step runs
+        runtime_provenance_context = dict(
+            getattr(runtime_service, "_runtime_provenance_context", {}) or {}
+        )
+        runtime_phase_timestamps = dict(
+            runtime_provenance_context.get("phase_timestamps") or {}
+        )
+        runtime_phase_timestamps["T0"] = datetime.now(timezone.utc).isoformat()
+        runtime_provenance_context.update(
+            {
+                "execution_step": step_index + 1,
+                "phase": "provider_initialization",
+                "phase_timestamps": runtime_phase_timestamps,
+            }
+        )
+        if runtime_service is not None:
+            setattr(
+                runtime_service,
+                "_runtime_provenance_context",
+                runtime_provenance_context,
+            )
         pre_step_checksum = compute_workspace_checksum(orchestration_state.project_dir)
         pre_step_file_snapshot = snapshot_file_contents(
             orchestration_state.project_dir, expected_files
@@ -724,6 +744,7 @@ def execute_step_loop(
             step_ops,
             accepted_path_authority=accepted_path_authority,
         )
+        runtime_phase_timestamps["T1"] = datetime.now(timezone.utc).isoformat()
         if not ops_result.get("success", False):
             step_result = {
                 "status": "failed",
@@ -913,6 +934,7 @@ def execute_step_loop(
                                 timeout_seconds=step_timeout_seconds,
                                 db=db,
                                 task_execution_id=ctx.task_execution_id,
+                                execution_step=step_index + 1,
                             )
                             step_result = dispatch_outcome.step_result
                             runtime_backend_result = (
@@ -942,6 +964,7 @@ def execute_step_loop(
                                     timeout_seconds=step_timeout_seconds,
                                     db=db,
                                     task_execution_id=ctx.task_execution_id,
+                                    execution_step=step_index + 1,
                                 )
                                 step_result = dispatch_outcome.step_result
                                 runtime_backend_result = (
@@ -1385,18 +1408,24 @@ def execute_step_loop(
             )
         step_finished_event = None
         try:
+            step_finished_details = {
+                "step_index": step_index + 1,
+                "step_total": len(orchestration_state.plan),
+                "status": step_status,
+                "error": step_record.error_message[:240],
+            }
+            runtime_result_payload = step_result.get("_runtime_backend_result") or {}
+            if runtime_result_payload.get("runtime_pollution"):
+                step_finished_details["runtime_pollution"] = runtime_result_payload[
+                    "runtime_pollution"
+                ]
             step_finished_event = append_orchestration_event(
                 project_dir=control_state_of(orchestration_state),
                 session_id=session_id,
                 task_id=task_id,
                 event_type=EventType.STEP_FINISHED,
                 parent_event_id=(step_started_event or {}).get("event_id"),
-                details={
-                    "step_index": step_index + 1,
-                    "step_total": len(orchestration_state.plan),
-                    "status": step_status,
-                    "error": step_record.error_message[:240],
-                },
+                details=step_finished_details,
             )
         except Exception:
             pass

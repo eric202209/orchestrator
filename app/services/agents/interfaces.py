@@ -55,9 +55,16 @@ class RuntimeBackendResult:
     tokens_in: Optional[int] = None
     tokens_out: Optional[int] = None
     token_source: Optional[str] = None
+    runtime_pollution: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        # Preserve the historical normalized-result JSON shape when no
+        # containment evidence exists; provenance is additive at the safety
+        # boundary only.
+        if self.runtime_pollution is None:
+            payload.pop("runtime_pollution", None)
+        return payload
 
 
 @dataclass(frozen=True)

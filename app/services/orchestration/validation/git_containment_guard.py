@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Subcommands that mutate history or refs and are always blocked.
 BLOCKED_GIT_MUTATION_SUBCOMMANDS = (
+    "init",
     "commit",
     "push",
     "pull",
@@ -59,7 +60,7 @@ deny() {{
 }}
 
 case "$sub" in
-  commit|push|pull|rebase|merge|reset|checkout|switch)
+  init|commit|push|pull|rebase|merge|reset|checkout|switch)
     deny "$sub"
     ;;
   branch)

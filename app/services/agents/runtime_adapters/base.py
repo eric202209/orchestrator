@@ -75,4 +75,9 @@ def runtime_result_from_mapping(
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         token_source=token_source,
+        runtime_pollution=(
+            result.get("runtime_pollution")
+            if isinstance(result.get("runtime_pollution"), dict)
+            else None
+        ),
     )
