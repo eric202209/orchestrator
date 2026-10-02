@@ -13,6 +13,9 @@ from app.services.human_guidance.plan_validator import (
     check_plan_guidance_violations_if_enabled as _check_plan_violations,
 )
 from app.services.orchestration.events.telemetry import emit_phase_event
+from app.services.orchestration.planning.source_materialization import (
+    observed_candidate_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +91,15 @@ def collect_repair_guidance_block(ctx: Any) -> str:
         str(getattr(ctx, "prompt", "") or "")
     )
     source_materialization = getattr(ctx, "planner_source_materialization", None)
+    # Repair continues the Planning attempt, so its source block keeps the
+    # attempt's observed-path scope (the replace modes the first pass offered).
     source_block = (
-        source_materialization.to_prompt_block(provider_safe=True)
+        source_materialization.to_prompt_block(
+            provider_safe=True,
+            additional_candidate_paths=observed_candidate_paths(
+                getattr(ctx, "read_only_observation", None)
+            ),
+        )
         if source_materialization is not None
         else ""
     )

@@ -434,10 +434,12 @@ def test_task222_provider_free_orientation_informed_readiness():
     assert handle.path == TASK_222_TARGET
     assert handle.target_id.startswith("tgt_")
 
-    # 7. re-derived provider capabilities
+    # 7. re-derived provider capabilities; an observed path is in the same
+    # replace scope for legacy old/new as for semantic handles (PHASE36-MAINT
+    # PMAC).  Affordance only: authority is unchanged (8/9/10).
     assert provider_planning_contract_capabilities(
         materialization, additional_candidate_paths=candidates
-    ) == (True, False)
+    ) == (True, True)
 
     # 8/9/10. visibility grants no authority and creates no new-file route
     assert record.expected is False

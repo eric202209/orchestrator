@@ -34,6 +34,7 @@ from app.services.orchestration.planning.workspace_identity import (
     render_planner_workspace_identity,
 )
 from app.services.orchestration.planning.source_materialization import (
+    provider_complete_existing_source_available,
     provider_planning_contract_capabilities,
 )
 from app.services.workspace.path_display import render_workspace_path_for_prompt
@@ -188,7 +189,9 @@ def build_minimal_planning_prompt(
                 additional_candidate_paths=additional_candidate_paths,
             )
         )
-        existing_source_available = legacy_replace_available
+        existing_source_available = provider_complete_existing_source_available(
+            source_materialization
+        )
     ops_contract = _render_ops_first_contract(
         semantic_mode_available=semantic_mode_available,
         legacy_replace_available=legacy_replace_available,
@@ -330,7 +333,9 @@ def build_ultra_minimal_planning_prompt(
                 additional_candidate_paths=additional_candidate_paths,
             )
         )
-        existing_source_available = legacy_replace_available
+        existing_source_available = provider_complete_existing_source_available(
+            source_materialization
+        )
     ops_contract = _render_ops_first_contract(
         semantic_mode_available=semantic_mode_available,
         legacy_replace_available=legacy_replace_available,

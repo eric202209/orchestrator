@@ -1530,6 +1530,62 @@ def render_planner_source_materialization(
     return "\n".join(lines)
 
 
+def _legacy_replace_source_available(
+    materialization: PlannerSourceMaterialization,
+    additional_candidate_paths: Iterable[Any] = (),
+) -> bool:
+    """Whether Planning was given current source it may copy an exact ``old`` from.
+
+    The scope is the semantic inventory's: an ``expected`` record, or a path
+    the completed read-only observation selected.  A truncated record still
+    qualifies: validation verifies ``old`` against the version-fenced full file
+    (Phase 32H-1, GR5), so a missing, stale or non-unique ``old`` fails closed.
+    Truncation never grants whole-file rewrite (GR2); see
+    ``provider_complete_existing_source_available``.  New-file and
+    omitted-source records still cannot invite fabricated ``old`` text.
+    """
+
+    from app.services.orchestration.validation.path_authority import (
+        PathAuthorityError,
+        declare,
+    )
+
+    observed: set[str] = set()
+    for value in additional_candidate_paths or ():
+        try:
+            observed.add(declare(value).value)
+        except (PathAuthorityError, TypeError, ValueError):
+            continue
+    return any(
+        item.status == SOURCE_STATUS_EXISTING
+        and (item.expected or item.relative_path in observed)
+        and item.content is not None
+        and int(item.included_source_bytes or 0) > 0
+        for item in materialization.files
+    )
+
+
+def provider_complete_existing_source_available(
+    materialization: PlannerSourceMaterialization | None,
+) -> bool:
+    """Whether an expected existing file's complete source was materialized.
+
+    Only this makes the whole-file ``write_file`` route of the existing-file
+    mutation contract truthful (GR2 rejects partial-source rewrites).
+    """
+
+    if not isinstance(materialization, PlannerSourceMaterialization):
+        return False
+    return any(
+        item.status == SOURCE_STATUS_EXISTING
+        and item.expected
+        and item.content is not None
+        and not item.truncated
+        and int(item.included_source_bytes or 0) > 0
+        for item in materialization.files
+    )
+
+
 def provider_planning_contract_capabilities(
     materialization: PlannerSourceMaterialization | None,
     *,
@@ -1538,10 +1594,8 @@ def provider_planning_contract_capabilities(
     """Return ``(semantic_available, grounded_legacy_available)``.
 
     Semantic availability is derived from the same filtered inventory that
-    renders provider-visible target handles.  Legacy replacement is available
-    only when an existing, non-truncated source body is actually materialized;
-    new-file and omitted-source records therefore cannot invite fabricated
-    ``old`` text.
+    renders provider-visible target handles.  Legacy replacement availability
+    follows ``_legacy_replace_source_available``.
     """
 
     if not isinstance(materialization, PlannerSourceMaterialization):
@@ -1554,15 +1608,9 @@ def provider_planning_contract_capabilities(
         materialization,
         additional_candidate_paths=additional_candidate_paths,
     )
-    grounded_legacy = any(
-        item.status == SOURCE_STATUS_EXISTING
-        and item.expected
-        and item.content is not None
-        and not item.truncated
-        and int(item.included_source_bytes or 0) > 0
-        for item in materialization.files
+    return bool(inventory.handles), _legacy_replace_source_available(
+        materialization, additional_candidate_paths
     )
-    return bool(inventory.handles), grounded_legacy
 
 
 def _render_provider_planner_source_materialization(
@@ -1582,13 +1630,8 @@ def _render_provider_planner_source_materialization(
         materialization,
         additional_candidate_paths=additional_candidate_paths,
     )
-    grounded_legacy = any(
-        item.status == SOURCE_STATUS_EXISTING
-        and item.expected
-        and item.content is not None
-        and not item.truncated
-        and int(item.included_source_bytes or 0) > 0
-        for item in materialization.files
+    grounded_legacy = _legacy_replace_source_available(
+        materialization, additional_candidate_paths
     )
     handles = {handle.path: handle for handle in inventory.handles}
     lines = [
@@ -1615,6 +1658,8 @@ def _render_provider_planner_source_materialization(
         lines[4:4] = [
             "Semantic target mode is unavailable for this task. Do not emit target_id.",
             "Legacy replace_in_file may use exact old/new from the supplied current source evidence.",
+            "Copy old verbatim from text supplied for that path, including read-only observation text; "
+            "it is verified against the current full file and a missing, stale or non-unique old is rejected.",
         ]
     else:
         lines[4:4] = [
