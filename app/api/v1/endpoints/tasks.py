@@ -1335,6 +1335,11 @@ def accept_latest_task_change_set(
             status_code=409,
             detail=f"Change set has already been {disposition}",
         )
+    if (change_set.get("review_decision") or {}).get("evaluator_pending"):
+        raise HTTPException(
+            status_code=409,
+            detail="Evaluator assessment is still pending for this change set",
+        )
 
     reason = (payload.note or "operator_accepted_change_set").strip()
     try:

@@ -17,6 +17,9 @@ from app.services.orchestration.planning.read_only_discovery import (
 from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
 )
+from app.services.orchestration.execution.executor_workspace_binding import (
+    EPHEMERAL_AGENT_ID,
+)
 
 
 def test_model2_packets_reuse_production_prompt_and_isolate_profile_envelope():
@@ -44,7 +47,9 @@ def test_model2_ephemeral_identity_and_pl18_do_not_mutate_product_state(tmp_path
         harness.ARMS["B"], runtime_workspace
     )
     try:
-        assert identity["agent_id"] == "post33-model2-runtime-runner"
+        # ORS1 owns normal sandbox identity; the legacy runner_agent_id is
+        # compatibility-only and must not replace the synthetic agent.
+        assert identity["agent_id"] == EPHEMERAL_AGENT_ID
         assert identity["model"] == "ollama/qwen3-coder:30b"
         assert identity["tools"] == {"deny": ["*"]}
     finally:

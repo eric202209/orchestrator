@@ -577,7 +577,10 @@ def _configure_ephemeral_service(
     configuration = RoleRuntimeConfiguration(
         role=BackendRole.PLANNING,
         backend_name=arm["backend"],
-        model_family=arm["model_family"],
+        # The runtime binding resolves the explicit provider/model reference
+        # against the ephemeral catalog.  The historical unqualified A/C model
+        # label is no longer present in the operator catalog.
+        model_family=arm["provider_model_ref"],
         adaptation_profile=arm["profile"],
     )
     service_db = EvaluationSessionLocal()

@@ -529,6 +529,28 @@ class ChangesetService:
             self.db.commit()
         return record
 
+    def update_task_execution_change_set_review_decision(
+        self,
+        *,
+        task_execution_id: int,
+        review_decision: dict[str, Any],
+        commit: bool = True,
+    ) -> Optional[TaskExecutionChangeSet]:
+        """Persist the authoritative post-evaluator Review projection."""
+
+        record = (
+            self.db.query(TaskExecutionChangeSet)
+            .filter(TaskExecutionChangeSet.task_execution_id == task_execution_id)
+            .first()
+        )
+        if not record:
+            return None
+        record.review_decision = dict(review_decision)
+        record.review_reason = review_decision.get("reason")
+        if commit:
+            self.db.commit()
+        return record
+
     def persist_task_execution_change_set(
         self,
         project: Project,

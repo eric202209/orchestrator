@@ -1,6 +1,7 @@
 """Task completion and finalization flow."""
 
 import asyncio
+import difflib
 import hashlib
 import json
 import os
@@ -1283,6 +1284,224 @@ _EVALUATOR_PASS_LINE = re.compile(
     r"^[\s*_#>-]*VERDICT[\s*_]*:[\s*_]*PASS[\s*_.]*$", re.IGNORECASE | re.MULTILINE
 )
 
+_EVALUATOR_DIFF_MAX_FILES = 12
+_EVALUATOR_DIFF_MAX_FILE_BYTES = 16_000
+_EVALUATOR_DIFF_MAX_CHARS = 12_000
+_EVALUATOR_VERIFICATION_MAX_CHARS = 1_200
+
+
+def _evaluator_file_path(root: Any, relative_path: str) -> Optional[Path]:
+    """Resolve one Candidate evidence path without granting filesystem authority."""
+
+    if not root or not relative_path:
+        return None
+    root_path = Path(str(root)).resolve()
+    candidate = (root_path / str(relative_path)).resolve()
+    try:
+        candidate.relative_to(root_path)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _read_evaluator_file(
+    root: Any, relative_path: str
+) -> tuple[bool, Optional[str], Optional[str], bool]:
+    """Read bounded text and the full hash of one canonical evidence file."""
+
+    path = _evaluator_file_path(root, relative_path)
+    if path is None or not path.is_file():
+        return False, None, None, False
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return False, None, None, False
+    digest = hashlib.sha256(raw).hexdigest()
+    truncated = len(raw) > _EVALUATOR_DIFF_MAX_FILE_BYTES
+    bounded = raw[:_EVALUATOR_DIFF_MAX_FILE_BYTES]
+    return True, bounded.decode("utf-8", errors="replace"), digest, truncated
+
+
+def _build_evaluator_candidate_evidence(
+    candidate_evidence: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Project the persisted ChangeSet artifact into bounded factual evidence."""
+
+    payload = candidate_evidence or {}
+    change_set = payload.get("change_set") if isinstance(payload, dict) else None
+    if not isinstance(change_set, dict):
+        return {
+            "authority": "persisted_task_execution_change_set_artifact",
+            "status": "unavailable",
+            "reason": "candidate_change_set_not_supplied",
+        }
+
+    artifact_path = change_set.get("artifact_path")
+    snapshot_path = change_set.get("snapshot_path")
+    paths = list(
+        dict.fromkeys(
+            str(path)
+            for key in ("added_files", "modified_files", "deleted_files")
+            for path in (change_set.get(key) or [])
+            if str(path).strip()
+        )
+    )
+    files: list[Dict[str, Any]] = []
+    diff_parts: list[str] = []
+    diff_chars = 0
+    truncated = False
+    incomplete = False
+    for relative_path in paths[:_EVALUATOR_DIFF_MAX_FILES]:
+        before_present, before_text, before_hash, before_truncated = (
+            _read_evaluator_file(snapshot_path, relative_path)
+        )
+        candidate_present, candidate_text, candidate_hash, candidate_truncated = (
+            _read_evaluator_file(artifact_path, relative_path)
+        )
+        before_lines = (
+            before_text.splitlines(keepends=True) if before_present else ["<missing>\n"]
+        )
+        candidate_lines = (
+            candidate_text.splitlines(keepends=True)
+            if candidate_present
+            else ["<missing>\n"]
+        )
+        diff = "".join(
+            difflib.unified_diff(
+                before_lines,
+                candidate_lines,
+                fromfile=f"BASELINE/{relative_path}",
+                tofile=f"CANDIDATE/{relative_path}",
+                lineterm="\n",
+            )
+        )
+        remaining = _EVALUATOR_DIFF_MAX_CHARS - diff_chars
+        if len(diff) > remaining:
+            truncated = True
+        if remaining > 0:
+            diff_parts.append(diff[:remaining])
+            diff_chars += min(len(diff), remaining)
+        truncated = truncated or before_truncated or candidate_truncated
+        expected_before = relative_path not in (change_set.get("added_files") or [])
+        expected_candidate = relative_path not in (
+            change_set.get("deleted_files") or []
+        )
+        incomplete = incomplete or (expected_before and not before_present)
+        incomplete = incomplete or (expected_candidate and not candidate_present)
+        files.append(
+            {
+                "path": relative_path,
+                "before_present": before_present,
+                "candidate_present": candidate_present,
+                "before_sha256": before_hash,
+                "candidate_sha256": candidate_hash,
+                "content_truncated": before_truncated or candidate_truncated,
+            }
+        )
+
+    omitted_files = max(0, len(paths) - _EVALUATOR_DIFF_MAX_FILES)
+    if omitted_files:
+        truncated = True
+    if diff_chars >= _EVALUATOR_DIFF_MAX_CHARS:
+        truncated = True
+    status = (
+        "complete"
+        if artifact_path and not truncated and not incomplete
+        else "bounded_or_incomplete"
+    )
+    return {
+        "authority": "persisted_task_execution_change_set_artifact",
+        "status": status,
+        "change_set_id": change_set.get("change_set_id"),
+        "task_execution_id": change_set.get("task_execution_id"),
+        "artifact_manifest_path": change_set.get("artifact_manifest_path"),
+        "artifact_path": artifact_path,
+        "modified_files": list(change_set.get("modified_files") or []),
+        "added_files": list(change_set.get("added_files") or []),
+        "deleted_files": list(change_set.get("deleted_files") or []),
+        "files": files,
+        "unified_diff": "".join(diff_parts),
+        "files_omitted": omitted_files,
+        "truncated": truncated,
+        "incomplete": incomplete,
+    }
+
+
+def _build_evaluator_verification_evidence(
+    orchestration_state: Any, validation: Any
+) -> Dict[str, Any]:
+    """Project deterministic validation and post-step results for the evaluator."""
+
+    if isinstance(validation, dict):
+        details = validation.get("details") or {}
+        validation_status = validation.get("status")
+        candidate_identity = validation.get("candidate_identity")
+    else:
+        details = getattr(validation, "details", None) or {}
+        validation_status = getattr(validation, "status", None)
+        candidate_identity = getattr(validation, "candidate_identity", None)
+    raw_quality = details.get("validation_evidence") or {}
+    quality_keys = (
+        "command_quality",
+        "applicable_command_quality",
+        "verification_insufficient",
+        "requires_independent_evidence",
+        "has_independent_regression_test",
+        "verification_invalidated_by_later_mutation",
+        "command_quality_by_step",
+        "semantic_violation_codes",
+        "behavior_baseline_passed",
+    )
+    quality = {key: raw_quality[key] for key in quality_keys if key in raw_quality}
+    plan_by_step = {
+        item.get("step_number"): item
+        for item in (getattr(orchestration_state, "plan", None) or [])
+        if isinstance(item, dict)
+    }
+    steps: list[Dict[str, Any]] = []
+    for result in (getattr(orchestration_state, "execution_results", None) or [])[:20]:
+        if isinstance(result, dict):
+            step_number = result.get("step_number")
+            status = result.get("status")
+            files_changed = result.get("files_changed") or []
+            verification_output = result.get("verification_output")
+            error_message = result.get("error_message") or result.get("error")
+        else:
+            step_number = getattr(result, "step_number", None)
+            status = getattr(result, "status", None)
+            files_changed = getattr(result, "files_changed", []) or []
+            verification_output = getattr(result, "verification_output", "")
+            error_message = getattr(result, "error_message", "")
+        plan_step = plan_by_step.get(step_number) or {}
+        steps.append(
+            {
+                "step_number": step_number,
+                "status": str(status or ""),
+                "verification_command": str(plan_step.get("verification") or ""),
+                "files_changed": [str(path) for path in files_changed[:20]],
+                "verification_output": str(verification_output or "")[
+                    :_EVALUATOR_VERIFICATION_MAX_CHARS
+                ],
+                "error": str(error_message or "")[:500],
+            }
+        )
+    return {
+        "authority": "deterministic_candidate_validator_and_execution_records",
+        "validation_status": validation_status,
+        "candidate_identity": candidate_identity,
+        "quality": quality,
+        "steps": steps,
+        "independent_evidence": {
+            key: quality[key]
+            for key in (
+                "requires_independent_evidence",
+                "has_independent_regression_test",
+                "behavior_baseline_passed",
+            )
+            if key in quality
+        },
+    }
+
 
 def _run_evaluator(
     *,
@@ -1290,6 +1509,8 @@ def _run_evaluator(
     orchestration_state: Any,
     prompt: str,
     summary: str,
+    candidate_evidence: Optional[Dict[str, Any]] = None,
+    verification_evidence: Any = None,
     emit_live: Any,
     logger: Any,
 ) -> Dict[str, Any]:
@@ -1318,6 +1539,12 @@ def _run_evaluator(
             ensure_ascii=True,
             indent=2,
         )
+        plan_intent = json.dumps(
+            list(getattr(orchestration_state, "plan", None) or [])[:10],
+            ensure_ascii=True,
+            indent=2,
+            default=str,
+        )
         steps_text = "\n".join(
             (
                 f"- {r.get('step_title', r.get('step', ''))}: {r.get('status', '')}"
@@ -1330,13 +1557,30 @@ def _run_evaluator(
             f"- {f}"
             for f in (getattr(orchestration_state, "changed_files", []) or [])[:30]
         )
+        actual_candidate = _build_evaluator_candidate_evidence(candidate_evidence)
+        verification = _build_evaluator_verification_evidence(
+            orchestration_state, verification_evidence
+        )
         evaluator_prompt = (
             "You are an independent QA evaluator. Grade the following completed task.\n\n"
-            f"## Task goal\n{prompt}\n\n"
-            f"## Control-plane reasoning artifact\n{reasoning_summary}\n\n"
+            f"## TASK_OBJECTIVE\n{prompt}\n\n"
+            "## PLAN_INTENT (advisory; not proof of implementation)\n"
+            f"{plan_intent}\n\n"
+            "## MODEL_GENERATED_SUMMARY (advisory only)\n"
+            f"Control-plane reasoning artifact:\n{reasoning_summary}\n\n"
             f"## Steps executed\n{steps_text or '(none recorded)'}\n\n"
             f"## Files changed\n{changed_files_text or '(none recorded)'}\n\n"
-            f"## Agent summary\n{summary[:600] or '(no summary)'}\n\n"
+            f"Agent summary:\n{summary[:600] or '(no summary)'}\n\n"
+            "## ACTUAL_CANDIDATE_CHANGE (AUTHORITATIVE_CANDIDATE_EVIDENCE)\n"
+            f"{json.dumps(actual_candidate, ensure_ascii=True, indent=2)}\n\n"
+            "## VERIFICATION_EVIDENCE (AUTHORITATIVE_VERIFICATION_EVIDENCE)\n"
+            f"{json.dumps(verification, ensure_ascii=True, indent=2)}\n\n"
+            "## VERIFICATION_QUALITY\n"
+            f"{json.dumps(verification.get('quality') or {}, ensure_ascii=True, indent=2)}\n\n"
+            "## INDEPENDENT_EVIDENCE\n"
+            f"{json.dumps(verification.get('independent_evidence') or {}, ensure_ascii=True, indent=2)}\n\n"
+            "Plan intent is not proof of implementation. Smoke or structural verification is not proof of Product behavior. "
+            "If authoritative Candidate evidence is unavailable, bounded, truncated, or conflicts with a claim, return NEEDS_REVIEW and do not award unsupported correctness credit.\n\n"
             "## Evaluation criteria\n"
             "1. **Goal coverage** – Does the work address the full task goal? (0–3)\n"
             "   Check alignment with the reasoning artifact intent and planned actions.\n"
@@ -1348,6 +1592,7 @@ def _run_evaluator(
             "TOTAL: X/10\n"
             "VERDICT: PASS or NEEDS_REVIEW\n"
             "NOTES: one-sentence rationale\n"
+            "Each field must be on its own line; VERDICT must be a standalone line and must not be embedded in TOTAL or NOTES.\n"
         )
         eval_result = asyncio.run(
             runtime_service.execute_task(

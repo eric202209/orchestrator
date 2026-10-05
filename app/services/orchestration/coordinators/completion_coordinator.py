@@ -1161,14 +1161,49 @@ class CompletionCoordinator:
             **review_decision,
             "verification_insufficient": verification_insufficient,
         }
-        evaluator_result = None
-        if (
+
+        def _persist_review_projection(decision: dict[str, Any]) -> None:
+            """Keep the stored API projection aligned with authoritative Review."""
+
+            if not task_change_set or not ctx.task_execution_id:
+                return
+            updater = getattr(
+                task_service,
+                "update_task_execution_change_set_review_decision",
+                None,
+            )
+            if not callable(updater):
+                return
+            _checkpointed(
+                "review_decision_projection",
+                lambda: updater(
+                    task_execution_id=ctx.task_execution_id,
+                    review_decision=decision,
+                    commit=False,
+                ),
+            )
+            db.commit()
+
+        evaluator_pending = bool(
             task_change_set
             and ctx.task_execution_id
             and not should_hold_for_review
             and publication_allowed
             and review_decision.get("outcome") == "auto_promote"
-        ):
+        )
+        if evaluator_pending:
+            _persist_review_projection(
+                {
+                    **review_decision,
+                    "outcome": "hold_for_review",
+                    "held_for_review": True,
+                    "reason": "evaluator_assessment_pending",
+                    "publication_eligible": False,
+                    "evaluator_pending": True,
+                }
+            )
+        evaluator_result = None
+        if evaluator_pending:
             evaluator_result = _checkpointed(
                 "evaluator_completed",
                 lambda: _run_evaluator(
@@ -1176,6 +1211,8 @@ class CompletionCoordinator:
                     orchestration_state=orchestration_state,
                     prompt=prompt,
                     summary=wm_summary,
+                    candidate_evidence={"change_set": task_change_set},
+                    verification_evidence=completion_validation,
                     emit_live=emit_live,
                     logger=logger,
                 ),
@@ -1232,6 +1269,13 @@ class CompletionCoordinator:
                     "verdict": review_decision.get("evaluator_verdict"),
                     "reason": "verification_insufficient_for_auto_promotion",
                 },
+            )
+        if evaluator_pending:
+            _persist_review_projection(
+                {
+                    **review_decision,
+                    "evaluator_pending": False,
+                }
             )
         if task_change_set and project and ctx.runtime_workspace_used:
             task_service.retain_workspace_snapshot(

@@ -477,6 +477,19 @@ class TaskService:
             commit=commit,
         )
 
+    def update_task_execution_change_set_review_decision(
+        self,
+        *,
+        task_execution_id: int,
+        review_decision: dict[str, Any],
+        commit: bool = True,
+    ) -> Optional[TaskExecutionChangeSet]:
+        return self.changesets.update_task_execution_change_set_review_decision(
+            task_execution_id=task_execution_id,
+            review_decision=review_decision,
+            commit=commit,
+        )
+
     def persist_task_execution_change_set(
         self,
         project: Project,
