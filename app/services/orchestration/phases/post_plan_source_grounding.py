@@ -274,6 +274,7 @@ def _complete_grounded_record(
     path: str,
     workspace_identity: str,
     observation: Any,
+    replace_old_texts: tuple[str, ...] = (),
 ) -> bool:
     if record is None or record.relative_path != path:
         return False
@@ -293,6 +294,11 @@ def _complete_grounded_record(
         return False
     if record.full_source_bytes != len(record.content.encode("utf-8")):
         return False
+    if replace_old_texts:
+        if len(replace_old_texts) != 1:
+            return False
+        if record.content.count(replace_old_texts[0]) > 1:
+            return False
     return True
 
 
@@ -541,6 +547,7 @@ def ground_post_plan_source_materialization(
                 path=target.path.value,
                 workspace_identity=runtime_identity,
                 observation=observation,
+                replace_old_texts=target.replace_old_texts,
             )
             mutation_local = _mutation_local_grounded_record(
                 record,

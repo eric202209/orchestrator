@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from app.services.orchestration.phases.post_plan_source_grounding import (
+    FAILURE_CLASS_PLAN_TARGET_UNGROUNDABLE,
     POST_PLAN_GROUNDING_CAPACITY_EXCEEDED,
     POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE,
     POST_PLAN_GROUNDING_PROTECTED,
@@ -175,6 +176,22 @@ def test_ambiguous_old_fails_closed(tmp_path):
     )
     assert not result.ok
     assert result.failure_code == POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE
+
+
+def test_missing_unmaterialized_small_target_duplicate_old_fails_closed(tmp_path):
+    root = _workspace(tmp_path, OLD + "middle = 2\n" + OLD)
+    initial = materialize_planner_source_context(
+        root, task_description=TASK, expected_paths=(), supporting_paths=()
+    )
+    assert TARGET not in initial.file_map()
+
+    result = ground_post_plan_source_materialization(
+        _replace_plan(), project_dir=root, source_materialization=initial
+    )
+
+    assert not result.ok
+    assert result.failure_code == POST_PLAN_GROUNDING_INCOMPLETE_EVIDENCE
+    assert result.failure_class == FAILURE_CLASS_PLAN_TARGET_UNGROUNDABLE
 
 
 def test_stale_version_after_reacquisition_fails_closed(tmp_path):
