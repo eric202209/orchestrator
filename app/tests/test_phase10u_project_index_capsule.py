@@ -126,7 +126,9 @@ def test_repair_prompt_includes_capsule_without_exceeding_budget(tmp_path):
     assert "PROJECT STRUCTURE CAPSULE" in prompt
     assert "- src/ledger_app/summary.py" in prompt
     assert "Use these paths as workspace facts." in prompt
-    assert "{op,path,target_id,new}" in prompt
+    # No target handle is issued, so repair must not advertise the target-ID shape.
+    assert "{op,path,target_id,new}" not in prompt
+    assert "{op,path,old,new}" in prompt
     assert "Do not invent helper variables" in prompt
     assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
 

@@ -725,7 +725,10 @@ def _minimum_artifact_evidence(plan: list[dict[str, Any]]) -> bool:
     return False
 
 
-def _minimum_implementation_evidence(plan: list[dict[str, Any]]) -> bool:
+def _minimum_implementation_evidence(
+    plan: list[dict[str, Any]],
+    existing_files: set[str] | frozenset[str] = frozenset(),
+) -> bool:
     for step in plan:
         for operation in step.get("ops") or []:
             if not isinstance(operation, dict):
@@ -742,11 +745,22 @@ def _minimum_implementation_evidence(plan: list[dict[str, Any]]) -> bool:
                 continue
             content_key = "content" if operation_name != "replace_in_file" else "new"
             content = str(operation.get(content_key) or "").strip()
-            if len(content) < 24:
-                continue
             if PLACEHOLDER_RE.search(content):
                 continue
-            return True
+            if len(content) >= 24:
+                return True
+            # The length floor detects stub file content.  An exact old/new edit
+            # of an already-existing source file is not file content: its
+            # substance is the change itself, which may be a short line or a
+            # deletion.  Files created by this Plan keep the floor.
+            old = str(operation.get("old") or "").strip()
+            if (
+                operation_name == "replace_in_file"
+                and path in existing_files
+                and old
+                and old != content
+            ):
+                return True
     return False
 
 
@@ -943,7 +957,9 @@ def build_task1_bootstrap_contract(
                 forbidden_python_src_imports=forbidden_src_imports,
                 missing_python_package_markers=missing_package_markers,
                 expected_test_reason=expected_test_reason,
-                minimum_implementation_evidence=_minimum_implementation_evidence(plan),
+                minimum_implementation_evidence=_minimum_implementation_evidence(
+                    plan, normalized_existing_files
+                ),
                 minimum_artifact_evidence=_minimum_artifact_evidence(plan),
                 contract_id=resolution["contract_id"],
                 contract_version=resolution["contract_version"],
@@ -1023,7 +1039,9 @@ def build_task1_bootstrap_contract(
             forbidden_python_src_imports=forbidden_src_imports,
             missing_python_package_markers=missing_package_markers,
             expected_test_reason=expected_test_reason,
-            minimum_implementation_evidence=_minimum_implementation_evidence(plan),
+            minimum_implementation_evidence=_minimum_implementation_evidence(
+                plan, normalized_existing_files
+            ),
             minimum_artifact_evidence=_minimum_artifact_evidence(plan),
             contract_id=resolution["contract_id"],
             contract_version=resolution["contract_version"],
@@ -1072,7 +1090,9 @@ def build_task1_bootstrap_contract(
         forbidden_python_src_imports=forbidden_src_imports,
         missing_python_package_markers=missing_package_markers,
         expected_test_reason=expected_test_reason,
-        minimum_implementation_evidence=_minimum_implementation_evidence(plan),
+        minimum_implementation_evidence=_minimum_implementation_evidence(
+            plan, normalized_existing_files
+        ),
         minimum_artifact_evidence=_minimum_artifact_evidence(plan),
     )
 

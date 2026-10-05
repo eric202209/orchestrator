@@ -636,7 +636,9 @@ def test_stale_replace_over_budget_fallback_preserves_provider_safe_budget(
     monkeypatch.setattr(
         repair_prompts,
         "PLANNING_REPAIR_PROMPT_MAX_CHARS",
-        4200,
+        # Calibrated so the minimal capsule stays over budget with the
+        # zero-handle repair contract (FTBC).
+        4150,
     )
 
     result = build_planning_repair_prompt_with_metadata(

@@ -68,6 +68,24 @@ PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS = 1400
 PLANNING_REPAIR_MAX_SOURCE_API_CONTRACT_CHARS = 1600
 PLANNING_REPAIR_COMPACT_SOURCE_API_CONTRACT_CHARS = 1200
 PLANNING_REPAIR_MINIMAL_SOURCE_API_CONTRACT_CHARS = 760
+# The handle line both provider-safe source renderers emit for one
+# Orchestrator-issued semantic target.
+_ISSUED_TARGET_ID_LINE_RE = re.compile(
+    r"^(?:- )?target_id: tgt_[0-9a-f]{24}$", re.MULTILINE
+)
+
+
+def _issued_target_id_listed(*blocks: str) -> bool:
+    """Whether the repair prompt's source evidence lists an issued target ID.
+
+    The semantic ``target_id`` replace shape is advertised only when the
+    provider can see an Orchestrator-issued handle; otherwise the repair
+    contract matches the zero-handle Planning contract.
+    """
+
+    return any(_ISSUED_TARGET_ID_LINE_RE.search(block or "") for block in blocks)
+
+
 PLANNING_REPAIR_STRUCTURE_TRUNCATION_MARKER = (
     "\n- ... project structure capsule truncated to fit repair prompt budget"
 )
@@ -635,8 +653,13 @@ def build_planning_repair_prompt_with_metadata(
     default_validation_error = (
         "Validation error:\n- malformed or non-runnable planning output\n"
     )
-    ops_contract = render_ops_first_contract()
-    operation_choice_contract = render_operation_choice_contract()
+    semantic_mode_available = _issued_target_id_listed(guidance_block)
+    ops_contract = render_ops_first_contract(
+        semantic_mode_available=semantic_mode_available
+    )
+    operation_choice_contract = render_operation_choice_contract(
+        semantic_mode_available=semantic_mode_available
+    )
     # Repair previously received this validator code as a bare string with no
     # statement of the legal shape it demands, so the contract is attached to
     # exactly the rejections that turn on it.
@@ -2047,8 +2070,13 @@ def build_compact_planning_repair_prompt(
     guidance_block: str = "",
     workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> str:
-    ops_contract = render_ops_first_contract()
-    operation_choice_contract = render_operation_choice_contract()
+    semantic_mode_available = _issued_target_id_listed(guidance_block)
+    ops_contract = render_ops_first_contract(
+        semantic_mode_available=semantic_mode_available
+    )
+    operation_choice_contract = render_operation_choice_contract(
+        semantic_mode_available=semantic_mode_available
+    )
     shell_fallback_limits = render_shell_fallback_limits()
     verification_contract = render_verification_contract()
     test_scaffold_contract = render_test_scaffold_contract()
@@ -2723,6 +2751,11 @@ def build_compact_stale_replace_repair_prompt(
             f"- {reason[:reason_chars]}" for reason in clean_reasons[:4]
         )
         excerpt = _truncate_text(file_excerpt, excerpt_chars)
+        stale_operation_choice_contract = render_operation_choice_contract(
+            semantic_mode_available=_issued_target_id_listed(
+                current_guidance_block, current_source_materialization_block
+            )
+        )
         target_line = target_path or "target path from invalid plan"
         excerpt_block = (
             f"Current file excerpt:\nCurrent file excerpt for {target_line}:\n{excerpt}\n"
@@ -2749,7 +2782,7 @@ Invalid plan excerpt:
 {current_source_api_contract_block + chr(10) if current_source_api_contract_block else ""}
 Required repair:
 - Stale replace fixes: use identifiers and exact text from the current file excerpt.
-- {render_operation_choice_contract()}
+- {stale_operation_choice_contract}
 - Do not use replace_in_file for the stale target.
 - do not emit another replace_in_file for the same missing old text or stale target.
 - Use a write_file op for `{target_line}` with the full corrected file content.
