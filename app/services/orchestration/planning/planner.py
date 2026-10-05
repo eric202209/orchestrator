@@ -2692,26 +2692,39 @@ class PlannerService:
                 observed_guidance_block
             )
             observation_survived_build = "## READ-ONLY OBSERVATION" in repair_prompt
-            entering_prompt_preserved = len(repair_prompt) >= len(entering_prompt)
+            observation_compacted_for_builder = len(repair_prompt) < len(
+                entering_prompt
+            )
+            planner_budget_is_stricter_than_builder = (
+                _repair_prompt_budget()
+                < repair_prompts.effective_repair_prompt_max_chars()
+            )
             if (
                 len(repair_prompt) <= _repair_prompt_budget()
                 and observation_survived_build
-                and entering_prompt_preserved
+                and not (
+                    observation_compacted_for_builder
+                    and planner_budget_is_stricter_than_builder
+                )
                 and not isinstance(
                     repair_prompt_metadata.get("repair_prompt_failure"), dict
                 )
             ):
                 guidance_block = observed_guidance_block
             else:
-                observation_omitted_reason = (
-                    "over_budget"
-                    if len(repair_prompt) > _repair_prompt_budget()
-                    else (
-                        "prompt_builder_omitted"
-                        if not observation_survived_build
-                        else "prompt_builder_compacted_entering_prompt"
+                if len(repair_prompt) > _repair_prompt_budget():
+                    observation_omitted_reason = "over_budget"
+                elif (
+                    observation_compacted_for_builder
+                    and planner_budget_is_stricter_than_builder
+                ):
+                    observation_omitted_reason = (
+                        "prompt_builder_compacted_entering_prompt"
                     )
-                )
+                elif not observation_survived_build:
+                    observation_omitted_reason = "prompt_builder_omitted"
+                else:
+                    observation_omitted_reason = "prompt_builder_rejected"
                 repair_prompt, repair_prompt_metadata = (
                     entering_prompt,
                     entering_prompt_metadata,
