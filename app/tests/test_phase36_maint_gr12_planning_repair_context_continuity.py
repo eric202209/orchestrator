@@ -294,6 +294,13 @@ def test_r10_over_budget_observation_is_omitted_not_fatal(
     tmp_path, captured, monkeypatch
 ):
     root, observation, materialization, rejected, verdict = _fixture(tmp_path)
+    # Match CI's fail-safe builder budget.  The local .env may declare a large
+    # repair context, which otherwise hides compaction of the observation path.
+    monkeypatch.setattr(
+        planner_module.repair_prompts.settings,
+        "PLANNING_REPAIR_CONTEXT_TOKENS",
+        None,
+    )
     _repair(root, materialization, rejected, list(verdict.reasons))
     entering_prompt = captured.pop()
     # A budget between the entering prompt and the observed prompt.

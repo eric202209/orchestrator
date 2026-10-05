@@ -2682,6 +2682,9 @@ class PlannerService:
         observation_block = render_discovery_observation(read_only_observation)
         observation_omitted_reason = None
         if observation_block and "## READ-ONLY OBSERVATION" not in guidance_block:
+            entering_prompt, entering_prompt_metadata = _build_repair_prompt(
+                guidance_block
+            )
             observed_guidance_block = "\n\n".join(
                 block for block in (guidance_block, observation_block) if block
             )
@@ -2689,9 +2692,11 @@ class PlannerService:
                 observed_guidance_block
             )
             observation_survived_build = "## READ-ONLY OBSERVATION" in repair_prompt
+            entering_prompt_preserved = len(repair_prompt) >= len(entering_prompt)
             if (
                 len(repair_prompt) <= _repair_prompt_budget()
                 and observation_survived_build
+                and entering_prompt_preserved
                 and not isinstance(
                     repair_prompt_metadata.get("repair_prompt_failure"), dict
                 )
@@ -2701,10 +2706,15 @@ class PlannerService:
                 observation_omitted_reason = (
                     "over_budget"
                     if len(repair_prompt) > _repair_prompt_budget()
-                    else "prompt_builder_omitted"
+                    else (
+                        "prompt_builder_omitted"
+                        if not observation_survived_build
+                        else "prompt_builder_compacted_entering_prompt"
+                    )
                 )
-                repair_prompt, repair_prompt_metadata = _build_repair_prompt(
-                    guidance_block
+                repair_prompt, repair_prompt_metadata = (
+                    entering_prompt,
+                    entering_prompt_metadata,
                 )
         else:
             repair_prompt, repair_prompt_metadata = _build_repair_prompt(guidance_block)
