@@ -312,6 +312,39 @@ def test_r10_over_budget_observation_is_omitted_not_fatal(
     assert captured[-1] == entering_prompt
 
 
+def test_r10_builder_omission_reuses_entering_prompt(tmp_path, captured, monkeypatch):
+    root, observation, materialization, rejected, verdict = _fixture(tmp_path)
+    real_build = PlannerService.build_planning_repair_prompt_with_metadata.__func__
+
+    def compact_without_observation(cls, *args, **kwargs):
+        result = real_build(cls, *args, **kwargs)
+        if OBSERVATION_HEADER in kwargs.get("guidance_block", ""):
+            return SimpleNamespace(prompt="compact repair prompt", metadata={})
+        return result
+
+    monkeypatch.setattr(
+        PlannerService,
+        "build_planning_repair_prompt_with_metadata",
+        classmethod(compact_without_observation),
+    )
+
+    _repair(root, materialization, rejected, list(verdict.reasons))
+    entering_prompt = captured.pop()
+    monkeypatch.setattr(
+        planner_module, "_repair_prompt_budget", lambda: len(entering_prompt) + 10
+    )
+
+    _repair(
+        root,
+        materialization,
+        rejected,
+        list(verdict.reasons),
+        read_only_observation=observation,
+    )
+
+    assert captured[-1] == entering_prompt
+
+
 def test_r10_genuine_overflow_still_fails_closed(tmp_path, captured, monkeypatch):
     root, observation, materialization, rejected, verdict = _fixture(tmp_path)
     monkeypatch.setattr(planner_module, "PLANNING_REPAIR_PROMPT_MAX_CHARS", 100)

@@ -2688,12 +2688,21 @@ class PlannerService:
             repair_prompt, repair_prompt_metadata = _build_repair_prompt(
                 observed_guidance_block
             )
-            if len(repair_prompt) <= _repair_prompt_budget() and not isinstance(
-                repair_prompt_metadata.get("repair_prompt_failure"), dict
+            observation_survived_build = "## READ-ONLY OBSERVATION" in repair_prompt
+            if (
+                len(repair_prompt) <= _repair_prompt_budget()
+                and observation_survived_build
+                and not isinstance(
+                    repair_prompt_metadata.get("repair_prompt_failure"), dict
+                )
             ):
                 guidance_block = observed_guidance_block
             else:
-                observation_omitted_reason = "over_budget"
+                observation_omitted_reason = (
+                    "over_budget"
+                    if len(repair_prompt) > _repair_prompt_budget()
+                    else "prompt_builder_omitted"
+                )
                 repair_prompt, repair_prompt_metadata = _build_repair_prompt(
                     guidance_block
                 )
