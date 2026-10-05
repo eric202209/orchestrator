@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-from collections import Counter
 from collections.abc import Generator
 
 import pytest
@@ -109,56 +107,6 @@ PRIMARY_CATEGORY_MARKERS = {
 }
 
 
-def _apply_ci_shard_markers(items: list[pytest.Item]) -> None:
-    """Assign the fast CI partition to deterministic, balanced file shards.
-
-    The workflow sets these variables only for the matrix jobs that execute
-    the fast partition.  Keeping the assignment here means the same pytest
-    collection and marker rules produce the shard boundaries locally and in
-    CI; semantic, remainder, and ordinary local runs are unchanged.
-    """
-    shard_count_text = os.environ.get("CI_TEST_SHARD_COUNT")
-    shard_index_text = os.environ.get("CI_TEST_SHARD_INDEX")
-    if shard_count_text is None and shard_index_text is None:
-        return
-    if shard_count_text is None or shard_index_text is None:
-        raise pytest.UsageError(
-            "CI_TEST_SHARD_COUNT and CI_TEST_SHARD_INDEX must be set together"
-        )
-    try:
-        shard_count = int(shard_count_text)
-        shard_index = int(shard_index_text)
-    except ValueError as exc:
-        raise pytest.UsageError("CI test shard values must be integers") from exc
-    if shard_count != 3 or not 1 <= shard_index <= shard_count:
-        raise pytest.UsageError(
-            "CI test sharding requires CI_TEST_SHARD_COUNT=3 and an index 1..3"
-        )
-
-    eligible_items = [
-        item
-        for item in items
-        if item.get_closest_marker("unit")
-        and not item.get_closest_marker("semantic")
-        and not item.get_closest_marker("slow")
-        and not item.get_closest_marker("live")
-    ]
-    module_counts = Counter(item.path.as_posix() for item in eligible_items)
-    loads = [0] * shard_count
-    assignments: dict[str, int] = {}
-    for module_path, count in sorted(
-        module_counts.items(), key=lambda entry: (-entry[1], entry[0])
-    ):
-        target = min(range(shard_count), key=lambda index: (loads[index], index))
-        assignments[module_path] = target + 1
-        loads[target] += count
-
-    marker_name = f"ci_shard_{shard_index}"
-    for item in eligible_items:
-        if assignments[item.path.as_posix()] == shard_index:
-            item.add_marker(getattr(pytest.mark, marker_name))
-
-
 def primary_test_category(item: pytest.Item) -> str:
     """Return the one ownership category for a collected backend test."""
     explicit_categories = [
@@ -253,7 +201,6 @@ def pytest_collection_modifyitems(config, items):
         else:
             item.add_marker(pytest.mark.unit)
         item.add_marker(getattr(pytest.mark, primary_test_category(item)))
-    _apply_ci_shard_markers(items)
 
 
 @pytest.fixture(autouse=True)
