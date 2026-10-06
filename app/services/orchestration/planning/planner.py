@@ -67,6 +67,7 @@ from app.services.orchestration.planning.read_only_discovery import (
     render_discovery_observation,
 )
 from app.services.orchestration.planning.source_materialization import (
+    describe_provider_visible_source,
     observed_candidate_paths,
 )
 from app.services.orchestration.planning.source_operation_verification import (
@@ -156,6 +157,95 @@ def _repair_prompt_budget() -> int:
     if PLANNING_REPAIR_PROMPT_MAX_CHARS < repair_prompts.REPAIR_PROMPT_MAX_CHARS:
         return PLANNING_REPAIR_PROMPT_MAX_CHARS
     return _effective_repair_prompt_max_chars()
+
+
+def _repair_source_evidence(
+    repair_prompt: str,
+    *,
+    entering_materialization: Any,
+    builder_metadata: Any,
+    read_only_observation: Any,
+) -> Dict[str, Any]:
+    """Durable record of the source evidence the repair provider actually received.
+
+    The repair builder's internal materialization is listed separately and is
+    never provider evidence unless its record was rendered (GRRC G1).
+    """
+
+    entering = describe_provider_visible_source(
+        repair_prompt,
+        entering_materialization,
+        origin="entering_planning_materialization",
+    )
+    builder_files = (
+        list(builder_metadata.get("files") or [])
+        if isinstance(builder_metadata, dict)
+        else []
+    )
+    builder = [
+        {
+            "origin": "repair_builder_materialization",
+            "relative_path": item.get("relative_path"),
+            "start_line": item.get("start_line"),
+            "end_line": item.get("end_line"),
+            "provider_visible": bool(item.get("provider_visible")),
+            "suppression_reason": item.get("provider_suppression_reason"),
+        }
+        for item in builder_files
+    ]
+    provider_visible = [record for record in entering if record["provider_visible"]]
+    provider_visible.extend(
+        {
+            "origin": "repair_builder_materialization",
+            **{
+                key: item.get(key)
+                for key in (
+                    "relative_path",
+                    "status",
+                    "expected",
+                    "version_identity",
+                    "content_hash",
+                    "start_byte",
+                    "end_byte",
+                    "start_line",
+                    "end_line",
+                    "truncated",
+                    "provider_rendering",
+                    "provider_rendered_bytes",
+                    "provider_rendered_sha256",
+                )
+            },
+        }
+        for item in builder_files
+        if item.get("provider_visible")
+    )
+    observation_visible = "## READ-ONLY OBSERVATION" in repair_prompt
+    observation: Optional[Dict[str, Any]] = None
+    if read_only_observation is not None or observation_visible:
+        content = getattr(read_only_observation, "content", None)
+        observation = {
+            "origin": "gr12_read_only_observation",
+            "authority": "advisory",
+            "provider_visible": observation_visible,
+            "action": getattr(read_only_observation, "action", None),
+            "status": getattr(read_only_observation, "status", None),
+            "paths": list(getattr(read_only_observation, "paths", ()) or ()),
+            "truncated": getattr(read_only_observation, "truncated", None),
+            "content_sha256": (
+                hashlib.sha256(content.encode("utf-8")).hexdigest()
+                if isinstance(content, str)
+                else None
+            ),
+        }
+    return {
+        "entering_materialization": entering,
+        "builder_materialization": builder,
+        "provider_visible_source": provider_visible,
+        "provider_visible_source_paths": sorted(
+            {str(record["relative_path"]) for record in provider_visible}
+        ),
+        "provider_visible_advisory_observation": observation,
+    }
 
 
 def _estimate_prompt_tokens(prompt: str) -> int:
@@ -2739,6 +2829,14 @@ class PlannerService:
                 observation_omitted_reason
             )
         repair_prompt_metadata.setdefault("prompt_stage", "P2_SELECTED_PROMPT")
+        repair_prompt_metadata["repair_source_evidence"] = _repair_source_evidence(
+            repair_prompt,
+            entering_materialization=source_materialization,
+            builder_metadata=repair_prompt_metadata.get(
+                "planner_source_materialization"
+            ),
+            read_only_observation=read_only_observation,
+        )
         repair_projection_failure = repair_prompt_metadata.get("repair_prompt_failure")
         if isinstance(repair_projection_failure, dict):
             emit_live(
@@ -3200,6 +3298,9 @@ class PlannerService:
                         guidance_block=guidance_block,
                         workspace_identity=workspace_identity,
                         planner_contract=planner_contract,
+                        # Prompt-neutral: guidance_block already carries this
+                        # block; passed so retry evidence can describe it.
+                        source_materialization=source_materialization,
                         grounding_planning_context=grounding_planning_context,
                         provider_response_evidence_path=provider_response_evidence_path,
                         provider_response_evidence_correlation_id=(

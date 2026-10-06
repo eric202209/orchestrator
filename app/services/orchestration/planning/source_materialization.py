@@ -1722,6 +1722,109 @@ def _render_provider_planner_source_materialization(
     return "\n".join(lines)
 
 
+def _rendered_record_content(prompt: str, item: MaterializedSourceFile) -> str | None:
+    """Return the source text rendered for ``item``'s section of ``prompt``.
+
+    Every source renderer emits ``### <path>`` then ``status: <status>`` and,
+    when content is supplied, a ``content:`` line before the next section.
+    """
+
+    if item.content is None or not prompt:
+        return None
+    header = f"### {item.relative_path}\nstatus: {item.status}\n"
+    start = prompt.find(header)
+    while start >= 0:
+        cursor = start + len(header)
+        bounds = [
+            index
+            for index in (prompt.find("\n### ", cursor), prompt.find("\n## ", cursor))
+            if index >= 0
+        ]
+        marker = prompt.find("\ncontent:\n", cursor, min(bounds, default=len(prompt)))
+        if marker >= 0:
+            body = marker + len("\ncontent:\n")
+            if prompt.startswith(item.content, body):
+                return item.content
+            ends = [
+                index
+                for index in (prompt.find("\n### ", body), prompt.find("\n## ", body))
+                if index >= 0
+            ]
+            excerpt = prompt[body : min(ends, default=len(prompt))]
+            if excerpt and not excerpt.startswith("(not supplied)"):
+                return excerpt
+        start = prompt.find(header, start + 1)
+    return None
+
+
+def describe_provider_visible_source(
+    prompt: str,
+    materialization: PlannerSourceMaterialization | None,
+    *,
+    origin: str,
+    not_rendered_reason: str | None = None,
+) -> list[dict[str, Any]]:
+    """Describe, per record, whether its source reached the provider ``prompt``.
+
+    Builder materialization and provider-visible evidence may differ: a record
+    a prompt builder produced but did not render stays listed with
+    ``provider_visible=False`` and the reason, so retained metadata can never
+    imply the provider saw it.
+    """
+
+    if not isinstance(materialization, PlannerSourceMaterialization):
+        return []
+    records: list[dict[str, Any]] = []
+    for item in materialization.files:
+        rendered = _rendered_record_content(prompt, item)
+        if rendered is not None:
+            suppression_reason = None
+        elif item.content is None:
+            suppression_reason = (
+                f"content_not_materialized:{item.omission_reason or item.status}"
+            )
+        else:
+            suppression_reason = not_rendered_reason or "not_rendered_in_final_prompt"
+        records.append(
+            {
+                "origin": origin,
+                "relative_path": item.relative_path,
+                "status": item.status,
+                "expected": item.expected,
+                "planning_visible": item.planning_visible,
+                "version_identity": item.version_identity,
+                "content_hash": item.content_hash,
+                "start_byte": item.start_byte,
+                "end_byte": item.end_byte,
+                "start_line": item.start_line,
+                "end_line": item.end_line,
+                "spans": [[span.start_line, span.end_line] for span in item.spans],
+                "included_source_bytes": item.included_source_bytes,
+                "truncated": item.truncated,
+                "provider_visible": rendered is not None,
+                "provider_rendering": (
+                    None
+                    if rendered is None
+                    else (
+                        "complete_record"
+                        if rendered == item.content
+                        else "reduced_excerpt"
+                    )
+                ),
+                "provider_rendered_bytes": (
+                    len(rendered.encode("utf-8")) if rendered is not None else 0
+                ),
+                "provider_rendered_sha256": (
+                    hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+                    if rendered is not None
+                    else None
+                ),
+                "suppression_reason": suppression_reason,
+            }
+        )
+    return records
+
+
 def render_repair_source_materialization(
     materialization: PlannerSourceMaterialization | None,
     *,

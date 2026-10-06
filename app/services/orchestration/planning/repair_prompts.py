@@ -29,6 +29,7 @@ from app.services.orchestration.planning.source_api_contract import (
 )
 from app.services.orchestration.planning.source_materialization import (
     SOURCE_MATERIALIZATION_REPAIR_MARKERS,
+    describe_provider_visible_source,
     materialize_planner_source_context,
     plan_target_paths,
     plan_source_materialization_paths,
@@ -423,6 +424,43 @@ def build_planning_repair_prompt_with_metadata(
         else ""
     )
     repair_guidance_block = guidance_block
+    if not source_materialization_required:
+        builder_not_rendered_reason: str | None = "repair_builder_block_not_required"
+    elif "## CURRENT SOURCE MATERIALIZATION" in guidance_block:
+        builder_not_rendered_reason = "entering_source_block_already_supplied"
+    else:
+        builder_not_rendered_reason = None
+
+    def _with_builder_visibility(
+        result: PlanningRepairPromptBuildResult,
+    ) -> PlanningRepairPromptBuildResult:
+        # The builder's own materialization is internal; label each record with
+        # whether its source actually reached the provider prompt (GRRC G1).
+        records = describe_provider_visible_source(
+            result.prompt,
+            planner_source_materialization,
+            origin="repair_builder_materialization",
+            not_rendered_reason=builder_not_rendered_reason,
+        )
+        builder_metadata = planner_source_materialization.to_metadata()
+        builder_metadata["role"] = "repair_builder_materialization"
+        builder_metadata["provider_visible_file_count"] = sum(
+            1 for record in records if record["provider_visible"]
+        )
+        builder_metadata["files"] = [
+            {
+                **file_metadata,
+                "provider_visible": record["provider_visible"],
+                "provider_rendering": record["provider_rendering"],
+                "provider_rendered_bytes": record["provider_rendered_bytes"],
+                "provider_rendered_sha256": record["provider_rendered_sha256"],
+                "provider_suppression_reason": record["suppression_reason"],
+            }
+            for file_metadata, record in zip(builder_metadata["files"], records)
+        ]
+        result.metadata["planner_source_materialization"] = builder_metadata
+        return result
+
     effective_guidance_block = guidance_block
     if (
         materialization_block
@@ -468,7 +506,7 @@ def build_planning_repair_prompt_with_metadata(
             ),
         )
         if isinstance(stale_prompt, RequiredRepairSourceEvidenceExceeded):
-            return PlanningRepairPromptBuildResult(
+            failed_projection = PlanningRepairPromptBuildResult(
                 prompt="",
                 metadata={
                     **source_api_metadata,
@@ -476,6 +514,7 @@ def build_planning_repair_prompt_with_metadata(
                     "repair_prompt_failure": stale_prompt.diagnostics,
                 },
             )
+            return _with_builder_visibility(failed_projection)
         selected_source_api_contract_block = next(
             (
                 block
@@ -488,7 +527,7 @@ def build_planning_repair_prompt_with_metadata(
             ),
             "",
         )
-        return PlanningRepairPromptBuildResult(
+        stale_result = PlanningRepairPromptBuildResult(
             prompt=stale_prompt,
             metadata={
                 **source_api_metadata,
@@ -524,6 +563,7 @@ def build_planning_repair_prompt_with_metadata(
                 ),
             },
         )
+        return _with_builder_visibility(stale_result)
     specialized_prompt, specialized_metadata = _build_specialized_prompt_protected(
         task_description=task_description,
         malformed_output=malformed_output,
@@ -627,10 +667,11 @@ def build_planning_repair_prompt_with_metadata(
             guidance_block=guidance_block,
             workspace_identity=workspace_identity,
         )
-        return PlanningRepairPromptBuildResult(
+        specialized_result = PlanningRepairPromptBuildResult(
             prompt=prompt,
             metadata={**source_api_metadata, **specialized_metadata, **final_metadata},
         )
+        return _with_builder_visibility(specialized_result)
     validation_error = ""
     validation_char_limit = PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS
     if rejection_reasons:
@@ -995,7 +1036,9 @@ Rules:
         workspace_identity=workspace_identity,
     )
     prompt_metadata.update(final_metadata)
-    return PlanningRepairPromptBuildResult(prompt=prompt, metadata=prompt_metadata)
+    return _with_builder_visibility(
+        PlanningRepairPromptBuildResult(prompt=prompt, metadata=prompt_metadata)
+    )
 
 
 def build_python_test_source_context_block(
