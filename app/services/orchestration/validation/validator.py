@@ -1103,6 +1103,15 @@ def _source_operation_contract_issues(
 
 
 MAX_PLANNING_COMMAND_CHARS = 900
+# PHASE36-MAINT-OAD (OBS-1): restoration requests are mutation intent just like
+# "fix"/"repair", so a trailing "verify it" must not turn them read-only.  Only
+# clause-initial imperatives count, so noun or adjective uses ("Verify the
+# restore script", "Make sure ... again") keep their current profile.
+_RESTORATIVE_MUTATION_INTENT_RE = re.compile(
+    r"(?:^|[.!?;:]\s+|\n\s*)"
+    r"(?:(?:restore|re-?enable|reinstate|prevent)\b"
+    r"|make\s+(?!sure\b|certain\b)[^.!?;:\n]*\bagain\b)"
+)
 READ_ONLY_WORKFLOW_STAGES = {
     "diagnose",
     "plan",
@@ -1541,17 +1550,20 @@ class ValidatorService:
         ):
             return "mutation"
         implementation_markers = get_implementation_intent_markers()
-        if execution_profile == "full_lifecycle" and any(
-            marker in combined
-            for marker in (
-                "fix",
-                "repair",
-                "update",
-                "modify",
-                "write",
-                "change",
-                "preserve",
+        if execution_profile == "full_lifecycle" and (
+            any(
+                marker in combined
+                for marker in (
+                    "fix",
+                    "repair",
+                    "update",
+                    "modify",
+                    "write",
+                    "change",
+                    "preserve",
+                )
             )
+            or _RESTORATIVE_MUTATION_INTENT_RE.search(combined)
         ):
             return "implementation"
         if any(marker in combined for marker in implementation_markers):
