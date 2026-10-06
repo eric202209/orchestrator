@@ -30,6 +30,7 @@ from app.models import (
 )
 from app.services.orchestration.execution.runtime import workspace_snapshot_key
 from app.services.tasks.service import TaskService
+from app.api.v1.endpoints.tasks import CHANGE_SET_EXECUTION_NOT_COMPLETED
 from app.services.workspace.changeset_service import EXECUTION_NOT_COMPLETED_OUTCOME
 from app.tests.test_phase36_maint_gr7_candidate_semantic_verification_authority import (
     _Runtime,
@@ -130,10 +131,12 @@ def test_r1_r3_r9_planning_failure_is_not_publishable(
     assert decision["configured_publication_eligible"] is True
     assert decision["execution_status"] == "failed"
 
-    # No accepted Plan exists: manual accept fails closed before any write.
+    # Manual accept fails closed before any write (PSC: a not-completed
+    # execution's change set is never releasable; the authority loader's own
+    # rejection is pinned on completed executions in the PSC suite).
     response = _accept(authenticated_client, task, execution)
     assert response.status_code == 409
-    assert "Task has no accepted executable Plan" in response.json()["detail"]
+    assert CHANGE_SET_EXECUTION_NOT_COMPLETED in response.json()["detail"]
     assert _record(db_session, execution.id).disposition == "captured"
 
 
@@ -171,7 +174,7 @@ def test_r2_r4_unvalidated_candidate_cannot_be_accepted(
     _assert_not_publishable(_record(db_session, execution.id).review_decision)
     response = _accept(authenticated_client, task, execution)
     assert response.status_code == 409
-    assert "publication_candidate_identity_unvalidated" in response.json()["detail"]
+    assert CHANGE_SET_EXECUTION_NOT_COMPLETED in response.json()["detail"]
     assert (root / "app.py").exists()
     assert _record(db_session, execution.id).disposition == "captured"
 

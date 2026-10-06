@@ -367,6 +367,30 @@ def _validate_task_execution_for_change_set(
     return task_execution
 
 
+CHANGE_SET_EXECUTION_NOT_COMPLETED = "change_set_execution_not_completed"
+
+
+def _require_completed_change_set_execution(task_execution: TaskExecution) -> None:
+    """Release a Change Set only from the TaskExecution that completed it.
+
+    Review acceptance releases a completed run's held Candidate.  A failed,
+    pending or cancelled execution owns no releasable Candidate: its recovery
+    is restore and retry, and a later publication gate may have rejected it
+    (PSC).  Shared by both accept routes; reject is unaffected.
+    """
+
+    status = getattr(task_execution.status, "value", task_execution.status)
+    if status != TaskStatus.DONE.value:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{CHANGE_SET_EXECUTION_NOT_COMPLETED}: TaskExecution "
+                f"{task_execution.id} is {status}; only a completed execution's "
+                "change set can be accepted"
+            ),
+        )
+
+
 def _active_project_task_conflict(db: Session, task: Task) -> Task | None:
     """Return a different running task in the same project, if one exists."""
     return (
@@ -1310,7 +1334,7 @@ def accept_latest_task_change_set(
             detail="task_execution_id is required to accept a change set",
         )
 
-    _validate_task_execution_for_change_set(
+    task_execution = _validate_task_execution_for_change_set(
         db,
         task=task,
         task_execution_id=task_execution_id,
@@ -1340,6 +1364,7 @@ def accept_latest_task_change_set(
             status_code=409,
             detail="Evaluator assessment is still pending for this change set",
         )
+    _require_completed_change_set_execution(task_execution)
 
     reason = (payload.note or "operator_accepted_change_set").strip()
     try:
@@ -1579,10 +1604,12 @@ def accept_task_workspace(
 
     accepted_change_set = None
     if payload.task_execution_id is not None:
-        _validate_task_execution_for_change_set(
-            db,
-            task=task,
-            task_execution_id=payload.task_execution_id,
+        _require_completed_change_set_execution(
+            _validate_task_execution_for_change_set(
+                db,
+                task=task,
+                task_execution_id=payload.task_execution_id,
+            )
         )
         if (
             _change_set_has_changes(latest_change_set)
