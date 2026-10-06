@@ -34,6 +34,7 @@ from app.services.workspace.workspace_paths import (
 TASK_CHANGE_SET_LOG_MESSAGE = (
     "[WORKSPACE_CHANGE_SET] Task execution change set captured"
 )
+EXECUTION_NOT_COMPLETED_OUTCOME = "execution_not_completed"
 DEPENDENCY_FILE_NAMES = {
     "package.json",
     "package-lock.json",
@@ -56,6 +57,37 @@ CONFIG_FILE_NAMES = {
     "ruff.toml",
     "mypy.ini",
 }
+
+
+def project_execution_review_decision(
+    review_decision: Optional[dict[str, Any]], status: Optional[str]
+) -> Optional[dict[str, Any]]:
+    """Keep a not-completed execution's Review projection non-publishable.
+
+    The policy decision is computed from captured content and configured
+    review policy only.  When the execution did not complete, that configured
+    outcome is kept as ``configured_*`` and never projected as current
+    publication eligibility (FPS).  Publication authority itself is unchanged:
+    it is the accepted Plan authority plus validated candidate identity.
+    """
+
+    if (
+        not isinstance(review_decision, dict)
+        or status is None
+        or str(status).strip().lower() == "done"
+        or review_decision.get("outcome") == EXECUTION_NOT_COMPLETED_OUTCOME
+    ):
+        return review_decision
+    return {
+        **review_decision,
+        "configured_outcome": review_decision.get("outcome"),
+        "configured_publication_eligible": review_decision.get("publication_eligible"),
+        "outcome": EXECUTION_NOT_COMPLETED_OUTCOME,
+        "held_for_review": False,
+        "publication_eligible": False,
+        "reason": "task_execution_not_completed",
+        "execution_status": str(status),
+    }
 
 
 def change_set_dir_for_read(
@@ -452,6 +484,7 @@ class ChangesetService:
         workflow_profile: Optional[str] = None,
         evaluator_evidence: Optional[dict[str, Any]] = None,
         planner_contract: Optional[dict[str, Any]] = None,
+        preserve_review_decision: bool = False,
     ) -> TaskExecutionChangeSet:
         task_execution_id = int(change_set["task_execution_id"])
         record = (
@@ -462,6 +495,14 @@ class ChangesetService:
         if record is None:
             record = TaskExecutionChangeSet(task_execution_id=task_execution_id)
             self.db.add(record)
+        # A re-capture of the same candidate must not replace the authoritative
+        # post-evaluator Review projection with a content-only recompute (FPS).
+        same_candidate = isinstance(record.review_decision, dict) and all(
+            list(getattr(record, key) or []) == list(change_set.get(key) or [])
+            for key in ("added_files", "modified_files", "deleted_files")
+        )
+        if review_decision is None and preserve_review_decision and same_candidate:
+            review_decision = dict(record.review_decision)
 
         record.project_id = int(change_set["project_id"])
         record.task_id = int(change_set["task_id"])
@@ -497,6 +538,9 @@ class ChangesetService:
                 evaluator_evidence=evaluator_evidence,
                 planner_contract=planner_contract,
             )
+        review_decision = project_execution_review_decision(
+            review_decision, change_set.get("status")
+        )
         record.review_decision = review_decision
         record.review_reason = (
             review_decision.get("reason") if review_decision else None
@@ -568,6 +612,7 @@ class ChangesetService:
         evaluator_evidence: Optional[dict[str, Any]] = None,
         planner_contract: Optional[dict[str, Any]] = None,
         commit: bool = True,
+        preserve_review_decision: bool = False,
     ) -> dict[str, Any]:
         change_set = self.build_task_execution_change_set(
             project,
@@ -593,6 +638,7 @@ class ChangesetService:
             workflow_profile=workflow_profile,
             evaluator_evidence=evaluator_evidence,
             planner_contract=planner_contract,
+            preserve_review_decision=preserve_review_decision,
         )
         existing = (
             self.db.query(LogEntry)

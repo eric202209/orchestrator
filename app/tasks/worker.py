@@ -3057,6 +3057,9 @@ def execute_orchestration_task(
                         preserve_project_root_rules=runs_in_canonical_baseline,
                         status=getattr(getattr(task, "status", None), "value", None),
                         commit=False,
+                        # Terminal re-capture keeps the coordinator's final
+                        # Review projection for the same candidate (FPS).
+                        preserve_review_decision=True,
                     )
             _sync_task_execution_from_task_state(
                 db,

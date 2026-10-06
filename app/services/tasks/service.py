@@ -507,6 +507,7 @@ class TaskService:
         evaluator_evidence: Optional[dict[str, Any]] = None,
         planner_contract: Optional[dict[str, Any]] = None,
         commit: bool = True,
+        preserve_review_decision: bool = False,
     ) -> dict[str, Any]:
         return self.changesets.persist_task_execution_change_set(
             project,
@@ -523,6 +524,7 @@ class TaskService:
             evaluator_evidence=evaluator_evidence,
             planner_contract=planner_contract,
             commit=commit,
+            preserve_review_decision=preserve_review_decision,
         )
 
     def record_task_execution_change_set_unavailable(
