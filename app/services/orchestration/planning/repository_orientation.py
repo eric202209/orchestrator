@@ -28,6 +28,21 @@ ORIENTATION_MIN_LITERAL_CHARS = 4
 ORIENTATION_MAX_LITERALS = 24
 ORIENTATION_GIT_TIMEOUT_SECONDS = 15
 
+# OI-A bounded one-hop reverse-import facts (Discovery orientation only).  They
+# live inside the unchanged 44-path / 3,072-byte envelope: at most
+# IMPORT_NEIGHBOR_RESERVED_SLOTS entries and IMPORT_NEIGHBOR_BYTE_BUDGET bytes,
+# so lexical orientation keeps at least the remaining slots and bytes.  An
+# anchor whose non-test static fan-in exceeds IMPORT_NEIGHBOR_FANIN_CAP adds
+# nothing (no partial subset of a hub's importers is ever shown).
+IMPORT_NEIGHBOR_RESERVED_SLOTS = 4
+IMPORT_NEIGHBOR_BYTE_BUDGET = 512
+IMPORT_NEIGHBOR_FANIN_CAP = 10
+IMPORT_NEIGHBOR_MAX_HOPS = 1
+IMPORT_FACTS_HEADER = (
+    "STATIC IMPORT FACTS (one hop: Git-tracked non-test files that import a "
+    "listed path)"
+)
+
 ORIENTATION_SCOPE_TRACKED = "git-tracked"
 ORIENTATION_SCOPE_UNAVAILABLE = "unavailable"
 
@@ -70,9 +85,16 @@ class RepositoryOrientation:
     byte_budget: int
     paths: tuple[str, ...] = ()
     unavailable_reason: str | None = None
+    # ``(importer, anchor)`` facts; populated only when Discovery requests them.
+    import_neighbors: tuple[tuple[str, str], ...] = ()
+    import_neighbors_requested: bool = False
+    lexical_bytes_used: int = 0
+    import_neighbor_bytes_used: int = 0
+    import_anchors_suppressed_by_fanin: int = 0
+    import_anchors_skipped_for_room: int = 0
 
     def as_details(self) -> dict[str, object]:
-        return {
+        details: dict[str, object] = {
             "orientation_available": self.available,
             "orientation_scope": self.scope,
             "orientation_entries_shown": self.entries_shown,
@@ -82,6 +104,19 @@ class RepositoryOrientation:
             "orientation_byte_budget": self.byte_budget,
             "orientation_unavailable_reason": self.unavailable_reason,
         }
+        if self.import_neighbors_requested:
+            details.update(
+                orientation_lexical_bytes_used=self.lexical_bytes_used,
+                orientation_import_neighbors_shown=len(self.import_neighbors),
+                orientation_import_neighbor_bytes_used=self.import_neighbor_bytes_used,
+                orientation_import_anchors_suppressed_by_fanin=(
+                    self.import_anchors_suppressed_by_fanin
+                ),
+                orientation_import_anchors_skipped_for_room=(
+                    self.import_anchors_skipped_for_room
+                ),
+            )
+        return details
 
     def as_provider_advisory(self) -> dict[str, object]:
         """Return ``as_details`` plus the already-bounded candidate paths.
@@ -187,12 +222,17 @@ def derive_repository_orientation(
     *,
     explicit_paths: Iterable[str] = (),
     excluded_path_prefixes: Iterable[str] = (),
+    include_import_neighbors: bool = False,
 ) -> RepositoryOrientation:
     """Derive the advisory candidate surface for the current request only.
 
     Excluded prefixes are applied before candidate ordering and truncation so
     a caller's narrower read scope receives the same deterministic budget as
     the full repository surface.
+
+    ``include_import_neighbors`` adds bounded one-hop reverse-import facts for
+    shown lexical anchors (see ``_with_import_neighbors``).  The lexical
+    derivation above it is unchanged either way.
     """
 
     tracked = tracked_product_paths(Path(project_dir))
@@ -252,17 +292,124 @@ def derive_repository_orientation(
         shown.append(value)
         bytes_used += cost
 
+    neighbors: tuple[tuple[str, str], ...] = ()
+    neighbor_bytes = suppressed = skipped = 0
+    lexical_bytes = bytes_used
+    if include_import_neighbors and shown:
+        shown, lexical_bytes, neighbors, neighbor_bytes, suppressed, skipped = (
+            _with_import_neighbors(Path(project_dir), scoped_tracked, shown)
+        )
+
     return RepositoryOrientation(
         available=bool(shown),
         scope=ORIENTATION_SCOPE_TRACKED,
         entries_shown=len(shown),
         entries_total=len(candidates),
         truncated=len(shown) < len(candidates),
-        bytes_used=bytes_used,
+        bytes_used=lexical_bytes + neighbor_bytes,
         byte_budget=ORIENTATION_BYTE_BUDGET,
         paths=tuple(shown),
         unavailable_reason=None if shown else ORIENTATION_UNAVAILABLE_NO_CANDIDATES,
+        import_neighbors=neighbors,
+        import_neighbors_requested=include_import_neighbors,
+        lexical_bytes_used=lexical_bytes,
+        import_neighbor_bytes_used=neighbor_bytes,
+        import_anchors_suppressed_by_fanin=suppressed,
+        import_anchors_skipped_for_room=skipped,
     )
+
+
+def _path_line_cost(value: str) -> int:
+    return len(f"- {value}\n".encode("utf-8"))
+
+
+def _import_fact_line(importer: str, anchor: str) -> str:
+    return f"- {importer} imports {anchor}"
+
+
+def _with_import_neighbors(
+    project_dir: Path, tracked: tuple[str, ...], shown: list[str]
+) -> tuple[list[str], int, tuple[tuple[str, str], ...], int, int, int]:
+    """Add bounded one-hop reverse-import facts to already-shown lexical paths.
+
+    Anchors are only eligible non-test source paths inside the guaranteed
+    lexical allocation (the first ``ORIENTATION_PATH_LIMIT -
+    IMPORT_NEIGHBOR_RESERVED_SLOTS`` shown paths within the lexical byte
+    floor), so an anchor is always still shown afterwards.  Order is anchor
+    order, then importer path order.  Each anchor's new importers are added
+    all-or-nothing; an importer is listed once.  Importers are never anchors.
+    """
+
+    # Imported lazily for the same import-cycle reason as tracked_product_paths.
+    from app.services.orchestration.planning.orientation_import_facts import (
+        is_import_fact_source,
+        reverse_import_neighbors,
+    )
+
+    lexical_slots = ORIENTATION_PATH_LIMIT - IMPORT_NEIGHBOR_RESERVED_SLOTS
+    lexical_byte_floor = ORIENTATION_BYTE_BUDGET - IMPORT_NEIGHBOR_BYTE_BUDGET
+    guaranteed: list[str] = []
+    used = 0
+    for value in shown:
+        cost = _path_line_cost(value)
+        if len(guaranteed) >= lexical_slots or used + cost > lexical_byte_floor:
+            break
+        guaranteed.append(value)
+        used += cost
+    unchanged = (shown, sum(map(_path_line_cost, shown)), (), 0, 0, 0)
+    anchors = [value for value in guaranteed if is_import_fact_source(value)]
+    if not anchors:
+        return unchanged
+    fan_in = reverse_import_neighbors(project_dir, tracked, anchors)
+
+    guaranteed_set = set(guaranteed)
+    selected: list[tuple[str, str]] = []
+    listed: set[str] = set()
+    neighbor_bytes = suppressed = skipped = 0
+    for anchor in anchors:
+        importers = fan_in.get(anchor, ())
+        if len(importers) > IMPORT_NEIGHBOR_FANIN_CAP:
+            suppressed += 1
+            continue
+        new = [
+            value
+            for value in importers
+            if value not in guaranteed_set and value not in listed
+        ]
+        if not new:
+            continue
+        cost = sum(
+            len(f"{_import_fact_line(value, anchor)}\n".encode("utf-8"))
+            for value in new
+        )
+        if (
+            len(selected) + len(new) > IMPORT_NEIGHBOR_RESERVED_SLOTS
+            or neighbor_bytes + cost > IMPORT_NEIGHBOR_BYTE_BUDGET
+        ):
+            skipped += 1
+            continue
+        selected.extend((value, anchor) for value in new)
+        listed.update(new)
+        neighbor_bytes += cost
+    if not selected:
+        return (*unchanged[:5], skipped)
+
+    # Unused reserved slots/bytes return to lexical orientation; an importer
+    # that was also a lexical path is listed once, as the import fact.
+    lexical: list[str] = []
+    lexical_bytes = 0
+    for value in shown:
+        if value in listed:
+            continue
+        cost = _path_line_cost(value)
+        if (
+            len(lexical) + len(selected) >= ORIENTATION_PATH_LIMIT
+            or lexical_bytes + neighbor_bytes + cost > ORIENTATION_BYTE_BUDGET
+        ):
+            break
+        lexical.append(value)
+        lexical_bytes += cost
+    return lexical, lexical_bytes, tuple(selected), neighbor_bytes, suppressed, skipped
 
 
 def render_repository_orientation(orientation: RepositoryOrientation | None) -> str:
@@ -280,6 +427,18 @@ def render_repository_orientation(orientation: RepositoryOrientation | None) -> 
         f"byte_budget={orientation.byte_budget}",
         "",
         *(f"- {value}" for value in orientation.paths),
+        *(
+            (
+                "",
+                IMPORT_FACTS_HEADER,
+                *(
+                    _import_fact_line(importer, anchor)
+                    for importer, anchor in orientation.import_neighbors
+                ),
+            )
+            if orientation.import_neighbors
+            else ()
+        ),
         "",
         "These are factual Git-tracked paths only. They are advisory candidates, "
         "not an expected file list: a listed path is not authorized for "
