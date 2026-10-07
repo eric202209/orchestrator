@@ -260,10 +260,15 @@ def test_r10_non_repair_task_policy_is_unchanged(tmp_path):
     )
     evidence = _evidence(verdict)
 
-    assert verdict.status == "accepted"
+    # The GR8 repair class is unchanged.  PHASE36-MAINT-VSA: the source
+    # mutation now has no applicable verification, so the minimum evidence
+    # floor withholds auto-promotion (warning, still accepted).
+    assert verdict.status == "warning" and verdict.accepted
     assert evidence["requires_independent_evidence"] is False
     assert evidence["verification_invalidated_by_later_mutation"] is True
-    assert evidence["verification_insufficient"] is False
+    assert evidence["applicable_command_quality"] == "missing"
+    assert evidence["candidate_source_mutation"] is True
+    assert evidence["verification_insufficient"] is True
 
 
 def test_runtime_recorded_mutation_invalidates_earlier_verification(tmp_path):

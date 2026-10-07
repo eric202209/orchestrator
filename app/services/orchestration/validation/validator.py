@@ -69,6 +69,7 @@ from .candidate_checks import (
 from .integrity import (
     check_test_preservation,
     classify_verification_command,
+    is_product_source_path,
     pre_existing_python_test_files,
     pre_existing_source_files,
     scan_test_file_changes,
@@ -1603,12 +1604,15 @@ class ValidatorService:
         description: Optional[str] = None,
     ) -> bool:
         combined = " ".join([task_prompt or "", title or "", description or ""])
+        # PHASE36-MAINT-VSA: restoration requests carry the same repair risk,
+        # so OAD's restorative mutation intent also requires GR8 evidence.
         return bool(
             re.search(
                 r"\b(?:repair|fix|debug|regression|bug|failure|failing|broken)\b",
                 combined,
                 re.IGNORECASE,
             )
+            or _RESTORATIVE_MUTATION_INTENT_RE.search(combined.lower())
         )
 
     @staticmethod
@@ -3546,6 +3550,29 @@ class ValidatorService:
         requires_independent_evidence = bool(
             repair_keyword_match and not fresh_bootstrap_generated_test_evidence
         )
+        # PHASE36-MAINT-VSA: the Candidate's own changed paths (the Change Set
+        # when present, otherwise the reported files) decide whether a
+        # mutation-capable task changed Product source.
+        candidate_paths = (
+            observed_scope
+            if isinstance(change_set, dict)
+            else tuple(
+                # Keep leading dots: ``.agent/`` must stay orchestration-internal.
+                path.removesuffix(" (deleted)").strip().removeprefix("./")
+                for path in reported_changed_files
+            )
+        )
+        source_mutation_paths = sorted(
+            {
+                path
+                for path in candidate_paths
+                if is_product_source_path(path)
+                and not is_orchestration_internal_path(path)
+            }
+        )
+        candidate_source_mutation = profile != "verification" and bool(
+            source_mutation_paths
+        )
         integrity_payload = [finding.to_dict() for finding in integrity_findings]
         integrity_blockers = [
             finding
@@ -3581,6 +3608,8 @@ class ValidatorService:
                 fresh_bootstrap_generated_test_evidence
             ),
             "requires_independent_evidence": requires_independent_evidence,
+            "candidate_source_mutation": candidate_source_mutation,
+            "source_mutation_paths": source_mutation_paths[:20],
             "pre_existing_test_files": pre_existing_tests[:20],
             "pre_existing_source_files": pre_existing_sources[:20],
             "has_independent_regression_test": has_independent_regression_test,
@@ -3634,6 +3663,19 @@ class ValidatorService:
             warnings.extend(
                 f"Verification integrity warning: {finding.message}"
                 for finding in integrity_blockers[:5]
+            )
+        # PHASE36-MAINT-VSA: minimum evidence floor.  Source mutation without
+        # applicable verification may complete but must not auto-promote.
+        # Smoke-only stays governed by the repair class above (Phase 10L).
+        if (
+            candidate_source_mutation
+            and not verification_insufficient
+            and applicable_command_quality in {"missing", "insufficient"}
+        ):
+            verification_insufficient = True
+            warnings.append(
+                "Source mutation verification is insufficient: no meaningful "
+                "verification applies to the Candidate"
             )
         details["validation_evidence"][
             "verification_insufficient"

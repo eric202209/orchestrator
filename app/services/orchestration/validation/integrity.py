@@ -193,6 +193,15 @@ def pre_existing_python_test_files(
 _PRE_EXISTING_SOURCE_SUFFIXES = {".py", ".js", ".jsx", ".ts", ".tsx"}
 
 
+def is_product_source_path(path: str | Path) -> bool:
+    """Non-test source path, by the same rule as ``pre_existing_source_files``."""
+
+    normalized = str(path).replace("\\", "/").lstrip("./")
+    if is_python_test_path(normalized):
+        return False
+    return Path(normalized).suffix.lower() in _PRE_EXISTING_SOURCE_SUFFIXES
+
+
 def pre_existing_source_files(
     project_dir: str | Path,
     change_set: Optional[dict[str, Any]],
