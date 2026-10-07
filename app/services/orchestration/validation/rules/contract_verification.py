@@ -230,16 +230,6 @@ def _verification_plan_creates_new_source_assets(
     if not project_dir or not project_dir.exists():
         return []
 
-    blocked_extensions = {
-        ".css",
-        ".html",
-        ".jsx",
-        ".py",
-        ".scss",
-        ".svg",
-        ".ts",
-        ".tsx",
-    }
     project_root = Path(project_dir)
     created: List[str] = []
     seen: set[str] = set()
@@ -259,7 +249,7 @@ def _verification_plan_creates_new_source_assets(
             except TaskWorkspaceViolationError:
                 continue
             path = Path(relative_path)
-            if path.suffix.lower() not in blocked_extensions:
+            if path.suffix.lower() not in SOURCE_EXTENSIONS:
                 continue
             if path.name.lower().startswith(("verify", "check")):
                 continue
@@ -281,16 +271,6 @@ def _verification_plan_mutates_app_source_assets(
     if not project_dir or not project_dir.exists():
         return []
 
-    blocked_extensions = {
-        ".css",
-        ".html",
-        ".jsx",
-        ".py",
-        ".scss",
-        ".svg",
-        ".ts",
-        ".tsx",
-    }
     project_root = Path(project_dir)
     mutated: List[str] = []
     seen: set[str] = set()
@@ -310,7 +290,7 @@ def _verification_plan_mutates_app_source_assets(
             except TaskWorkspaceViolationError:
                 continue
             path = Path(relative_path)
-            if path.suffix.lower() not in blocked_extensions:
+            if path.suffix.lower() not in SOURCE_EXTENSIONS:
                 continue
             if path.name.lower().startswith(("verify", "check")):
                 continue
