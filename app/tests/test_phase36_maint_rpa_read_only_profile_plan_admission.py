@@ -227,10 +227,12 @@ MATRIX = [
     ("icon.svg", True, False),
     ("script.sh", True, False),
     ("src/status.test.ts", True, False),
-    # Established overrides of the guard, unchanged by RPA:
-    # top-level test dirs and verify*/check* helpers stay writable.
+    # Established override of the guard, unchanged by RPA: top-level test
+    # dirs stay writable.
     ("tests/test_app.py", True, True),
-    ("verify_status.js", True, True),
+    # RPA2: an existing verify*/check* file is not distinguishable from
+    # Product source, so its name no longer grants mutation authority.
+    ("verify_status.js", True, False),
     # Non-source controls.
     ("README.md", False, True),
     ("settings.json", False, True),

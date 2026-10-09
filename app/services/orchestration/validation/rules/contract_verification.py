@@ -222,6 +222,26 @@ def _verification_plan_missing_workspace_files(
     ]
 
 
+def _is_new_verification_helper(
+    op_name: str, relative_path: str, project_root: Path
+) -> bool:
+    """Return whether an op creates a new, conventionally named verify/check helper.
+
+    The exemption exists so a verification plan can create a helper such as
+    ``verify.js``. It never covers an existing file or a Product-like name
+    such as ``checkout.py`` or ``verifyToken.js``.
+    """
+
+    if op_name not in {"write_file", "append_file"}:
+        return False
+    if (project_root / relative_path).exists():
+        return False
+    stem = Path(relative_path).stem.lower()
+    return stem in {"verify", "check"} or stem.startswith(
+        ("verify_", "verify-", "check_", "check-")
+    )
+
+
 def _verification_plan_creates_new_source_assets(
     plan: List[Dict[str, Any]], project_dir: Optional[Path]
 ) -> List[str]:
@@ -251,7 +271,7 @@ def _verification_plan_creates_new_source_assets(
             path = Path(relative_path)
             if path.suffix.lower() not in SOURCE_EXTENSIONS:
                 continue
-            if path.name.lower().startswith(("verify", "check")):
+            if _is_new_verification_helper(op_name, relative_path, project_root):
                 continue
             if path.parts and path.parts[0] in {"test", "tests", "spec"}:
                 continue
@@ -292,7 +312,7 @@ def _verification_plan_mutates_app_source_assets(
             path = Path(relative_path)
             if path.suffix.lower() not in SOURCE_EXTENSIONS:
                 continue
-            if path.name.lower().startswith(("verify", "check")):
+            if _is_new_verification_helper(op_name, relative_path, project_root):
                 continue
             if path.parts and path.parts[0] in {"test", "tests", "spec"}:
                 continue
