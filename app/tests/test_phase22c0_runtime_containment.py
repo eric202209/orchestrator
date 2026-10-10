@@ -11,6 +11,7 @@ import os
 import stat
 import subprocess
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -231,8 +232,11 @@ def test_strict_provider_controls_are_written_to_ephemeral_config(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
     service = object.__new__(OpenClawSessionService)
+    # Production reaches this only with an active binding whose own config
+    # copy is the override (Phase 37 Pre-B F2A guard).
+    service._workspace_binding = SimpleNamespace(config_path=config_path)
+    service._openclaw_config_path_override = config_path
 
     controls = service._configure_strict_provider_controls("planning")
     config = json.loads(config_path.read_text(encoding="utf-8"))

@@ -1090,7 +1090,21 @@ class OpenClawSessionService:
         only the per-invocation config copy created by workspace binding.
         """
 
-        config_path = self._openclaw_config_path()
+        # Fail closed unless the override is the active binding's own copy;
+        # never fall back to OPENCLAW_CONFIG_PATH or the persistent config.
+        bound_paths = set()
+        binding = getattr(self, "_workspace_binding", None)
+        if binding is not None:
+            bound_paths.add(Path(binding.config_path))
+        planning_dir = getattr(self, "_strict_planning_config_dir", None)
+        if planning_dir is not None:
+            bound_paths.add(Path(planning_dir.name) / "openclaw.json")
+        config_path = getattr(self, "_openclaw_config_path_override", None)
+        if config_path is None or Path(config_path) not in bound_paths:
+            raise OpenClawProviderControlError(
+                "Strict planning controls require the active ephemeral OpenClaw config"
+            )
+        config_path = Path(config_path)
         try:
             config = json.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:

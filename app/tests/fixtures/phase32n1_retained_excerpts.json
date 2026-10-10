@@ -1,0 +1,106 @@
+{
+  "_provenance": "Immutable Phase 32N-1 retained excerpts. Each text is the exact materialized excerpt the runtime recorded for attempts 7 and 9 (SHA-256 = key = content_hash in phase32n1_retained_attempt_shapes.json). Derived from source_commit at the original_spans recorded by the first fixture revision 2e123d8 (2026-08-06). Never regenerate from current source.",
+  "excerpts": {
+    "0ccbba19d7f55a7feb687f8df9de6d2d175707e70bddac6d2e6809464f73e10d": {
+      "relative_path": "app/services/workspace/context_service.py",
+      "source_commit": "b260a7499a80a5865e81e02a556a56e9cc08d3d1",
+      "source_blob": "5b2cf488bb19d6834ed38173b842f20d5e1f9882",
+      "full_source_bytes": 15720,
+      "original_spans": [
+        [
+          0,
+          542
+        ],
+        [
+          13185,
+          14529
+        ]
+      ],
+      "attempts": [
+        "attempt9"
+      ],
+      "text": "\"\"\"Context Preservation Service.\n\nProvides session state persistence, task resumption, and conversation history.\nThis service intentionally follows the ORM model shape and avoids referencing\ncolumns that are not defined there.\n\"\"\"\n\nimport json\nimport logging\nfrom datetime import datetime\nfrom typing import Optional, Dict, Any, List\n\nfrom sqlalchemy.orm import Session as DBSession\nfrom sqlalchemy import func\n\nfrom app.models import (\n    SessionState,\n    ConversationHistory,\n    TaskCheckpoint,\n)\n\nlogger = logging.getLogger(__name__)\n\n\n... [truncated]\n            \"plan\": json.loads(state.plan) if state.plan else [],\n            \"execution_results\": (\n                json.loads(state.execution_results) if state.execution_results else []\n            ),\n            \"debug_attempts\": (\n                json.loads(state.debug_attempts) if state.debug_attempts else []\n            ),\n            \"changed_files\": (\n                json.loads(state.changed_files) if state.changed_files else []\n            ),\n            \"conversation_history\": [\n                {\n                    \"role\": msg.role,\n                    \"content\": msg.content,\n                    \"metadata\": msg.metadata_json,\n                    \"created_at\": None,\n                }\n                for msg in self.get_conversation_history(session_id)\n            ],\n            \"exported_at\": datetime.utcnow().isoformat(),\n        }\n\n    def import_session_context(\n        self, session_id: int, context_data: Dict[str, Any]\n    ) -> bool:\n        \"\"\"\n        Import session context\n\n        Args:\n            session_id: Session ID\n            context_data: Context data to import\n\n        Returns:\n            True if import successful\n        \"\"\"\n        try:\n            # Restore session state\n            plan = context_data.get(\"plan\", [])\n            execution_results = context_data.get(\"execution_results\", [])\n\n... [truncated]"
+    },
+    "247f1ec19f27337b98b046ab5f8755a31e728c2fe42532bdfe6d64f34f9d404a": {
+      "relative_path": "app/api/v1/router.py",
+      "source_commit": "b260a7499a80a5865e81e02a556a56e9cc08d3d1",
+      "source_blob": "233887e6de89a751b765704fc0a06e571a760926",
+      "full_source_bytes": 5164,
+      "original_spans": [
+        [
+          0,
+          1029
+        ]
+      ],
+      "attempts": [
+        "attempt9"
+      ],
+      "text": "\"\"\"API Router v1\"\"\"\n\nfrom fastapi import APIRouter, Depends\nfrom app.api.v1.endpoints import (\n    tasks,\n    github,\n    sessions,\n    projects,\n    planner,\n    planning,\n    planning_execution_commit,\n    planning_reviews,\n    users,\n    mobile,\n    resume,\n    settings,\n    admin,\n)\nfrom app.api.v1.endpoints import isolation, permissions, context\nfrom app.api.v1.endpoints.dashboard import router as dashboard_router\nfrom app.api.v1.endpoints.knowledge import router as knowledge_router\nfrom app.api.v1.endpoints.knowledge_lifecycle import (\n    router as knowledge_lifecycle_router,\n)\nfrom app.api.v1.endpoints.project_logs import router as project_logs_router\nfrom app.api.v1.endpoints.ops import router as ops_router\nfrom app.api.v1.endpoints.guidance import router as guidance_router\nfrom app.api.v1.endpoints.analytics import router as analytics_router\nfrom app.dependencies import get_current_active_user\nfrom app.services.observability.health import api_root_payload, health_payload\n\n# Import auth router separately\n\n... [truncated]"
+    },
+    "70ed574e734134730eb3e54c73622e67b6424f79b7d7fe415207bedad6de49a7": {
+      "relative_path": "app/api/v1/router.py",
+      "source_commit": "b260a7499a80a5865e81e02a556a56e9cc08d3d1",
+      "source_blob": "233887e6de89a751b765704fc0a06e571a760926",
+      "full_source_bytes": 5164,
+      "original_spans": [
+        [
+          0,
+          997
+        ]
+      ],
+      "attempts": [
+        "attempt7"
+      ],
+      "text": "\"\"\"API Router v1\"\"\"\n\nfrom fastapi import APIRouter, Depends\nfrom app.api.v1.endpoints import (\n    tasks,\n    github,\n    sessions,\n    projects,\n    planner,\n    planning,\n    planning_execution_commit,\n    planning_reviews,\n    users,\n    mobile,\n    resume,\n    settings,\n    admin,\n)\nfrom app.api.v1.endpoints import isolation, permissions, context\nfrom app.api.v1.endpoints.dashboard import router as dashboard_router\nfrom app.api.v1.endpoints.knowledge import router as knowledge_router\nfrom app.api.v1.endpoints.knowledge_lifecycle import (\n    router as knowledge_lifecycle_router,\n)\nfrom app.api.v1.endpoints.project_logs import router as project_logs_router\nfrom app.api.v1.endpoints.ops import router as ops_router\nfrom app.api.v1.endpoints.guidance import router as guidance_router\nfrom app.api.v1.endpoints.analytics import router as analytics_router\nfrom app.dependencies import get_current_active_user\nfrom app.services.observability.health import api_root_payload, health_payload\n\n\n... [truncated]"
+    },
+    "85c1d571f72a47a69a3b79c40ff069fc8ec51259638b0f45dfe24ad806993a73": {
+      "relative_path": "app/config.py",
+      "source_commit": "b260a7499a80a5865e81e02a556a56e9cc08d3d1",
+      "source_blob": "039c41b434c674f0234877bfa701f823bff2da93",
+      "full_source_bytes": 25508,
+      "original_spans": [
+        [
+          0,
+          30
+        ]
+      ],
+      "attempts": [
+        "attempt9"
+      ],
+      "text": "\"\"\"Configuration settings\"\"\"\n\n\n... [truncated]"
+    },
+    "88073779716c402ebaf60582cc699ebd94c0405e3f29034ab7bd8a457881f0d7": {
+      "relative_path": "app/services/workspace/context_service.py",
+      "source_commit": "b260a7499a80a5865e81e02a556a56e9cc08d3d1",
+      "source_blob": "5b2cf488bb19d6834ed38173b842f20d5e1f9882",
+      "full_source_bytes": 15720,
+      "original_spans": [
+        [
+          12969,
+          14932
+        ]
+      ],
+      "attempts": [
+        "attempt7"
+      ],
+      "text": "... [truncated]\n            return {}\n\n        return {\n            \"session_id\": session_id,\n            \"project_id\": state.project_id,\n            \"current_step\": state.current_step,\n            \"total_steps\": state.total_steps,\n            \"plan\": json.loads(state.plan) if state.plan else [],\n            \"execution_results\": (\n                json.loads(state.execution_results) if state.execution_results else []\n            ),\n            \"debug_attempts\": (\n                json.loads(state.debug_attempts) if state.debug_attempts else []\n            ),\n            \"changed_files\": (\n                json.loads(state.changed_files) if state.changed_files else []\n            ),\n            \"conversation_history\": [\n                {\n                    \"role\": msg.role,\n                    \"content\": msg.content,\n                    \"metadata\": msg.metadata_json,\n                    \"created_at\": None,\n                }\n                for msg in self.get_conversation_history(session_id)\n            ],\n            \"exported_at\": datetime.utcnow().isoformat(),\n        }\n\n    def import_session_context(\n        self, session_id: int, context_data: Dict[str, Any]\n    ) -> bool:\n        \"\"\"\n        Import session context\n\n        Args:\n            session_id: Session ID\n            context_data: Context data to import\n\n        Returns:\n            True if import successful\n        \"\"\"\n        try:\n            # Restore session state\n            plan = context_data.get(\"plan\", [])\n            execution_results = context_data.get(\"execution_results\", [])\n            debug_attempts = context_data.get(\"debug_attempts\", [])\n            changed_files = context_data.get(\"changed_files\", [])\n\n            self.save_session_state(\n                session_id=session_id,\n                project_id=context_data.get(\"project_id\", 0),\n                current_step=context_data.get(\"current_step\", 0),\n                total_steps=context_data.get(\"total_steps\", 0),\n\n... [truncated]"
+    },
+    "b01f25331fea9b540f938dad5d9e4c66eb7b7b0d74bb6a9ad269e531b08c0f30": {
+      "relative_path": "app/services/agents/openclaw_service.py",
+      "source_commit": "b260a7499a80a5865e81e02a556a56e9cc08d3d1",
+      "source_blob": "55210cb6c7b4ffb2f618b4968d5e0c2997963c3a",
+      "full_source_bytes": 150026,
+      "original_spans": [
+        [
+          103638,
+          105577
+        ]
+      ],
+      "attempts": [
+        "attempt7",
+        "attempt9"
+      ],
+      "text": "... [truncated]\n            return True\n\n    async def _execute_demo_mode(self, prompt: str) -> Dict[str, Any]:\n        \"\"\"\n        Demo mode: Return mock logs for UI testing\n\n        Args:\n            prompt: Task prompt\n\n        Returns:\n            Mock execution result\n        \"\"\"\n        # Get recent logs from database\n        recent_logs = (\n            self.db.query(LogEntry)\n            .filter(LogEntry.session_id == self.session_id)\n            .order_by(LogEntry.created_at.desc())\n            .limit(10)\n            .all()\n        )\n\n        self._log_entry(\"INFO\", \"Running in DEMO MODE - no actual task execution\")\n\n        return {\n            \"status\": \"completed\",\n            \"mode\": \"demo\",\n            \"output\": f\"Demo execution of: {prompt[:50]}...\",\n            \"logs\": [\n                {\n                    \"level\": log.level,\n                    \"message\": log.message,\n                    \"timestamp\": log.created_at.isoformat(),\n                }\n                for log in recent_logs\n            ],\n            \"execution_time\": 0.0,\n            \"note\": \"Demo mode - no actual task was executed. Enable real mode to execute via OpenClaw API.\",\n        }\n\n    async def stream_logs(self, callback: callable) -> None:\n        \"\"\"\n        Stream logs from OpenClaw session to callback\n\n        Args:\n            callback: Function to receive log entries (log_level, message, metadata)\n        \"\"\"\n        try:\n            self._log_entry(\"INFO\", \"Starting log streaming\")\n\n            # TODO: Implement actual log streaming\n            # This would read from OpenClaw session logs and emit via callback\n\n            while True:\n                # Simulate log stream\n                await callback(\n                    \"INFO\", \"Log stream active...\", {\"session_id\": self.session_id}\n                )\n                # Break for now (would be infinite loop in production)\n                break\n\n        except Exception as e:\n\n... [truncated]"
+    }
+  }
+}

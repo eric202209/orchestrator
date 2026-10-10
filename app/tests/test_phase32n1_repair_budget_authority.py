@@ -8,10 +8,11 @@ authority that removes that blocker, and pin that a *genuine* overflow still
 fails closed before any provider call.
 
 The Attempt 7 and Attempt 9 shapes are reconstructed provider-free from
-retained evidence. Excerpt bytes are re-derived from canonical repository
-source at the recorded span offsets and asserted byte-identical to the
-`content_hash` values recorded at runtime, so the reconstruction is faithful
-rather than approximate.
+retained evidence. Excerpt text comes from the immutable retained excerpt
+fixture (derived once from the historical source commit) and is asserted
+byte-identical to the `content_hash` values recorded at runtime, so the
+reconstruction is faithful rather than approximate and does not depend on
+the current byte layout of repository source (Phase 37 Pre-B F2A).
 """
 
 from __future__ import annotations
@@ -43,6 +44,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RETAINED_SHAPES_FIXTURE = (
     REPOSITORY_ROOT / "app/tests/fixtures/phase32n1_retained_attempt_shapes.json"
 )
+RETAINED_EXCERPTS_FIXTURE = (
+    REPOSITORY_ROOT / "app/tests/fixtures/phase32n1_retained_excerpts.json"
+)
 
 # Retained runtime authority.
 ATTEMPT9_PLAN_SHA256 = (
@@ -62,10 +66,9 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _compose_excerpt(relative_path: str, spans: list[tuple[int, int]]) -> str:
+def _compose_excerpt(encoded: bytes, spans: list[tuple[int, int]]) -> str:
     """Re-derive one materialized excerpt exactly as `_compose_span_content` does."""
 
-    encoded = (REPOSITORY_ROOT / relative_path).read_bytes()
     parts: list[str] = []
     if spans[0][0] > 0:
         parts.append("... [truncated]\n")
@@ -84,15 +87,16 @@ def _compose_excerpt(relative_path: str, spans: list[tuple[int, int]]) -> str:
 def build_retained_materialization(record: dict) -> PlannerSourceMaterialization:
     """Rebuild a retained materialization, asserting excerpt fidelity."""
 
+    excerpts = json.loads(RETAINED_EXCERPTS_FIXTURE.read_text(encoding="utf-8"))[
+        "excerpts"
+    ]
     files = []
     for entry in record["files"]:
         content = None
         if entry["status"] == "existing_file_with_materialized_source":
-            spans = [
-                (span["start_byte"], span["end_byte"])
-                for span in entry.get("spans", [])
-            ] or [(entry["start_byte"], entry["end_byte"])]
-            content = _compose_excerpt(entry["relative_path"], spans)
+            retained = excerpts[entry["content_hash"]]
+            assert retained["relative_path"] == entry["relative_path"]
+            content = retained["text"]
             assert _sha256(content) == entry["content_hash"], (
                 f"{entry['relative_path']} excerpt is not byte-identical to the "
                 "retained runtime record; the reconstruction is not faithful"
