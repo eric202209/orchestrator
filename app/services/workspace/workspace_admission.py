@@ -126,16 +126,6 @@ def matching_openclaw_agent_ids(config: dict[str, Any], workspace: Path) -> list
     return matches
 
 
-def _matching_openclaw_agent_ids(config_path: Path, workspace: Path) -> list[str]:
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise WorkspaceAdmissionError(
-            "workspace_openclaw_mismatch", f"Could not read OpenClaw config: {exc}"
-        ) from exc
-    return matching_openclaw_agent_ids(config, workspace)
-
-
 def _default_openclaw_config_path() -> Path:
     configured = os.environ.get("OPENCLAW_CONFIG_PATH", "").strip()
     if configured:
@@ -146,11 +136,46 @@ def _default_openclaw_config_path() -> Path:
     return Path.home() / ".openclaw" / "openclaw.json"
 
 
+def _load_dogfood_openclaw_config(config_path: Path) -> dict[str, Any]:
+    """Read the operator config read-only and require an unambiguous ``main``.
+
+    ``main`` is a configuration-integrity check only. It is never an execution
+    identity: dispatch binds the ephemeral runtime agent instead.
+    """
+
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise WorkspaceAdmissionError(
+            "openclaw_config_invalid", f"Could not read OpenClaw config: {exc}"
+        ) from exc
+    agents = config.get("agents") if isinstance(config, dict) else None
+    agent_list = agents.get("list") if isinstance(agents, dict) else None
+    if not isinstance(agent_list, list):
+        raise WorkspaceAdmissionError(
+            "openclaw_config_invalid",
+            f"OpenClaw config has no agents.list array: {config_path}",
+        )
+    main_count = sum(
+        1
+        for agent in agent_list
+        if isinstance(agent, dict) and str(agent.get("id") or "").strip() == "main"
+    )
+    if main_count != 1:
+        raise WorkspaceAdmissionError(
+            "openclaw_config_invalid",
+            f"Expected exactly one OpenClaw 'main' agent; found {main_count}.",
+        )
+    return config
+
+
 @dataclass(frozen=True)
 class DogfoodWorkspaceAdmission:
     project_id: int
     workspace: str
-    openclaw_agent_id: str
+    # Legacy persistent agent registered for this ProductRoot, if any. It is
+    # diagnostic only; dispatch never selects it. None for fresh ProductRoots.
+    openclaw_agent_id: str | None
 
 
 @dataclass(frozen=True)
@@ -304,12 +329,17 @@ def admit_dogfood_workspace(
             f"Workspace has no configured Git remote: {workspace}",
         )
     config_path = openclaw_config_path or Path.home() / ".openclaw" / "openclaw.json"
-    matches = _matching_openclaw_agent_ids(config_path, workspace)
-    if len(matches) != 1:
+    config = _load_dogfood_openclaw_config(config_path)
+    # A persistent per-ProductRoot agent is not required: dispatch uses an
+    # ephemeral binding. More than one legacy registration stays ambiguous.
+    matches = matching_openclaw_agent_ids(config, workspace)
+    if len(matches) > 1:
         raise WorkspaceAdmissionError(
             "workspace_openclaw_mismatch",
-            f"Expected exactly one OpenClaw agent for {workspace}; found {matches or 'none'}.",
+            f"Expected at most one OpenClaw agent for {workspace}; found {matches}.",
         )
     return DogfoodWorkspaceAdmission(
-        project_id=project.id, workspace=str(workspace), openclaw_agent_id=matches[0]
+        project_id=project.id,
+        workspace=str(workspace),
+        openclaw_agent_id=matches[0] if matches else None,
     )

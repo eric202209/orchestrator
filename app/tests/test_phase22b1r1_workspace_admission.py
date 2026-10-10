@@ -130,6 +130,10 @@ def test_dogfood_admission_requires_clean_remote_and_one_matching_agent(
     db_session.add(project)
     db_session.commit()
     config = _openclaw_config(tmp_path / "openclaw.json", workspace, "eligible-agent")
+    # Phase 37 Pre-B F1: admission requires one persistent main agent.
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data["agents"]["list"].insert(0, {"id": "main", "workspace": str(tmp_path)})
+    config.write_text(json.dumps(data), encoding="utf-8")
 
     admitted = admit_dogfood_workspace(db_session, project, openclaw_config_path=config)
     assert admitted.workspace == str(workspace.resolve())
