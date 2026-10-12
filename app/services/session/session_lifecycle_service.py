@@ -528,6 +528,39 @@ def recover_stale_running_sessions(
     recovered_sessions: list[dict[str, Any]] = []
 
     for session in running_sessions:
+        pending_execution = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.session_id == session.id,
+                TaskExecution.status == TaskStatus.PENDING,
+            )
+            .order_by(TaskExecution.id.desc())
+            .first()
+        )
+        if pending_execution is not None:
+            # A pending row is a durable delivery/continuation reservation. It
+            # has no worker ownership evidence yet, so session age cannot
+            # prove abandonment. Preserve it for the worker or continuation
+            # delivery/recovery path rather than stopping the session and
+            # leaving a queued execution behind.
+            if decision_records is not None:
+                decision_records.append(
+                    {
+                        "execution_id": pending_execution.id,
+                        "outcome": "pending_execution_protected",
+                        "ownership_classification": "AMBIGUOUS_FAIL_SAFE",
+                        "recovery_eligible": False,
+                        "signals": ["PENDING_EXECUTION", "OWNER_IDENTITY_INCOMPLETE"],
+                        "decision_reason": (
+                            "pending execution has no ownership evidence; "
+                            "session age is insufficient proof of abandonment"
+                        ),
+                        "selected_action": "preserve_pending_execution",
+                        "session_id": session.id,
+                    }
+                )
+            continue
+
         latest_link = (
             db.query(SessionTask)
             .filter(
