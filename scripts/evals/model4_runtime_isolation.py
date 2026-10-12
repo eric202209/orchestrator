@@ -272,13 +272,18 @@ def _bootstrap_audit() -> dict[str, Any]:
     return {
         "OPENCLAW_DISCOVERY_SKIP_BOOTSTRAP": (
             'defaults["skipBootstrap"] = True' in binding_source
+            or '"skipBootstrap": True' in binding_source
         ),
         "OPENCLAW_DISCOVERY_AGENTDIR_EPHEMERAL": (
             'agent["agentDir"]' in binding_source
             or 'selected["agentDir"]' in service_source
+            or '"agentDir": str(agent_dir)' in binding_source
         ),
         "OPENCLAW_DISCOVERY_SESSION_STORE_EPHEMERAL": (
-            'session["store"]' in binding_source
+            (
+                'session["store"]' in binding_source
+                or '"session": {"store": str(state_dir' in binding_source
+            )
             and 'session_config["store"]' in service_source
         ),
         "OPENCLAW_DISCOVERY_AGENTS_MD_VISIBLE": bool(

@@ -226,7 +226,16 @@ def test_admission_bind_command_release_leaves_persistent_config_unchanged(
     (state / "openclaw.json").write_text(
         json.dumps(
             {
-                "models": {"providers": {"openai": {"models": [{"id": "qwen-local"}]}}},
+                "models": {
+                    "providers": {
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local"}],
+                        }
+                    }
+                },
                 "agents": {
                     "list": [
                         {

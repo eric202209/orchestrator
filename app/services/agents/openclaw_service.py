@@ -455,6 +455,13 @@ class OpenClawSessionService:
                 "OpenClaw runtime model is empty; refusing persistent/default "
                 "model authority"
             )
+        # ``local`` is the historical application-level alias.  The
+        # credential-minimized runtime contract has one supported local route,
+        # so normalize that alias before consulting the provider catalog.  Do
+        # not resolve arbitrary catalog entries: an absent qwen-local entry
+        # still fails closed below.
+        if requested == "local":
+            requested = "qwen-local"
         providers = (config.get("models") or {}).get("providers") or {}
         if "/" in requested:
             provider_name, model_id = requested.split("/", 1)

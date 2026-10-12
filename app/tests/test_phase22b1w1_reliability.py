@@ -82,6 +82,20 @@ def _write_config(path, project_workspace, runtime_root):
     )
 
 
+def test_legacy_local_model_alias_resolves_to_authorized_qwen_route():
+    config = {
+        "models": {
+            "providers": {
+                "openai": {"models": [{"id": "qwen-local"}]},
+            }
+        }
+    }
+    assert (
+        OpenClawSessionService._runtime_openclaw_model_ref_from_config(config, "local")
+        == "openai/qwen-local"
+    )
+
+
 def test_runtime_binding_moves_all_provider_state_out_of_canonical_root(tmp_path):
     project_workspace = tmp_path / "canonical"
     project_workspace.mkdir()

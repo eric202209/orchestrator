@@ -64,12 +64,24 @@ def _runtime_binding_fixture(tmp_path: Path, project_workspace: Path):
     config_path.write_text(
         json.dumps(
             {
+                "models": {
+                    "providers": {
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [
+                                {"id": "qwen-local", "name": "synthetic qwen local"}
+                            ],
+                        }
+                    }
+                },
                 "agents": {
                     "defaults": {},
                     "list": [
                         {"id": "orchestrator", "workspace": str(runner_workspace)}
                     ],
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -92,6 +104,7 @@ def test_runtime_binding_blocks_provider_bootstrap_scaffold(tmp_path: Path):
         _binding_context(project_workspace, runtime_workspace, runtime_root),
         real_config_path=config_path,
         runner_agent_id="orchestrator",
+        model_ref="openai/qwen-local",
     )
     try:
         bound_config = json.loads(binding.config_path.read_text(encoding="utf-8"))
@@ -143,6 +156,7 @@ def test_current_openclaw_parser_accepts_defaults_bootstrap_control(
         _binding_context(project_workspace, runtime_workspace, runtime_root),
         real_config_path=config_path,
         runner_agent_id="orchestrator",
+        model_ref="openai/qwen-local",
     )
     try:
         env = os.environ.copy()
@@ -177,13 +191,13 @@ def test_discovery_tool_suppression_is_ephemeral_and_openclaw_validated(
         tmp_path, project_workspace
     )
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["agents"]["list"][0]["model"] = "ollama/qwen3-coder:30b"
     config_path.write_text(json.dumps(config), encoding="utf-8")
     original_config = config_path.read_bytes()
     binding = bind_openclaw_workspace(
         _binding_context(project_workspace, runtime_workspace, runtime_root),
         real_config_path=config_path,
         runner_agent_id="orchestrator",
+        model_ref="openai/qwen-local",
     )
     service = object.__new__(OpenClawSessionService)
     service._workspace_binding = binding
@@ -197,7 +211,10 @@ def test_discovery_tool_suppression_is_ephemeral_and_openclaw_validated(
         bound = json.loads(binding.config_path.read_text(encoding="utf-8"))
         agent = bound["agents"]["list"][0]
         assert agent["tools"]["deny"] == ["*"]
-        assert agent["model"] == "ollama/qwen3-coder:30b"
+        assert agent["model"] == {
+            "primary": "openai/qwen-local",
+            "fallbacks": [],
+        }
         assert agent["workspace"] == str(runtime_workspace)
 
         env = os.environ.copy()

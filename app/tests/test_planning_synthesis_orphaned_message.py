@@ -50,7 +50,12 @@ async def test_planning_invocations_bind_unique_openclaw_history_keys(
             {
                 "models": {
                     "providers": {
-                        "openai": {"models": [{"id": "qwen-local"}]},
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local"}],
+                        },
                     }
                 },
                 "agents": {

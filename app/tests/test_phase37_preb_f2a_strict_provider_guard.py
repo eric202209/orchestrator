@@ -58,7 +58,12 @@ def _persistent_home(tmp_path: Path, monkeypatch) -> Path:
             {
                 "models": {
                     "providers": {
-                        "openai": {"models": [{"id": "qwen-local", "reasoning": True}]}
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local", "reasoning": True}],
+                        }
                     }
                 },
                 "agents": {
