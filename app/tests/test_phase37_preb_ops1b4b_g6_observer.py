@@ -574,12 +574,27 @@ def test_15_release_only_after_prior_discovery(world, fake):
     assert "release_observed" not in summary["checks"]
 
 
-def test_15b_preexisting_binding_removal_is_not_a_release(world, fake):
-    b = synthetic_binding(world, fake)  # present before the observer starts
+def test_15b_preexisting_foreign_binding_removal_is_not_a_release(world, fake):
+    b = world.binding(owner_pid=OWNER, owner_ticks=OWNER_TICKS, exec_id=999)
     observer, summary = run(world, fake, {2: lambda: world.release(b)})
     assert events(observer, "observer_started")[0]["preexisting_entries"] == 1
     assert events(observer, "binding_discovered") == []
     assert events(observer, "binding_removed") == []
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_15c_r1_preexisting_matching_binding_is_adopted_but_cannot_pass(world, fake):
+    """R1 (F1, SUPERSEDES the PREP rule 'pre-existing entries are never
+    adopted'): a late-started observer adopts the binding of the expected
+    execution, but an earlier CLI may have been missed, so no PASS."""
+    b = synthetic_binding(world, fake)  # present before the observer starts
+    add_cli(fake, b, argv=["openclaw-agent"])
+    steps = {2: lambda: fake.remove(7100), 3: lambda: world.release(b)}
+    observer, summary = run(world, fake, steps)
+    assert events(observer, "observer_started")[0]["preexisting_entries"] == 0
+    assert events(observer, "binding_discovered")[0]["discovered_at_start"] is True
+    assert summary["checks"]["release_observed"] == obs.PASS
+    assert summary["checks"]["observed_from_creation"] == obs.INCONCLUSIVE
     assert summary["verdict"] == obs.INCONCLUSIVE
 
 
@@ -923,7 +938,6 @@ def test_28b_static_source_has_no_network_signal_subprocess_or_app_imports():
         "asyncio",
         "signal",
         "shutil",
-        "sqlite3",
         "redis",
         "app",
         "celery",
@@ -1199,3 +1213,878 @@ def test_14b_dir_removed_but_lock_still_held_is_not_a_release(world, fake):
     assert events(observer, "binding_removed")[0]["lock_still_held"] is True
     assert summary["checks"]["release_observed"] == obs.INCONCLUSIVE
     assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+# --------------------------------------------------------------------------
+# R1: pre-dispatch arming, read-only execution correlation, fast lifecycles,
+# CLI identity evidence, terminal state, observer defect regressions
+# --------------------------------------------------------------------------
+
+import re  # noqa: E402
+import sqlite3  # noqa: E402
+
+PROJECT_ID, SESSION_ID, TASK_ID = 170, 245, 295
+BOOT_ID = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+
+
+class SyntheticDb:
+    """Tmp SQLite DB with the columns the observer reads (WAL, like prod).
+    The test plays the Worker and writes through its own connection."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        c = sqlite3.connect(path)
+        c.execute("PRAGMA journal_mode=WAL")
+        c.executescript(
+            """
+            CREATE TABLE sessions (id INTEGER PRIMARY KEY, project_id INTEGER,
+                name TEXT, status TEXT, continuation_kind TEXT,
+                continuation_retry_count INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE tasks (id INTEGER PRIMARY KEY, project_id INTEGER,
+                title TEXT, description TEXT);
+            CREATE TABLE task_executions (id INTEGER PRIMARY KEY,
+                session_id INTEGER, task_id INTEGER, attempt_number INTEGER,
+                status TEXT, worker_pid INTEGER,
+                worker_process_start_identity TEXT);
+            """
+        )
+        c.execute(
+            "INSERT INTO sessions VALUES (?, ?, ?, 'pending', NULL, 0)",
+            (SESSION_ID, PROJECT_ID, DECOYS[5]),
+        )
+        c.execute(
+            "INSERT INTO tasks VALUES (?, ?, 'hello', ?)",
+            (TASK_ID, PROJECT_ID, PROMPT),
+        )
+        c.commit()
+        self.c = c
+
+    def add_execution(
+        self, eid=EXEC_ID, attempt=1, status="RUNNING", pid=OWNER, ticks=OWNER_TICKS
+    ):
+        identity = f"{BOOT_ID}:{ticks}" if pid is not None else None
+        self.c.execute(
+            "INSERT INTO task_executions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (eid, SESSION_ID, TASK_ID, attempt, status, pid, identity),
+        )
+        self.c.commit()
+
+    def finish(self, eid=EXEC_ID, status="DONE", session="completed"):
+        # Terminal release clears the worker identity, like production.
+        self.c.execute(
+            "UPDATE task_executions SET status=?, worker_pid=NULL, "
+            "worker_process_start_identity=NULL WHERE id=?",
+            (status, eid),
+        )
+        self.c.execute("UPDATE sessions SET status=? WHERE id=?", (session, SESSION_ID))
+        self.c.commit()
+
+    def session(self, **values):
+        for key, value in values.items():
+            self.c.execute(
+                f"UPDATE sessions SET {key}=? WHERE id=?", (value, SESSION_ID)
+            )
+        self.c.commit()
+
+    def close(self):
+        self.c.close()
+
+
+@pytest.fixture
+def db(tmp_path):
+    d = SyntheticDb(tmp_path / "orchestrator-synthetic.db")
+    yield d
+    d.close()
+
+
+def arm_args(world, db, *extra):
+    return obs.build_parser().parse_args(
+        [
+            "--mode",
+            "synthetic",
+            "--arm",
+            "--binding-root",
+            str(world.root),
+            "--db-path",
+            str(db.path),
+            "--expected-session-id",
+            str(SESSION_ID),
+            "--expected-task-id",
+            str(TASK_ID),
+            "--expected-project-id",
+            str(PROJECT_ID),
+            "--expected-runtime-root",
+            str(world.tmp / "runtime"),
+            "--output-dir",
+            str(world.out),
+            "--interval",
+            "0.05",
+            "--duration",
+            "5",
+            "--settle",
+            "0",
+            "--arm-timeout",
+            "3",
+            *extra,
+        ]
+    )
+
+
+def run_armed(world, fake, db, steps=None, extra=(), announced=None):
+    script = Script(dict(steps or {}))
+    observer = obs.Observer(
+        arm_args(world, db, *extra),
+        proc=fake,
+        clock=script.clock,
+        sleep=script.sleep,
+        announce=(announced.append if announced is not None else None),
+    )
+    observer.open_db()
+    observer.open_output()
+    return observer, observer.run()
+
+
+def armed_lifecycle_steps(world, fake, db, holder, cli_argv_value=None):
+    """armed -> row (1) -> binding+CLI (2) -> CLI exit (4) -> release (5)
+    -> execution DONE / session completed (6)."""
+
+    def create():
+        holder["b"] = synthetic_binding(world, fake)
+        add_cli(fake, holder["b"], argv=cli_argv_value)
+        (holder["b"] / "agent" / "models.json").write_text("{}")
+
+    return {
+        1: db.add_execution,
+        2: create,
+        4: lambda: fake.remove(7100),
+        5: lambda: world.release(holder["b"]),
+        6: db.finish,
+    }
+
+
+def test_r1_01_02_armed_before_dispatch_then_binding_after_readiness(world, fake, db):
+    holder, announced = {}, []
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    first = steps[1]
+
+    def dispatch():
+        # G5 happens only after ARMED readiness was emitted and persisted.
+        assert len(announced) == 1 and announced[0]["event"] == "observer_armed"
+        assert (world.out / "g6-armed.json").exists()
+        first()
+
+    steps[1] = dispatch
+    observer, summary = run_armed(world, fake, db, steps, announced=announced)
+    names = [e["event"] for e in observer.events]
+    assert names.index("observer_armed") < names.index("execution_discovered")
+    assert names.index("execution_discovered") < names.index("binding_discovered")
+    assert summary["verdict"] == obs.PASS, (summary["checks"], summary["notes"])
+    assert summary["terminal_state"] == obs.EXECUTION_TERMINAL
+    assert summary["cli_identity_evidence"] == obs.DIRECTLY_OBSERVED
+    assert set(summary["evidence_chain"].values()) == {obs.DIRECTLY_OBSERVED}
+    assert summary["checks"]["worker_identity_correlation"] == obs.PASS
+    assert summary["checks"]["single_attempt"] == obs.PASS
+    assert summary["executions"] == [
+        {"id": EXEC_ID, "attempt_number": 1, "status": "DONE"}
+    ]
+    armed = json.loads((world.out / "g6-armed.json").read_text())
+    assert armed["existing_executions"] == 0
+    assert (os.stat(world.out / "g6-armed.json").st_mode & 0o777) == 0o600
+
+
+def test_r1_03_binding_released_rapidly_seen_on_one_poll(world, fake, db):
+    holder = {}
+
+    def create():
+        holder["b"] = synthetic_binding(world, fake)
+        add_cli(fake, holder["b"])
+        (holder["b"] / "agent" / "models.json").write_text("{}")
+
+    def gone():
+        fake.remove(7100)
+        world.release(holder["b"])
+
+    steps = {1: db.add_execution, 2: create, 3: gone, 4: db.finish}
+    observer, summary = run_armed(world, fake, db, steps)
+    assert len(events(observer, "binding_discovered")) == 1
+    assert summary["checks"]["release_observed"] == obs.PASS
+    assert summary["verdict"] == obs.PASS, summary["checks"]
+
+
+def test_r1_04_cli_argv_visible_briefly_then_title_rewrite(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps[3] = lambda: add_cli(fake, holder["b"], argv=["openclaw-agent"])
+    observer, summary = run_armed(world, fake, db, steps)
+    assert events(observer, "process_correlated")[0]["argv_form"] == "original_argv"
+    assert len(events(observer, "process_correlated")) == 1  # same (pid, ticks)
+    assert summary["checks"]["cli_agent_identity"] == obs.PASS
+    assert summary["evidence_chain"]["cli_agent_selection"] == obs.DIRECTLY_OBSERVED
+
+
+@pytest.mark.parametrize("models_json", [True, False])
+def test_r1_05_cli_already_renamed_is_corroborated_at_best_never_pass(
+    world, fake, db, models_json
+):
+    holder = {}
+    steps = armed_lifecycle_steps(
+        world, fake, db, holder, cli_argv_value=["openclaw-agent"]
+    )
+    create = steps[2]
+
+    def create_variant():
+        create()
+        if not models_json:
+            (holder["b"] / "agent" / "models.json").unlink()
+
+    steps[2] = create_variant
+    _, summary = run_armed(world, fake, db, steps)
+    assert summary["checks"]["cli_agent_identity"] == obs.INCONCLUSIVE
+    expected = obs.CORROBORATED if models_json else obs.INCONCLUSIVE
+    assert summary["evidence_chain"]["cli_agent_selection"] == expected
+    assert summary["cli_identity_evidence"] == expected
+    assert summary["verdict"] == obs.INCONCLUSIVE
+    assert summary["terminal_state"] == obs.EXECUTION_TERMINAL
+
+
+def test_r1_06_cli_exits_between_polls_is_inconclusive(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    create = steps[2]
+
+    def create_without_visible_cli():
+        create()
+        fake.remove(7100)
+
+    steps[2] = create_without_visible_cli
+    steps[4] = lambda: None
+    observer, summary = run_armed(world, fake, db, steps)
+    assert events(observer, "process_correlated") == []
+    assert summary["checks"]["lock_inherited_by_cli"] == obs.INCONCLUSIVE
+    assert summary["evidence_chain"]["worker_to_cli"] == obs.INCONCLUSIVE
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_07_task_execution_row_before_binding(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps = {1: steps[1], 3: steps[2], 5: steps[4], 6: steps[5], 7: steps[6]}
+    observer, summary = run_armed(world, fake, db, steps)
+    assert events(observer, "binding_deferred") == []
+    assert summary["verdict"] == obs.PASS, summary["checks"]
+
+
+def test_r1_08_binding_visible_before_task_execution_row_is_deferred(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps = {1: steps[2], 3: steps[1], 5: steps[4], 6: steps[5], 7: steps[6]}
+    observer, summary = run_armed(world, fake, db, steps)
+    names = [e["event"] for e in observer.events]
+    assert names.index("binding_deferred") < names.index("execution_discovered")
+    assert names.index("execution_discovered") < names.index("binding_discovered")
+    assert events(observer, "foreign_binding") == []
+    assert summary["verdict"] == obs.PASS, summary["checks"]
+
+
+def test_r1_09_incomplete_binding_metadata_never_passes(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+
+    def create():
+        holder["b"] = world.binding(
+            owner_pid=OWNER,
+            owner_ticks=OWNER_TICKS,
+            metadata_override={"owner_pid_start_ticks": None, "boot_id": None},
+        )
+        add_cli(fake, holder["b"])
+
+    steps[2] = create
+    observer, summary = run_armed(world, fake, db, steps)
+    assert events(observer, "binding_discovered")[0]["owner_alive"] is None
+    assert summary["evidence_chain"]["binding_to_worker"] == obs.INCONCLUSIVE
+    assert summary["checks"]["worker_identity_correlation"] == obs.INCONCLUSIVE
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_09b_binding_without_execution_id_is_foreign_in_armed_mode(world, fake, db):
+    def create():
+        world.binding(
+            owner_pid=OWNER,
+            owner_ticks=OWNER_TICKS,
+            metadata_override={"task_execution_id": None},
+        )
+
+    observer, summary = run_armed(
+        world, fake, db, {1: db.add_execution, 2: create}, extra=("--duration", "0.5")
+    )
+    assert len(events(observer, "foreign_binding")) == 1
+    assert events(observer, "binding_discovered") == []
+    assert summary["checks"]["binding_identity"] == obs.INCONCLUSIVE
+
+
+def _nested(world, fake, holder, **kw):
+    def create():
+        holder["n"] = synthetic_binding(world, fake, **kw)
+
+    return create
+
+
+def test_r1_10_nested_same_execution_binding_with_wrong_workspace_fails(
+    world, fake, db
+):
+    """F2: a nested repair/fallback binding for the same TaskExecution was
+    ignored by PREP's single-'primary' adjudication."""
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps[3] = _nested(world, fake, holder, workspace=world.tmp / "wrong-ws")
+    steps[5] = lambda: (world.release(holder["b"]), world.release(holder["n"]))
+    observer, summary = run_armed(world, fake, db, steps)
+    assert len(events(observer, "binding_discovered")) == 2
+    assert summary["checks"]["runtime_workspace"] == obs.FAIL
+    assert summary["verdict"] == obs.FAIL
+    assert summary["evidence_chain"]["env_to_agent_config"] == obs.CONTRADICTED
+
+
+def test_r1_10b_nested_binding_unreleased_blocks_pass(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps[3] = _nested(world, fake, holder)
+    observer, summary = run_armed(world, fake, db, steps, extra=("--duration", "1"))
+    assert summary["checks"]["release_observed"] == obs.INCONCLUSIVE
+    assert "multiple_target_bindings:2" in summary["notes"]
+    assert summary["verdict"] == obs.INCONCLUSIVE
+    assert summary["terminal_state"] == obs.TERMINAL_STATE_INCONCLUSIVE
+
+
+def test_r1_10c_nested_binding_correct_and_released_passes(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps[3] = _nested(world, fake, holder)
+    steps[5] = lambda: (world.release(holder["n"]), world.release(holder["b"]))
+    _, summary = run_armed(world, fake, db, steps)
+    assert summary["verdict"] == obs.PASS, summary["checks"]
+
+
+def test_r1_11_worker_identity_contradiction_fails(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps[1] = lambda: db.add_execution(ticks=OWNER_TICKS + 7)  # reused PID
+    _, summary = run_armed(world, fake, db, steps)
+    assert summary["checks"]["worker_identity_correlation"] == obs.FAIL
+    assert summary["evidence_chain"]["binding_to_worker"] == obs.CONTRADICTED
+    assert summary["verdict"] == obs.FAIL
+
+
+def test_r1_12_sequential_clis_one_title_only_is_not_pass(world, fake, db):
+    """F5: PREP passed cli_agent_identity when ANY direct CLI's argv was
+    captured; every direct CLI must be captured."""
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+
+    def second_cli():
+        fake.remove(7100)
+        add_cli(fake, holder["b"], pid=7101, ticks=6100, argv=["openclaw-agent"])
+
+    steps[3] = second_cli
+    steps[4] = lambda: fake.remove(7101)
+    observer, summary = run_armed(world, fake, db, steps)
+    assert len(events(observer, "process_correlated")) == 2
+    assert summary["checks"]["cli_agent_identity"] == obs.INCONCLUSIVE
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_12b_sequential_clis_second_wrong_agent_fails(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+
+    def second_cli():
+        fake.remove(7100)
+        add_cli(fake, holder["b"], pid=7101, ticks=6100, argv=cli_argv(agent="main"))
+
+    steps[3] = second_cli
+    steps[4] = lambda: fake.remove(7101)
+    _, summary = run_armed(world, fake, db, steps)
+    assert summary["checks"]["cli_agent_identity"] == obs.FAIL
+    assert summary["evidence_chain"]["cli_agent_selection"] == obs.CONTRADICTED
+
+
+@pytest.mark.parametrize("which", ["config", "state"])
+def test_r1_13_14_wrong_config_or_state_path_in_armed_mode(world, fake, db, which):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+
+    def create():
+        holder["b"] = synthetic_binding(world, fake)
+        bad = world.tmp / "elsewhere"
+        env = cli_env(holder["b"], **{which: bad})
+        add_cli(fake, holder["b"], env=env)
+
+    steps[2] = create
+    _, summary = run_armed(world, fake, db, steps)
+    check = "ephemeral_config_path" if which == "config" else "ephemeral_state_dir"
+    assert summary["checks"][check] == obs.FAIL
+    assert summary["evidence_chain"]["cli_to_ephemeral_env"] == obs.CONTRADICTED
+    assert summary["verdict"] == obs.FAIL
+
+
+def test_r1_15_armed_workspace_derived_from_runtime_root_and_project(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+
+    def create():
+        holder["b"] = synthetic_binding(
+            world, fake, workspace=world.tmp / "runtime" / "tasks" / "169" / "386"
+        )
+        add_cli(fake, holder["b"])
+
+    steps[2] = create
+    _, summary = run_armed(world, fake, db, steps)
+    assert summary["checks"]["runtime_workspace"] == obs.FAIL
+
+
+def test_r1_16_cli_without_inherited_lock_is_not_correlated(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+
+    def create():
+        holder["b"] = synthetic_binding(world, fake)
+        fake.add(
+            7100,
+            ppid=OWNER,
+            ticks=6000,
+            argv=cli_argv(),
+            env=cli_env(holder["b"]),
+            fds=(),
+        )
+
+    steps[2] = create
+    observer, summary = run_armed(world, fake, db, steps)
+    assert events(observer, "process_correlated") == []
+    assert summary["checks"]["lock_inherited_by_cli"] == obs.INCONCLUSIVE
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_17_release_without_discovery_in_armed_mode(world, fake, db):
+    def flash():
+        b = synthetic_binding(world, fake)
+        world.release(b)
+
+    observer, summary = run_armed(
+        world, fake, db, {1: db.add_execution, 2: flash, 3: db.finish}
+    )
+    assert events(observer, "binding_removed") == []
+    assert summary["checks"] == {"binding_identity": obs.INCONCLUSIVE}
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_18_no_binding_observed_but_execution_terminal(world, fake, db):
+    observer, summary = run_armed(
+        world, fake, db, {1: db.add_execution, 3: db.finish}, extra=("--duration", "1")
+    )
+    assert summary["terminal_state"] == obs.EXECUTION_TERMINAL
+    assert summary["verdict"] == obs.INCONCLUSIVE  # terminal is not success
+    assert "target_binding_never_observed" in summary["notes"]
+
+
+def test_r1_19_initialization_failures_fail_closed_before_armed(
+    world, fake, db, tmp_path, capsys
+):
+    # session belongs to another project
+    db.session(project_id=1)
+    observer, summary = run_armed(world, fake, db)
+    assert summary["verdict"] == obs.OBSERVATION_ERROR
+    assert events(observer, "observer_armed") == []
+    assert not (world.out / "g6-armed.json").exists()
+    db.session(project_id=PROJECT_ID)
+
+    # an execution already exists: arming would not be pre-dispatch
+    db.add_execution()
+    world.out = tmp_path / "evidence" / "g6-b"
+    _, summary = run_armed(world, fake, db)
+    assert summary["verdict"] == obs.OBSERVATION_ERROR
+    assert not (world.out / "g6-armed.json").exists()
+
+    base = [
+        "--binding-root",
+        str(world.root),
+        "--expected-session-id",
+        str(SESSION_ID),
+        "--expected-task-id",
+        str(TASK_ID),
+        "--expected-project-id",
+        str(PROJECT_ID),
+        "--expected-runtime-root",
+        str(world.tmp / "runtime"),
+    ]
+    out = tmp_path / "o"
+    cases = [
+        ["--mode", "synthetic", "--arm", "--db-path", str(tmp_path / "missing.db")],
+        ["--mode", "synthetic", "--arm", "--db-path", obs.DEFAULT_PRODUCTION_DB],
+        [
+            "--mode",
+            "production",
+            "--confirm-read-only-production",
+            "--arm",
+            "--db-path",
+            str(db.path),
+        ],
+        [
+            "--mode",
+            "synthetic",
+            "--arm",
+            "--db-path",
+            str(db.path),
+            "--expected-task-execution-id",
+            "1",
+        ],
+    ]
+    for case in cases:
+        assert obs.main([*case, *base, "--output-dir", str(out)]) == 3
+        assert not out.exists()
+    bad = tmp_path / "schema.db"
+    sqlite3.connect(bad).execute(
+        "CREATE TABLE sessions (id INTEGER)"
+    ).connection.close()
+    assert (
+        obs.main(
+            ["--mode", "synthetic", "--arm", "--db-path", str(bad), *base]
+            + ["--output-dir", str(out)]
+        )
+        == 3
+    )
+    assert not out.exists()
+    err = capsys.readouterr().err
+    assert DECOYS[5] not in err and PROMPT not in err
+
+
+def test_r1_20_window_expires_during_execution_without_signals(
+    world, fake, db, monkeypatch
+):
+    holder = {}
+
+    def create():
+        holder["b"] = synthetic_binding(world, fake)
+        add_cli(fake, holder["b"])
+
+    script = Script({1: db.add_execution, 2: create})
+    observer = obs.Observer(
+        arm_args(world, db, "--duration", "1"),
+        proc=fake,
+        clock=script.clock,
+        sleep=script.sleep,
+    )
+    observer.open_db()
+    observer.open_output()
+    _forbid(monkeypatch)
+    summary = observer.run()
+    monkeypatch.undo()
+    assert summary["terminal_state"] == obs.EXECUTION_STILL_ACTIVE
+    assert "observation_window_elapsed" in summary["notes"]
+    assert summary["checks"]["execution_terminal"] == obs.INCONCLUSIVE
+    assert summary["verdict"] == obs.INCONCLUSIVE
+    assert holder["b"].exists()  # nothing cleaned up
+
+
+def test_r1_arm_timeout_without_dispatch(world, fake, db):
+    observer, summary = run_armed(world, fake, db, extra=("--arm-timeout", "0.3"))
+    assert "dispatch_not_observed_within_arm_timeout" in summary["notes"]
+    assert summary["terminal_state"] == obs.OBSERVATION_WINDOW_ENDED
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_retry_additional_execution_row_detected(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps[3] = lambda: db.add_execution(eid=EXEC_ID + 1, attempt=2, status="PENDING")
+    observer, summary = run_armed(world, fake, db, steps, extra=("--duration", "1"))
+    reasons = {e["reason"] for e in events(observer, "retry_detected")}
+    assert {"additional_execution_row", "attempt_number_above_one"} <= reasons
+    assert summary["terminal_state"] == obs.RETRY_DETECTED
+    assert summary["checks"]["single_attempt"] == obs.INCONCLUSIVE
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_retry_capacity_continuation_detected(world, fake, db):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps[3] = lambda: db.session(
+        continuation_kind="backend_capacity", continuation_retry_count=1
+    )
+    _, summary = run_armed(world, fake, db, steps, extra=("--duration", "1"))
+    assert summary["terminal_state"] == obs.RETRY_DETECTED
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_session_still_running_after_terminal_execution_is_inconclusive(
+    world, fake, db
+):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    steps[6] = lambda: db.finish(session="running")
+    _, summary = run_armed(world, fake, db, steps, extra=("--duration", "1"))
+    assert summary["terminal_state"] == obs.TERMINAL_STATE_INCONCLUSIVE
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_f4_pre_exec_lock_holder_is_deferred_until_exec(world, fake):
+    """F4: between fork and exec the child holds the inherited lock but still
+    shows the Worker's comm/exe/cmdline/environ; recording it then produced a
+    false ephemeral_config_path FAIL."""
+    holder = {}
+
+    def fork():
+        holder["b"] = synthetic_binding(world, fake)
+        fake.add(
+            7100,
+            ppid=OWNER,
+            ticks=6000,
+            comm="celery",
+            argv=["celery"],
+            env={"PATH": "/usr/bin", "OPENAI_API_KEY": DECOYS[4]},
+            fds=[holder["b"] / obs.BINDING_LOCK_NAME],
+        )
+
+    def exec_cli():
+        add_cli(fake, holder["b"])  # exec: same pid and ticks
+        (holder["b"] / "agent" / "models.json").write_text("{}")
+
+    steps = {
+        1: fork,
+        2: exec_cli,
+        4: lambda: fake.remove(7100),
+        5: lambda: world.release(holder["b"]),
+    }
+    observer, summary = run(world, fake, steps)
+    assert len(events(observer, "lock_holder_pending")) == 1
+    rec = events(observer, "process_correlated")[0]
+    assert rec["config_path_ok"] is True and rec["argv_agent"] == AGENT
+    assert summary["checks"]["lock_holders_resolved"] == obs.PASS
+    assert summary["verdict"] == obs.PASS, summary["checks"]
+
+
+def test_r1_f4_pre_exec_holder_never_resolved_is_inconclusive(world, fake):
+    holder = {}
+
+    def fork():
+        holder["b"] = synthetic_binding(world, fake)
+        fake.add(
+            7100,
+            ppid=OWNER,
+            ticks=6000,
+            comm="celery",
+            argv=["celery"],
+            fds=[holder["b"] / obs.BINDING_LOCK_NAME],
+        )
+
+    steps = {
+        1: fork,
+        3: lambda: fake.remove(7100),
+        4: lambda: world.release(holder["b"]),
+    }
+    _, summary = run(world, fake, steps)
+    assert summary["checks"]["lock_holders_resolved"] == obs.INCONCLUSIVE
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_f3_lock_still_held_at_first_post_removal_poll_then_released(world, fake):
+    """F3: release() removes the directory before closing the lock; PREP
+    evaluated the lock once at removal and stayed INCONCLUSIVE forever."""
+    holder, held = {}, {}
+
+    def create():
+        holder["b"] = synthetic_binding(world, fake)
+        add_cli(fake, holder["b"])
+        (holder["b"] / "agent" / "models.json").write_text("{}")
+        held["ino"] = (holder["b"] / obs.BINDING_LOCK_NAME).stat().st_ino
+
+    def rmtree_only():
+        import shutil
+
+        shutil.rmtree(holder["b"])
+
+    def close_lock():
+        os.close(world.lock_fds.pop(holder["b"].name))
+        held.clear()
+
+    fake.locked_inodes = lambda: set(held.values())
+    steps = {1: create, 3: lambda: fake.remove(7100), 4: rmtree_only, 5: close_lock}
+    observer, summary = run(world, fake, steps)
+    assert events(observer, "binding_removed")[0]["lock_still_held"] is True
+    after = [
+        e for e in events(observer, "lock_state") if e["detail"] == "after_removal"
+    ]
+    assert after and after[-1]["lock_held"] is False
+    assert summary["checks"]["release_observed"] == obs.PASS
+    assert summary["verdict"] == obs.PASS, summary["checks"]
+
+
+def test_r1_f3_unknown_lock_table_is_not_a_release(world, fake):
+    holder = {}
+    fake.locked_inodes = lambda: None
+    _, summary = run(world, fake, full_lifecycle_steps(world, fake, holder))
+    assert summary["checks"]["release_observed"] == obs.INCONCLUSIVE
+    assert summary["verdict"] == obs.INCONCLUSIVE
+
+
+def test_r1_late_start_with_db_tracks_terminal_state(world, fake, db):
+    holder = {}
+    db.add_execution()
+    steps = full_lifecycle_steps(world, fake, holder)
+    steps[5] = db.finish
+    observer = None
+    script = Script(steps)
+    args = world.args("--db-path", str(db.path))
+    observer = obs.Observer(args, proc=fake, clock=script.clock, sleep=script.sleep)
+    observer.open_db()
+    observer.open_output()
+    summary = observer.run()
+    assert events(observer, "observer_started")[0]["expected_session_id"] == SESSION_ID
+    assert summary["terminal_state"] == obs.EXECUTION_TERMINAL
+    assert summary["verdict"] == obs.PASS, summary["checks"]
+
+
+def test_r1_credential_and_prompt_decoys_absent_from_every_output(
+    world, fake, db, capsys
+):
+    holder = {}
+    steps = armed_lifecycle_steps(world, fake, db, holder)
+    script = Script(steps)
+    observer = obs.Observer(
+        arm_args(world, db),
+        proc=fake,
+        clock=script.clock,
+        sleep=script.sleep,
+        announce=lambda r: print(json.dumps(r)),
+    )
+    observer.open_db()
+    observer.open_output()
+    summary = observer.run()
+    print(json.dumps(summary))
+    # Case-insensitive: the observer normalizes status case, so a leaked
+    # text column could surface lower/upper-cased.
+    text = all_output_text(world, capsys).lower()
+    for secret in DECOYS + (PROMPT, "PRIVATE-TASK-TEXT", "sess-1", BOOT_ID):
+        assert secret.lower() not in text
+    assert sorted(p.name for p in world.out.iterdir()) == [
+        "g6-armed.json",
+        "g6-observe.jsonl",
+        "g6-summary.json",
+    ]
+    for p in world.out.iterdir():
+        assert (os.stat(p).st_mode & 0o777) == 0o600
+
+
+def test_r1_execution_db_is_read_only_and_never_written(world, fake, db, tmp_path):
+    reader = obs.ExecutionDb(str(db.path))
+    with pytest.raises(sqlite3.OperationalError):
+        reader.conn.execute("UPDATE sessions SET status='x'")
+    reader.close()
+    db.c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    before = (db.path.read_bytes(), os.stat(db.path).st_mtime_ns)
+    run_armed(world, fake, db, extra=("--arm-timeout", "0.3"))
+    assert (db.path.read_bytes(), os.stat(db.path).st_mtime_ns) == before
+
+
+def test_r1_static_sql_is_select_only_and_connection_is_mode_ro():
+    src = SCRIPT.read_text()
+    tree = ast.parse(src)
+    sql = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id.startswith("_SQL") for t in node.targets
+        ):
+            value = ast.literal_eval(node.value)
+            sql += list(value) if isinstance(value, tuple) else [value]
+    assert sql and all(
+        s.startswith("SELECT ") or s == "PRAGMA query_only = ON" for s in sql
+    ), sql
+    write = re.compile(
+        r"\b(INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM|DROP\s|CREATE\s|"
+        r"ALTER\s|ATTACH\s|VACUUM|REPLACE\s+INTO)",
+        re.I,
+    )
+    assert not write.search(src)
+    executes = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "execute"
+    ]
+    for call in executes:
+        arg = call.args[0]
+        assert isinstance(arg, ast.Name) and (
+            arg.id.startswith("_SQL") or arg.id == "probe"
+        ), ast.dump(arg)
+    connects = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call)
+        and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "connect"
+    ]
+    assert len(connects) == 1 and "mode=ro" in ast.unparse(connects[0])
+
+
+def test_r1_sql_columns_exist_in_production_models():
+    from app.models import Base
+
+    pattern = re.compile(r"SELECT (.+?) FROM (\w+)")
+    statements = list(obs._SQL_SCHEMA_PROBES) + [
+        obs._SQL_SESSION,
+        obs._SQL_TASK_PROJECT,
+        obs._SQL_EXECUTIONS,
+        obs._SQL_EXECUTION_OWNER,
+    ]
+    for statement in statements:
+        columns, table = pattern.match(statement).groups()
+        known = set(Base.metadata.tables[table].columns.keys())
+        wanted = {c.strip() for c in columns.split(",")}
+        assert wanted <= known, (table, wanted - known)
+    from app.models import TaskStatus
+
+    assert obs.TERMINAL_EXECUTION_STATUSES == {
+        TaskStatus.DONE.name,
+        TaskStatus.FAILED.name,
+        TaskStatus.CANCELLED.name,
+    }
+    assert obs.ACTIVE_EXECUTION_STATUSES == {
+        TaskStatus.PENDING.name,
+        TaskStatus.RUNNING.name,
+    }
+
+
+def test_r1_main_arm_announces_readiness_on_stdout_then_summary(
+    world, db, tmp_path, capsys
+):
+    rc = obs.main(
+        [
+            "--mode",
+            "synthetic",
+            "--arm",
+            "--binding-root",
+            str(world.root),
+            "--db-path",
+            str(db.path),
+            "--expected-session-id",
+            str(SESSION_ID),
+            "--expected-task-id",
+            str(TASK_ID),
+            "--expected-project-id",
+            str(PROJECT_ID),
+            "--expected-runtime-root",
+            str(world.tmp / "runtime"),
+            "--output-dir",
+            str(world.out),
+            "--interval",
+            "0.05",
+            "--arm-timeout",
+            "0.2",
+            "--duration",
+            "2",
+        ]
+    )
+    lines = capsys.readouterr().out.strip().splitlines()
+    assert rc == 2
+    assert json.loads(lines[0])["event"] == "observer_armed"
+    assert json.loads(lines[-1])["verdict"] == obs.INCONCLUSIVE
