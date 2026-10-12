@@ -200,9 +200,17 @@ def test_d1_d6_dedicated_binding_is_a_private_managed_artifact(
         assert metadata["task_execution_id"] == 5150
         assert _lock_is_held(root)  # D5
         assert sorted(os.listdir(root)) == sorted(
-            [ewb.BINDING_LOCK_NAME, ewb.BINDING_METADATA_NAME, "openclaw.json", "state"]
+            [
+                ewb.BINDING_LOCK_NAME,
+                ewb.BINDING_METADATA_NAME,
+                "agent",
+                "home",
+                "openclaw.json",
+                "state",
+                "tmp",
+            ]
         )
-        assert not (root / "agent").exists()  # D6: no agent dir, no auth copy
+        assert (root / "agent").is_dir()
         assert not any(p.name == "auth-profiles.json" for p in root.rglob("*"))
         for content in _snapshot_files(root).values():
             assert SYNTHETIC_SECRET.encode() not in content
@@ -226,18 +234,24 @@ def test_d7_d10_config_is_equivalent_to_the_previous_builder(
     try:
         root = binding._tmp_dir
         written = json.loads(binding.config_path.read_text())
-        expected = _legacy_dedicated_config(
+        expected = ewb.project_local_openclaw_config(
             source,
+            model_ref=model_ref,
             agent_id=DEDICATED,
             runtime_workspace=workspace,
-            model_ref=model_ref,
-            root=root,
+            agent_dir=root / "agent",
+            state_dir=root / "state",
         )
         assert _normalized(written, root) == _normalized(expected, root)  # D7
         selected = next(a for a in written["agents"]["list"] if a["id"] == DEDICATED)
         assert service._last_selected_openclaw_agent_id == DEDICATED  # D8
         assert selected["model"] == {"primary": model_ref, "fallbacks": []}  # D9
-        assert written["models"] == source["models"]  # provider settings kept
+        assert list(written["models"]["providers"]) == ["openai"]
+        assert "openai-codex" not in written["models"]["providers"]
+        assert (
+            written["models"]["providers"]["openai"]["apiKey"]
+            == source["models"]["providers"]["openai"]["apiKey"]
+        )
         # D10: the operator config is the only source and stays untouched;
         # the override points at the binding's own config.
         assert json.loads(_source_config(tmp_path).read_text()) == source
@@ -246,6 +260,8 @@ def test_d7_d10_config_is_equivalent_to_the_previous_builder(
         assert service._apply_workspace_binding_env({}) == {
             "OPENCLAW_CONFIG_PATH": str(binding.config_path),
             "OPENCLAW_STATE_DIR": str(root / "state"),
+            "HOME": str(root / "home"),
+            "TMPDIR": str(root / "tmp"),
         }
         assert selected["workspace"] == str(workspace)  # D11 (config side)
     finally:

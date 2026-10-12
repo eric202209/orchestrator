@@ -85,7 +85,16 @@ def _write_openclaw_config(path, *, agent_id: str, workspace) -> None:
                         }
                     ]
                 },
-                "models": {"providers": {"openai": {"models": [{"id": "qwen-local"}]}}},
+                "models": {
+                    "providers": {
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local"}],
+                        }
+                    }
+                },
             }
         ),
         encoding="utf-8",

@@ -41,6 +41,7 @@ from app.services.orchestration.execution.runtime_context import RuntimeExecutor
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SYNTHETIC_SECRET = "synthetic-f2b-token-not-a-real-credential"
+SYNTHETIC_LOCAL_GATEWAY_TOKEN = "synthetic-local-gateway-token-not-real"
 
 
 # --------------------------------------------------------------------------
@@ -62,7 +63,22 @@ def _persistent_state(tmp_path: Path) -> tuple[Path, Path]:
     config.write_text(
         json.dumps(
             {
-                "models": {"providers": {"openai": {"models": [{"id": "qwen-local"}]}}},
+                "models": {
+                    "providers": {
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": SYNTHETIC_LOCAL_GATEWAY_TOKEN,
+                            "models": [{"id": "qwen-local"}],
+                        },
+                        "openai-codex": {
+                            "baseUrl": "https://synthetic-external.invalid/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-external-key-not-real",
+                            "models": [{"id": "external-model"}],
+                        },
+                    }
+                },
                 "agents": {
                     "list": [
                         {
@@ -268,7 +284,7 @@ def test_a_l_m_normal_binding_is_private_owned_and_fully_released(
     assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
     assert stat.S_IMODE(os.stat(binding._tmp_dir).st_mode) == 0o700
     copied = binding._tmp_dir / "agent" / "auth-profiles.json"
-    assert stat.S_IMODE(os.stat(copied).st_mode) == 0o600
+    assert not copied.exists()
     assert stat.S_IMODE(os.stat(binding._tmp_dir / "agent").st_mode) == 0o700
     assert stat.S_IMODE(os.stat(binding._tmp_dir / "state").st_mode) == 0o700
     assert stat.S_IMODE(os.stat(binding.config_path).st_mode) == 0o600
@@ -447,17 +463,20 @@ def test_spawn_kwargs_pass_lock_fd_only_while_bound(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("failing", ["copyfile", "config_write", "metadata"])
+@pytest.mark.parametrize("failing", ["agent_dir", "config_write", "metadata"])
 def test_c_partial_initialization_leaves_no_artifact(
     tmp_path, monkeypatch, isolated_openclaw_binding_root, failing
 ):
     _state, config = _persistent_state(tmp_path)
-    if failing == "copyfile":
-        monkeypatch.setattr(
-            ewb.shutil,
-            "copyfile",
-            lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
-        )
+    if failing == "agent_dir":
+        original_mkdir = Path.mkdir
+
+        def mkdir(path, *args, **kwargs):
+            if path.name == "agent":
+                raise OSError("disk full")
+            return original_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", mkdir)
     elif failing == "config_write":
         original = Path.write_text
 
@@ -523,11 +542,11 @@ def test_f_sigkill_residue_is_discoverable_and_classified_stale_confirmed(
     proc.wait(timeout=15)
     residue = Path(info["dir"])
     assert residue.exists(), "SIGKILL handlers never run; residue must remain"
-    assert (residue / "agent" / "auth-profiles.json").exists()
+    assert not (residue / "agent" / "auth-profiles.json").exists()
 
     report = recon.reconcile_binding_artifacts(isolated_openclaw_binding_root)
     assert _classes(report) == {residue.name: (recon.STALE_CONFIRMED, recon.REPORTED)}
-    assert report["artifacts"][0]["credential_bearing"] is True
+    assert report["artifacts"][0]["credential_bearing"] is False
     assert residue.exists(), "report-only mode must not delete"
 
     applied = recon.reconcile_binding_artifacts(

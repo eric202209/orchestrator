@@ -24,7 +24,12 @@ def _config(path: Path, *, project: Path) -> dict:
     value = {
         "models": {
             "providers": {
-                "openai": {"models": [{"id": "qwen-local"}]},
+                "openai": {
+                    "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                    "api": "openai-completions",
+                    "apiKey": "synthetic-local-gateway-token-not-real",
+                    "models": [{"id": "qwen-local"}],
+                },
                 "ollama": {"models": [{"id": "qwen3-coder:30b"}]},
             }
         },
@@ -87,22 +92,19 @@ def test_normal_binding_uses_synthetic_agent_and_preserves_persistent_state(tmp_
             for agent in bound["agents"]["list"]
             if agent["id"] == binding.agent_id
         )
-        main = next(agent for agent in bound["agents"]["list"] if agent["id"] == "main")
         assert binding.agent_id == "orchestrator-runtime"
         assert [agent["id"] for agent in bound["agents"]["list"]] == [
-            "main",
             "orchestrator-runtime",
         ]
-        assert main == original["agents"]["list"][0]
         assert selected["workspace"] == str(runtime)
         assert selected["model"] == {
             "primary": "openai/qwen-local",
             "fallbacks": [],
         }
-        assert (
-            bound["agents"]["defaults"]["model"]
-            == original["agents"]["defaults"]["model"]
-        )
+        assert bound["agents"]["defaults"] == {
+            "workspace": str(runtime),
+            "skipBootstrap": True,
+        }
         assert config_path.read_bytes() == before_bytes
         assert hashlib.sha256(config_path.read_bytes()).hexdigest() == before_sha
         assert Path(selected["agentDir"]).is_dir()
@@ -290,7 +292,7 @@ def test_no_persistent_runner_is_required_after_normal_binding(tmp_path):
             for agent in json.loads(binding.config_path.read_text())["agents"]["list"]
         ]
         assert persistent_ids == ["main"]
-        assert ephemeral_ids == ["main", "orchestrator-runtime"]
+        assert ephemeral_ids == ["orchestrator-runtime"]
     finally:
         binding.release()
 

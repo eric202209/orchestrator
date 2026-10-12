@@ -73,6 +73,8 @@ from app.services.orchestration.execution.executor_workspace_binding import (
     ExecutorWorkspaceBindingError,
     bind_openclaw_workspace,
     create_managed_binding,
+    project_local_openclaw_config,
+    restricted_openclaw_environment,
 )
 from app.services.orchestration.validation.runtime_pollution_guard import (
     detect_runtime_pollution,
@@ -904,18 +906,20 @@ class OpenClawSessionService:
             )
 
         def build_config(binding_dir: Path) -> Dict[str, Any]:
-            selected["workspace"] = str(runtime_workspace)
-            selected["agentDir"] = str(binding_dir / "agent")
-            if model_ref is not None:
-                selected["model"] = {"primary": model_ref, "fallbacks": []}
-            defaults = (config.setdefault("agents", {})).setdefault("defaults", {})
-            defaults["workspace"] = str(runtime_workspace)
-            memory_search = defaults.get("memorySearch")
-            if isinstance(memory_search, dict):
-                defaults["memorySearch"] = {**memory_search, "enabled": False}
-            session_config = config.setdefault("session", {})
-            session_config["store"] = str(binding_dir / "sessions.json")
-            return config
+            agent_dir = binding_dir / "agent"
+            agent_dir.mkdir(mode=0o700)
+            if model_ref is None:
+                raise OpenClawAgentSelectionError(
+                    "Dedicated Protocol v2 planning requires an explicit runtime model"
+                )
+            return project_local_openclaw_config(
+                config,
+                model_ref=model_ref,
+                agent_id=agent_id,
+                runtime_workspace=Path(runtime_workspace),
+                agent_dir=agent_dir,
+                state_dir=binding_dir / "state",
+            )
 
         # Phase 37 Pre-B-F2C: same managed lifecycle as the runtime binding
         # (managed root, flock, metadata, 0600 config, forced-termination
@@ -1289,6 +1293,8 @@ class OpenClawSessionService:
         """
         binding = getattr(self, "_workspace_binding", None)
         planning_binding = getattr(self, "_strict_planning_binding", None)
+        if binding is not None or planning_binding is not None:
+            env = restricted_openclaw_environment(env)
         if binding is not None:
             env.update(binding.environment)
         elif (

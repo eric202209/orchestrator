@@ -32,12 +32,22 @@ def _write_config(path, *, project_root, runner_root):
     path.write_text(
         json.dumps(
             {
+                "models": {
+                    "providers": {
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local"}],
+                        }
+                    }
+                },
                 "agents": {
                     "list": [
                         {"id": "project-agent", "workspace": str(project_root)},
                         {"id": "runtime-runner", "workspace": str(runner_root)},
                     ]
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -113,12 +123,22 @@ def test_duplicate_runner_identity_fails_closed(tmp_path, monkeypatch):
     config_path.write_text(
         json.dumps(
             {
+                "models": {
+                    "providers": {
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local"}],
+                        }
+                    }
+                },
                 "agents": {
                     "list": [
                         {"id": "runtime-runner", "workspace": str(runner_root)},
                         {"id": "runtime-runner", "workspace": str(runner_root)},
                     ]
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -227,9 +247,19 @@ def test_missing_approved_runtime_root_fails_closed(tmp_path, monkeypatch):
     config_path.write_text(
         json.dumps(
             {
+                "models": {
+                    "providers": {
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local"}],
+                        }
+                    }
+                },
                 "agents": {
                     "list": [{"id": "runtime-runner", "workspace": str(runner_root)}]
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -290,12 +320,22 @@ def test_explicit_binding_argument_precedes_environment_identity(tmp_path, monke
     config_path.write_text(
         json.dumps(
             {
+                "models": {
+                    "providers": {
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local"}],
+                        }
+                    }
+                },
                 "agents": {
                     "list": [
                         {"id": "runtime-runner", "workspace": str(runner_root)},
                         {"id": "alternate-runner", "workspace": str(alternate_runner)},
                     ]
-                }
+                },
             }
         ),
         encoding="utf-8",
@@ -306,6 +346,7 @@ def test_explicit_binding_argument_precedes_environment_identity(tmp_path, monke
         context,
         real_config_path=config_path,
         runner_agent_id="runtime-runner",
+        model_ref="openai/qwen-local",
     )
     try:
         assert binding.agent_id == "runtime-runner"
@@ -471,6 +512,7 @@ def test_physical_binding_probe_writes_only_ephemeral_runtime_copy(
         context,
         real_config_path=config_path,
         runner_agent_id="runtime-runner",
+        model_ref="openai/qwen-local",
     )
     try:
         bound_config = json.loads(binding.config_path.read_text(encoding="utf-8"))
@@ -546,6 +588,7 @@ def test_explicit_runner_id_is_selected_over_project_root_agent(
         context,
         real_config_path=config_path,
         runner_agent_id=runner_id,
+        model_ref="openai/qwen-local",
     )
     try:
         assert binding.agent_id == runner_id
@@ -568,6 +611,16 @@ def test_binding_applies_explicit_runtime_model_without_fallbacks(
     )
     config_path = tmp_path / "openclaw.json"
     config = {
+        "models": {
+            "providers": {
+                "openai": {
+                    "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                    "api": "openai-completions",
+                    "apiKey": "synthetic-local-gateway-token-not-real",
+                    "models": [{"id": "qwen-local"}],
+                }
+            }
+        },
         "agents": {
             "defaults": {
                 "model": {
@@ -583,7 +636,7 @@ def test_binding_applies_explicit_runtime_model_without_fallbacks(
                     "model": "ollama/qwen3-coder:30b",
                 },
             ],
-        }
+        },
     }
     config_path.write_text(json.dumps(config), encoding="utf-8")
     persistent_before = config_path.read_bytes()
@@ -605,10 +658,10 @@ def test_binding_applies_explicit_runtime_model_without_fallbacks(
             "primary": "openai/qwen-local",
             "fallbacks": [],
         }
-        assert (
-            bound_config["agents"]["defaults"]["model"]
-            == config["agents"]["defaults"]["model"]
-        )
+        assert bound_config["agents"]["defaults"] == {
+            "workspace": str(runtime_workspace),
+            "skipBootstrap": True,
+        }
         assert selected["workspace"] == str(runtime_workspace)
         ephemeral_agent_dir = Path(selected["agentDir"])
         ephemeral_state_dir = Path(binding.environment["OPENCLAW_STATE_DIR"])
@@ -633,7 +686,12 @@ def test_service_binding_uses_role_model_over_persistent_runner_model(
     config = {
         "models": {
             "providers": {
-                "openai": {"models": [{"id": "qwen-local"}]},
+                "openai": {
+                    "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                    "api": "openai-completions",
+                    "apiKey": "synthetic-local-gateway-token-not-real",
+                    "models": [{"id": "qwen-local"}],
+                },
                 "ollama": {"models": [{"id": "qwen3-coder:30b"}]},
             }
         },
@@ -771,11 +829,13 @@ def test_two_tasks_share_template_identity_but_not_ephemeral_binding(
         first_context,
         real_config_path=config_path,
         runner_agent_id="runtime-runner",
+        model_ref="openai/qwen-local",
     )
     second = bind_openclaw_workspace(
         second_context,
         real_config_path=config_path,
         runner_agent_id="runtime-runner",
+        model_ref="openai/qwen-local",
     )
     try:
         assert first.agent_id == second.agent_id == "runtime-runner"

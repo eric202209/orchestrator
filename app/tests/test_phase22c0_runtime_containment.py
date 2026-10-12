@@ -19,6 +19,10 @@ from app.services.agents.openclaw_service import (
     OpenClawAgentSelectionError,
     OpenClawSessionService,
 )
+from app.services.agents.runtime_configuration import (
+    BackendRole,
+    RoleRuntimeConfiguration,
+)
 from app.services.orchestration.execution.runtime_context import RuntimeExecutorContext
 from app.services.orchestration.validation.git_containment_guard import (
     BLOCKED_GIT_MUTATION_SUBCOMMANDS,
@@ -225,7 +229,12 @@ def test_strict_provider_controls_are_written_to_ephemeral_config(
                 },
                 "models": {
                     "providers": {
-                        "openai": {"models": [{"id": "qwen-local", "reasoning": True}]}
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local", "reasoning": True}],
+                        }
                     }
                 },
             }
@@ -269,7 +278,12 @@ def test_explicit_dedicated_planning_agent_binds_without_project_match(
                 },
                 "models": {
                     "providers": {
-                        "openai": {"models": [{"id": "qwen-local", "reasoning": True}]}
+                        "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
+                            "models": [{"id": "qwen-local", "reasoning": True}],
+                        }
                     }
                 },
             }
@@ -281,6 +295,12 @@ def test_explicit_dedicated_planning_agent_binds_without_project_match(
     service._strict_planning_binding = None
     service._last_selected_openclaw_agent_id = None
     service._workspace_binding = None
+    service.runtime_configuration = RoleRuntimeConfiguration(
+        role=BackendRole.EXECUTION,
+        backend_name="local_openclaw",
+        model_family="qwen-local",
+        adaptation_profile="openclaw_default",
+    )
     monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
 
     runtime_workspace = tmp_path / "runtime"

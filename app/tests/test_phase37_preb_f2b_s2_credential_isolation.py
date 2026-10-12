@@ -107,7 +107,10 @@ def _auth_source(tmp_path: Path) -> Path:
 
 
 def _set_secret(tmp_path: Path, secret: str) -> None:
-    _auth_source(tmp_path).write_text(json.dumps({"token": secret}), encoding="utf-8")
+    config = _auth_source(tmp_path).parents[3] / "openclaw.json"
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["models"]["providers"]["openai"]["apiKey"] = secret
+    config.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _state(tmp_path: Path, secret: str = SECRET_A) -> Path:
@@ -142,9 +145,8 @@ def _bind(tmp_path, config, name, task_execution_id):
 
 
 def _copied_secret(binding) -> str:
-    return json.loads((binding._tmp_dir / "agent" / "auth-profiles.json").read_text())[
-        "token"
-    ]
+    config = json.loads(binding.config_path.read_text())
+    return config["models"]["providers"]["openai"]["apiKey"]
 
 
 def _assert_self_contained(binding, runtime_workspace: Path) -> None:
@@ -160,7 +162,7 @@ def _assert_self_contained(binding, runtime_workspace: Path) -> None:
         assert Path(value).parent == root
     assert stat.S_IMODE(os.lstat(root).st_mode) == 0o700
     copied = root / "agent" / "auth-profiles.json"
-    assert stat.S_IMODE(os.lstat(copied).st_mode) == 0o600
+    assert not copied.exists()
     assert stat.S_IMODE(os.lstat(binding.config_path).st_mode) == 0o600
 
 
@@ -268,9 +270,8 @@ def test_s2_01_credential_snapshots_are_per_binding(
     second = _bind(tmp_path, config, "snap-b", 2)
     assert _copied_secret(first) == SECRET_A
     assert _copied_secret(second) == SECRET_B
-    assert os.lstat(first._tmp_dir / "agent" / "auth-profiles.json").st_ino != (
-        os.lstat(second._tmp_dir / "agent" / "auth-profiles.json").st_ino
-    )
+    assert not (first._tmp_dir / "agent" / "auth-profiles.json").exists()
+    assert not (second._tmp_dir / "agent" / "auth-profiles.json").exists()
     first.release()
     assert _copied_secret(second) == SECRET_B
     second.release()
@@ -678,7 +679,7 @@ async def test_s2_10_credential_value_absent_from_logs_errors_and_evidence(
     binding = unbound._workspace_binding
     surfaces.append((binding._tmp_dir / ewb.BINDING_METADATA_NAME).read_text())
     active_report = recon.reconcile_binding_artifacts()
-    assert active_report["summary"]["credential_bearing"] == 1
+    assert active_report["summary"]["credential_bearing"] == 0
     surfaces.append(json.dumps(active_report, default=str))
     surfaces.append(
         json.dumps(

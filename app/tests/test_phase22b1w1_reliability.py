@@ -65,10 +65,13 @@ def _write_config(path, project_workspace, runtime_root):
                 "models": {
                     "providers": {
                         "openai": {
+                            "baseUrl": "http://synthetic-ai-gateway:8000/v1",
+                            "api": "openai-completions",
+                            "apiKey": "synthetic-local-gateway-token-not-real",
                             "models": [
                                 {"id": "local"},
                                 {"id": "qwen-local"},
-                            ]
+                            ],
                         },
                     }
                 },
@@ -99,7 +102,10 @@ def test_runtime_binding_moves_all_provider_state_out_of_canonical_root(tmp_path
     )
 
     binding = bind_openclaw_workspace(
-        context, real_config_path=config_path, runner_agent_id="orchestrator"
+        context,
+        real_config_path=config_path,
+        runner_agent_id="orchestrator",
+        model_ref="openai/qwen-local",
     )
     try:
         bound = json.loads(binding.config_path.read_text(encoding="utf-8"))

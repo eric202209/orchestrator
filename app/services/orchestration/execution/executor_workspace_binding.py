@@ -9,16 +9,17 @@ entry can ever match it, so every runtime-workspace dispatch raised
 
 This module closes that gap without rewriting the operator's persistent
 `openclaw.json` and without creating or deleting any agent identity in it.
-Normal Orchestrator dispatch reads the real config read-only, adds one
-invocation-only synthetic agent to a private copy, and points that agent at
-the current Runtime Workspace. The persistent runner-template selector below
-remains available for explicit historical/maintenance callers, but is not a
-normal lifecycle prerequisite.
-The copy is consumed by exactly one dispatch (via `OPENCLAW_CONFIG_PATH`,
-already an existing `OpenClawSessionService._openclaw_config_path()` seam)
-and discarded on release -- the same ephemeral-artifact-per-invocation
-pattern `git_containment_guard.build_git_containment_env` already uses for
-the git shim.
+Normal Orchestrator dispatch reads the real config read-only, projects only
+the selected local provider/model route into a private invocation config, and
+points one synthetic agent at the current Runtime Workspace. The persistent
+runner-template selector below remains available for explicit
+historical/maintenance callers, but is not a normal lifecycle prerequisite.
+The projection is consumed by exactly one dispatch (via
+`OPENCLAW_CONFIG_PATH`, already an existing
+`OpenClawSessionService._openclaw_config_path()` seam) and discarded on
+release -- the same ephemeral-artifact-per-invocation pattern
+`git_containment_guard.build_git_containment_env` already uses for the git
+shim.
 
 Deliberately independent of OpenClaw's own service module (imports only
 `RuntimeExecutorContext`) so a future executor with different workspace
@@ -64,6 +65,67 @@ BINDING_METADATA_NAME = ".orchestrator-binding.json"
 BINDING_LOCK_NAME = ".orchestrator-binding.lock"
 BINDING_METADATA_SCHEMA = "orchestrator.openclaw_binding.v1"
 BINDING_ARTIFACT_TYPE = "openclaw_runtime_binding"
+
+# D-37-13: the only route currently authorized for an ephemeral local binding.
+# The provider name is OpenClaw's OpenAI-compatible adapter; it does not imply
+# that the route is the external OpenAI service.  The selected provider's
+# explicit baseUrl remains the routing authority.
+SUPPORTED_LOCAL_MODEL_REF = "openai/qwen-local"
+
+# These are the provider/model fields required by the pinned OpenClaw runtime
+# for the selected OpenAI-compatible local route.  Unknown fields are rejected
+# rather than copied, because an unknown field may be credential-bearing or
+# may change provider selection.
+_LOCAL_PROVIDER_KEYS = frozenset({"api", "apiKey", "auth", "baseUrl", "models"})
+_LOCAL_MODEL_KEYS = frozenset(
+    {
+        "compat",
+        "contextWindow",
+        "cost",
+        "id",
+        "input",
+        "maxTokens",
+        "name",
+        "reasoning",
+        "api",
+    }
+)
+
+# The OpenClaw child receives only process/runtime plumbing.  Provider
+# credentials stay in the selected provider projection, not in inherited env.
+_OPENCLAW_ENV_KEYS = frozenset(
+    {
+        "FORCE_COLOR",
+        "LANG",
+        "LOGNAME",
+        "NO_COLOR",
+        "OPENCLAW_NO_RESPAWN",
+        "PATH",
+        "SHELL",
+        "TERM",
+        "TZ",
+        "USER",
+    }
+)
+
+
+def restricted_openclaw_environment(
+    base_env: Optional[Dict[str, str]] = None,
+) -> Dict[str, str]:
+    """Return a non-secret environment allowlist for a managed OpenClaw child.
+
+    Deliberately excluded are provider/API/OAuth, gateway, GitHub, Langfuse,
+    application-secret, proxy and generic ``XDG_*`` variables.  Binding-local
+    ``HOME``/``TMPDIR`` and the two OpenClaw binding paths are added by the
+    binding itself after this function returns.
+    """
+
+    source = dict(base_env if base_env is not None else os.environ)
+    return {
+        key: value
+        for key, value in source.items()
+        if key in _OPENCLAW_ENV_KEYS or key.startswith("LC_")
+    }
 
 
 def binding_artifact_root() -> Path:
@@ -173,6 +235,160 @@ class ExecutorWorkspaceBindingError(Exception):
     """
 
 
+def _json_copy(value: Any, *, field_name: str) -> Any:
+    """Copy a JSON value without retaining references to source config data."""
+
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError) as exc:
+        raise ExecutorWorkspaceBindingError(
+            f"Unsupported OpenClaw {field_name} schema; refusing broad config copy"
+        ) from exc
+
+
+def _configured_agent_list(config: Dict[str, Any]) -> list[Any]:
+    """Return the configured agent list or fail closed on unknown shape."""
+
+    agents = config.get("agents")
+    if agents is None:
+        return []
+    if not isinstance(agents, dict):
+        raise ExecutorWorkspaceBindingError(
+            "OpenClaw agent configuration has an unsupported schema; refusing binding"
+        )
+    entries = agents.get("list")
+    if entries is None:
+        return []
+    if not isinstance(entries, list):
+        raise ExecutorWorkspaceBindingError(
+            "OpenClaw agent list has an unsupported schema; refusing binding"
+        )
+    return entries
+
+
+def project_local_openclaw_config(
+    config: Dict[str, Any],
+    *,
+    model_ref: str,
+    agent_id: str,
+    runtime_workspace: Path,
+    agent_dir: Path,
+    state_dir: Path,
+) -> Dict[str, Any]:
+    """Build the minimum config for the pinned local OpenClaw route.
+
+    This function is intentionally strict.  It retains the selected provider's
+    explicit gateway URL, adapter, and authentication material, plus only the
+    selected model's routing metadata.  It never copies persistent agent
+    directories, auth profiles, defaults, tools, plugins, channels, or other
+    providers.
+    """
+
+    if model_ref != SUPPORTED_LOCAL_MODEL_REF:
+        raise ExecutorWorkspaceBindingError(
+            f"Unsupported OpenClaw runtime route {model_ref!r}; refusing binding"
+        )
+    if not isinstance(config, dict):
+        raise ExecutorWorkspaceBindingError(
+            "OpenClaw configuration must be an object; refusing binding"
+        )
+
+    models = config.get("models")
+    providers = models.get("providers") if isinstance(models, dict) else None
+    provider = providers.get("openai") if isinstance(providers, dict) else None
+    if not isinstance(provider, dict):
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw provider catalog is unavailable; refusing binding"
+        )
+    unknown_provider_keys = set(provider) - _LOCAL_PROVIDER_KEYS
+    if unknown_provider_keys:
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw provider has unsupported schema fields; "
+            "refusing binding"
+        )
+
+    base_url = provider.get("baseUrl")
+    api = provider.get("api")
+    api_key = provider.get("apiKey")
+    if not isinstance(base_url, str) or not base_url.strip():
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw provider has no explicit gateway URL"
+        )
+    if not isinstance(api, str) or not api.strip():
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw provider has no explicit API adapter"
+        )
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw provider has no explicit gateway authentication"
+        )
+    # Environment/secret-reference markers cannot work with the restricted
+    # child environment and must not be guessed or resolved from broad ambient
+    # credentials.  A later task may add an explicitly authorized resolver.
+    if api_key.startswith("$") or api_key.startswith("{"):
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw provider authentication uses an unsupported "
+            "environment or secret reference"
+        )
+    auth = provider.get("auth")
+    if auth is not None and (not isinstance(auth, str) or auth != "api-key"):
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw provider uses an unsupported auth mode"
+        )
+
+    provider_models = provider.get("models")
+    if not isinstance(provider_models, list):
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw provider has no model catalog"
+        )
+    selected_models = [
+        item
+        for item in provider_models
+        if isinstance(item, dict) and str(item.get("id") or "").strip() == "qwen-local"
+    ]
+    if len(selected_models) != 1:
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw model catalog entry is missing or ambiguous"
+        )
+    selected_model = selected_models[0]
+    unknown_model_keys = set(selected_model) - _LOCAL_MODEL_KEYS
+    if unknown_model_keys:
+        raise ExecutorWorkspaceBindingError(
+            "Selected local OpenClaw model has unsupported schema fields; refusing binding"
+        )
+
+    selected_provider = {
+        "baseUrl": base_url,
+        "api": api,
+        "apiKey": api_key,
+        "models": [_json_copy(selected_model, field_name="model")],
+    }
+    if auth is not None:
+        selected_provider["auth"] = auth
+
+    return {
+        "models": {"providers": {"openai": selected_provider}},
+        "agents": {
+            "defaults": {
+                "workspace": str(runtime_workspace),
+                "skipBootstrap": True,
+            },
+            "list": [
+                {
+                    "id": agent_id,
+                    "workspace": str(runtime_workspace),
+                    "agentDir": str(agent_dir),
+                    "model": {
+                        "primary": SUPPORTED_LOCAL_MODEL_REF,
+                        "fallbacks": [],
+                    },
+                }
+            ],
+        },
+        "session": {"store": str(state_dir / "sessions.json")},
+    }
+
+
 RUNNER_AGENT_ID_ENV = "OPENCLAW_RUNNER_AGENT_ID"
 EPHEMERAL_AGENT_ID = "orchestrator-runtime"
 
@@ -262,7 +478,7 @@ def _find_template_agent_id(config: Dict[str, Any], workspace: Path) -> Optional
     project_root = Path(workspace).expanduser().resolve(strict=False)
     matches = [
         str(agent.get("id") or "").strip()
-        for agent in (config.get("agents") or {}).get("list") or []
+        for agent in _configured_agent_list(config)
         if isinstance(agent, dict)
         and str(agent.get("id") or "").strip()
         and str(agent.get("workspace") or "").strip()
@@ -307,7 +523,7 @@ def validate_runtime_owned_openclaw_agent(
             "refusing ambiguous workspace ownership"
         )
 
-    agents = (config.get("agents") or {}).get("list") or []
+    agents = _configured_agent_list(config)
     matches = [
         agent
         for agent in agents
@@ -516,17 +732,43 @@ def bind_openclaw_workspace(
     else:
         agent_id = EPHEMERAL_AGENT_ID
     resolved_model_ref = str(model_ref or "").strip() or None
-    if resolved_model_ref is None and legacy_selection is None:
+    if resolved_model_ref is None:
         raise ExecutorWorkspaceBindingError(
             "Explicit OpenClaw runtime model is required; refusing "
             "persistent/default model authority"
         )
 
-    bound_config = json.loads(json.dumps(real_config))  # cheap deep copy
-    agents = bound_config.setdefault("agents", {}).setdefault("list", [])
+    if legacy_selection is not None:
+        selected_agent = next(
+            (
+                agent
+                for agent in _configured_agent_list(real_config)
+                if isinstance(agent, dict)
+                and str(agent.get("id") or "").strip() == agent_id
+            ),
+            None,
+        )
+        if selected_agent is None:
+            raise ExecutorWorkspaceBindingError(
+                f"Configured OpenClaw runner agent {agent_id!r} was not found"
+            )
+
+    # Validate the selected route before creating a managed directory.  This
+    # makes unsupported providers and unknown auth/schema requirements fail
+    # closed without even a partial binding artifact.
+    project_local_openclaw_config(
+        real_config,
+        model_ref=resolved_model_ref,
+        agent_id=agent_id,
+        runtime_workspace=Path(context.runtime_workspace),
+        agent_dir=Path("/binding/agent"),
+        state_dir=Path("/binding/state"),
+    )
+
+    configured_agents = _configured_agent_list(real_config)
     if legacy_selection is None and any(
         isinstance(agent, dict) and str(agent.get("id") or "").strip() == agent_id
-        for agent in agents
+        for agent in configured_agents
     ):
         raise ExecutorWorkspaceBindingError(
             f"Ephemeral OpenClaw agent ID {agent_id!r} collides with the "
@@ -536,36 +778,14 @@ def bind_openclaw_workspace(
     def build_config(tmp_dir: Path) -> Dict[str, Any]:
         agent_dir = tmp_dir / "agent"
         agent_dir.mkdir(mode=0o700)
-        main_agent = next(
-            (
-                agent
-                for agent in (real_config.get("agents") or {}).get("list") or []
-                if isinstance(agent, dict) and agent.get("id") == "main"
-            ),
-            None,
-        )
-        main_agent_dir = str((main_agent or {}).get("agentDir") or "").strip()
-        auth_profiles = Path(main_agent_dir).expanduser() / "auth-profiles.json"
-        if main_agent_dir and auth_profiles.is_file():
-            # OpenClaw resolves provider credentials relative to agentDir. Copy
-            # only the operator-owned auth profile into the invocation
-            # directory; never point the ephemeral agent at persistent main
-            # state and never modify the source file. The copy is owner-only
-            # and lives exactly as long as this binding.
-            copied_auth = agent_dir / "auth-profiles.json"
-            shutil.copyfile(auth_profiles, copied_auth)
-            os.chmod(copied_auth, 0o600)
-        _populate_bound_config(
-            bound_config,
-            agents=agents,
+        return project_local_openclaw_config(
+            real_config,
+            model_ref=resolved_model_ref,
             agent_id=agent_id,
-            legacy_selection=legacy_selection,
-            resolved_model_ref=resolved_model_ref,
-            context=context,
+            runtime_workspace=Path(context.runtime_workspace),
             agent_dir=agent_dir,
             state_dir=tmp_dir / "state",
         )
-        return bound_config
 
     binding = create_managed_binding(
         agent_id=agent_id,
@@ -633,6 +853,8 @@ def create_managed_binding(
         )
         state_dir = tmp_dir / "state"
         state_dir.mkdir(mode=0o700)
+        (tmp_dir / "home").mkdir(mode=0o700)
+        (tmp_dir / "tmp").mkdir(mode=0o700)
         bound_config = build_config(tmp_dir)
         config_path = tmp_dir / "openclaw.json"
         # The copy may carry provider settings from the operator config:
@@ -660,6 +882,8 @@ def create_managed_binding(
         environment={
             "OPENCLAW_CONFIG_PATH": str(config_path),
             "OPENCLAW_STATE_DIR": str(state_dir),
+            "HOME": str(tmp_dir / "home"),
+            "TMPDIR": str(tmp_dir / "tmp"),
         },
         binding_id=binding_id,
         _lock_fd=lock_fd,
@@ -674,50 +898,3 @@ def create_managed_binding(
         binding.release
     )
     return binding
-
-
-def _populate_bound_config(
-    bound_config: Dict[str, Any],
-    *,
-    agents: list,
-    agent_id: str,
-    legacy_selection: Optional[OpenClawTemplateSelection],
-    resolved_model_ref: Optional[str],
-    context: RuntimeExecutorContext,
-    agent_dir: Path,
-    state_dir: Path,
-) -> None:
-    if legacy_selection is None:
-        agents.append(
-            {
-                "id": agent_id,
-                "workspace": str(context.runtime_workspace),
-                "agentDir": str(agent_dir),
-                "model": {
-                    "primary": resolved_model_ref,
-                    "fallbacks": [],
-                },
-            }
-        )
-    else:
-        for agent in agents:
-            if (
-                isinstance(agent, dict)
-                and str(agent.get("id") or "").strip() == agent_id
-            ):
-                agent["workspace"] = str(context.runtime_workspace)
-                agent["agentDir"] = str(agent_dir)
-                if resolved_model_ref is not None:
-                    agent["model"] = {
-                        "primary": resolved_model_ref,
-                        "fallbacks": [],
-                    }
-
-    defaults = (bound_config.setdefault("agents", {})).setdefault("defaults", {})
-    # OpenClaw 2026.4.10 owns this control at agents.defaults.  Agent entries
-    # are strict and reject the same key, so keep bootstrap suppression in the
-    # defaults object while retaining the per-invocation state directory below.
-    defaults["workspace"] = str(context.runtime_workspace)
-    defaults["skipBootstrap"] = True
-    session = bound_config.setdefault("session", {})
-    session["store"] = str(state_dir / "sessions.json")
