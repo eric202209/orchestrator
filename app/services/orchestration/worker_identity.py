@@ -168,6 +168,51 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.orchestration.validation",
     # Literal importlib.import_module() from the Worker dispatch task.
     "app.services.execution.execution_task_runtime_ownership_service",
+    # Source-backed parent package initializers executed before the bounded
+    # modules above.  These are a finite package-loading boundary, not a
+    # recursive transitive dependency inventory.
+    "app.services.agents",
+    "app.services.execution",
+    "app.services.human_guidance",
+    "app.services.integrations",
+    "app.services.observability.build_identity",
+    "app.services.observability.health",
+    "app.services.observability.log_stream",
+    "app.services.observability.streaming_health",
+    "app.services.observability.tracing",
+    "app.services.orchestration.context",
+    "app.services.orchestration.coordinators",
+    "app.services.orchestration.events.observability",
+    "app.services.orchestration.events.telemetry",
+    "app.services.orchestration.execution.execution_flow",
+    "app.services.orchestration.execution.executor",
+    "app.services.orchestration.execution.step_support",
+    "app.services.orchestration.lifecycle",
+    "app.services.orchestration.lifecycle.completion",
+    "app.services.orchestration.phases.failure_flow",
+    "app.services.orchestration.planning.planner",
+    "app.services.orchestration.reporting.task_report",
+    "app.services.orchestration.state",
+    "app.services.orchestration.state.transition_table",
+    "app.services.orchestration.validation.parsing",
+    "app.services.orchestration.validation.validator",
+    "app.services.permissions",
+    "app.services.project",
+    "app.services.session",
+    "app.services.session.auth",
+    "app.services.session.auth_service",
+    "app.services.session.intervention_service",
+    "app.services.session.replan_service",
+    "app.services.session.resume_service",
+    "app.services.session.session_inspection_service",
+    "app.services.session.session_lookup",
+    "app.services.session.session_stream_service",
+    "app.services.tasks",
+    "app.services.workspace",
+    "app.services.workspace.context_service",
+    "app.services.workspace.overwrite_protection_service",
+    "app.tasks",
+    "app.tasks.worker_support",
 )
 
 # These are the finite source files whose syntax is inspected to derive the
@@ -477,9 +522,20 @@ def _module_source_path(root: Path, module_name: str) -> Path:
     if any(not part or part in {".", ".."} for part in parts):
         raise CandidateManifestError(f"invalid affected module: {module_name!r}")
     package_path = root.joinpath(*parts)
-    source_path = package_path.with_suffix(".py")
-    if not source_path.exists():
-        source_path = package_path / "__init__.py"
+    module_path = package_path.with_suffix(".py")
+    package_init_path = package_path / "__init__.py"
+    module_exists = module_path.exists()
+    package_exists = package_init_path.exists()
+    if module_exists and package_exists:
+        raise CandidateManifestError(
+            f"ambiguous module/package identity: {module_name}"
+        )
+    if module_exists:
+        source_path = module_path
+    elif package_exists:
+        source_path = package_init_path
+    else:
+        source_path = module_path
     resolved = source_path.resolve(strict=True)
     if not _under_root(resolved, root):
         raise CandidateManifestError(
@@ -488,6 +544,31 @@ def _module_source_path(root: Path, module_name: str) -> Path:
     if not resolved.is_file():
         raise CandidateManifestError(f"affected module is not a file: {module_name}")
     return resolved
+
+
+def _parent_package_initializers(
+    root: Path, module_names: Iterable[str]
+) -> tuple[set[str], set[str]]:
+    """Derive source-backed parent package identities without importing code.
+
+    Only parents of already bounded module identities are considered.  A
+    namespace parent is reported separately and never gets an invented
+    ``__init__.py`` identity.
+    """
+
+    initializers: set[str] = set()
+    namespace_packages: set[str] = set()
+    for module_name in module_names:
+        parts = module_name.split(".")
+        for index in range(1, len(parts)):
+            package_name = ".".join(parts[:index])
+            package_path = root.joinpath(*parts[:index])
+            initializer_path = package_path / "__init__.py"
+            if initializer_path.is_file():
+                initializers.add(package_name)
+            elif package_path.is_dir():
+                namespace_packages.add(package_name)
+    return initializers, namespace_packages
 
 
 def _git_output(root: Path, *arguments: str) -> str:
@@ -728,6 +809,9 @@ class ProvenanceBoundaryCheck:
     literal_dynamic_imports: tuple[str, ...] = ()
     unsupported_dynamic_imports: tuple[str, ...] = ()
     reasons: tuple[str, ...] = ()
+    package_initializer_modules: tuple[str, ...] = ()
+    namespace_packages: tuple[str, ...] = ()
+    lazy_dynamic_imports: tuple[str, ...] = ()
 
 
 def _relative_import_module(
@@ -757,6 +841,14 @@ def _static_module_imports(
     literal_dynamic: set[str] = set()
     unsupported_dynamic: list[str] = []
     parse_notes: list[str] = []
+    lazy_dynamic_lines = {
+        getattr(child, "lineno", -1)
+        for function in ast.walk(tree)
+        if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and function.name == "__getattr__"
+        for child in ast.walk(function)
+        if isinstance(child, ast.Call)
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             imports.update(
@@ -789,9 +881,11 @@ def _static_module_imports(
                 if argument.value.startswith("app."):
                     literal_dynamic.add(argument.value)
             else:
-                unsupported_dynamic.append(
-                    f"{source_module}:{getattr(node, 'lineno', '?')}"
-                )
+                line = getattr(node, "lineno", "?")
+                if line in lazy_dynamic_lines:
+                    parse_notes.append(f"lazy_dynamic_import:{source_module}:{line}")
+                else:
+                    unsupported_dynamic.append(f"{source_module}:{line}")
     return imports, literal_dynamic, tuple(unsupported_dynamic), tuple(parse_notes)
 
 
@@ -826,38 +920,104 @@ def inspect_worker_provenance_boundary(
     missing_source: list[str] = []
     literal_dynamic: set[str] = set()
     unsupported_dynamic: list[str] = []
+    lazy_dynamic: set[str] = set()
     reasons: list[str] = []
-    for module_name in WORKER_PROVENANCE_ANALYSIS_ROOTS:
+    resolution_errors: list[str] = []
+    package_initializers: set[str] = set()
+    namespace_packages: set[str] = set()
+    inspected_set: set[str] = set()
+
+    # A fixed point over parent package initializers is finite: only
+    # initializers belonging to already bounded identities are analyzed.  The
+    # imported modules themselves are recorded but are not recursively parsed.
+    while True:
+        discovered_initializers, discovered_namespaces = _parent_package_initializers(
+            root, required
+        )
+        new_initializers = discovered_initializers - package_initializers
+        package_initializers.update(discovered_initializers)
+        newly_required_initializers = discovered_initializers - required
+        required.update(discovered_initializers)
+        namespace_packages.update(discovered_namespaces)
+        analysis_roots = tuple(
+            dict.fromkeys(
+                WORKER_PROVENANCE_ANALYSIS_ROOTS + tuple(sorted(package_initializers))
+            )
+        )
+        new_required = bool(newly_required_initializers)
+        for module_name in analysis_roots:
+            if module_name in inspected_set:
+                continue
+            inspected_set.add(module_name)
+            try:
+                source_path = _module_source_path(root, module_name)
+            except CandidateManifestError as exc:
+                if "ambiguous module/package identity" in str(exc):
+                    resolution_errors.append(f"module_package_collision:{module_name}")
+                else:
+                    missing_source.append(module_name)
+                continue
+            except (OSError, ValueError):
+                missing_source.append(module_name)
+                continue
+            inspected.append(module_name)
+            try:
+                imports, dynamic, unsupported, notes = _static_module_imports(
+                    module_name, source_path
+                )
+            except (OSError, SyntaxError, UnicodeError) as exc:
+                reasons.append(
+                    f"static_inspection_unavailable:{module_name}:{type(exc).__name__}"
+                )
+                continue
+            literal_dynamic.update(dynamic)
+            unsupported_dynamic.extend(unsupported)
+            for note in notes:
+                if note.startswith("lazy_dynamic_import:"):
+                    lazy_dynamic.add(note)
+                else:
+                    reasons.append(note)
+            if (
+                module_name in WORKER_PROVENANCE_REGISTRATION_ROOTS
+                or module_name in package_initializers
+            ):
+                previous_required = len(required)
+                required.update(imports)
+                required.update(dynamic)
+                new_required = new_required or len(required) != previous_required
+        if not new_initializers and not new_required:
+            break
+
+    # Every required identity, including a package initializer, must resolve
+    # to an in-root source file.  This keeps an omitted or deleted required
+    # initializer from looking like an intentional namespace exclusion.
+    for module_name in sorted(required):
         try:
-            source_path = _module_source_path(root, module_name)
-        except (CandidateManifestError, OSError, ValueError):
+            _module_source_path(root, module_name)
+        except CandidateManifestError as exc:
+            if "ambiguous module/package identity" in str(exc):
+                resolution_errors.append(f"module_package_collision:{module_name}")
+            else:
+                missing_source.append(module_name)
+        except (OSError, ValueError):
             missing_source.append(module_name)
-            continue
-        inspected.append(module_name)
-        try:
-            imports, dynamic, unsupported, notes = _static_module_imports(
-                module_name, source_path
-            )
-        except (OSError, SyntaxError, UnicodeError) as exc:
-            reasons.append(
-                f"static_inspection_unavailable:{module_name}:{type(exc).__name__}"
-            )
-            continue
-        literal_dynamic.update(dynamic)
-        unsupported_dynamic.extend(unsupported)
-        reasons.extend(notes)
-        if module_name in WORKER_PROVENANCE_REGISTRATION_ROOTS:
-            required.update(imports)
     required.update(literal_dynamic)
     missing = sorted(required - approved)
     if missing_source:
         reasons.extend(f"missing_reviewed_source:{name}" for name in missing_source)
     if missing:
         reasons.extend(f"missing_approved_module:{name}" for name in missing)
-    if reasons and not unsupported_dynamic and not missing and not missing_source:
+    reasons.extend(resolution_errors)
+    if (
+        reasons
+        and not unsupported_dynamic
+        and not missing
+        and not missing_source
+        and not resolution_errors
+    ):
         unsupported_dynamic.extend(reasons)
     classification = BOUNDARY_COMPLETENESS_VALID
-    if missing or missing_source:
+    if missing or missing_source or resolution_errors:
         classification = BOUNDARY_COMPLETENESS_INVALID
     elif unsupported_dynamic or reasons:
         classification = BOUNDARY_COMPLETENESS_INCONCLUSIVE
@@ -866,10 +1026,13 @@ def inspect_worker_provenance_boundary(
         required_modules=tuple(sorted(required)),
         inspected_modules=tuple(inspected),
         missing_modules=tuple(missing),
-        missing_source_modules=tuple(sorted(missing_source)),
+        missing_source_modules=tuple(sorted(set(missing_source))),
         literal_dynamic_imports=tuple(sorted(literal_dynamic)),
         unsupported_dynamic_imports=tuple(sorted(set(unsupported_dynamic))),
         reasons=tuple(dict.fromkeys(reasons)),
+        package_initializer_modules=tuple(sorted(package_initializers)),
+        namespace_packages=tuple(sorted(namespace_packages)),
+        lazy_dynamic_imports=tuple(sorted(lazy_dynamic)),
     )
 
 
@@ -1010,6 +1173,7 @@ def verify_candidate_source_manifest(
         expected_digest = _sha256_bytes(_canonical_json(candidate.payload()).encode())
         if expected_digest != candidate.source_manifest_digest:
             reasons.append("source_manifest_digest_mismatch")
+        module_identity_reasons = tuple(reasons)
         boundary_check = inspect_worker_provenance_boundary(
             root, candidate.affected_modules
         )
@@ -1045,11 +1209,30 @@ def verify_candidate_source_manifest(
             module_identity_status=MODULE_IDENTITY_INVALID,
         )
 
+    if boundary_check.classification == BOUNDARY_COMPLETENESS_NOT_APPLICABLE:
+        reasons.append("provenance_boundary_not_applicable")
+    elif boundary_check.classification not in {
+        BOUNDARY_COMPLETENESS_VALID,
+        BOUNDARY_COMPLETENESS_INVALID,
+        BOUNDARY_COMPLETENESS_INCONCLUSIVE,
+    }:
+        reasons.append(f"provenance_boundary_unknown:{boundary_check.classification}")
+
     module_identity_status = (
-        MODULE_IDENTITY_VALID if not reasons else MODULE_IDENTITY_INVALID
+        MODULE_IDENTITY_VALID
+        if not module_identity_reasons
+        else MODULE_IDENTITY_INVALID
     )
+    if module_identity_status != MODULE_IDENTITY_VALID:
+        classification = IDENTITY_MISMATCH
+    elif boundary_check.classification == BOUNDARY_COMPLETENESS_VALID:
+        classification = IDENTITY_VERIFIED
+    elif boundary_check.classification == BOUNDARY_COMPLETENESS_INVALID:
+        classification = IDENTITY_MISMATCH
+    else:
+        classification = IDENTITY_INCONCLUSIVE
     return CandidateManifestVerification(
-        IDENTITY_MISMATCH if reasons else IDENTITY_VERIFIED,
+        classification,
         tuple(dict.fromkeys(reasons)),
         current_head=current_head,
         current_tree=current_tree,

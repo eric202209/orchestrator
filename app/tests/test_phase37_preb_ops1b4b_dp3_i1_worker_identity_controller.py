@@ -11,6 +11,7 @@ import socket
 import stat
 import subprocess
 import tempfile
+import shutil
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -40,6 +41,7 @@ from app.services.orchestration.worker_controller import (
 from app.services.orchestration.worker_identity import (
     BOUNDARY_COMPLETENESS_INCONCLUSIVE,
     BOUNDARY_COMPLETENESS_INVALID,
+    BOUNDARY_COMPLETENESS_NOT_APPLICABLE,
     BOUNDARY_COMPLETENESS_VALID,
     CONFIG_PROJECTION_INCOMPLETE,
     CandidateIdentityPin,
@@ -75,8 +77,11 @@ TASKS = ("app.tasks.worker.execute_orchestration_task",)
 @pytest.fixture
 def candidate(tmp_path: Path) -> tuple[Path, CandidateSourceManifest]:
     root = tmp_path / "candidate"
-    (root / "app").mkdir(parents=True)
-    (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    shutil.copytree(
+        Path.cwd() / "app",
+        root / "app",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     (root / "app" / "worker.py").write_text(
         "WORKER_VALUE = 'candidate'\n", encoding="utf-8"
     )
@@ -87,9 +92,12 @@ def candidate(tmp_path: Path) -> tuple[Path, CandidateSourceManifest]:
     subprocess.run(["git", "config", "user.name", "DP3 test"], cwd=root, check=True)
     subprocess.run(["git", "add", "."], cwd=root, check=True)
     subprocess.run(["git", "commit", "-qm", "candidate"], cwd=root, check=True)
+    affected_modules = ("app.worker",) + tuple(
+        module for module in DEFAULT_AFFECTED_MODULES if module != "app.worker"
+    )
     manifest = build_candidate_source_manifest(
         root,
-        affected_modules=("app.worker",),
+        affected_modules=affected_modules,
         launcher_identity={
             "launcher": "test-worker",
             "executable": "/venv/bin/python3",
@@ -112,6 +120,43 @@ def _resign(manifest: CandidateSourceManifest, **changes) -> CandidateSourceMani
         json.dumps(updated.payload(), sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return replace(updated, source_manifest_digest=digest)
+
+
+def _isolated_worker_source(root: Path) -> Path:
+    shutil.copytree(
+        Path.cwd() / "app",
+        root / "app",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "DP3 test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+    return root
+
+
+def _isolated_worker_manifest(root: Path) -> CandidateSourceManifest:
+    return build_candidate_source_manifest(
+        root,
+        affected_modules=DEFAULT_AFFECTED_MODULES,
+        launcher_identity={
+            "launcher": "test-worker",
+            "executable": "/venv/bin/python3",
+            "cwd": str(root),
+            "argv": [
+                "/venv/bin/python3",
+                "/venv/bin/celery",
+                "-A",
+                "app.celery_app",
+                "worker",
+            ],
+        },
+    )
 
 
 def _identity(
@@ -211,8 +256,13 @@ def _transition_in_process(root: str, claim_id: str, result_queue) -> None:
         result_queue.put(True)
 
 
-def _module_record(root: Path, manifest: CandidateSourceManifest) -> dict:
-    record = manifest.resolved_modules[0]
+def _module_record(
+    root: Path,
+    manifest: CandidateSourceManifest,
+    record=None,
+) -> dict:
+    del root
+    record = record or manifest.resolved_modules[0]
     source_path = Path(record.expected_source_path)
     return {
         "module_name": record.module_name,
@@ -257,7 +307,10 @@ def _boot(
         registered_task_registrations=TASKS,
         worker_children=(child.to_dict(),),
         affected_module_provenance=(
-            _module_record(Path(manifest.source_root), manifest),
+            *(
+                _module_record(Path(manifest.source_root), manifest, record)
+                for record in manifest.resolved_modules
+            ),
         ),
         configuration_fingerprint=fingerprint,
         configuration_projection=projection,
@@ -265,6 +318,12 @@ def _boot(
         record_id="boot-a-101-1001",
     )
     return boot, worker, beat, api
+
+
+def _replace_first_provenance(boot: WorkerBootIdentityManifest, record: dict):
+    provenance = list(boot.affected_module_provenance)
+    provenance[0] = record
+    return replace(boot, affected_module_provenance=tuple(provenance))
 
 
 def _observation(
@@ -430,13 +489,14 @@ def test_candidate_manifest_correct_and_deterministic(candidate):
     root, manifest = candidate
     rebuilt = build_candidate_source_manifest(
         root,
-        affected_modules=("app.worker",),
+        affected_modules=manifest.affected_modules,
         launcher_identity=manifest.launcher_identity,
     )
     assert rebuilt.to_dict() == manifest.to_dict()
     verification = verify_candidate_source_manifest(manifest)
     assert verification.classification == IDENTITY_VERIFIED
     assert verification.module_identity_status == MODULE_IDENTITY_VALID
+    assert verification.boundary_completeness_status == BOUNDARY_COMPLETENESS_VALID
 
 
 @pytest.mark.parametrize("field", ["candidate_head", "candidate_tree"])
@@ -1331,6 +1391,298 @@ def test_i9_unsupported_dynamic_import_is_inconclusive(monkeypatch):
     assert "app.tasks.worker:999" in result.unsupported_dynamic_imports
 
 
+@pytest.mark.parametrize(
+    "boundary_status",
+    [
+        BOUNDARY_COMPLETENESS_NOT_APPLICABLE,
+        BOUNDARY_COMPLETENESS_INCONCLUSIVE,
+        BOUNDARY_COMPLETENESS_INVALID,
+        "BOUNDARY_COMPLETENESS_UNKNOWN",
+    ],
+)
+def test_i11_identity_verification_requires_valid_boundary(
+    candidate, monkeypatch, boundary_status
+):
+    _root, manifest = candidate
+    monkeypatch.setattr(
+        worker_identity,
+        "inspect_worker_provenance_boundary",
+        lambda *_args, **_kwargs: worker_identity.ProvenanceBoundaryCheck(
+            boundary_status,
+            tuple(sorted(DEFAULT_AFFECTED_MODULES)),
+            (),
+        ),
+    )
+    result = verify_candidate_source_manifest(manifest)
+    assert result.module_identity_status == MODULE_IDENTITY_VALID
+    assert result.boundary_completeness_status == boundary_status
+    assert result.classification != IDENTITY_VERIFIED
+
+
+def test_i11_invalid_module_identity_cannot_verify_with_valid_boundary(
+    candidate,
+):
+    _root, manifest = candidate
+    record = replace(manifest.resolved_modules[0], source_sha256="0" * 64)
+    invalid = _resign(
+        manifest,
+        resolved_modules=(record, *manifest.resolved_modules[1:]),
+    )
+    result = verify_candidate_source_manifest(invalid)
+    assert result.module_identity_status != MODULE_IDENTITY_VALID
+    assert result.boundary_completeness_status == BOUNDARY_COMPLETENESS_VALID
+    assert result.classification != IDENTITY_VERIFIED
+
+
+def test_i11_non_worker_empty_manifest_cannot_verify(tmp_path):
+    root = tmp_path / "non-worker"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "app" / "worker.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "DP3 test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "non-worker"], cwd=root, check=True)
+    manifest = build_candidate_source_manifest(
+        root,
+        affected_modules=(),
+        launcher_identity={
+            "launcher": "fixture",
+            "executable": "/venv/bin/python3",
+            "cwd": str(root),
+            "argv": ["/venv/bin/python3"],
+        },
+    )
+    result = verify_candidate_source_manifest(manifest)
+    assert result.module_identity_status == MODULE_IDENTITY_VALID
+    assert result.boundary_completeness_status == BOUNDARY_COMPLETENESS_NOT_APPLICABLE
+    assert result.classification != IDENTITY_VERIFIED
+
+
+def test_i11_package_initializers_are_in_the_finite_boundary():
+    result = inspect_worker_provenance_boundary(Path.cwd(), DEFAULT_AFFECTED_MODULES)
+    assert result.classification == BOUNDARY_COMPLETENESS_VALID
+    assert {
+        "app.services.agents",
+        "app.services.orchestration.context",
+    }.issubset(DEFAULT_AFFECTED_MODULES)
+    assert {
+        "app.services.agents",
+        "app.services.orchestration.context",
+    }.issubset(result.package_initializer_modules)
+    assert {
+        "app.services.agents",
+        "app.services.orchestration.context",
+    }.issubset(result.inspected_modules)
+    assert "app" in result.namespace_packages
+    assert "app.services.agents.runtime_adapters" in result.namespace_packages
+
+
+@pytest.mark.parametrize(
+    "omitted",
+    ["app.services.agents", "app.services.orchestration.context"],
+)
+def test_i11_omitted_parent_initializer_is_detected(omitted):
+    result = inspect_worker_provenance_boundary(
+        Path.cwd(), set(DEFAULT_AFFECTED_MODULES) - {omitted}
+    )
+    assert result.classification == BOUNDARY_COMPLETENESS_INVALID
+    assert omitted in result.missing_modules
+
+
+@pytest.mark.parametrize(
+    "package,extra_module,extra_import",
+    [
+        (
+            "agents",
+            "i11_extra_agent",
+            "from .i11_extra_agent import I11_EXTRA_AGENT\n",
+        ),
+        (
+            "orchestration/context",
+            "i11_extra_context",
+            "from .i11_extra_context import I11_EXTRA_CONTEXT\n",
+        ),
+    ],
+)
+def test_i11_package_initializer_reexport_drift_is_detected(
+    tmp_path, package, extra_module, extra_import
+):
+    root = _isolated_worker_source(tmp_path / "package-reexport")
+    package_path = root / "app" / "services" / package
+    (package_path / f"{extra_module}.py").write_text(
+        "I11_VALUE = True\n", encoding="utf-8"
+    )
+    initializer = package_path / "__init__.py"
+    initializer.write_text(
+        initializer.read_text(encoding="utf-8") + extra_import,
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(
+        ["git", "commit", "-qm", "initializer re-export"], cwd=root, check=True
+    )
+    result = inspect_worker_provenance_boundary(root, DEFAULT_AFFECTED_MODULES)
+    assert result.classification == BOUNDARY_COMPLETENESS_INVALID
+    assert (
+        f"app.services.{package.replace('/', '.')}.{extra_module}"
+        in result.missing_modules
+    )
+
+
+@pytest.mark.parametrize(
+    "package_module",
+    ["app.services.agents", "app.services.orchestration.context"],
+)
+def test_i11_package_initializer_source_hash_drift_is_rejected(
+    tmp_path, package_module
+):
+    root = _isolated_worker_source(tmp_path / "package-hash")
+    manifest = _isolated_worker_manifest(root)
+    parts = package_module.split(".")
+    initializer = root.joinpath(*parts) / "__init__.py"
+    initializer.write_text(
+        initializer.read_text(encoding="utf-8") + "\nI11_DRIFT = True\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "initializer drift"], cwd=root, check=True)
+    result = verify_candidate_source_manifest(manifest)
+    assert result.classification == IDENTITY_MISMATCH
+    assert f"module_hash_mismatch:{package_module}" in result.reasons
+
+
+def test_i11_new_dotted_package_initializer_is_added_to_boundary(tmp_path):
+    root = _isolated_worker_source(tmp_path / "new-package")
+    package = root / "app" / "services" / "agents" / "i11_nested"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "new_module.py").write_text("I11_VALUE = True\n", encoding="utf-8")
+    worker_path = root / "app" / "tasks" / "worker.py"
+    worker_path.write_text(
+        worker_path.read_text(encoding="utf-8")
+        + "\nfrom app.services.agents.i11_nested.new_module import I11_VALUE\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "new dotted package"], cwd=root, check=True)
+    result = inspect_worker_provenance_boundary(root, DEFAULT_AFFECTED_MODULES)
+    assert result.classification == BOUNDARY_COMPLETENESS_INVALID
+    assert "app.services.agents.i11_nested" in result.missing_modules
+    assert "app.services.agents.i11_nested.new_module" in result.missing_modules
+
+
+@pytest.mark.parametrize("layout", ["module", "package"])
+def test_i11_module_or_package_only_identity_resolves_conservatively(tmp_path, layout):
+    root = tmp_path / layout
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    if layout == "module":
+        expected = root / "app" / "pkg.py"
+        expected.write_text("VALUE = 'module'\n", encoding="utf-8")
+    else:
+        expected = root / "app" / "pkg" / "__init__.py"
+        expected.parent.mkdir()
+        expected.write_text("VALUE = 'package'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "DP3 test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "module layout"], cwd=root, check=True)
+    assert worker_identity._module_source_path(root, "app.pkg") == expected.resolve()
+    manifest = build_candidate_source_manifest(
+        root,
+        affected_modules=("app.pkg",),
+        launcher_identity={
+            "launcher": "fixture",
+            "executable": "/venv/bin/python3",
+            "cwd": str(root),
+            "argv": ["/venv/bin/python3"],
+        },
+    )
+    assert Path(manifest.resolved_modules[0].expected_source_path) == expected.resolve()
+
+
+def test_i11_module_package_collision_rejects_manifest_and_identity(tmp_path):
+    root = tmp_path / "collision"
+    (root / "app" / "pkg").mkdir(parents=True)
+    (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (root / "app" / "pkg.py").write_text("VALUE = 'module'\n", encoding="utf-8")
+    (root / "app" / "pkg" / "__init__.py").write_text(
+        "VALUE = 'package'\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "DP3 test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "collision"], cwd=root, check=True)
+    with pytest.raises(
+        worker_identity.CandidateManifestError,
+        match="ambiguous module/package identity",
+    ):
+        build_candidate_source_manifest(
+            root,
+            affected_modules=("app.pkg",),
+            launcher_identity={
+                "launcher": "fixture",
+                "executable": "/venv/bin/python3",
+                "cwd": str(root),
+                "argv": ["/venv/bin/python3"],
+            },
+        )
+
+
+def test_i11_package_initializer_origin_mismatch_and_path_escape_fail_closed(tmp_path):
+    root = tmp_path / "package-origin"
+    (root / "app" / "pkg").mkdir(parents=True)
+    (root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    package_init = root / "app" / "pkg" / "__init__.py"
+    package_init.write_text("VALUE = 'package'\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "DP3 test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "package origin"], cwd=root, check=True)
+    manifest = build_candidate_source_manifest(
+        root,
+        affected_modules=("app.pkg",),
+        launcher_identity={
+            "launcher": "fixture",
+            "executable": "/venv/bin/python3",
+            "cwd": str(root),
+            "argv": ["/venv/bin/python3"],
+        },
+    )
+    wrong = replace(
+        manifest.resolved_modules[0],
+        expected_source_path=str((root / "app" / "pkg.py").resolve()),
+    )
+    result = verify_candidate_source_manifest(
+        _resign(manifest, resolved_modules=(wrong,))
+    )
+    assert result.classification != IDENTITY_VERIFIED
+    assert any("wrong_module_path" in reason for reason in result.reasons)
+    with pytest.raises(worker_identity.CandidateManifestError):
+        worker_identity._module_source_path(root, "app..pkg")
+
+
 def test_i7_import_origin_drift_is_not_verified(candidate):
     root, manifest = candidate
     alternate = root.parent / "alternate.py"
@@ -1371,7 +1723,7 @@ def test_i7_unsupported_dynamic_module_evidence_is_inconclusive(candidate):
         load_timing="dynamic_unresolved",
     )
     result = verify_worker_identity(
-        replace(boot, affected_module_provenance=(dynamic,)),
+        _replace_first_provenance(boot, dynamic),
         manifest,
         **_identity_verification_kwargs(boot, worker, beat, api, manifest),
     )
@@ -2125,7 +2477,7 @@ def test_i5_lazy_module_provenance_is_inconclusive_not_attested(candidate):
         load_timing="lazy_or_unloaded",
     )
     result = verify_worker_identity(
-        replace(boot, affected_module_provenance=(lazy,)),
+        _replace_first_provenance(boot, lazy),
         manifest,
         **_identity_verification_kwargs(boot, worker, beat, api, manifest),
     )
