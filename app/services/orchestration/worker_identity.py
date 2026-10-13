@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -48,6 +49,14 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.orchestration.execution.executor_workspace_binding",
     "app.services.agents.openclaw_service",
     "app.services.agents.subprocess_lifecycle",
+    # Direct load-bearing S1/D-37-13 dependencies.  This is intentionally an
+    # exact boundary rather than a recursive package dump.
+    "app.services.session.orphan_ownership",
+    "app.services.session.recovery_coordinator",
+    "app.services.orchestration.execution.runtime_context",
+    "app.services.agents.runtime_configuration",
+    "app.services.orchestration.lifecycle.worker_bootstrap",
+    "app.services.orchestration.lifecycle.worker_capacity",
 )
 
 EXPECTED_TASK_REGISTRATIONS = frozenset(
@@ -95,6 +104,28 @@ NON_SECRET_CONFIGURATION_KEYS = frozenset(
         "route.planning_repair_enabled",
         "route.typed_grounding_enabled",
         "route.artifact_continuation_enabled",
+        "celery.task_serializer",
+        "celery.accept_content",
+        "celery.result_serializer",
+        "celery.timezone",
+        "celery.enable_utc",
+        "celery.task_default_queue",
+        "celery.task_default_exchange",
+        "celery.task_default_routing_key",
+        "celery.task_routes",
+        "celery.worker_send_task_events",
+        "celery.task_publish_retry",
+        "celery.task_publish_retry_policy",
+        "retry.max_retries",
+        "retry.countdown_seconds",
+        "retry.redelivery_policy",
+        "maintenance.task_identity",
+        "openclaw.gateway_route",
+        "openclaw.model_identity",
+        "openclaw.fallback_policy",
+        "openclaw.cli.executable",
+        "openclaw.cli.args",
+        "d37.binding.route_behavior",
         "beat.schedule",
     }
 )
@@ -125,6 +156,9 @@ class ManifestWriteError(WorkerIdentityError):
 
 class ConfigurationFingerprintError(WorkerIdentityError):
     """An unapproved or secret-bearing setting was supplied."""
+
+
+CONFIG_PROJECTION_INCOMPLETE = "CONFIG_PROJECTION_INCOMPLETE"
 
 
 def _utc_now() -> datetime:
@@ -266,6 +300,37 @@ def _validate_launcher_identity(value: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _canonical_launcher_identity(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize independent launcher evidence without executing it."""
+
+    validated = _validate_launcher_identity(value)
+    return {
+        "launcher": str(validated.get("launcher", "")),
+        "executable": str(
+            Path(validated["executable"]).expanduser().resolve(strict=False)
+        ),
+        "cwd": str(Path(validated["cwd"]).expanduser().resolve(strict=False)),
+        "argv": [str(item) for item in validated["argv"]],
+    }
+
+
+def _launcher_process_reasons(
+    expected: Mapping[str, Any], actual: "ProcessIdentity", prefix: str
+) -> list[str]:
+    try:
+        normalized = _canonical_launcher_identity(expected)
+    except (CandidateManifestError, OSError, ValueError) as exc:
+        return [f"{prefix}launcher_evidence_invalid:{type(exc).__name__}"]
+    reasons: list[str] = []
+    if normalized["executable"] != actual.executable:
+        reasons.append(f"{prefix}executable_mismatch")
+    if normalized["cwd"] != actual.cwd:
+        reasons.append(f"{prefix}cwd_mismatch")
+    if tuple(normalized["argv"]) != actual.argv:
+        reasons.append(f"{prefix}argv_mismatch")
+    return reasons
+
+
 @dataclass(frozen=True)
 class ModuleSourceRecord:
     module_name: str
@@ -356,6 +421,26 @@ class CandidateSourceManifest:
 
 
 @dataclass(frozen=True)
+class CandidateIdentityPin:
+    """Externally approved candidate identity used by activation gates.
+
+    The pin is deliberately separate from the boot record and source
+    manifest.  A Worker cannot promote the checkout it is currently running
+    to an approved candidate merely by writing a manifest for itself.
+    """
+
+    candidate_head: str
+    candidate_tree: str
+    source_root: str
+    source_manifest_digest: str
+    launcher_identity: Mapping[str, Any]
+    worker_node_identity: str
+
+    def normalized_launcher(self) -> dict[str, Any]:
+        return _canonical_launcher_identity(self.launcher_identity)
+
+
+@dataclass(frozen=True)
 class CandidateManifestVerification:
     classification: str
     reasons: tuple[str, ...]
@@ -436,6 +521,8 @@ def verify_candidate_source_manifest(
     *,
     expected_head: str | None = None,
     expected_tree: str | None = None,
+    expected_source_root: str | None = None,
+    expected_source_manifest_digest: str | None = None,
 ) -> CandidateManifestVerification:
     """Recompute Git/source evidence for a candidate manifest."""
 
@@ -463,6 +550,15 @@ def verify_candidate_source_manifest(
             reasons.append("expected_head_mismatch")
         if expected_tree is not None and current_tree != expected_tree:
             reasons.append("expected_tree_mismatch")
+        if expected_source_root is not None and candidate.source_root != str(
+            Path(expected_source_root).expanduser().resolve(strict=False)
+        ):
+            reasons.append("expected_source_root_mismatch")
+        if (
+            expected_source_manifest_digest is not None
+            and candidate.source_manifest_digest != expected_source_manifest_digest
+        ):
+            reasons.append("expected_source_manifest_digest_mismatch")
         if tuple(candidate.affected_modules) != tuple(
             record.module_name for record in candidate.resolved_modules
         ):
@@ -705,6 +801,11 @@ def _canonical_configuration_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
+        secret_keys = [str(key) for key in value if _secret_like_key(str(key))]
+        if secret_keys:
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: secret-bearing nested fields"
+            )
         return {
             str(key): _canonical_configuration_value(value[key])
             for key in sorted(value, key=str)
@@ -756,6 +857,45 @@ def build_non_secret_configuration_fingerprint(
     return _sha256_bytes(_canonical_json(payload).encode()), payload
 
 
+def _schedule_value(value: Any) -> Any:
+    """Canonicalize Celery schedule values without serializing objects blindly."""
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, timedelta):
+        return {"type": "timedelta", "seconds": value.total_seconds()}
+    total_seconds = getattr(value, "total_seconds", None)
+    if callable(total_seconds):
+        return {"type": type(value).__name__, "seconds": total_seconds()}
+    if isinstance(value, Mapping):
+        return _canonical_configuration_value(value)
+    if isinstance(value, (list, tuple)):
+        return [_schedule_value(item) for item in value]
+    raise ConfigurationFingerprintError(
+        f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported Beat schedule value"
+    )
+
+
+def _safe_cli_args(value: Any) -> list[str]:
+    if value is None or value == "":
+        return []
+    try:
+        args = shlex.split(value) if isinstance(value, str) else list(value)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: CLI argument policy is not parseable"
+        ) from exc
+    if not args or any(not isinstance(item, str) or not item for item in args):
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: CLI argument policy is invalid"
+        )
+    if any(_secret_like_key(item) for item in args):
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: CLI argument policy may contain secrets"
+        )
+    return [str(item) for item in args]
+
+
 def collect_worker_configuration(
     settings_object: Any,
     celery_config: Mapping[str, Any],
@@ -766,19 +906,45 @@ def collect_worker_configuration(
     """Collect only named operational settings from live objects."""
 
     schedule = celery_config.get("beat_schedule") or {}
+    if not isinstance(schedule, Mapping):
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: Beat schedule is not a mapping"
+        )
     schedule_identity = {}
     for name, entry in sorted(schedule.items()):
-        interval = entry.get("schedule") if isinstance(entry, Mapping) else None
-        interval_value = (
-            getattr(interval, "total_seconds", lambda: interval)()
-            if interval is not None
-            else None
-        )
+        if not isinstance(entry, Mapping):
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: Beat entry is not a mapping"
+            )
+        unsupported = set(entry) - {
+            "task",
+            "schedule",
+            "args",
+            "kwargs",
+            "options",
+            "relative",
+        }
+        if unsupported:
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported Beat entry fields"
+            )
+        interval = entry.get("schedule")
         schedule_identity[str(name)] = {
             "task": str(entry.get("task", "")),
-            "interval_seconds": interval_value,
+            "schedule": _schedule_value(interval),
+            "args": _canonical_configuration_value(entry.get("args", ())),
+            "kwargs": _canonical_configuration_value(entry.get("kwargs", {})),
+            "options": _canonical_configuration_value(entry.get("options", {})),
+            "relative": entry.get("relative"),
         }
     operational = operational_values or {}
+    maintenance_identity = {
+        name: entry.get("task", "")
+        for name, entry in sorted(schedule.items())
+        if isinstance(entry, Mapping)
+    }
+    cli_path = getattr(settings_object, "OPENCLAW_CLI_PATH", None)
+    cli_args = _safe_cli_args(getattr(settings_object, "OPENCLAW_CLI_ARGS", ""))
     values = {
         "queue.identity": celery_config.get("task_default_queue", "celery"),
         "worker.concurrency": getattr(worker_runtime, "concurrency", None),
@@ -822,6 +988,43 @@ def collect_worker_configuration(
         "route.artifact_continuation_enabled": getattr(
             settings_object, "ARTIFACT_CONTINUATION_ENABLED", None
         ),
+        "celery.task_serializer": celery_config.get("task_serializer"),
+        "celery.accept_content": celery_config.get("accept_content"),
+        "celery.result_serializer": celery_config.get("result_serializer"),
+        "celery.timezone": celery_config.get("timezone"),
+        "celery.enable_utc": celery_config.get("enable_utc"),
+        "celery.task_default_queue": celery_config.get("task_default_queue"),
+        "celery.task_default_exchange": celery_config.get("task_default_exchange"),
+        "celery.task_default_routing_key": celery_config.get(
+            "task_default_routing_key"
+        ),
+        "celery.task_routes": celery_config.get("task_routes", {}),
+        "celery.worker_send_task_events": celery_config.get("worker_send_task_events"),
+        "celery.task_publish_retry": celery_config.get("task_publish_retry"),
+        "celery.task_publish_retry_policy": celery_config.get(
+            "task_publish_retry_policy", {}
+        ),
+        "retry.max_retries": operational.get("retry.max_retries"),
+        "retry.countdown_seconds": operational.get("retry.countdown_seconds"),
+        "retry.redelivery_policy": operational.get("retry.redelivery_policy"),
+        "maintenance.task_identity": maintenance_identity,
+        "openclaw.gateway_route": getattr(
+            settings_object, "OPENCLAW_GATEWAY_URL", None
+        ),
+        "openclaw.model_identity": {
+            "execution": getattr(settings_object, "EXECUTION_MODEL", None),
+            "planning": getattr(settings_object, "PLANNER_MODEL", None),
+            "repair": getattr(settings_object, "PLANNING_REPAIR_MODEL", None),
+        },
+        "openclaw.fallback_policy": {
+            "agent_backend": getattr(settings_object, "AGENT_BACKEND", None),
+            "secondary_backend": getattr(
+                settings_object, "AGENT_SECONDARY_BACKEND", None
+            ),
+        },
+        "openclaw.cli.executable": cli_path or None,
+        "openclaw.cli.args": cli_args,
+        "d37.binding.route_behavior": operational.get("d37.binding.route_behavior"),
         "beat.schedule": schedule_identity,
     }
     # Remove absent optional values only when the live object does not expose
@@ -1008,6 +1211,7 @@ def create_worker_boot_identity(
     source_root: str | Path,
     identity_dir: str | Path = DEFAULT_WORKER_IDENTITY_DIR,
     candidate_manifest: CandidateSourceManifest | None = None,
+    candidate_pin: CandidateIdentityPin | None = None,
     sender: Any | None = None,
     worker_node_identity: str | None = None,
     registered_tasks: Iterable[str] | None = None,
@@ -1026,7 +1230,15 @@ def create_worker_boot_identity(
 
     root = _safe_source_root(source_root)
     candidate = candidate_manifest or build_candidate_source_manifest(root)
-    candidate_check = verify_candidate_source_manifest(candidate)
+    candidate_check = verify_candidate_source_manifest(
+        candidate,
+        expected_head=candidate_pin.candidate_head if candidate_pin else None,
+        expected_tree=candidate_pin.candidate_tree if candidate_pin else None,
+        expected_source_root=candidate_pin.source_root if candidate_pin else None,
+        expected_source_manifest_digest=(
+            candidate_pin.source_manifest_digest if candidate_pin else None
+        ),
+    )
     if candidate_check.classification != IDENTITY_VERIFIED:
         raise WorkerIdentityError(
             "candidate source manifest is not verified: "
@@ -1052,7 +1264,23 @@ def create_worker_boot_identity(
     )
     expected_tasks = tuple(sorted(EXPECTED_TASK_REGISTRATIONS))
     provenance = capture_loaded_module_provenance(candidate)
-    status = IDENTITY_VERIFIED
+    # A boot hook may record useful evidence without having authority to
+    # approve its own checkout.  Without an external pin it is explicitly
+    # identity-inconclusive, never verified.
+    status = IDENTITY_INCONCLUSIVE if candidate_pin is None else IDENTITY_VERIFIED
+    if candidate_pin is not None:
+        status_reasons = _launcher_process_reasons(
+            candidate_pin.launcher_identity, process, "boot_launcher_"
+        )
+        if process_node := (
+            worker_node_identity
+            or getattr(sender, "hostname", None)
+            or f"celery@{socket.gethostname()}"
+        ):
+            if process_node != candidate_pin.worker_node_identity:
+                status_reasons.append("boot_worker_node_identity_mismatch")
+        if status_reasons:
+            status = IDENTITY_MISMATCH
     if set(actual_tasks) != EXPECTED_TASK_REGISTRATIONS:
         status = IDENTITY_MISMATCH
     if any(not item.get("loaded") for item in provenance):
@@ -1140,6 +1368,8 @@ def verify_worker_identity(
     current_configuration_fingerprint: str | None = None,
     expected_service_identities: Mapping[str, ProcessIdentity] | None = None,
     current_service_identities: Mapping[str, ProcessIdentity] | None = None,
+    candidate_pin: CandidateIdentityPin | None = None,
+    current_worker_node_identity: str | None = None,
     now: datetime | None = None,
     stale_after: timedelta = timedelta(hours=24),
 ) -> IdentityVerification:
@@ -1155,7 +1385,15 @@ def verify_worker_identity(
     except (WorkerIdentityError, KeyError, TypeError, ValueError) as exc:
         return IdentityVerification(IDENTITY_UNAVAILABLE, (str(exc),))
 
-    candidate_check = verify_candidate_source_manifest(candidate_manifest)
+    candidate_check = verify_candidate_source_manifest(
+        candidate_manifest,
+        expected_head=candidate_pin.candidate_head if candidate_pin else None,
+        expected_tree=candidate_pin.candidate_tree if candidate_pin else None,
+        expected_source_root=candidate_pin.source_root if candidate_pin else None,
+        expected_source_manifest_digest=(
+            candidate_pin.source_manifest_digest if candidate_pin else None
+        ),
+    )
     if candidate_check.classification != IDENTITY_VERIFIED:
         reasons.extend(candidate_check.reasons)
     try:
@@ -1182,6 +1420,24 @@ def verify_worker_identity(
         reasons.append("boot_source_root_mismatch")
     if boot.source_manifest_digest != candidate.source_manifest_digest:
         reasons.append("boot_source_manifest_mismatch")
+    if candidate_pin is None:
+        reasons.append("candidate_pin_unavailable")
+    else:
+        if boot.candidate_head != candidate_pin.candidate_head:
+            reasons.append("boot_pinned_candidate_head_mismatch")
+        if boot.candidate_tree != candidate_pin.candidate_tree:
+            reasons.append("boot_pinned_candidate_tree_mismatch")
+        if boot.candidate_source_root != candidate_pin.source_root:
+            reasons.append("boot_pinned_source_root_mismatch")
+        if boot.source_manifest_digest != candidate_pin.source_manifest_digest:
+            reasons.append("boot_pinned_source_manifest_mismatch")
+        try:
+            if _canonical_launcher_identity(candidate.launcher_identity) != (
+                candidate_pin.normalized_launcher()
+            ):
+                reasons.append("candidate_launcher_pin_mismatch")
+        except (CandidateManifestError, OSError, ValueError) as exc:
+            reasons.append(f"candidate_launcher_pin_invalid:{type(exc).__name__}")
 
     actual = current_process or capture_process_identity(boot.worker_pid)
     if actual is None:
@@ -1209,6 +1465,27 @@ def verify_worker_identity(
     reasons.extend(_compare_process(expected_process, actual))
     if boot.worker_node_identity == "":
         reasons.append("worker_node_identity_missing")
+    if candidate_pin is None or not candidate_pin.worker_node_identity:
+        reasons.append("expected_worker_node_identity_unavailable")
+    elif boot.worker_node_identity != candidate_pin.worker_node_identity:
+        reasons.append("boot_worker_node_identity_mismatch")
+    if current_worker_node_identity is None:
+        reasons.append("current_worker_node_identity_unavailable")
+    elif candidate_pin is not None and current_worker_node_identity != (
+        candidate_pin.worker_node_identity
+    ):
+        reasons.append("current_worker_node_identity_mismatch")
+    if candidate_pin is not None:
+        reasons.extend(
+            _launcher_process_reasons(
+                candidate_pin.launcher_identity, expected_process, "boot_launcher_"
+            )
+        )
+        reasons.extend(
+            _launcher_process_reasons(
+                candidate_pin.launcher_identity, actual, "current_launcher_"
+            )
+        )
 
     if current_registered_tasks is None:
         reasons.append("registrations_unavailable")
@@ -1365,7 +1642,9 @@ def process_identity_from_mapping(value: Mapping[str, Any]) -> ProcessIdentity:
 __all__ = [
     "CandidateManifestError",
     "CandidateManifestVerification",
+    "CandidateIdentityPin",
     "CandidateSourceManifest",
+    "CONFIG_PROJECTION_INCOMPLETE",
     "ConfigurationFingerprintError",
     "DEFAULT_AFFECTED_MODULES",
     "DEFAULT_WORKER_IDENTITY_DIR",

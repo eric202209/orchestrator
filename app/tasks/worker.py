@@ -83,6 +83,9 @@ from app.services.orchestration.worker_identity import (
     collect_worker_configuration as _collect_worker_configuration,
     create_worker_boot_identity as _create_worker_boot_identity,
 )
+from app.services.orchestration.execution.executor_workspace_binding import (
+    SUPPORTED_LOCAL_MODEL_REF as _SUPPORTED_LOCAL_MODEL_REF,
+)
 from app.services.orchestration.lifecycle.worker_capacity import (
     BACKEND_CAPACITY_RETRY_MAX_RETRIES,
     backend_capacity_retry_state,
@@ -256,6 +259,24 @@ def on_worker_ready(sender, **kwargs):
             operational_values={
                 "task.soft_time_limit_seconds": ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
                 "task.time_limit_seconds": ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
+                "retry.max_retries": {
+                    "execute_orchestration_task": BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+                    "scheduled_task_execution": 1,
+                },
+                "retry.countdown_seconds": {
+                    "capacity": 15,
+                    "scheduled_task_execution": 5,
+                },
+                "retry.redelivery_policy": {
+                    "acks_late": True,
+                    "reject_on_worker_lost": True,
+                    "acks_on_failure_or_timeout": True,
+                },
+                "d37.binding.route_behavior": {
+                    "binding": "ephemeral-runtime",
+                    "selected_model": _SUPPORTED_LOCAL_MODEL_REF,
+                    "fallbacks": [],
+                },
             },
         )
         manifest_path, boot_manifest = _create_worker_boot_identity(

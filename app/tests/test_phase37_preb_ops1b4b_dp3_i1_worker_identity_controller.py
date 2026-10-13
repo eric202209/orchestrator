@@ -6,6 +6,8 @@ import hashlib
 import json
 import logging
 import subprocess
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -15,6 +17,9 @@ import pytest
 
 from app.services.orchestration import worker_controller, worker_identity
 from app.services.orchestration.worker_controller import (
+    ApprovalVerification,
+    ControllerSafetyError,
+    FileApprovalClaimStore,
     HOLD_MAINTENANCE_WINDOW_NOT_PROVEN,
     PREFLIGHT_BLOCKED,
     PREFLIGHT_INCONCLUSIVE,
@@ -29,6 +34,9 @@ from app.services.orchestration.worker_controller import (
     make_deployment_gate,
 )
 from app.services.orchestration.worker_identity import (
+    CONFIG_PROJECTION_INCOMPLETE,
+    CandidateIdentityPin,
+    DEFAULT_AFFECTED_MODULES,
     EXPECTED_TASK_REGISTRATIONS,
     IDENTITY_INCONCLUSIVE,
     IDENTITY_MISMATCH,
@@ -39,6 +47,7 @@ from app.services.orchestration.worker_identity import (
     WorkerBootIdentityManifest,
     build_candidate_source_manifest,
     build_non_secret_configuration_fingerprint,
+    collect_worker_configuration,
     create_worker_boot_identity,
     sha256_file,
     verify_candidate_source_manifest,
@@ -72,7 +81,13 @@ def candidate(tmp_path: Path) -> tuple[Path, CandidateSourceManifest]:
             "launcher": "test-worker",
             "executable": "/venv/bin/python3",
             "cwd": str(root),
-            "argv": ["/venv/bin/python3", "-m", "celery", "worker"],
+            "argv": [
+                "/venv/bin/python3",
+                "/venv/bin/celery",
+                "-A",
+                "app.celery_app",
+                "worker",
+            ],
         },
     )
     return root, manifest
@@ -86,13 +101,19 @@ def _resign(manifest: CandidateSourceManifest, **changes) -> CandidateSourceMani
     return replace(updated, source_manifest_digest=digest)
 
 
-def _identity(pid: int, ticks: str, *, boot: str = "boot-a") -> ProcessIdentity:
+def _identity(
+    pid: int,
+    ticks: str,
+    *,
+    boot: str = "boot-a",
+    cwd: str = "/srv/orchestrator",
+) -> ProcessIdentity:
     return ProcessIdentity(
         pid=pid,
         linux_boot_id=boot,
         start_ticks=ticks,
         executable="/venv/bin/python3",
-        cwd="/srv/orchestrator",
+        cwd=cwd,
         argv=(
             "/venv/bin/python3",
             "/venv/bin/celery",
@@ -142,7 +163,7 @@ def _boot(
     WorkerBootIdentityManifest, ProcessIdentity, ProcessIdentity, ProcessIdentity
 ]:
     del root
-    worker = _identity(101, "1001")
+    worker = _identity(101, "1001", cwd=manifest.source_root)
     child = replace(worker, pid=102, start_ticks="1002", ppid=101)
     beat = replace(worker, pid=201, start_ticks="2001", ppid=1, pgid=201, sid=201)
     api = replace(worker, pid=301, start_ticks="3001", ppid=1, pgid=301, sid=301)
@@ -218,18 +239,29 @@ def _observation(
             schedule_identity=("cleanup", "orphan", "continuation"),
         ),
         notes=(),
+        worker_node_identity="celery@test",
+        observer_provenance="test-trusted-observer",
+        observer_candidate_source_manifest_digest=None,
+        observer_worker_key=worker.key() if worker else None,
+        beat_maintenance_identity="test-beat-maintenance",
     )
     values.update(changes)
     return WorkerObservation(**values)
 
 
 def _controller(
-    candidate: CandidateSourceManifest, boot: WorkerBootIdentityManifest, observation
+    candidate: CandidateSourceManifest,
+    boot: WorkerBootIdentityManifest,
+    observation,
+    *,
+    claim_store=None,
+    fail_stop: bool = False,
 ):
-    state = {"observation": observation}
     adapter = SimpleNamespace(stop_calls=[], start_calls=[])
 
     def stop_worker(identity):
+        if fail_stop:
+            raise ControllerSafetyError("synthetic adapter uncertainty")
         adapter.stop_calls.append(identity)
 
     def start_worker(launcher):
@@ -237,11 +269,58 @@ def _controller(
 
     adapter.stop_worker = stop_worker
     adapter.start_worker = start_worker
+    observation = replace(
+        observation,
+        observer_candidate_source_manifest_digest=candidate.source_manifest_digest,
+    )
+    state = {"observation": observation}
+
+    class TestApprovalVerifier:
+        def verify(self, approval, *, operation, candidate_pin, gate, now):
+            del operation, candidate_pin, gate, now
+            return ApprovalVerification(
+                approval.operator_identity == "operator:test",
+                principal=(
+                    "operator:test"
+                    if approval.operator_identity == "operator:test"
+                    else None
+                ),
+            )
+
+    class TestObserverVerifier:
+        def verify(self, observation, *, candidate_pin, expected_worker, now):
+            del now
+            reasons = []
+            if observation.observer_provenance != "test-trusted-observer":
+                reasons.append("observer_provenance_missing")
+            if (
+                observation.observer_candidate_source_manifest_digest
+                != candidate_pin.source_manifest_digest
+            ):
+                reasons.append("observer_candidate_binding_mismatch")
+            if observation.observer_worker_key != (
+                expected_worker.key() if expected_worker else None
+            ):
+                reasons.append("observer_worker_binding_mismatch")
+            return not reasons, reasons
+
     controller = WorkerOnlyController(
         candidate_manifest=candidate,
+        candidate_pin=CandidateIdentityPin(
+            candidate_head=candidate.candidate_head,
+            candidate_tree=candidate.candidate_tree,
+            source_root=candidate.source_root,
+            source_manifest_digest=candidate.source_manifest_digest,
+            launcher_identity=candidate.launcher_identity,
+            worker_node_identity="celery@test",
+        ),
         boot_manifest=boot,
         snapshot_provider=lambda: state["observation"],
         process_adapter=adapter,
+        approval_verifier=TestApprovalVerifier(),
+        observer_verifier=TestObserverVerifier(),
+        claim_store=claim_store
+        or FileApprovalClaimStore(Path(tempfile.mkdtemp(prefix="dp3-i3-claims-"))),
         clock=lambda: NOW,
     )
     return controller, state, adapter
@@ -271,6 +350,15 @@ def _gate(candidate, worker, beat, api, approval, operation="stop", **changes):
         approval=approval,
         stopped_verified_at=NOW if operation == "start" else None,
     )
+    object.__setattr__(approval, "candidate_head", candidate.candidate_head)
+    object.__setattr__(approval, "candidate_tree", candidate.candidate_tree)
+    object.__setattr__(
+        approval, "source_manifest_digest", candidate.source_manifest_digest
+    )
+    object.__setattr__(approval, "worker_pid", worker.pid)
+    object.__setattr__(approval, "worker_start_ticks", worker.start_ticks)
+    object.__setattr__(approval, "linux_boot_id", worker.linux_boot_id)
+    object.__setattr__(approval, "gate_id", gate.gate_id)
     return replace(gate, **changes)
 
 
@@ -382,6 +470,7 @@ def test_boot_manifest_is_atomic_unique_and_credential_free(candidate, tmp_path)
     raw = path.read_text(encoding="utf-8")
     assert "synthetic-secret" not in raw
     assert boot.record_id in raw
+    assert boot.identity_status == IDENTITY_INCONCLUSIVE
     with pytest.raises(worker_identity.ManifestWriteError):
         create_worker_boot_identity(
             source_root=root,
@@ -440,6 +529,15 @@ def _identity_verification_kwargs(boot, worker, beat, api, manifest, **changes):
         current_configuration_fingerprint=_config()[0],
         expected_service_identities={"beat": beat, "api": api},
         current_service_identities={"beat": beat, "api": api},
+        candidate_pin=CandidateIdentityPin(
+            candidate_head=manifest.candidate_head,
+            candidate_tree=manifest.candidate_tree,
+            source_root=manifest.source_root,
+            source_manifest_digest=manifest.source_manifest_digest,
+            launcher_identity=manifest.launcher_identity,
+            worker_node_identity="celery@test",
+        ),
+        current_worker_node_identity="celery@test",
     )
     values.update(changes)
     return values
@@ -750,7 +848,17 @@ def test_controller_expired_approval_and_no_default_observer_are_safe(candidate)
     boot, worker, beat, api = _boot(root, manifest)
     del root
     controller = WorkerOnlyController(
-        candidate_manifest=manifest, boot_manifest=boot, clock=lambda: NOW
+        candidate_manifest=manifest,
+        candidate_pin=CandidateIdentityPin(
+            candidate_head=manifest.candidate_head,
+            candidate_tree=manifest.candidate_tree,
+            source_root=manifest.source_root,
+            source_manifest_digest=manifest.source_manifest_digest,
+            launcher_identity=manifest.launcher_identity,
+            worker_node_identity="celery@test",
+        ),
+        boot_manifest=boot,
+        clock=lambda: NOW,
     )
     assert controller.inspect().status == PREFLIGHT_INCONCLUSIVE
     controller, _state, adapter = _controller(
@@ -804,3 +912,310 @@ def test_worker_ready_manifest_failure_is_nonfatal_and_not_verified(
     with caplog.at_level(logging.ERROR):
         worker_tasks.on_worker_ready(sender)
     assert any("not identity-verified" in record.message for record in caplog.records)
+
+
+@pytest.mark.parametrize(
+    "pin_change,reason",
+    [
+        (
+            lambda pin, worker: replace(
+                pin,
+                launcher_identity={
+                    **pin.launcher_identity,
+                    "executable": "/wrong/python",
+                },
+            ),
+            "current_launcher_executable_mismatch",
+        ),
+        (
+            lambda pin, worker: replace(
+                pin,
+                launcher_identity={**pin.launcher_identity, "cwd": "/wrong/cwd"},
+            ),
+            "current_launcher_cwd_mismatch",
+        ),
+        (
+            lambda pin, worker: replace(
+                pin,
+                launcher_identity={
+                    **pin.launcher_identity,
+                    "argv": [*pin.launcher_identity["argv"], "--wrong"],
+                },
+            ),
+            "current_launcher_argv_mismatch",
+        ),
+    ],
+)
+def test_i3_external_launcher_pin_rejects_boot_and_current_drift(
+    candidate, pin_change, reason
+):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    pin = _identity_verification_kwargs(boot, worker, beat, api, manifest)[
+        "candidate_pin"
+    ]
+    result = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot,
+            worker,
+            beat,
+            api,
+            manifest,
+            candidate_pin=pin_change(pin, worker),
+        ),
+    )
+    assert result.classification == IDENTITY_MISMATCH
+    assert reason in result.reasons
+
+
+def test_i3_missing_or_wrong_node_pin_never_verifies(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    missing = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot, worker, beat, api, manifest, candidate_pin=None
+        ),
+    )
+    assert missing.classification == IDENTITY_INCONCLUSIVE
+    assert "candidate_pin_unavailable" in missing.reasons
+
+    wrong_node = replace(
+        _identity_verification_kwargs(boot, worker, beat, api, manifest)[
+            "candidate_pin"
+        ],
+        worker_node_identity="celery@other",
+    )
+    result = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot,
+            worker,
+            beat,
+            api,
+            manifest,
+            candidate_pin=wrong_node,
+        ),
+    )
+    assert result.classification == IDENTITY_MISMATCH
+    assert "boot_worker_node_identity_mismatch" in result.reasons
+
+
+def test_i3_configuration_projection_covers_policy_and_excludes_secrets():
+    settings_object = SimpleNamespace(
+        OPENCLAW_GATEWAY_URL="http://127.0.0.1:8000",
+        OPENCLAW_CLI_PATH="/usr/local/bin/openclaw",
+        OPENCLAW_CLI_ARGS="--profile local --json",
+        EXECUTION_MODEL="local-model-a",
+        PLANNER_MODEL="planner-a",
+        PLANNING_REPAIR_MODEL="repair-a",
+        AGENT_BACKEND="local_openclaw",
+        AGENT_SECONDARY_BACKEND=None,
+        OPENCLAW_API_KEY="synthetic-secret-value",
+        OPENAI_API_KEY="another-secret-value",
+        PLANNING_DIRECT_API_KEY="third-secret-value",
+    )
+    celery_config = {
+        "task_default_queue": "celery",
+        "task_serializer": "json",
+        "accept_content": ["json"],
+        "result_serializer": "json",
+        "timezone": "UTC",
+        "enable_utc": True,
+        "task_acks_late": True,
+        "task_reject_on_worker_lost": True,
+        "task_acks_on_failure_or_timeout": True,
+        "worker_prefetch_multiplier": 1,
+        "task_routes": {"app.tasks.worker.*": {"queue": "celery"}},
+        "beat_schedule": {
+            "cleanup": {
+                "task": "app.tasks.maintenance.cleanup_old_logs",
+                "schedule": timedelta(days=1),
+                "kwargs": {"days": 30},
+            }
+        },
+    }
+    first, projection = collect_worker_configuration(
+        settings_object,
+        celery_config,
+        worker_runtime=SimpleNamespace(concurrency=4),
+        operational_values={
+            "task.soft_time_limit_seconds": 120,
+            "task.time_limit_seconds": 180,
+            "retry.max_retries": 3,
+            "retry.countdown_seconds": 60,
+            "retry.redelivery_policy": "reject_on_worker_lost",
+            "d37.binding.route_behavior": "ephemeral-runtime-binding",
+        },
+    )
+    changed_schedule = dict(celery_config)
+    changed_schedule["beat_schedule"] = {
+        **celery_config["beat_schedule"],
+        "cleanup": {
+            **celery_config["beat_schedule"]["cleanup"],
+            "kwargs": {"days": 31},
+        },
+    }
+    second, _ = collect_worker_configuration(
+        settings_object,
+        changed_schedule,
+        worker_runtime=SimpleNamespace(concurrency=4),
+        operational_values={
+            "task.soft_time_limit_seconds": 120,
+            "task.time_limit_seconds": 180,
+            "retry.max_retries": 3,
+            "retry.countdown_seconds": 60,
+            "retry.redelivery_policy": "reject_on_worker_lost",
+            "d37.binding.route_behavior": "ephemeral-runtime-binding",
+        },
+    )
+    assert first != second
+    assert projection["allowlisted_values"]["openclaw.gateway_route"]
+    encoded = json.dumps(projection)
+    assert "synthetic-secret-value" not in encoded
+    assert "another-secret-value" not in encoded
+    assert "OPENAI_API_KEY" in encoded
+
+    unsupported_schedule = dict(celery_config)
+    unsupported_schedule["beat_schedule"] = {
+        "cleanup": {"task": "task", "schedule": timedelta(days=1), "unknown": 1}
+    }
+    with pytest.raises(
+        worker_identity.ConfigurationFingerprintError,
+        match=CONFIG_PROJECTION_INCOMPLETE,
+    ):
+        collect_worker_configuration(settings_object, unsupported_schedule)
+
+
+def test_i3_candidate_pin_and_reviewed_module_boundary_are_explicit(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    pin = _identity_verification_kwargs(boot, worker, beat, api, manifest)[
+        "candidate_pin"
+    ]
+    wrong_digest = replace(pin, source_manifest_digest="0" * 64)
+    result = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot, worker, beat, api, manifest, candidate_pin=wrong_digest
+        ),
+    )
+    assert result.classification == IDENTITY_MISMATCH
+    assert "expected_source_manifest_digest_mismatch" in result.reasons
+    assert {
+        "app.services.session.orphan_ownership",
+        "app.services.session.recovery_coordinator",
+        "app.services.orchestration.execution.runtime_context",
+        "app.services.agents.runtime_configuration",
+        "app.services.orchestration.lifecycle.worker_bootstrap",
+        "app.services.orchestration.lifecycle.worker_capacity",
+    }.issubset(DEFAULT_AFFECTED_MODULES)
+
+
+def test_i3_claim_store_rejects_replay_across_controller_reconstruction(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    shared_store = FileApprovalClaimStore(root.parent / "shared-claims")
+    observation = _observation(worker, beat, api)
+    first_controller, _state, first_adapter = _controller(
+        manifest, boot, observation, claim_store=shared_store
+    )
+    second_controller, _state, second_adapter = _controller(
+        manifest, boot, observation, claim_store=shared_store
+    )
+    approval = _approval("stop")
+    gate = _gate(manifest, worker, beat, api, approval)
+    assert first_controller.stop(approval, gate).status == STOP_REQUESTED
+    replay = second_controller.stop(approval, gate)
+    assert replay.status == PREFLIGHT_BLOCKED
+    assert "approval replay rejected" in replay.reasons
+    assert len(first_adapter.stop_calls) == 1
+    assert not second_adapter.stop_calls
+
+
+def test_i3_claim_store_rejects_concurrent_replay_and_uncertain_retry(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    shared_store = FileApprovalClaimStore(root.parent / "concurrent-claims")
+    approval = _approval("stop")
+    gate = _gate(manifest, worker, beat, api, approval)
+    controllers = [
+        _controller(
+            manifest,
+            boot,
+            _observation(worker, beat, api),
+            claim_store=shared_store,
+        )[0]
+        for _ in range(2)
+    ]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(lambda item: item.stop(approval, gate), controllers)
+        )
+    assert sorted(result.status for result in results) == [
+        PREFLIGHT_BLOCKED,
+        STOP_REQUESTED,
+    ]
+
+    uncertain_store = FileApprovalClaimStore(root.parent / "uncertain-claims")
+    failing, _state, adapter = _controller(
+        manifest,
+        boot,
+        _observation(worker, beat, api),
+        claim_store=uncertain_store,
+        fail_stop=True,
+    )
+    failed = failing.stop(approval, gate)
+    assert failed.status == PREFLIGHT_BLOCKED
+    retrying, _state, retry_adapter = _controller(
+        manifest,
+        boot,
+        _observation(worker, beat, api),
+        claim_store=uncertain_store,
+    )
+    replay = retrying.stop(approval, gate)
+    assert replay.status == PREFLIGHT_BLOCKED
+    assert "approval replay rejected" in replay.reasons
+    assert not retry_adapter.stop_calls
+    assert not adapter.stop_calls
+
+
+def test_i3_trusted_observer_is_required_and_fail_closed(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    controller, _state, adapter = _controller(
+        manifest, boot, _observation(worker, beat, api)
+    )
+    controller.observer_verifier = None
+    result = controller.stop(
+        _approval("stop"),
+        _gate(manifest, worker, beat, api, _approval("stop")),
+    )
+    assert result.status == PREFLIGHT_BLOCKED
+    assert "trusted_observer_unavailable" in result.reasons
+    assert not adapter.stop_calls
+
+
+def test_i3_pidfd_rechecks_full_provenance_before_signal(monkeypatch):
+    expected = _identity(501, "5001")
+    observed = [expected, replace(expected, cwd="/changed")]
+    signals = []
+    adapter = worker_controller.PidfdWorkerProcessAdapter(
+        lambda _pid: observed.pop(0) if observed else expected
+    )
+    monkeypatch.setattr(worker_controller.os, "pidfd_open", lambda _pid, _flags: 99)
+    monkeypatch.setattr(
+        worker_controller.os,
+        "pidfd_send_signal",
+        lambda *args: signals.append(args),
+        raising=False,
+    )
+    monkeypatch.setattr(worker_controller.os, "close", lambda _fd: None)
+    with pytest.raises(ControllerSafetyError):
+        adapter.stop_worker(expected)
+    assert not signals

@@ -8,14 +8,19 @@ database, provider, or binding lifecycle authority.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import signal
-from dataclasses import dataclass, field
+import tempfile
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .worker_identity import (
     CandidateSourceManifest,
+    CandidateIdentityPin,
     IDENTITY_INCONCLUSIVE,
     IDENTITY_MISMATCH,
     IDENTITY_UNAVAILABLE,
@@ -42,12 +47,172 @@ class ControllerSafetyError(RuntimeError):
     """A required safety or approval condition was not satisfied."""
 
 
+CLAIM_AVAILABLE = "AVAILABLE"
+CLAIM_CLAIMED = "CLAIMED"
+CLAIM_OPERATION_ATTEMPTED = "OPERATION_ATTEMPTED"
+CLAIM_COMPLETED = "COMPLETED"
+CLAIM_FAILED_UNCERTAIN = "FAILED_UNCERTAIN"
+
+
+@dataclass(frozen=True)
+class ApprovalVerification:
+    verified: bool
+    principal: str | None = None
+    reasons: tuple[str, ...] = ()
+
+
+class ApprovalVerifier(Protocol):
+    """Trusted issuer/verifier boundary; caller strings are not authentication."""
+
+    def verify(
+        self,
+        approval: "OperatorApproval",
+        *,
+        operation: str,
+        candidate_pin: CandidateIdentityPin,
+        gate: "DeploymentGate",
+        now: datetime,
+    ) -> ApprovalVerification: ...
+
+
+class TrustedObserverVerifier(Protocol):
+    """Read-only observer authentication and freshness boundary."""
+
+    def verify(
+        self,
+        observation: "WorkerObservation",
+        *,
+        candidate_pin: CandidateIdentityPin,
+        expected_worker: ProcessIdentity | None,
+        now: datetime,
+    ) -> tuple[bool, Sequence[str]]: ...
+
+
+class ApprovalClaimStore(Protocol):
+    """Atomic, cross-controller single-use approval claim contract."""
+
+    def claim(
+        self,
+        *,
+        claim_id: str,
+        binding: Mapping[str, Any],
+        expires_at: datetime,
+        now: datetime,
+    ) -> None: ...
+
+    def transition(self, claim_id: str, *, expected: str, state: str) -> None: ...
+
+
+class FileApprovalClaimStore:
+    """Durable provider-free claim store using atomic exclusive file create.
+
+    Deployment must inject an explicitly configured location.  The controller
+    never chooses a production path and therefore cannot silently write to
+    application or Redis state.
+    """
+
+    def __init__(self, root: str | Path) -> None:
+        path = Path(root).expanduser()
+        if path.exists() and path.is_symlink():
+            raise ControllerSafetyError("approval claim directory is a symlink")
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(path, 0o700)
+        self.root = path.resolve()
+
+    def _path(self, claim_id: str) -> Path:
+        if not claim_id or any(ch not in "0123456789abcdef" for ch in claim_id):
+            raise ControllerSafetyError("invalid approval claim id")
+        path = self.root / f"{claim_id}.json"
+        if path.is_symlink():
+            raise ControllerSafetyError("approval claim path is a symlink")
+        return path
+
+    def claim(
+        self,
+        *,
+        claim_id: str,
+        binding: Mapping[str, Any],
+        expires_at: datetime,
+        now: datetime,
+    ) -> None:
+        if expires_at <= now:
+            raise ControllerSafetyError("approval claim expired")
+        path = self._path(claim_id)
+        payload = {
+            "claim_id": claim_id,
+            "state": CLAIM_CLAIMED,
+            "claimed_at": now.astimezone(UTC).isoformat(),
+            "expires_at": expires_at.astimezone(UTC).isoformat(),
+            "binding": dict(binding),
+        }
+        encoded = (
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        try:
+            fd = os.open(
+                path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except FileExistsError as exc:
+            raise ControllerSafetyError("approval replay rejected") from exc
+        except OSError as exc:
+            raise ControllerSafetyError("approval claim create failed") from exc
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            path.unlink(missing_ok=True)
+            raise ControllerSafetyError("approval claim write failed") from exc
+
+    def transition(self, claim_id: str, *, expected: str, state: str) -> None:
+        if state not in {
+            CLAIM_CLAIMED,
+            CLAIM_OPERATION_ATTEMPTED,
+            CLAIM_COMPLETED,
+            CLAIM_FAILED_UNCERTAIN,
+        }:
+            raise ControllerSafetyError("invalid approval claim state")
+        path = self._path(claim_id)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ControllerSafetyError("approval claim unavailable") from exc
+        if payload.get("state") != expected:
+            raise ControllerSafetyError("approval claim lifecycle mismatch")
+        payload["state"] = state
+        encoded = (
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=self.root, prefix=f".{path.name}.", delete=False
+            ) as handle:
+                temporary = Path(handle.name)
+                os.chmod(temporary, 0o600)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+        except OSError as exc:
+            try:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ControllerSafetyError("approval claim transition failed") from exc
+
+
 @dataclass(frozen=True)
 class MaintenanceWindowProof:
     checked_at: datetime
     free_until: datetime
     required_margin_seconds: int
     schedule_identity: tuple[str, ...] = ()
+    maintenance_identity: str | None = None
 
     def is_proven(self, now: datetime) -> bool:
         return (
@@ -91,6 +256,11 @@ class WorkerObservation:
     beat_maintenance_free: bool | None
     maintenance_window: MaintenanceWindowProof | None
     notes: tuple[str, ...] = ()
+    worker_node_identity: str | None = None
+    observer_provenance: str | None = None
+    observer_candidate_source_manifest_digest: str | None = None
+    observer_worker_key: tuple[str, int, str] | None = None
+    beat_maintenance_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +271,13 @@ class OperatorApproval:
     nonce: str
     approved_at: datetime
     expires_at: datetime
+    candidate_head: str | None = None
+    candidate_tree: str | None = None
+    source_manifest_digest: str | None = None
+    worker_pid: int | None = None
+    worker_start_ticks: str | None = None
+    linux_boot_id: str | None = None
+    gate_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +285,7 @@ class DeploymentGate:
     operation: str
     candidate_head: str
     candidate_tree: str
+    candidate_source_manifest_digest: str
     worker_pid: int
     worker_start_ticks: str
     linux_boot_id: str
@@ -119,6 +297,7 @@ class DeploymentGate:
     operator_approval_identity: str
     approval_id: str
     nonce: str
+    gate_id: str
     stopped_verified_at: datetime | None = None
 
 
@@ -143,6 +322,23 @@ class WorkerProcessAdapter(Protocol):
     def start_worker(self, launcher_identity: Mapping[str, Any]) -> None: ...
 
 
+def _process_provenance_reasons(
+    expected: ProcessIdentity, actual: ProcessIdentity
+) -> list[str]:
+    return [
+        field_name
+        for field_name in (
+            "linux_boot_id",
+            "pid",
+            "start_ticks",
+            "executable",
+            "cwd",
+            "argv",
+        )
+        if getattr(expected, field_name) != getattr(actual, field_name)
+    ]
+
+
 class PidfdWorkerProcessAdapter:
     """Minimal Linux adapter for one graceful Worker-parent signal.
 
@@ -155,7 +351,7 @@ class PidfdWorkerProcessAdapter:
 
     def stop_worker(self, identity: ProcessIdentity) -> None:
         current = self._identity_reader(identity.pid)
-        if current is None or current.key() != identity.key():
+        if current is None or _process_provenance_reasons(identity, current):
             raise ControllerSafetyError("Worker process identity changed before stop")
         pidfd_open = getattr(os, "pidfd_open", None)
         pidfd_send_signal = getattr(os, "pidfd_send_signal", None)
@@ -166,7 +362,7 @@ class PidfdWorkerProcessAdapter:
         process_fd = pidfd_open(identity.pid, 0)
         try:
             current = self._identity_reader(identity.pid)
-            if current is None or current.key() != identity.key():
+            if current is None or _process_provenance_reasons(identity, current):
                 raise ControllerSafetyError(
                     "Worker process identity changed after handle open"
                 )
@@ -186,21 +382,28 @@ class WorkerOnlyController:
         self,
         *,
         candidate_manifest: CandidateSourceManifest,
+        candidate_pin: CandidateIdentityPin | None = None,
         boot_manifest: WorkerBootIdentityManifest | None,
         snapshot_provider: Callable[[], WorkerObservation] | None = None,
         process_adapter: WorkerProcessAdapter | None = None,
+        approval_verifier: ApprovalVerifier | None = None,
+        observer_verifier: TrustedObserverVerifier | None = None,
+        claim_store: ApprovalClaimStore | None = None,
         clock: Callable[[], datetime] | None = None,
         required_margin_seconds: int = 900,
         max_observation_age_seconds: int = 60,
     ) -> None:
         self.candidate_manifest = candidate_manifest
+        self.candidate_pin = candidate_pin
         self.boot_manifest = boot_manifest
         self.snapshot_provider = snapshot_provider
         self.process_adapter = process_adapter
+        self.approval_verifier = approval_verifier
+        self.observer_verifier = observer_verifier
+        self.claim_store = claim_store
         self.clock = clock or (lambda: datetime.now(UTC))
         self.required_margin_seconds = required_margin_seconds
         self.max_observation_age_seconds = max_observation_age_seconds
-        self._consumed_approvals: set[tuple[str, str, str]] = set()
 
     def inspect(self) -> ControllerResult:
         snapshot, error = self._snapshot()
@@ -218,7 +421,20 @@ class WorkerOnlyController:
                 PREFLIGHT_INCONCLUSIVE,
                 (error or "observation unavailable",),
             )
-        candidate = verify_candidate_source_manifest(self.candidate_manifest)
+        if self.candidate_pin is None:
+            return ControllerResult(
+                "preflight",
+                PREFLIGHT_INCONCLUSIVE,
+                ("candidate_pin_unavailable",),
+                snapshot,
+            )
+        candidate = verify_candidate_source_manifest(
+            self.candidate_manifest,
+            expected_head=self.candidate_pin.candidate_head,
+            expected_tree=self.candidate_pin.candidate_tree,
+            expected_source_root=self.candidate_pin.source_root,
+            expected_source_manifest_digest=self.candidate_pin.source_manifest_digest,
+        )
         if candidate.classification != IDENTITY_VERIFIED:
             return ControllerResult(
                 "preflight",
@@ -233,6 +449,7 @@ class WorkerOnlyController:
         reasons = self._common_safety_reasons(snapshot, worker_required=True)
         reasons.extend(self._fresh_observation_reasons(snapshot))
         reasons.extend(self._worker_identity_reasons(snapshot))
+        reasons.extend(self._observer_reasons(snapshot))
         maintenance_status = self._maintenance_status(snapshot)
         if maintenance_status is not None:
             return ControllerResult(
@@ -271,14 +488,24 @@ class WorkerOnlyController:
                 ("process_adapter_unavailable",),
                 snapshot,
             )
-        try:
-            self._consume_approval(approval)
-        except ControllerSafetyError as exc:
-            return ControllerResult("stop", PREFLIGHT_BLOCKED, (str(exc),), snapshot)
+        claim_id, authorization_reasons = self._authorize_and_claim(
+            "stop", approval, gate, snapshot
+        )
+        if authorization_reasons:
+            return ControllerResult(
+                "stop",
+                self._authorization_failure_status(authorization_reasons),
+                tuple(authorization_reasons),
+                snapshot,
+            )
         try:
             self.process_adapter.stop_worker(snapshot.worker)  # type: ignore[arg-type]
         except (ControllerSafetyError, OSError) as exc:
+            self._transition_claim(
+                claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_FAILED_UNCERTAIN
+            )
             return ControllerResult("stop", PREFLIGHT_BLOCKED, (str(exc),), snapshot)
+        self._transition_claim(claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_COMPLETED)
         return ControllerResult("stop", STOP_REQUESTED, observation=snapshot)
 
     def verify_stopped(self) -> ControllerResult:
@@ -319,13 +546,27 @@ class WorkerOnlyController:
             return ControllerResult(
                 "start", PREFLIGHT_INCONCLUSIVE, (error or "observation unavailable",)
             )
-        candidate = verify_candidate_source_manifest(self.candidate_manifest)
+        if self.candidate_pin is None:
+            return ControllerResult(
+                "start",
+                PREFLIGHT_INCONCLUSIVE,
+                ("candidate_pin_unavailable",),
+                snapshot,
+            )
+        candidate = verify_candidate_source_manifest(
+            self.candidate_manifest,
+            expected_head=self.candidate_pin.candidate_head,
+            expected_tree=self.candidate_pin.candidate_tree,
+            expected_source_root=self.candidate_pin.source_root,
+            expected_source_manifest_digest=self.candidate_pin.source_manifest_digest,
+        )
         if candidate.classification != IDENTITY_VERIFIED:
             return ControllerResult(
                 "start", PREFLIGHT_BLOCKED, candidate.reasons, snapshot
             )
         reasons = self._common_safety_reasons(snapshot, worker_required=False)
         reasons.extend(self._fresh_observation_reasons(snapshot))
+        reasons.extend(self._observer_reasons(snapshot))
         if snapshot.worker is not None:
             reasons.append("old_or_duplicate_Worker_alive")
         if snapshot.worker_children is None:
@@ -357,14 +598,24 @@ class WorkerOnlyController:
                 ("process_adapter_unavailable",),
                 snapshot,
             )
-        try:
-            self._consume_approval(approval)
-        except ControllerSafetyError as exc:
-            return ControllerResult("start", PREFLIGHT_BLOCKED, (str(exc),), snapshot)
+        claim_id, authorization_reasons = self._authorize_and_claim(
+            "start", approval, gate, snapshot
+        )
+        if authorization_reasons:
+            return ControllerResult(
+                "start",
+                self._authorization_failure_status(authorization_reasons),
+                tuple(authorization_reasons),
+                snapshot,
+            )
         try:
             self.process_adapter.start_worker(self.candidate_manifest.launcher_identity)
         except (ControllerSafetyError, OSError) as exc:
+            self._transition_claim(
+                claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_FAILED_UNCERTAIN
+            )
             return ControllerResult("start", PREFLIGHT_BLOCKED, (str(exc),), snapshot)
+        self._transition_claim(claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_COMPLETED)
         return ControllerResult("start", START_REQUESTED, observation=snapshot)
 
     def verify_started(
@@ -402,6 +653,8 @@ class WorkerOnlyController:
             current_configuration_fingerprint=current_configuration_fingerprint,
             expected_service_identities=expected_service_identities,
             current_service_identities=current_service_identities,
+            candidate_pin=self.candidate_pin,
+            current_worker_node_identity=snapshot.worker_node_identity,
         )
         safety_reasons = self._common_safety_reasons(snapshot, worker_required=True)
         safety_reasons.extend(self._fresh_observation_reasons(snapshot))
@@ -442,6 +695,46 @@ class WorkerOnlyController:
         if age < 0 or age > self.max_observation_age_seconds:
             return ["quiescence_observation_stale"]
         return []
+
+    def _observer_reasons(self, snapshot: WorkerObservation) -> list[str]:
+        if self.candidate_pin is None:
+            return ["candidate_pin_unavailable"]
+        contract_reasons: list[str] = []
+        if not snapshot.observer_provenance:
+            contract_reasons.append("observer_provenance_unavailable")
+        if (
+            snapshot.observer_candidate_source_manifest_digest
+            != self.candidate_pin.source_manifest_digest
+        ):
+            contract_reasons.append("observer_candidate_binding_mismatch")
+        if (
+            snapshot.worker is not None
+            and snapshot.observer_worker_key != snapshot.worker.key()
+        ):
+            contract_reasons.append("observer_worker_binding_mismatch")
+        if not snapshot.beat_maintenance_identity:
+            contract_reasons.append("beat_maintenance_identity_unavailable")
+        if self.observer_verifier is None:
+            return [*contract_reasons, "trusted_observer_unavailable"]
+        try:
+            verified, observer_reasons = self.observer_verifier.verify(
+                snapshot,
+                candidate_pin=self.candidate_pin,
+                expected_worker=snapshot.worker,
+                now=self.clock(),
+            )
+        except Exception as exc:  # noqa: BLE001 - observer is a fail-closed boundary
+            return [
+                *contract_reasons,
+                f"trusted_observer_failed:{type(exc).__name__}",
+            ]
+        if not verified:
+            return [
+                "untrusted_observer",
+                *contract_reasons,
+                *map(str, observer_reasons),
+            ]
+        return contract_reasons
 
     def _common_safety_reasons(
         self,
@@ -495,6 +788,8 @@ class WorkerOnlyController:
         return reasons
 
     def _worker_identity_reasons(self, snapshot: WorkerObservation) -> list[str]:
+        if self.candidate_pin is None:
+            return ["candidate_pin_unavailable"]
         if self.boot_manifest is None or snapshot.worker is None:
             return ["boot_identity_unavailable"]
         if snapshot.registered_tasks is None:
@@ -506,6 +801,39 @@ class WorkerOnlyController:
             reasons.append("Worker_start_ticks_mismatch")
         if snapshot.worker.linux_boot_id != self.boot_manifest.linux_boot_id:
             reasons.append("linux_boot_id_mismatch")
+        for prefix, process in (
+            (
+                "boot_launcher_",
+                ProcessIdentity(
+                    pid=self.boot_manifest.worker_pid,
+                    linux_boot_id=self.boot_manifest.linux_boot_id,
+                    start_ticks=self.boot_manifest.worker_start_ticks,
+                    executable=self.boot_manifest.worker_executable,
+                    cwd=self.boot_manifest.worker_cwd,
+                    argv=self.boot_manifest.worker_argv,
+                ),
+            ),
+            ("current_launcher_", snapshot.worker),
+        ):
+            try:
+                normalized = self.candidate_pin.normalized_launcher()
+                if normalized["executable"] != process.executable:
+                    reasons.append(f"{prefix}executable_mismatch")
+                if normalized["cwd"] != process.cwd:
+                    reasons.append(f"{prefix}cwd_mismatch")
+                if tuple(normalized["argv"]) != process.argv:
+                    reasons.append(f"{prefix}argv_mismatch")
+            except (OSError, ValueError, TypeError):
+                reasons.append(f"{prefix}evidence_invalid")
+        if not snapshot.worker_node_identity:
+            reasons.append("current_worker_node_identity_unavailable")
+        elif snapshot.worker_node_identity != self.candidate_pin.worker_node_identity:
+            reasons.append("current_worker_node_identity_mismatch")
+        if (
+            self.boot_manifest.worker_node_identity
+            != self.candidate_pin.worker_node_identity
+        ):
+            reasons.append("boot_worker_node_identity_mismatch")
         if set(snapshot.registered_tasks) != set(
             self.boot_manifest.expected_task_registrations
         ):
@@ -548,6 +876,13 @@ class WorkerOnlyController:
         if gate.candidate_tree != self.candidate_manifest.candidate_tree:
             reasons.append("gate_candidate_tree_mismatch")
         if (
+            gate.candidate_source_manifest_digest
+            != self.candidate_manifest.source_manifest_digest
+        ):
+            reasons.append("gate_source_manifest_digest_mismatch")
+        if gate.gate_id != _deployment_gate_id_from_gate(gate):
+            reasons.append("gate_id_integrity_mismatch")
+        if (
             snapshot.beat_identity is None
             or snapshot.beat_identity.key() != gate.beat_identity.key()
         ):
@@ -584,11 +919,187 @@ class WorkerOnlyController:
             reasons.append("gate_quiescence_observation_stale")
         return reasons
 
-    def _consume_approval(self, approval: OperatorApproval) -> None:
-        key = (approval.operation, approval.approval_id, approval.nonce)
-        if key in self._consumed_approvals:
-            raise ControllerSafetyError("approval replay rejected")
-        self._consumed_approvals.add(key)
+    def _approval_contract_reasons(
+        self,
+        operation: str,
+        approval: OperatorApproval,
+        gate: DeploymentGate,
+    ) -> tuple[list[str], ApprovalVerification | None]:
+        if self.candidate_pin is None:
+            return ["candidate_pin_unavailable"], None
+        if self.approval_verifier is None:
+            return ["approval_verifier_unavailable"], None
+        reasons: list[str] = []
+        if approval.candidate_head != self.candidate_pin.candidate_head:
+            reasons.append("approval_candidate_head_mismatch")
+        if approval.candidate_tree != self.candidate_pin.candidate_tree:
+            reasons.append("approval_candidate_tree_mismatch")
+        if approval.source_manifest_digest != self.candidate_pin.source_manifest_digest:
+            reasons.append("approval_source_manifest_digest_mismatch")
+        if approval.worker_pid != gate.worker_pid:
+            reasons.append("approval_worker_pid_mismatch")
+        if approval.worker_start_ticks != gate.worker_start_ticks:
+            reasons.append("approval_worker_start_ticks_mismatch")
+        if approval.linux_boot_id != gate.linux_boot_id:
+            reasons.append("approval_linux_boot_id_mismatch")
+        if approval.gate_id != gate.gate_id:
+            reasons.append("approval_gate_id_mismatch")
+        try:
+            verification = self.approval_verifier.verify(
+                approval,
+                operation=operation,
+                candidate_pin=self.candidate_pin,
+                gate=gate,
+                now=self.clock(),
+            )
+        except Exception as exc:  # noqa: BLE001 - authorization fails closed
+            return [f"approval_verifier_failed:{type(exc).__name__}"], None
+        if not verification.verified:
+            reasons.append("approval_unverified")
+            reasons.extend(str(item) for item in verification.reasons)
+        return reasons, verification
+
+    def _claim_binding(
+        self,
+        operation: str,
+        approval: OperatorApproval,
+        gate: DeploymentGate,
+        principal: str,
+    ) -> dict[str, Any]:
+        return {
+            "operation": operation,
+            "approval_id": approval.approval_id,
+            "nonce": approval.nonce,
+            "principal": principal,
+            "candidate_head": self.candidate_manifest.candidate_head,
+            "candidate_tree": self.candidate_manifest.candidate_tree,
+            "source_manifest_digest": self.candidate_manifest.source_manifest_digest,
+            "gate_id": gate.gate_id,
+            "worker_pid": gate.worker_pid,
+            "worker_start_ticks": gate.worker_start_ticks,
+            "linux_boot_id": gate.linux_boot_id,
+        }
+
+    def _authorize_and_claim(
+        self,
+        operation: str,
+        approval: OperatorApproval,
+        gate: DeploymentGate,
+        snapshot: WorkerObservation,
+    ) -> tuple[str | None, list[str]]:
+        reasons, verification = self._approval_contract_reasons(
+            operation, approval, gate
+        )
+        if reasons:
+            return None, reasons
+        if self.claim_store is None:
+            return None, ["approval_claim_store_unavailable"]
+        # The verifier's authenticated principal is bound into the durable
+        # claim; caller-supplied ``operator_identity`` is never sufficient.
+        if verification is None:
+            return None, ["approval_verification_unavailable"]
+        principal = verification.principal or ""
+        if not principal:
+            return None, ["authenticated_operator_principal_unavailable"]
+        binding = self._claim_binding(operation, approval, gate, principal)
+        claim_id = hashlib.sha256(
+            json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        try:
+            self.claim_store.claim(
+                claim_id=claim_id,
+                binding=binding,
+                expires_at=min(approval.expires_at, gate.expires_at),
+                now=self.clock(),
+            )
+            self.claim_store.transition(
+                claim_id, expected=CLAIM_CLAIMED, state=CLAIM_OPERATION_ATTEMPTED
+            )
+        except (ControllerSafetyError, OSError) as exc:
+            return None, [str(exc)]
+        del snapshot
+        return claim_id, []
+
+    def _transition_claim(
+        self, claim_id: str | None, expected: str, state: str
+    ) -> None:
+        if claim_id is None or self.claim_store is None:
+            return
+        try:
+            self.claim_store.transition(claim_id, expected=expected, state=state)
+        except (ControllerSafetyError, OSError):
+            # The operation is already single-use.  A lifecycle persistence
+            # failure is intentionally not converted into a retryable control
+            # action.
+            return
+
+    @staticmethod
+    def _authorization_failure_status(reasons: Sequence[str]) -> str:
+        if any(
+            "replay rejected" in reason
+            or "claim expired" in reason
+            or "claim lifecycle" in reason
+            for reason in reasons
+        ):
+            return PREFLIGHT_BLOCKED
+        return PREFLIGHT_INCONCLUSIVE
+
+
+def _deployment_gate_id(
+    *,
+    operation: str,
+    candidate_head: str,
+    candidate_tree: str,
+    source_manifest_digest: str,
+    worker_pid: int,
+    worker_start_ticks: str,
+    linux_boot_id: str,
+    beat: ProcessIdentity,
+    api: ProcessIdentity,
+    quiescence_observed_at: datetime,
+    maintenance_free_until: datetime,
+    expires_at: datetime,
+    approval_id: str,
+    nonce: str,
+) -> str:
+    payload = {
+        "operation": operation,
+        "candidate_head": candidate_head,
+        "candidate_tree": candidate_tree,
+        "source_manifest_digest": source_manifest_digest,
+        "worker_pid": worker_pid,
+        "worker_start_ticks": worker_start_ticks,
+        "linux_boot_id": linux_boot_id,
+        "beat": beat.to_dict(),
+        "api": api.to_dict(),
+        "quiescence_observed_at": quiescence_observed_at.astimezone(UTC).isoformat(),
+        "maintenance_free_until": maintenance_free_until.astimezone(UTC).isoformat(),
+        "expires_at": expires_at.astimezone(UTC).isoformat(),
+        "approval_id": approval_id,
+        "nonce": nonce,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def _deployment_gate_id_from_gate(gate: DeploymentGate) -> str:
+    return _deployment_gate_id(
+        operation=gate.operation,
+        candidate_head=gate.candidate_head,
+        candidate_tree=gate.candidate_tree,
+        source_manifest_digest=gate.candidate_source_manifest_digest,
+        worker_pid=gate.worker_pid,
+        worker_start_ticks=gate.worker_start_ticks,
+        linux_boot_id=gate.linux_boot_id,
+        beat=gate.beat_identity,
+        api=gate.api_identity,
+        quiescence_observed_at=gate.quiescence_observed_at,
+        maintenance_free_until=gate.maintenance_free_until,
+        expires_at=gate.expires_at,
+        approval_id=gate.approval_id,
+        nonce=gate.nonce,
+    )
 
 
 def make_deployment_gate(
@@ -605,11 +1116,27 @@ def make_deployment_gate(
     stopped_verified_at: datetime | None = None,
 ) -> DeploymentGate:
     """Create a value-only gate; validation remains controller-owned."""
-
+    gate_id = _deployment_gate_id(
+        operation=operation,
+        candidate_head=candidate_manifest.candidate_head,
+        candidate_tree=candidate_manifest.candidate_tree,
+        source_manifest_digest=candidate_manifest.source_manifest_digest,
+        worker_pid=worker.pid,
+        worker_start_ticks=worker.start_ticks,
+        linux_boot_id=worker.linux_boot_id,
+        beat=beat,
+        api=api,
+        quiescence_observed_at=quiescence_observed_at,
+        maintenance_free_until=maintenance_free_until,
+        expires_at=expires_at,
+        approval_id=approval.approval_id,
+        nonce=approval.nonce,
+    )
     return DeploymentGate(
         operation=operation,
         candidate_head=candidate_manifest.candidate_head,
         candidate_tree=candidate_manifest.candidate_tree,
+        candidate_source_manifest_digest=candidate_manifest.source_manifest_digest,
         worker_pid=worker.pid,
         worker_start_ticks=worker.start_ticks,
         linux_boot_id=worker.linux_boot_id,
@@ -621,14 +1148,24 @@ def make_deployment_gate(
         operator_approval_identity=approval.operator_identity,
         approval_id=approval.approval_id,
         nonce=approval.nonce,
+        gate_id=gate_id,
         stopped_verified_at=stopped_verified_at,
     )
 
 
 __all__ = [
+    "ApprovalClaimStore",
+    "ApprovalVerification",
+    "ApprovalVerifier",
+    "CLAIM_AVAILABLE",
+    "CLAIM_CLAIMED",
+    "CLAIM_COMPLETED",
+    "CLAIM_FAILED_UNCERTAIN",
+    "CLAIM_OPERATION_ATTEMPTED",
     "ControllerResult",
     "ControllerSafetyError",
     "DeploymentGate",
+    "FileApprovalClaimStore",
     "HOLD_MAINTENANCE_WINDOW_NOT_PROVEN",
     "MaintenanceWindowProof",
     "OperatorApproval",
@@ -643,5 +1180,6 @@ __all__ = [
     "WorkerObservation",
     "WorkerOnlyController",
     "WorkerProcessAdapter",
+    "TrustedObserverVerifier",
     "make_deployment_gate",
 ]
