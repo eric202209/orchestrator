@@ -302,6 +302,7 @@ def on_worker_ready(sender, **kwargs):
                     "fallbacks": [],
                 },
             },
+            task_registry=getattr(worker_app, "tasks", None),
         )
         manifest_path, boot_manifest = _create_worker_boot_identity(
             source_root=Path.cwd(),

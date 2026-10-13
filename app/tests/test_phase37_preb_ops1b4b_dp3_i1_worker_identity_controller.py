@@ -7,6 +7,8 @@ import json
 import logging
 import multiprocessing
 import os
+import socket
+import stat
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -50,7 +52,9 @@ from app.services.orchestration.worker_identity import (
     ProcessIdentity,
     WorkerBootIdentityManifest,
     build_candidate_source_manifest,
+    build_effective_task_policy_projection,
     build_non_secret_configuration_fingerprint,
+    capture_loaded_module_provenance,
     collect_worker_configuration,
     create_worker_boot_identity,
     sha256_file,
@@ -169,6 +173,9 @@ def _config() -> tuple[str, dict]:
             "d37.binding.model_selection": "openai/qwen-local",
             "d37.binding.auth_schema_identity": "api-key",
             "beat.schedule": {"orphan": {"task": "sweep", "interval_seconds": 900}},
+            "task.effective_policies": build_effective_task_policy_projection(
+                _task_registry(), _task_policy_celery_config()
+            ),
         },
         secret_presence={"OPENAI_API_KEY": True},
     )
@@ -1065,6 +1072,8 @@ def test_i3_configuration_projection_covers_policy_and_excludes_secrets():
     )
     celery_config = {
         "task_default_queue": "celery",
+        "task_default_exchange": None,
+        "task_default_routing_key": None,
         "task_serializer": "json",
         "accept_content": ["json"],
         "result_serializer": "json",
@@ -1087,6 +1096,7 @@ def test_i3_configuration_projection_covers_policy_and_excludes_secrets():
         settings_object,
         celery_config,
         worker_runtime=SimpleNamespace(concurrency=4),
+        task_registry=_task_registry(),
         operational_values={
             "task.soft_time_limit_seconds": 120,
             "task.time_limit_seconds": 180,
@@ -1113,6 +1123,7 @@ def test_i3_configuration_projection_covers_policy_and_excludes_secrets():
         settings_object,
         changed_schedule,
         worker_runtime=SimpleNamespace(concurrency=4),
+        task_registry=_task_registry(),
         operational_values={
             "task.soft_time_limit_seconds": 120,
             "task.time_limit_seconds": 180,
@@ -1192,6 +1203,294 @@ def test_i3_candidate_pin_and_reviewed_module_boundary_are_explicit(candidate):
         "app.services.execution.process_identity",
         "app.tasks.worker_support.workspace",
     }.issubset(DEFAULT_AFFECTED_MODULES)
+
+
+def test_i7_reviewed_boundary_pins_all_load_bearing_worker_and_celery_modules():
+    required = {
+        "app.models",
+        "app.services.agents.backend_concurrency",
+        "app.services.agents.backend_slot_reconciliation",
+        "app.services.human_guidance.activation",
+        "app.services.human_guidance.conflicts",
+        "app.services.integrations.github",
+        "app.services.observability.maintenance_observability",
+        "app.services.orchestration",
+        "app.services.orchestration.execution.binding_reconciliation",
+        "app.services.orchestration.lifecycle.continuation_recovery",
+        "app.services.orchestration.phases.incremental_flow",
+        "app.services.orchestration.phases.planning_guidance_enforcement",
+        "app.services.orchestration.planning.incremental_classifier",
+        "app.services.orchestration.planning.planner_contract_registry",
+        "app.services.orchestration.repo_memory",
+        "app.services.orchestration.run_state",
+        "app.services.orchestration.worker_identity",
+        "app.services.orchestration.working_memory",
+        "app.services.planning.planning_dispatch",
+        "app.services.planning.planning_session_service",
+        "app.services.project.state_summary",
+        "app.tasks.github_tasks",
+        "app.tasks.planning_tasks",
+        "app.tasks.worker_support.worker_helpers",
+    }
+    assert required.issubset(DEFAULT_AFFECTED_MODULES)
+    assert len(DEFAULT_AFFECTED_MODULES) == len(set(DEFAULT_AFFECTED_MODULES))
+
+
+def test_i7_import_origin_drift_is_not_verified(candidate):
+    root, manifest = candidate
+    alternate = root.parent / "alternate.py"
+    alternate.write_text("ALTERNATE = True\n", encoding="utf-8")
+    boot, worker, beat, api = _boot(root, manifest)
+    record = dict(boot.affected_module_provenance[0])
+    record["spec_origin"] = str(alternate)
+    result = verify_worker_identity(
+        replace(boot, affected_module_provenance=(record,)),
+        manifest,
+        **_identity_verification_kwargs(boot, worker, beat, api, manifest),
+    )
+    assert result.classification == IDENTITY_MISMATCH
+    assert "module_import_origin_mismatch:app.worker" in result.reasons
+
+
+def test_i7_missing_required_module_remains_inconclusive(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    lazy = capture_loaded_module_provenance(manifest, modules={})
+    result = verify_worker_identity(
+        replace(boot, affected_module_provenance=lazy),
+        manifest,
+        **_identity_verification_kwargs(boot, worker, beat, api, manifest),
+    )
+    assert result.classification == IDENTITY_INCONCLUSIVE
+    assert "lazy_module_provenance_unavailable:app.worker" in result.reasons
+
+
+def test_i7_unsupported_dynamic_module_evidence_is_inconclusive(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    dynamic = dict(boot.affected_module_provenance[0])
+    dynamic.update(
+        resolved_source_path=None,
+        source_sha256=None,
+        loaded=False,
+        load_timing="dynamic_unresolved",
+    )
+    result = verify_worker_identity(
+        replace(boot, affected_module_provenance=(dynamic,)),
+        manifest,
+        **_identity_verification_kwargs(boot, worker, beat, api, manifest),
+    )
+    assert result.classification == IDENTITY_INCONCLUSIVE
+    assert "dynamic_module_provenance_unavailable:app.worker" in result.reasons
+
+
+def test_i7_package_and_module_source_paths_are_not_interchangeable(candidate):
+    root, _manifest = candidate
+    package = root / "app" / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("VALUE = 'package'\n", encoding="utf-8")
+    subprocess.run(["git", "add", "app/pkg"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "package"], cwd=root, check=True)
+    manifest = build_candidate_source_manifest(
+        root,
+        affected_modules=("app.pkg",),
+        launcher_identity={
+            "launcher": "test-worker",
+            "executable": "/venv/bin/python3",
+            "cwd": str(root),
+            "argv": [
+                "/venv/bin/python3",
+                "/venv/bin/celery",
+                "-A",
+                "app.celery_app",
+                "worker",
+            ],
+        },
+    )
+    assert manifest.resolved_modules[0].expected_source_path.endswith(
+        "app/pkg/__init__.py"
+    )
+    wrong = replace(
+        manifest.resolved_modules[0],
+        expected_source_path=str((root / "app" / "pkg.py").resolve()),
+    )
+    result = verify_candidate_source_manifest(
+        _resign(manifest, resolved_modules=(wrong,))
+    )
+    assert result.classification == IDENTITY_MISMATCH
+    assert any("module_path" in reason for reason in result.reasons)
+
+
+def _task_registry():
+    return {
+        name: SimpleNamespace(
+            name=name,
+            max_retries=3,
+            default_retry_delay=60,
+            time_limit=None,
+            soft_time_limit=None,
+            acks_late=True,
+            reject_on_worker_lost=True,
+            acks_on_failure_or_timeout=True,
+            queue="celery",
+            exchange=None,
+            routing_key=None,
+        )
+        for name in sorted(EXPECTED_TASK_REGISTRATIONS)
+    }
+
+
+def _task_policy_celery_config():
+    return {
+        "task_default_queue": "celery",
+        "task_default_exchange": None,
+        "task_default_routing_key": None,
+        "task_routes": {},
+    }
+
+
+def test_i7_task_policy_projection_is_complete_deterministic_and_fail_closed():
+    registry = _task_registry()
+    config = _task_policy_celery_config()
+    first = build_effective_task_policy_projection(registry, config)
+    second = build_effective_task_policy_projection(
+        dict(reversed(list(registry.items()))), config
+    )
+    assert first == second
+    assert first["reviewed_task_names"] == sorted(EXPECTED_TASK_REGISTRATIONS)
+    assert [item["task_name"] for item in first["policies"]] == sorted(
+        EXPECTED_TASK_REGISTRATIONS
+    )
+
+    missing = dict(registry)
+    missing.pop(sorted(EXPECTED_TASK_REGISTRATIONS)[0])
+    with pytest.raises(
+        worker_identity.ConfigurationFingerprintError,
+        match="missing registered task policy",
+    ):
+        build_effective_task_policy_projection(missing, config)
+
+    unexpected = dict(registry)
+    unexpected["app.tasks.unsafe_task"] = registry[
+        sorted(EXPECTED_TASK_REGISTRATIONS)[0]
+    ]
+    with pytest.raises(
+        worker_identity.ConfigurationFingerprintError,
+        match="unexpected safety-critical task",
+    ):
+        build_effective_task_policy_projection(unexpected, config)
+
+    with pytest.raises(
+        worker_identity.ConfigurationFingerprintError,
+        match=CONFIG_PROJECTION_INCOMPLETE,
+    ):
+        build_effective_task_policy_projection(None, config)
+
+
+@pytest.mark.parametrize(
+    "field,value,group,key",
+    [
+        ("max_retries", 99, "retry", "max_retries"),
+        ("time_limit", 999, "time_limits", "hard"),
+        ("acks_late", False, "acknowledgements", "acks_late"),
+        ("queue", "unsafe", "route", "queue"),
+    ],
+)
+def test_i7_task_policy_projection_detects_effective_policy_drift(
+    field, value, group, key
+):
+    baseline = build_effective_task_policy_projection(
+        _task_registry(), _task_policy_celery_config()
+    )
+    registry = _task_registry()
+    task = registry[sorted(registry)[0]]
+    setattr(task, field, value)
+    changed = build_effective_task_policy_projection(
+        registry, _task_policy_celery_config()
+    )
+    assert baseline != changed
+    assert changed["policies"][0]["policy"][group][key] == value
+
+
+def test_i7_task_policy_projection_rejects_unsupported_types_and_secrets():
+    registry = _task_registry()
+    registry[sorted(registry)[0]].max_retries = object()
+    with pytest.raises(
+        worker_identity.ConfigurationFingerprintError,
+        match=CONFIG_PROJECTION_INCOMPLETE,
+    ):
+        build_effective_task_policy_projection(registry, _task_policy_celery_config())
+
+    config = _task_policy_celery_config()
+    config["task_routes"] = {
+        sorted(EXPECTED_TASK_REGISTRATIONS)[0]: {
+            "queue": "celery",
+            "token": "synthetic",
+        }
+    }
+    with pytest.raises(
+        worker_identity.ConfigurationFingerprintError,
+        match=CONFIG_PROJECTION_INCOMPLETE,
+    ):
+        build_effective_task_policy_projection(_task_registry(), config)
+
+
+def test_i7_task_policy_projection_changes_approved_configuration_digest():
+    settings = SimpleNamespace(
+        OPENCLAW_GATEWAY_URL="http://127.0.0.1:8000",
+        CELERY_BROKER_URL="redis://127.0.0.1:6379/0",
+        CELERY_RESULT_BACKEND="redis://127.0.0.1:6379/1",
+        OPENCLAW_CLI_PATH="/usr/local/bin/openclaw",
+        OPENCLAW_CLI_ARGS="--json",
+        EXECUTION_MODEL="local-model",
+        PLANNER_MODEL="planner",
+        PLANNING_REPAIR_MODEL="repair",
+        AGENT_BACKEND="local_openclaw",
+        AGENT_SECONDARY_BACKEND=None,
+    )
+    config = {
+        **_task_policy_celery_config(),
+        "task_serializer": "json",
+        "accept_content": ["json"],
+        "result_serializer": "json",
+        "timezone": "UTC",
+        "enable_utc": True,
+        "worker_prefetch_multiplier": 1,
+        "task_acks_late": True,
+        "task_reject_on_worker_lost": True,
+        "task_acks_on_failure_or_timeout": True,
+        "beat_schedule": {},
+    }
+    operational = {
+        "task.soft_time_limit_seconds": 120,
+        "task.time_limit_seconds": 180,
+        "retry.max_retries": 3,
+        "retry.countdown_seconds": 60,
+        "retry.redelivery_policy": "reject_on_worker_lost",
+        "task.decorator_time_limits": {"execute": {"soft": 120, "hard": 180}},
+        "policy.timeout_policy": {"planning": 60},
+        "d37.binding.route_behavior": "ephemeral",
+        "d37.binding.provider_base_url_identity": "http://127.0.0.1:8000",
+        "d37.binding.model_selection": "local-model",
+        "d37.binding.auth_schema_identity": "api-key",
+    }
+    baseline, _ = collect_worker_configuration(
+        settings,
+        config,
+        worker_runtime=SimpleNamespace(concurrency=1),
+        operational_values=operational,
+        task_registry=_task_registry(),
+    )
+    changed_registry = _task_registry()
+    changed_registry[sorted(changed_registry)[0]].max_retries = 7
+    changed, _ = collect_worker_configuration(
+        settings,
+        config,
+        worker_runtime=SimpleNamespace(concurrency=1),
+        operational_values=operational,
+        task_registry=changed_registry,
+    )
+    assert baseline != changed
 
 
 def test_i3_claim_store_rejects_replay_across_controller_reconstruction(candidate):
@@ -1594,6 +1893,72 @@ def test_i5_claim_store_rejects_symlink_ancestor_and_unsafe_permissions(tmp_path
     )
     os.chmod(store.root / f"{claim_id}.json", 0o644)
     with pytest.raises(ControllerSafetyError, match="claim file permissions unsafe"):
+        store.transition(claim_id, expected="CLAIMED", state="OPERATION_ATTEMPTED")
+
+
+@pytest.mark.parametrize("object_kind", ["fifo", "directory", "socket"])
+def test_i7_claim_lock_rejects_non_regular_objects(tmp_path, object_kind):
+    store = FileApprovalClaimStore(tmp_path / f"claims-{object_kind}")
+    claim_id = "f" * 64
+    lock_path = store.root / f".{claim_id}.lock"
+    sock = None
+    if object_kind == "fifo":
+        os.mkfifo(lock_path)
+    elif object_kind == "directory":
+        lock_path.mkdir()
+    else:
+        short_root = Path(tempfile.mkdtemp(prefix="dp3", dir="/tmp"))
+        store = FileApprovalClaimStore(short_root / "c")
+        lock_path = store.root / f".{claim_id}.lock"
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.bind(str(lock_path))
+    try:
+        with pytest.raises(ControllerSafetyError, match="lock .*regular"):
+            store.transition(claim_id, expected="CLAIMED", state="OPERATION_ATTEMPTED")
+    finally:
+        if sock is not None:
+            sock.close()
+            lock_path.unlink(missing_ok=True)
+            store.root.rmdir()
+            short_root.rmdir()
+
+
+def test_i7_claim_lock_regular_file_remains_accepted(tmp_path):
+    store = FileApprovalClaimStore(tmp_path / "regular-claims")
+    claim_id = "1" * 64
+    store.claim(
+        claim_id=claim_id,
+        binding={"operation": "stop"},
+        expires_at=NOW + timedelta(minutes=5),
+        now=NOW,
+    )
+    lock_path = store.root / f".{claim_id}.lock"
+    assert stat.S_ISREG(lock_path.stat().st_mode)
+    store.transition(claim_id, expected="CLAIMED", state="OPERATION_ATTEMPTED")
+
+
+def test_i7_claim_lock_path_replacement_is_checked_after_open(tmp_path, monkeypatch):
+    store = FileApprovalClaimStore(tmp_path / "replacement-claims")
+    claim_id = "2" * 64
+    store.claim(
+        claim_id=claim_id,
+        binding={"operation": "stop"},
+        expires_at=NOW + timedelta(minutes=5),
+        now=NOW,
+    )
+    lock_path = store.root / f".{claim_id}.lock"
+    original_open = worker_controller.os.open
+    replaced = {"done": False}
+
+    def replace_before_open(path, flags, mode=0o777, *, dir_fd=None):
+        if Path(path) == lock_path and not replaced["done"]:
+            lock_path.unlink()
+            os.mkfifo(lock_path)
+            replaced["done"] = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(worker_controller.os, "open", replace_before_open)
+    with pytest.raises(ControllerSafetyError, match="lock .*regular"):
         store.transition(claim_id, expected="CLAIMED", state="OPERATION_ATTEMPTED")
 
 

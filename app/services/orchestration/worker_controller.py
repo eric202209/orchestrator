@@ -214,6 +214,8 @@ class FileApprovalClaimStore:
                 raise ControllerSafetyError("approval claim lock is a symlink")
         except FileNotFoundError:
             pass
+        else:
+            self._check_secure_file(lock_path, label="approval claim lock")
         return path
 
     @contextmanager
@@ -230,6 +232,8 @@ class FileApprovalClaimStore:
             raise ControllerSafetyError("approval claim lock unavailable") from exc
         try:
             item = os.fstat(fd)
+            if not stat.S_ISREG(item.st_mode):
+                raise ControllerSafetyError("approval claim lock is not a regular file")
             if item.st_mode & 0o077:
                 raise ControllerSafetyError("approval claim lock permissions unsafe")
             getuid = getattr(os, "getuid", None)

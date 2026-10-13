@@ -22,6 +22,7 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from fnmatch import fnmatchcase
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -52,10 +53,19 @@ DEFAULT_AFFECTED_MODULES = (
     "app.celery_app",
     "app.tasks.worker",
     "app.tasks.maintenance",
+    # Celery includes these modules explicitly; their registered Task
+    # objects and import-time policies are inside the reviewed Worker scope.
+    "app.tasks.github_tasks",
+    "app.tasks.planning_tasks",
+    "app.models",
+    "app.services.orchestration",
+    "app.services.orchestration.worker_identity",
     "app.services.session.session_lifecycle_service",
     "app.services.orchestration.execution.executor_workspace_binding",
     "app.services.agents.openclaw_service",
     "app.services.agents.subprocess_lifecycle",
+    "app.services.agents.backend_concurrency",
+    "app.services.agents.backend_slot_reconciliation",
     # Direct load-bearing S1/D-37-13 dependencies.  This is intentionally an
     # exact boundary rather than a recursive package dump.
     "app.services.session.orphan_ownership",
@@ -64,6 +74,8 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.agents.runtime_configuration",
     "app.services.orchestration.lifecycle.worker_bootstrap",
     "app.services.orchestration.lifecycle.worker_capacity",
+    "app.services.orchestration.execution.binding_reconciliation",
+    "app.services.orchestration.lifecycle.continuation_recovery",
     # Direct Worker execution and backend dependencies.  These are reviewed
     # load-bearing imports, not a recursive package scan.
     "app.services.agents.agent_runtime",
@@ -76,6 +88,13 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.orchestration.coordinators.failure_coordinator",
     "app.services.orchestration.phases.execution_loop",
     "app.services.orchestration.phases.planning_flow",
+    "app.services.orchestration.phases.incremental_flow",
+    "app.services.orchestration.phases.planning_guidance_enforcement",
+    "app.services.orchestration.planning.incremental_classifier",
+    "app.services.orchestration.planning.planner_contract_registry",
+    "app.services.orchestration.repo_memory",
+    "app.services.orchestration.run_state",
+    "app.services.orchestration.working_memory",
     "app.services.orchestration.state.persistence",
     "app.services.orchestration.state.execution_states",
     "app.services.orchestration.state.session_state",
@@ -99,7 +118,11 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.tasks.service",
     "app.services.tasks.execution",
     "app.services.human_guidance.service",
+    "app.services.human_guidance.activation",
+    "app.services.human_guidance.conflicts",
     "app.services.observability.runtime_identity",
+    "app.services.observability.maintenance_observability",
+    "app.services.integrations.github",
     # Direct imports of the selected OpenClaw execution service.
     "app.services.agents.interfaces",
     "app.services.model_adaptation",
@@ -111,8 +134,13 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.permissions.approval",
     "app.services.orchestration.prompt_optimization",
     "app.services.tasks.tool_tracking",
+    "app.services.planning.planning_dispatch",
+    "app.services.planning.planning_session_service",
+    "app.services.planning",
+    "app.services.project.state_summary",
     "app.services.workspace.workspace_paths",
     "app.services.agents.openclaw_response",
+    "app.tasks.worker_support.worker_helpers",
 )
 
 EXPECTED_TASK_REGISTRATIONS = frozenset(
@@ -131,6 +159,20 @@ EXPECTED_TASK_REGISTRATIONS = frozenset(
         "app.tasks.worker.execute_orchestration_task",
         "app.tasks.worker.receive_execution_task_dispatch",
     }
+)
+
+TASK_POLICY_PROJECTION_SCHEMA_VERSION = 1
+TASK_POLICY_FIELDS = (
+    "retry.max_retries",
+    "retry.default_retry_delay",
+    "task.soft_time_limit_seconds",
+    "task.time_limit_seconds",
+    "task.acks_late",
+    "task.reject_on_worker_lost",
+    "task.acks_on_failure_or_timeout",
+    "route.queue",
+    "route.exchange",
+    "route.routing_key",
 )
 
 # Only these configuration keys may enter the fingerprint.  Secret-bearing
@@ -190,6 +232,7 @@ NON_SECRET_CONFIGURATION_KEYS = frozenset(
         "d37.binding.model_selection",
         "d37.binding.auth_schema_identity",
         "beat.schedule",
+        "task.effective_policies",
     }
 )
 SECRET_KEY_MARKERS = (
@@ -239,6 +282,7 @@ REQUIRED_EFFECTIVE_CONFIGURATION_KEYS = frozenset(
         "d37.binding.model_selection",
         "d37.binding.auth_schema_identity",
         "beat.schedule",
+        "task.effective_policies",
     }
 )
 
@@ -897,6 +941,8 @@ def capture_loaded_module_provenance(
         resolved_path: Path | None = None
         source_hash: str | None = None
         loader_type = origin = cached = None
+        if module is not None:
+            loader_type, origin, cached = _module_origin(module)
         if raw_file:
             try:
                 resolved_path = Path(str(raw_file)).expanduser().resolve(strict=True)
@@ -906,7 +952,6 @@ def capture_loaded_module_provenance(
                         resolved_path = source_candidate.resolve(strict=True)
                 if resolved_path.is_file():
                     source_hash = sha256_file(resolved_path)
-                loader_type, origin, cached = _module_origin(module)
             except (OSError, CandidateManifestError, ValueError):
                 resolved_path = None
         records.append(
@@ -951,7 +996,11 @@ def _canonical_configuration_value(value: Any) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
-        secret_keys = [str(key) for key in value if _secret_like_key(str(key))]
+        secret_keys = [
+            str(key)
+            for key in value
+            if _secret_like_key(str(key)) and str(key) != "routing_key"
+        ]
         if secret_keys:
             raise ConfigurationFingerprintError(
                 f"{CONFIG_PROJECTION_INCOMPLETE}: secret-bearing nested fields"
@@ -1093,12 +1142,258 @@ def _safe_route_identity(value: Any, *, field_name: str) -> str | None:
     return value
 
 
+_TASK_POLICY_MISSING = object()
+
+
+def _task_policy_attribute(task: Any, task_name: str, attribute: str) -> Any:
+    if isinstance(task, Mapping):
+        value = task.get(attribute, _TASK_POLICY_MISSING)
+    else:
+        value = getattr(task, attribute, _TASK_POLICY_MISSING)
+    if value is _TASK_POLICY_MISSING:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: effective task policy unavailable "
+            f"for {task_name}: {attribute}"
+        )
+    return value
+
+
+def _task_route_value(
+    task_name: str,
+    task: Any,
+    attribute: str,
+    celery_config: Mapping[str, Any],
+) -> Any:
+    value = (
+        task.get(attribute, _TASK_POLICY_MISSING)
+        if isinstance(task, Mapping)
+        else getattr(task, attribute, _TASK_POLICY_MISSING)
+    )
+    if value is not _TASK_POLICY_MISSING:
+        return value
+    routes = celery_config.get("task_routes", {})
+    if routes is None:
+        routes = {}
+    if not isinstance(routes, Mapping):
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: effective task routes unavailable"
+        )
+    route = routes.get(task_name)
+    if route is None:
+        matches = sorted(
+            (
+                (str(pattern), candidate)
+                for pattern, candidate in routes.items()
+                if isinstance(pattern, str) and fnmatchcase(task_name, pattern)
+            ),
+            key=lambda item: item[0],
+        )
+        route = matches[0][1] if matches else None
+    if route is not None:
+        if not isinstance(route, Mapping):
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported route type for {task_name}"
+            )
+        unknown = set(route) - {"queue", "exchange", "routing_key"}
+        if unknown:
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported route fields for "
+                f"{task_name}: {sorted(unknown)}"
+            )
+        if attribute in route:
+            return route[attribute]
+    config_key = {
+        "queue": "task_default_queue",
+        "exchange": "task_default_exchange",
+        "routing_key": "task_default_routing_key",
+    }[attribute]
+    if config_key not in celery_config:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: effective route value unavailable "
+            f"for {task_name}: {attribute}"
+        )
+    return celery_config[config_key]
+
+
+def _canonical_task_route(value: Any, *, task_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported route value for "
+            f"{task_name}"
+        )
+    return value
+
+
+def _canonical_task_number(
+    value: Any, *, task_name: str, field_name: str, integer: bool = False
+) -> int | float | None:
+    if value is None:
+        return None
+    valid = isinstance(value, int if integer else (int, float)) and not isinstance(
+        value, bool
+    )
+    if not valid or value < 0:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported effective policy type "
+            f"for {task_name}: {field_name}"
+        )
+    return value
+
+
+def _canonical_task_routes(routes: Any) -> dict[str, Any]:
+    if routes is None:
+        return {}
+    if not isinstance(routes, Mapping):
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported effective task routes type"
+        )
+    canonical: dict[str, Any] = {}
+    for pattern, route in sorted(routes.items(), key=lambda item: str(item[0])):
+        if not isinstance(pattern, str) or not isinstance(route, Mapping):
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported effective task route"
+            )
+        unknown = set(route) - {"queue", "exchange", "routing_key"}
+        if unknown:
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported route fields: "
+                f"{sorted(unknown)}"
+            )
+        canonical[pattern] = {
+            key: _canonical_task_route(route.get(key), task_name=pattern)
+            for key in ("queue", "exchange", "routing_key")
+            if key in route
+        }
+    return canonical
+
+
+def build_effective_task_policy_projection(
+    task_registry: Mapping[str, Any] | None,
+    celery_config: Mapping[str, Any],
+    *,
+    reviewed_tasks: Iterable[str] = EXPECTED_TASK_REGISTRATIONS,
+) -> dict[str, Any]:
+    """Build the finite, non-secret projection of registered Celery policies.
+
+    ``task_registry`` must be the already-registered Worker task table.  This
+    function never imports task modules.  Only application task names are
+    compared with the reviewed set; Celery's built-in utility tasks are not
+    part of the Worker safety contract.  Missing, extra application tasks,
+    unsupported values, and incomplete route evidence all fail closed.
+    """
+
+    if not isinstance(task_registry, Mapping) or not isinstance(celery_config, Mapping):
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: effective task policy evidence unavailable"
+        )
+    reviewed = tuple(sorted({str(item) for item in reviewed_tasks}))
+    registry_names: set[str] = set()
+    for raw_name in task_registry:
+        if not isinstance(raw_name, str):
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: registered task name is not a string"
+            )
+        registry_names.add(raw_name)
+    application_names = {
+        name for name in registry_names if name.startswith("app.tasks.")
+    }
+    missing = sorted(set(reviewed) - registry_names)
+    if missing:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: missing registered task policy: {missing}"
+        )
+    unexpected = sorted(application_names - set(reviewed))
+    if unexpected:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unexpected safety-critical task: "
+            f"{unexpected}"
+        )
+    policies = []
+    for task_name in reviewed:
+        task = task_registry[task_name]
+        observed_name = _task_policy_attribute(task, task_name, "name")
+        if observed_name != task_name:
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: task name mismatch for {task_name}"
+            )
+        retry = {
+            "max_retries": _canonical_task_number(
+                _task_policy_attribute(task, task_name, "max_retries"),
+                task_name=task_name,
+                field_name="retry.max_retries",
+                integer=True,
+            ),
+            "default_retry_delay": _canonical_task_number(
+                _task_policy_attribute(task, task_name, "default_retry_delay"),
+                task_name=task_name,
+                field_name="retry.default_retry_delay",
+            ),
+        }
+        limits = {
+            "soft": _canonical_task_number(
+                _task_policy_attribute(task, task_name, "soft_time_limit"),
+                task_name=task_name,
+                field_name="task.soft_time_limit_seconds",
+            ),
+            "hard": _canonical_task_number(
+                _task_policy_attribute(task, task_name, "time_limit"),
+                task_name=task_name,
+                field_name="task.time_limit_seconds",
+            ),
+        }
+        acknowledgements = {}
+        for attribute in (
+            "acks_late",
+            "reject_on_worker_lost",
+            "acks_on_failure_or_timeout",
+        ):
+            value = _task_policy_attribute(task, task_name, attribute)
+            if not isinstance(value, bool):
+                raise ConfigurationFingerprintError(
+                    f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported effective policy type "
+                    f"for {task_name}: task.{attribute}"
+                )
+            acknowledgements[attribute] = value
+        route = {
+            key: _canonical_task_route(
+                _task_route_value(task_name, task, attribute, celery_config),
+                task_name=task_name,
+            )
+            for key, attribute in (
+                ("queue", "queue"),
+                ("exchange", "exchange"),
+                ("routing_key", "routing_key"),
+            )
+        }
+        policies.append(
+            {
+                "task_name": task_name,
+                "policy": {
+                    "retry": retry,
+                    "time_limits": limits,
+                    "acknowledgements": acknowledgements,
+                    "route": route,
+                },
+            }
+        )
+    return {
+        "schema_version": TASK_POLICY_PROJECTION_SCHEMA_VERSION,
+        "reviewed_task_names": list(reviewed),
+        "policy_fields": list(TASK_POLICY_FIELDS),
+        "routing_table": _canonical_task_routes(celery_config.get("task_routes", {})),
+        "policies": policies,
+    }
+
+
 def collect_worker_configuration(
     settings_object: Any,
     celery_config: Mapping[str, Any],
     *,
     worker_runtime: Any | None = None,
     operational_values: Mapping[str, Any] | None = None,
+    task_registry: Mapping[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Collect only named operational settings from live objects."""
 
@@ -1135,6 +1430,10 @@ def collect_worker_configuration(
             "relative": entry.get("relative"),
         }
     operational = operational_values or {}
+    task_policy_projection = build_effective_task_policy_projection(
+        task_registry,
+        celery_config,
+    )
     maintenance_identity = {
         name: entry.get("task", "")
         for name, entry in sorted(schedule.items())
@@ -1261,6 +1560,7 @@ def collect_worker_configuration(
             "d37.binding.auth_schema_identity"
         ),
         "beat.schedule": schedule_identity,
+        "task.effective_policies": task_policy_projection,
     }
     missing_effective = [
         key
@@ -1818,7 +2118,9 @@ def verify_worker_identity(
             continue
         resolved_text = record.get("resolved_source_path")
         if not resolved_text:
-            if record.get("load_timing") == "lazy_or_unloaded":
+            if record.get("load_timing") == "dynamic_unresolved":
+                reasons.append(f"dynamic_module_provenance_unavailable:{name}")
+            elif record.get("load_timing") == "lazy_or_unloaded":
                 reasons.append(f"lazy_module_provenance_unavailable:{name}")
             else:
                 reasons.append(f"missing_module:{name}")
@@ -1839,6 +2141,17 @@ def verify_worker_identity(
                 reasons.append(f"module_boot_hash_mismatch:{name}")
             if sha256_file(resolved) != expected.source_sha256:
                 reasons.append(f"source_drift:{name}")
+            origin_text = record.get("spec_origin")
+            if not isinstance(origin_text, str) or not origin_text:
+                reasons.append(f"module_import_origin_unavailable:{name}")
+            else:
+                try:
+                    origin = Path(origin_text).expanduser().resolve(strict=True)
+                except (OSError, ValueError):
+                    reasons.append(f"module_import_origin_unavailable:{name}")
+                else:
+                    if origin != expected_path:
+                        reasons.append(f"module_import_origin_mismatch:{name}")
         except (OSError, CandidateManifestError, ValueError):
             reasons.append(f"wrong_module_path:{name}")
 
@@ -1855,6 +2168,12 @@ def verify_worker_identity(
             ):
                 reasons.append(f"current_lazy_module_provenance_unavailable:{name}")
                 continue
+            if (
+                not record.get("resolved_source_path")
+                and record.get("load_timing") == "dynamic_unresolved"
+            ):
+                reasons.append(f"current_dynamic_module_provenance_unavailable:{name}")
+                continue
             if record.get("resolved_source_path") != expected_by_name.get(name, {}).get(
                 "expected_source_path"
             ):
@@ -1863,6 +2182,18 @@ def verify_worker_identity(
                 "expected_source_sha256"
             ):
                 reasons.append(f"current_module_hash_mismatch:{name}")
+            origin_text = record.get("spec_origin")
+            expected_path = expected_by_name.get(name, {}).get("expected_source_path")
+            if not isinstance(origin_text, str) or not origin_text:
+                reasons.append(f"current_module_import_origin_unavailable:{name}")
+            else:
+                try:
+                    origin = str(Path(origin_text).expanduser().resolve(strict=True))
+                except (OSError, ValueError):
+                    reasons.append(f"current_module_import_origin_unavailable:{name}")
+                else:
+                    if origin != expected_path:
+                        reasons.append(f"current_module_import_origin_mismatch:{name}")
     else:
         # The boot record plus file/import provenance is independently useful,
         # but no external verifier can claim a full in-memory attestation.
@@ -1914,6 +2245,8 @@ def verify_worker_identity(
         "source_drift",
         "missing_module",
         "wrong_module",
+        "module_import_origin_mismatch",
+        "current_module_import_origin_mismatch",
         "boot_identity_status:IDENTITY_MISMATCH",
         "registration_drift",
     )
@@ -1967,9 +2300,12 @@ __all__ = [
     "ProcessIdentity",
     "REQUIRED_EFFECTIVE_CONFIGURATION_KEYS",
     "SCHEMA_VERSION",
+    "TASK_POLICY_FIELDS",
+    "TASK_POLICY_PROJECTION_SCHEMA_VERSION",
     "WorkerBootIdentityManifest",
     "WorkerIdentityError",
     "build_candidate_source_manifest",
+    "build_effective_task_policy_projection",
     "build_non_secret_configuration_fingerprint",
     "capture_child_identities",
     "capture_loaded_module_provenance",
