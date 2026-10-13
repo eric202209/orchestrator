@@ -38,6 +38,9 @@ from app.services.orchestration.worker_controller import (
     make_deployment_gate,
 )
 from app.services.orchestration.worker_identity import (
+    BOUNDARY_COMPLETENESS_INCONCLUSIVE,
+    BOUNDARY_COMPLETENESS_INVALID,
+    BOUNDARY_COMPLETENESS_VALID,
     CONFIG_PROJECTION_INCOMPLETE,
     CandidateIdentityPin,
     CONFIGURATION_POLICY_ID,
@@ -48,6 +51,7 @@ from app.services.orchestration.worker_identity import (
     IDENTITY_MISMATCH,
     IDENTITY_UNAVAILABLE,
     IDENTITY_VERIFIED,
+    MODULE_IDENTITY_VALID,
     CandidateSourceManifest,
     ProcessIdentity,
     WorkerBootIdentityManifest,
@@ -56,6 +60,7 @@ from app.services.orchestration.worker_identity import (
     build_non_secret_configuration_fingerprint,
     capture_loaded_module_provenance,
     collect_worker_configuration,
+    inspect_worker_provenance_boundary,
     create_worker_boot_identity,
     sha256_file,
     verify_candidate_source_manifest,
@@ -429,9 +434,9 @@ def test_candidate_manifest_correct_and_deterministic(candidate):
         launcher_identity=manifest.launcher_identity,
     )
     assert rebuilt.to_dict() == manifest.to_dict()
-    assert (
-        verify_candidate_source_manifest(manifest).classification == IDENTITY_VERIFIED
-    )
+    verification = verify_candidate_source_manifest(manifest)
+    assert verification.classification == IDENTITY_VERIFIED
+    assert verification.module_identity_status == MODULE_IDENTITY_VALID
 
 
 @pytest.mark.parametrize("field", ["candidate_head", "candidate_tree"])
@@ -1234,6 +1239,96 @@ def test_i7_reviewed_boundary_pins_all_load_bearing_worker_and_celery_modules():
     }
     assert required.issubset(DEFAULT_AFFECTED_MODULES)
     assert len(DEFAULT_AFFECTED_MODULES) == len(set(DEFAULT_AFFECTED_MODULES))
+
+
+def test_i9_complete_bounded_boundary_is_independently_valid():
+    result = inspect_worker_provenance_boundary(Path.cwd(), DEFAULT_AFFECTED_MODULES)
+    assert result.classification == BOUNDARY_COMPLETENESS_VALID
+    assert result.required_modules == tuple(sorted(DEFAULT_AFFECTED_MODULES))
+    assert result.missing_modules == ()
+    assert result.missing_source_modules == ()
+    assert result.literal_dynamic_imports == (
+        "app.services.execution.execution_task_runtime_ownership_service",
+    )
+
+
+@pytest.mark.parametrize(
+    "omitted",
+    [
+        "app.tasks.worker_support.checkpoint",
+        "app.tasks.worker_support.common",
+        "app.tasks.worker_support.context",
+        "app.tasks.worker_support.dispatch",
+        "app.tasks.worker_support.execution_state",
+    ],
+)
+def test_i9_omitted_worker_helper_is_detected(omitted):
+    result = inspect_worker_provenance_boundary(
+        Path.cwd(), set(DEFAULT_AFFECTED_MODULES) - {omitted}
+    )
+    assert result.classification == BOUNDARY_COMPLETENESS_INVALID
+    assert omitted in result.missing_modules
+
+
+def test_i9_omitted_direct_package_reexport_is_detected():
+    omitted = "app.services.orchestration.context.assembly"
+    result = inspect_worker_provenance_boundary(
+        Path.cwd(), set(DEFAULT_AFFECTED_MODULES) - {omitted}
+    )
+    assert result.classification == BOUNDARY_COMPLETENESS_INVALID
+    assert omitted in result.missing_modules
+
+
+def test_i9_omitted_literal_dynamic_import_is_detected():
+    omitted = "app.services.execution.execution_task_runtime_ownership_service"
+    result = inspect_worker_provenance_boundary(
+        Path.cwd(), set(DEFAULT_AFFECTED_MODULES) - {omitted}
+    )
+    assert result.classification == BOUNDARY_COMPLETENESS_INVALID
+    assert omitted in result.literal_dynamic_imports
+    assert omitted in result.missing_modules
+
+
+def test_i9_subset_manifest_cannot_establish_completeness():
+    subset = set(DEFAULT_AFFECTED_MODULES) - {
+        "app.tasks.worker_support.dispatch",
+        "app.services.orchestration.reporting.replay",
+    }
+    result = inspect_worker_provenance_boundary(Path.cwd(), subset)
+    assert result.classification == BOUNDARY_COMPLETENESS_INVALID
+    assert set(result.missing_modules) == {
+        "app.services.orchestration.reporting.replay",
+        "app.tasks.worker_support.dispatch",
+    }
+
+
+def test_i9_missing_required_source_fails_closed(monkeypatch):
+    original = worker_identity._module_source_path
+
+    def missing_checkpoint(root, module_name):
+        if module_name == "app.tasks.worker_support.checkpoint":
+            raise worker_identity.CandidateManifestError("synthetic missing source")
+        return original(root, module_name)
+
+    monkeypatch.setattr(worker_identity, "_module_source_path", missing_checkpoint)
+    result = inspect_worker_provenance_boundary(Path.cwd(), DEFAULT_AFFECTED_MODULES)
+    assert result.classification == BOUNDARY_COMPLETENESS_INVALID
+    assert "app.tasks.worker_support.checkpoint" in result.missing_source_modules
+
+
+def test_i9_unsupported_dynamic_import_is_inconclusive(monkeypatch):
+    original = worker_identity._static_module_imports
+
+    def unsupported(source_module, source_path):
+        imports, dynamic, _unsupported, notes = original(source_module, source_path)
+        if source_module == "app.tasks.worker":
+            return imports, dynamic, ("app.tasks.worker:999",), notes
+        return imports, dynamic, _unsupported, notes
+
+    monkeypatch.setattr(worker_identity, "_static_module_imports", unsupported)
+    result = inspect_worker_provenance_boundary(Path.cwd(), DEFAULT_AFFECTED_MODULES)
+    assert result.classification == BOUNDARY_COMPLETENESS_INCONCLUSIVE
+    assert "app.tasks.worker:999" in result.unsupported_dynamic_imports
 
 
 def test_i7_import_origin_drift_is_not_verified(candidate):

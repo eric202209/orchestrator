@@ -11,6 +11,7 @@ constitute an in-memory bytecode attestation.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import os
@@ -36,6 +37,12 @@ IDENTITY_VERIFIED = "IDENTITY_VERIFIED"
 IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
 IDENTITY_INCONCLUSIVE = "IDENTITY_INCONCLUSIVE"
 IDENTITY_UNAVAILABLE = "IDENTITY_UNAVAILABLE"
+MODULE_IDENTITY_VALID = "MODULE_IDENTITY_VALID"
+MODULE_IDENTITY_INVALID = "MODULE_IDENTITY_INVALID"
+BOUNDARY_COMPLETENESS_VALID = "BOUNDARY_COMPLETENESS_VALID"
+BOUNDARY_COMPLETENESS_INVALID = "BOUNDARY_COMPLETENESS_INVALID"
+BOUNDARY_COMPLETENESS_INCONCLUSIVE = "BOUNDARY_COMPLETENESS_INCONCLUSIVE"
+BOUNDARY_COMPLETENESS_NOT_APPLICABLE = "BOUNDARY_COMPLETENESS_NOT_APPLICABLE"
 
 DEFAULT_WORKER_IDENTITY_DIR = Path("run/worker-identities")
 ROADMAP_DOC_PREFIX = "docs/roadmap/"
@@ -141,6 +148,74 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.workspace.workspace_paths",
     "app.services.agents.openclaw_response",
     "app.tasks.worker_support.worker_helpers",
+    # Worker helper modules imported by worker_helpers at Worker import time.
+    "app.tasks.worker_support.checkpoint",
+    "app.tasks.worker_support.common",
+    "app.tasks.worker_support.context",
+    "app.tasks.worker_support.dispatch",
+    "app.tasks.worker_support.execution_state",
+    # Direct package re-exports executed by app.services.orchestration.__init__.
+    "app.services.orchestration.context.assembly",
+    "app.services.orchestration.execution",
+    "app.services.orchestration.events",
+    "app.services.orchestration.phases",
+    "app.services.orchestration.planning",
+    "app.services.orchestration.reporting",
+    "app.services.orchestration.reporting.policy_simulation",
+    "app.services.orchestration.reporting.replay",
+    "app.services.orchestration.stage_engine",
+    "app.services.orchestration.types",
+    "app.services.orchestration.validation",
+    # Literal importlib.import_module() from the Worker dispatch task.
+    "app.services.execution.execution_task_runtime_ownership_service",
+)
+
+# These are the finite source files whose syntax is inspected to derive the
+# Worker boundary. The checker does not recurse through arbitrary application
+# or third-party dependencies. S1 and D-37-13 roots are explicitly reviewed
+# safety paths; only their own identity and dynamic-import call sites are
+# inspected because their transitive dependencies are outside this contract.
+WORKER_PROVENANCE_REGISTRATION_ROOTS = (
+    "app.celery_app",
+    "app.tasks.worker",
+    "app.tasks.maintenance",
+    "app.tasks.github_tasks",
+    "app.tasks.planning_tasks",
+    "app.tasks.worker_support.worker_helpers",
+    "app.tasks.worker_support.checkpoint",
+    "app.tasks.worker_support.common",
+    "app.tasks.worker_support.context",
+    "app.tasks.worker_support.dispatch",
+    "app.tasks.worker_support.execution_state",
+    "app.services.orchestration",
+)
+WORKER_PROVENANCE_S1_ROOTS = (
+    "app.services.agents.backend_concurrency",
+    "app.services.agents.backend_slot_reconciliation",
+    "app.services.observability.maintenance_observability",
+    "app.services.orchestration.execution.binding_reconciliation",
+    "app.services.orchestration.lifecycle.continuation_recovery",
+    "app.services.orchestration.lifecycle.worker_bootstrap",
+    "app.services.orchestration.lifecycle.worker_capacity",
+    "app.services.session.orphan_ownership",
+    "app.services.session.recovery_coordinator",
+)
+WORKER_PROVENANCE_D37_ROOTS = (
+    "app.services.agents.openclaw_service",
+    "app.services.agents.runtime_adapters.openclaw_adapter",
+    "app.services.agents.runtime_configuration",
+    "app.services.agents.runtime_invocation",
+    "app.services.execution.execution_task_runtime_ownership_service",
+)
+WORKER_PROVENANCE_ANALYSIS_ROOTS = tuple(
+    dict.fromkeys(
+        WORKER_PROVENANCE_REGISTRATION_ROOTS
+        + WORKER_PROVENANCE_S1_ROOTS
+        + WORKER_PROVENANCE_D37_ROOTS
+    )
+)
+WORKER_PROVENANCE_LITERAL_DYNAMIC_MODULES = frozenset(
+    {"app.services.execution.execution_task_runtime_ownership_service"}
 )
 
 EXPECTED_TASK_REGISTRATIONS = frozenset(
@@ -637,6 +712,165 @@ class CandidateManifestVerification:
     reasons: tuple[str, ...]
     current_head: str | None = None
     current_tree: str | None = None
+    module_identity_status: str = MODULE_IDENTITY_VALID
+    boundary_completeness_status: str = BOUNDARY_COMPLETENESS_NOT_APPLICABLE
+
+
+@dataclass(frozen=True)
+class ProvenanceBoundaryCheck:
+    """Result of finite static inspection of the Worker source boundary."""
+
+    classification: str
+    required_modules: tuple[str, ...]
+    inspected_modules: tuple[str, ...]
+    missing_modules: tuple[str, ...] = ()
+    missing_source_modules: tuple[str, ...] = ()
+    literal_dynamic_imports: tuple[str, ...] = ()
+    unsupported_dynamic_imports: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+
+def _relative_import_module(
+    source_module: str, source_path: Path, node: ast.ImportFrom
+) -> str:
+    package = (
+        source_module
+        if source_path.name == "__init__.py"
+        else source_module.rsplit(".", 1)[0]
+    )
+    if node.level == 0:
+        return node.module or ""
+    parts = package.split(".")
+    prefix = parts[: len(parts) - node.level + 1]
+    if node.module:
+        prefix.extend(node.module.split("."))
+    return ".".join(prefix)
+
+
+def _static_module_imports(
+    source_module: str, source_path: Path
+) -> tuple[set[str], set[str], tuple[str, ...], tuple[str, ...]]:
+    """Read import edges without importing or executing the source module."""
+
+    tree = ast.parse(source_path.read_text(encoding="utf-8"), filename=str(source_path))
+    imports: set[str] = set()
+    literal_dynamic: set[str] = set()
+    unsupported_dynamic: list[str] = []
+    parse_notes: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.update(
+                alias.name for alias in node.names if alias.name.startswith("app.")
+            )
+        elif isinstance(node, ast.ImportFrom):
+            imported_module = _relative_import_module(source_module, source_path, node)
+            if node.module is None and node.level:
+                package = _relative_import_module(source_module, source_path, node)
+                if package.startswith("app."):
+                    imports.add(package)
+                imports.update(
+                    f"{package}.{alias.name}"
+                    for alias in node.names
+                    if alias.name != "*"
+                )
+            elif imported_module.startswith("app."):
+                imports.add(imported_module)
+        elif isinstance(node, ast.Call):
+            function = node.func
+            is_import_module = (
+                isinstance(function, ast.Name) and function.id == "import_module"
+            ) or (
+                isinstance(function, ast.Attribute) and function.attr == "import_module"
+            )
+            if not is_import_module:
+                continue
+            argument = node.args[0] if node.args else None
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                if argument.value.startswith("app."):
+                    literal_dynamic.add(argument.value)
+            else:
+                unsupported_dynamic.append(
+                    f"{source_module}:{getattr(node, 'lineno', '?')}"
+                )
+    return imports, literal_dynamic, tuple(unsupported_dynamic), tuple(parse_notes)
+
+
+def inspect_worker_provenance_boundary(
+    source_root: str | Path,
+    approved_modules: Iterable[str],
+) -> ProvenanceBoundaryCheck:
+    """Independently check the finite Worker boundary against source syntax.
+
+    The explicit seed set is the reviewed safety boundary. Only registration,
+    helper and orchestration-package initialization files contribute direct
+    import edges; S1 and D-37-13 roots are inspected for identity and dynamic
+    import uncertainty but are not recursively expanded.
+    """
+
+    root = Path(source_root).expanduser().resolve(strict=False)
+    anchor_paths = [
+        root / "app" / "celery_app.py",
+        root / "app" / "tasks" / "worker.py",
+    ]
+    if not any(path.is_file() for path in anchor_paths):
+        return ProvenanceBoundaryCheck(
+            BOUNDARY_COMPLETENESS_NOT_APPLICABLE,
+            (),
+            (),
+            reasons=("worker_boundary_anchors_unavailable",),
+        )
+
+    approved = {str(item) for item in approved_modules}
+    required = set(DEFAULT_AFFECTED_MODULES)
+    inspected: list[str] = []
+    missing_source: list[str] = []
+    literal_dynamic: set[str] = set()
+    unsupported_dynamic: list[str] = []
+    reasons: list[str] = []
+    for module_name in WORKER_PROVENANCE_ANALYSIS_ROOTS:
+        try:
+            source_path = _module_source_path(root, module_name)
+        except (CandidateManifestError, OSError, ValueError):
+            missing_source.append(module_name)
+            continue
+        inspected.append(module_name)
+        try:
+            imports, dynamic, unsupported, notes = _static_module_imports(
+                module_name, source_path
+            )
+        except (OSError, SyntaxError, UnicodeError) as exc:
+            reasons.append(
+                f"static_inspection_unavailable:{module_name}:{type(exc).__name__}"
+            )
+            continue
+        literal_dynamic.update(dynamic)
+        unsupported_dynamic.extend(unsupported)
+        reasons.extend(notes)
+        if module_name in WORKER_PROVENANCE_REGISTRATION_ROOTS:
+            required.update(imports)
+    required.update(literal_dynamic)
+    missing = sorted(required - approved)
+    if missing_source:
+        reasons.extend(f"missing_reviewed_source:{name}" for name in missing_source)
+    if missing:
+        reasons.extend(f"missing_approved_module:{name}" for name in missing)
+    if reasons and not unsupported_dynamic and not missing and not missing_source:
+        unsupported_dynamic.extend(reasons)
+    classification = BOUNDARY_COMPLETENESS_VALID
+    if missing or missing_source:
+        classification = BOUNDARY_COMPLETENESS_INVALID
+    elif unsupported_dynamic or reasons:
+        classification = BOUNDARY_COMPLETENESS_INCONCLUSIVE
+    return ProvenanceBoundaryCheck(
+        classification=classification,
+        required_modules=tuple(sorted(required)),
+        inspected_modules=tuple(inspected),
+        missing_modules=tuple(missing),
+        missing_source_modules=tuple(sorted(missing_source)),
+        literal_dynamic_imports=tuple(sorted(literal_dynamic)),
+        unsupported_dynamic_imports=tuple(sorted(set(unsupported_dynamic))),
+        reasons=tuple(dict.fromkeys(reasons)),
+    )
 
 
 def build_candidate_source_manifest(
@@ -718,6 +952,9 @@ def verify_candidate_source_manifest(
     """Recompute Git/source evidence for a candidate manifest."""
 
     reasons: list[str] = []
+    boundary_check = ProvenanceBoundaryCheck(
+        BOUNDARY_COMPLETENESS_NOT_APPLICABLE, (), ()
+    )
     try:
         candidate = (
             manifest
@@ -773,21 +1010,51 @@ def verify_candidate_source_manifest(
         expected_digest = _sha256_bytes(_canonical_json(candidate.payload()).encode())
         if expected_digest != candidate.source_manifest_digest:
             reasons.append("source_manifest_digest_mismatch")
+        boundary_check = inspect_worker_provenance_boundary(
+            root, candidate.affected_modules
+        )
+        if boundary_check.classification == BOUNDARY_COMPLETENESS_INVALID:
+            reasons.extend(
+                f"provenance_boundary_missing:{name}"
+                for name in boundary_check.missing_modules
+            )
+            reasons.extend(
+                f"provenance_boundary_source_missing:{name}"
+                for name in boundary_check.missing_source_modules
+            )
+        elif boundary_check.classification == BOUNDARY_COMPLETENESS_INCONCLUSIVE:
+            reasons.extend(
+                f"provenance_boundary_inconclusive:{reason}"
+                for reason in boundary_check.reasons
+            )
     except CandidateManifestError as exc:
         classification = (
             IDENTITY_MISMATCH
             if "digest mismatch" in str(exc) or "manifest" in str(exc)
             else IDENTITY_UNAVAILABLE
         )
-        return CandidateManifestVerification(classification, (str(exc),))
+        return CandidateManifestVerification(
+            classification,
+            (str(exc),),
+            module_identity_status=MODULE_IDENTITY_INVALID,
+        )
     except (OSError, ValueError, TypeError) as exc:
-        return CandidateManifestVerification(IDENTITY_UNAVAILABLE, (str(exc),))
+        return CandidateManifestVerification(
+            IDENTITY_UNAVAILABLE,
+            (str(exc),),
+            module_identity_status=MODULE_IDENTITY_INVALID,
+        )
 
+    module_identity_status = (
+        MODULE_IDENTITY_VALID if not reasons else MODULE_IDENTITY_INVALID
+    )
     return CandidateManifestVerification(
         IDENTITY_MISMATCH if reasons else IDENTITY_VERIFIED,
         tuple(dict.fromkeys(reasons)),
         current_head=current_head,
         current_tree=current_tree,
+        module_identity_status=module_identity_status,
+        boundary_completeness_status=boundary_check.classification,
     )
 
 
@@ -968,7 +1235,13 @@ def capture_loaded_module_provenance(
                 "spec_origin": origin,
                 "cached_path": cached,
                 "load_timing": (
-                    "boot" if (module and resolved_path) else "lazy_or_unloaded"
+                    "boot"
+                    if (module and resolved_path)
+                    else (
+                        "dynamic_literal_unloaded"
+                        if module_name in WORKER_PROVENANCE_LITERAL_DYNAMIC_MODULES
+                        else "lazy_or_unloaded"
+                    )
                 ),
                 "in_memory_code_attestation": "unavailable",
             }
@@ -2118,7 +2391,10 @@ def verify_worker_identity(
             continue
         resolved_text = record.get("resolved_source_path")
         if not resolved_text:
-            if record.get("load_timing") == "dynamic_unresolved":
+            if record.get("load_timing") in {
+                "dynamic_unresolved",
+                "dynamic_literal_unloaded",
+            }:
                 reasons.append(f"dynamic_module_provenance_unavailable:{name}")
             elif record.get("load_timing") == "lazy_or_unloaded":
                 reasons.append(f"lazy_module_provenance_unavailable:{name}")
@@ -2168,10 +2444,10 @@ def verify_worker_identity(
             ):
                 reasons.append(f"current_lazy_module_provenance_unavailable:{name}")
                 continue
-            if (
-                not record.get("resolved_source_path")
-                and record.get("load_timing") == "dynamic_unresolved"
-            ):
+            if not record.get("resolved_source_path") and record.get("load_timing") in {
+                "dynamic_unresolved",
+                "dynamic_literal_unloaded",
+            }:
                 reasons.append(f"current_dynamic_module_provenance_unavailable:{name}")
                 continue
             if record.get("resolved_source_path") != expected_by_name.get(name, {}).get(
@@ -2278,6 +2554,10 @@ def process_identity_from_mapping(value: Mapping[str, Any]) -> ProcessIdentity:
 
 
 __all__ = [
+    "BOUNDARY_COMPLETENESS_INCONCLUSIVE",
+    "BOUNDARY_COMPLETENESS_INVALID",
+    "BOUNDARY_COMPLETENESS_NOT_APPLICABLE",
+    "BOUNDARY_COMPLETENESS_VALID",
     "CandidateManifestError",
     "CandidateManifestVerification",
     "CandidateIdentityPin",
@@ -2294,10 +2574,13 @@ __all__ = [
     "IDENTITY_UNAVAILABLE",
     "IDENTITY_VERIFIED",
     "IdentityVerification",
+    "MODULE_IDENTITY_INVALID",
+    "MODULE_IDENTITY_VALID",
     "ManifestWriteError",
     "ModuleSourceRecord",
     "NON_SECRET_CONFIGURATION_KEYS",
     "ProcessIdentity",
+    "ProvenanceBoundaryCheck",
     "REQUIRED_EFFECTIVE_CONFIGURATION_KEYS",
     "SCHEMA_VERSION",
     "TASK_POLICY_FIELDS",
@@ -2309,6 +2592,7 @@ __all__ = [
     "build_non_secret_configuration_fingerprint",
     "capture_child_identities",
     "capture_loaded_module_provenance",
+    "inspect_worker_provenance_boundary",
     "capture_process_identity",
     "canonical_launcher_identity",
     "configuration_pin_reasons",
