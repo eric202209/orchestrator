@@ -12,13 +12,18 @@ import hashlib
 import json
 import os
 import signal
+import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+import fcntl
+
 from .worker_identity import (
+    CandidateManifestError,
     CandidateSourceManifest,
     CandidateIdentityPin,
     IDENTITY_INCONCLUSIVE,
@@ -28,6 +33,8 @@ from .worker_identity import (
     IdentityVerification,
     ProcessIdentity,
     WorkerBootIdentityManifest,
+    canonical_launcher_identity,
+    configuration_pin_reasons,
     verify_candidate_source_manifest,
     verify_worker_identity,
 )
@@ -104,28 +111,199 @@ class ApprovalClaimStore(Protocol):
 
 
 class FileApprovalClaimStore:
-    """Durable provider-free claim store using atomic exclusive file create.
+    """Durable provider-free claim store with a legal, serialized state graph.
 
     Deployment must inject an explicitly configured location.  The controller
     never chooses a production path and therefore cannot silently write to
-    application or Redis state.
+    application or Redis state.  A per-claim advisory lock serializes every
+    read/validate/replace transition across threads and processes.  Claim
+    creation is exclusive; replacement is temporary-file plus file and
+    parent-directory fsync.  A failed persistence operation is left as an
+    uncertainty and is never silently retried by this store.
     """
+
+    _LEGAL_TRANSITIONS = {
+        CLAIM_AVAILABLE: frozenset({CLAIM_CLAIMED}),
+        CLAIM_CLAIMED: frozenset({CLAIM_OPERATION_ATTEMPTED}),
+        CLAIM_OPERATION_ATTEMPTED: frozenset({CLAIM_COMPLETED, CLAIM_FAILED_UNCERTAIN}),
+        CLAIM_COMPLETED: frozenset(),
+        CLAIM_FAILED_UNCERTAIN: frozenset(),
+    }
 
     def __init__(self, root: str | Path) -> None:
         path = Path(root).expanduser()
-        if path.exists() and path.is_symlink():
-            raise ControllerSafetyError("approval claim directory is a symlink")
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(path, 0o700)
-        self.root = path.resolve()
+        self._reject_symlink_ancestors(path)
+        if path.exists():
+            self._check_secure_directory(path)
+        else:
+            try:
+                path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            except OSError as exc:
+                raise ControllerSafetyError(
+                    "approval claim directory create failed"
+                ) from exc
+        self._check_secure_directory(path)
+        self.root = path.absolute()
+
+    @staticmethod
+    def _reject_symlink_ancestors(path: Path) -> None:
+        absolute = path.absolute()
+        cursor = Path(absolute.anchor)
+        for part in absolute.parts[1:]:
+            cursor /= part
+            try:
+                item = os.lstat(cursor)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ControllerSafetyError(
+                    "approval claim directory ancestry unavailable"
+                ) from exc
+            if stat.S_ISLNK(item.st_mode):
+                raise ControllerSafetyError(
+                    "approval claim directory has a symlinked ancestor"
+                )
+
+    @staticmethod
+    def _check_secure_directory(path: Path) -> None:
+        try:
+            item = os.lstat(path)
+        except OSError as exc:
+            raise ControllerSafetyError("approval claim directory unavailable") from exc
+        if stat.S_ISLNK(item.st_mode) or not stat.S_ISDIR(item.st_mode):
+            raise ControllerSafetyError("approval claim root is not a directory")
+        if item.st_mode & 0o077:
+            raise ControllerSafetyError("approval claim directory permissions unsafe")
+        getuid = getattr(os, "getuid", None)
+        if getuid is not None and item.st_uid != getuid():
+            raise ControllerSafetyError("approval claim directory ownership unsafe")
+
+    @staticmethod
+    def _check_secure_file(path: Path, *, label: str) -> None:
+        try:
+            item = os.lstat(path)
+        except OSError as exc:
+            raise ControllerSafetyError(f"{label} unavailable") from exc
+        if stat.S_ISLNK(item.st_mode) or not stat.S_ISREG(item.st_mode):
+            raise ControllerSafetyError(f"{label} is not a regular file")
+        if item.st_mode & 0o077:
+            raise ControllerSafetyError(f"{label} permissions unsafe")
+        getuid = getattr(os, "getuid", None)
+        if getuid is not None and item.st_uid != getuid():
+            raise ControllerSafetyError(f"{label} ownership unsafe")
+
+    def _check_root(self) -> None:
+        self._reject_symlink_ancestors(self.root)
+        self._check_secure_directory(self.root)
 
     def _path(self, claim_id: str) -> Path:
-        if not claim_id or any(ch not in "0123456789abcdef" for ch in claim_id):
+        if len(claim_id) != 64 or any(ch not in "0123456789abcdef" for ch in claim_id):
             raise ControllerSafetyError("invalid approval claim id")
+        self._check_root()
         path = self.root / f"{claim_id}.json"
-        if path.is_symlink():
-            raise ControllerSafetyError("approval claim path is a symlink")
+        try:
+            if stat.S_ISLNK(os.lstat(path).st_mode):
+                raise ControllerSafetyError("approval claim path is a symlink")
+        except FileNotFoundError:
+            pass
+        else:
+            self._check_secure_file(path, label="approval claim file")
+        lock_path = self.root / f".{claim_id}.lock"
+        try:
+            if stat.S_ISLNK(os.lstat(lock_path).st_mode):
+                raise ControllerSafetyError("approval claim lock is a symlink")
+        except FileNotFoundError:
+            pass
         return path
+
+    @contextmanager
+    def _claim_lock(self, claim_id: str):
+        path = self._path(claim_id)
+        lock_path = self.root / f".{claim_id}.lock"
+        try:
+            fd = os.open(
+                lock_path,
+                os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+        except OSError as exc:
+            raise ControllerSafetyError("approval claim lock unavailable") from exc
+        try:
+            item = os.fstat(fd)
+            if item.st_mode & 0o077:
+                raise ControllerSafetyError("approval claim lock permissions unsafe")
+            getuid = getattr(os, "getuid", None)
+            if getuid is not None and item.st_uid != getuid():
+                raise ControllerSafetyError("approval claim lock ownership unsafe")
+        except (ControllerSafetyError, OSError):
+            os.close(fd)
+            raise
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield path
+        except OSError as exc:
+            raise ControllerSafetyError("approval claim lock failed") from exc
+        finally:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+    def _fsync_directory(self) -> None:
+        self._check_root()
+        try:
+            directory_fd = os.open(
+                self.root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as exc:
+            raise ControllerSafetyError(
+                "approval claim directory durability failed"
+            ) from exc
+
+    @staticmethod
+    def _read_payload(path: Path, claim_id: str) -> dict[str, Any]:
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise ControllerSafetyError("approval claim unavailable") from exc
+        if not isinstance(payload, dict) or payload.get("claim_id") != claim_id:
+            raise ControllerSafetyError("approval claim record invalid")
+        if payload.get("state") not in FileApprovalClaimStore._LEGAL_TRANSITIONS:
+            raise ControllerSafetyError("approval claim state invalid")
+        if not isinstance(payload.get("binding"), dict):
+            raise ControllerSafetyError("approval claim binding invalid")
+        return payload
+
+    def _write_replacement(self, path: Path, payload: Mapping[str, Any]) -> None:
+        temporary: Path | None = None
+        encoded = (
+            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb", dir=self.root, prefix=f".{path.name}.", delete=False
+            ) as handle:
+                temporary = Path(handle.name)
+                os.chmod(temporary, 0o600)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+            self._fsync_directory()
+        except OSError as exc:
+            try:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise ControllerSafetyError("approval claim transition failed") from exc
 
     def claim(
         self,
@@ -137,73 +315,61 @@ class FileApprovalClaimStore:
     ) -> None:
         if expires_at <= now:
             raise ControllerSafetyError("approval claim expired")
-        path = self._path(claim_id)
-        payload = {
-            "claim_id": claim_id,
-            "state": CLAIM_CLAIMED,
-            "claimed_at": now.astimezone(UTC).isoformat(),
-            "expires_at": expires_at.astimezone(UTC).isoformat(),
-            "binding": dict(binding),
-        }
-        encoded = (
-            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-        ).encode()
-        try:
-            fd = os.open(
-                path,
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-            )
-        except FileExistsError as exc:
-            raise ControllerSafetyError("approval replay rejected") from exc
-        except OSError as exc:
-            raise ControllerSafetyError("approval claim create failed") from exc
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-        except OSError as exc:
-            path.unlink(missing_ok=True)
-            raise ControllerSafetyError("approval claim write failed") from exc
+        with self._claim_lock(claim_id) as path:
+            payload = {
+                "claim_id": claim_id,
+                "state": CLAIM_CLAIMED,
+                "claimed_at": now.astimezone(UTC).isoformat(),
+                "expires_at": expires_at.astimezone(UTC).isoformat(),
+                "binding": dict(binding),
+                "state_history": [
+                    {"state": CLAIM_CLAIMED, "at": now.astimezone(UTC).isoformat()}
+                ],
+            }
+            encoded = (
+                json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+            ).encode()
+            try:
+                fd = os.open(
+                    path,
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0),
+                    0o600,
+                )
+            except FileExistsError as exc:
+                raise ControllerSafetyError("approval replay rejected") from exc
+            except OSError as exc:
+                raise ControllerSafetyError("approval claim create failed") from exc
+            try:
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                self._fsync_directory()
+            except OSError as exc:
+                # Do not remove a possibly durable/partial claim.  An
+                # ambiguous claim must block replay until an operator reviews
+                # the record; the controller never auto-releases it.
+                raise ControllerSafetyError("approval claim write uncertain") from exc
 
     def transition(self, claim_id: str, *, expected: str, state: str) -> None:
-        if state not in {
-            CLAIM_CLAIMED,
-            CLAIM_OPERATION_ATTEMPTED,
-            CLAIM_COMPLETED,
-            CLAIM_FAILED_UNCERTAIN,
-        }:
+        if state not in self._LEGAL_TRANSITIONS:
             raise ControllerSafetyError("invalid approval claim state")
-        path = self._path(claim_id)
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            raise ControllerSafetyError("approval claim unavailable") from exc
-        if payload.get("state") != expected:
-            raise ControllerSafetyError("approval claim lifecycle mismatch")
-        payload["state"] = state
-        encoded = (
-            json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-        ).encode()
-        temporary: Path | None = None
-        try:
-            with tempfile.NamedTemporaryFile(
-                mode="wb", dir=self.root, prefix=f".{path.name}.", delete=False
-            ) as handle:
-                temporary = Path(handle.name)
-                os.chmod(temporary, 0o600)
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, path)
-        except OSError as exc:
-            try:
-                if temporary is not None:
-                    temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise ControllerSafetyError("approval claim transition failed") from exc
+        allowed = self._LEGAL_TRANSITIONS.get(expected, frozenset())
+        if state not in allowed:
+            raise ControllerSafetyError("illegal approval claim transition")
+        with self._claim_lock(claim_id) as path:
+            payload = self._read_payload(path, claim_id)
+            if payload.get("state") != expected:
+                raise ControllerSafetyError("approval claim lifecycle mismatch")
+            history = payload.get("state_history", [])
+            if not isinstance(history, list):
+                raise ControllerSafetyError("approval claim history invalid")
+            payload["state"] = state
+            payload["state_history"] = [
+                *history,
+                {"state": state, "at": datetime.now(UTC).isoformat()},
+            ]
+            self._write_replacement(path, payload)
 
 
 @dataclass(frozen=True)
@@ -428,6 +594,14 @@ class WorkerOnlyController:
                 ("candidate_pin_unavailable",),
                 snapshot,
             )
+        configuration_reasons = configuration_pin_reasons(self.candidate_pin)
+        if configuration_reasons:
+            return ControllerResult(
+                "preflight",
+                PREFLIGHT_INCONCLUSIVE,
+                configuration_reasons,
+                snapshot,
+            )
         candidate = verify_candidate_source_manifest(
             self.candidate_manifest,
             expected_head=self.candidate_pin.candidate_head,
@@ -501,11 +675,22 @@ class WorkerOnlyController:
         try:
             self.process_adapter.stop_worker(snapshot.worker)  # type: ignore[arg-type]
         except (ControllerSafetyError, OSError) as exc:
-            self._transition_claim(
+            transition_ok = self._transition_claim(
                 claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_FAILED_UNCERTAIN
             )
-            return ControllerResult("stop", PREFLIGHT_BLOCKED, (str(exc),), snapshot)
-        self._transition_claim(claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_COMPLETED)
+            reasons = [str(exc)]
+            if not transition_ok:
+                reasons.append("claim_failure_persistence_uncertain")
+            return ControllerResult("stop", PREFLIGHT_BLOCKED, tuple(reasons), snapshot)
+        if not self._transition_claim(
+            claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_COMPLETED
+        ):
+            return ControllerResult(
+                "stop",
+                PREFLIGHT_INCONCLUSIVE,
+                ("claim_completion_persistence_uncertain",),
+                snapshot,
+            )
         return ControllerResult("stop", STOP_REQUESTED, observation=snapshot)
 
     def verify_stopped(self) -> ControllerResult:
@@ -553,6 +738,14 @@ class WorkerOnlyController:
                 ("candidate_pin_unavailable",),
                 snapshot,
             )
+        configuration_reasons = configuration_pin_reasons(self.candidate_pin)
+        if configuration_reasons:
+            return ControllerResult(
+                "start",
+                PREFLIGHT_INCONCLUSIVE,
+                configuration_reasons,
+                snapshot,
+            )
         candidate = verify_candidate_source_manifest(
             self.candidate_manifest,
             expected_head=self.candidate_pin.candidate_head,
@@ -567,6 +760,7 @@ class WorkerOnlyController:
         reasons = self._common_safety_reasons(snapshot, worker_required=False)
         reasons.extend(self._fresh_observation_reasons(snapshot))
         reasons.extend(self._observer_reasons(snapshot))
+        reasons.extend(self._approved_launcher_reasons(snapshot))
         if snapshot.worker is not None:
             reasons.append("old_or_duplicate_Worker_alive")
         if snapshot.worker_children is None:
@@ -598,6 +792,10 @@ class WorkerOnlyController:
                 ("process_adapter_unavailable",),
                 snapshot,
             )
+        try:
+            launcher_request = self._approved_launcher_request()
+        except ControllerSafetyError as exc:
+            return ControllerResult("start", PREFLIGHT_BLOCKED, (str(exc),), snapshot)
         claim_id, authorization_reasons = self._authorize_and_claim(
             "start", approval, gate, snapshot
         )
@@ -609,13 +807,26 @@ class WorkerOnlyController:
                 snapshot,
             )
         try:
-            self.process_adapter.start_worker(self.candidate_manifest.launcher_identity)
+            self.process_adapter.start_worker(launcher_request)
         except (ControllerSafetyError, OSError) as exc:
-            self._transition_claim(
+            transition_ok = self._transition_claim(
                 claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_FAILED_UNCERTAIN
             )
-            return ControllerResult("start", PREFLIGHT_BLOCKED, (str(exc),), snapshot)
-        self._transition_claim(claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_COMPLETED)
+            reasons = [str(exc)]
+            if not transition_ok:
+                reasons.append("claim_failure_persistence_uncertain")
+            return ControllerResult(
+                "start", PREFLIGHT_BLOCKED, tuple(reasons), snapshot
+            )
+        if not self._transition_claim(
+            claim_id, CLAIM_OPERATION_ATTEMPTED, CLAIM_COMPLETED
+        ):
+            return ControllerResult(
+                "start",
+                PREFLIGHT_INCONCLUSIVE,
+                ("claim_completion_persistence_uncertain",),
+                snapshot,
+            )
         return ControllerResult("start", START_REQUESTED, observation=snapshot)
 
     def verify_started(
@@ -625,6 +836,8 @@ class WorkerOnlyController:
         current_service_identities: Mapping[str, ProcessIdentity] | None = None,
         current_module_provenance: Sequence[Mapping[str, Any]] | None = None,
         current_configuration_fingerprint: str | None = None,
+        current_configuration_schema_version: int | None = None,
+        current_configuration_policy_id: str | None = None,
     ) -> ControllerResult:
         """Verify the newly observed Worker without starting or stopping anything."""
 
@@ -651,6 +864,8 @@ class WorkerOnlyController:
             current_worker_identities=snapshot.worker_identities,
             current_module_provenance=current_module_provenance,
             current_configuration_fingerprint=current_configuration_fingerprint,
+            current_configuration_schema_version=current_configuration_schema_version,
+            current_configuration_policy_id=current_configuration_policy_id,
             expected_service_identities=expected_service_identities,
             current_service_identities=current_service_identities,
             candidate_pin=self.candidate_pin,
@@ -840,6 +1055,52 @@ class WorkerOnlyController:
             reasons.append("registration_drift")
         return reasons
 
+    def _approved_launcher_reasons(self, snapshot: WorkerObservation) -> list[str]:
+        """Bind start's adapter request to the external candidate pin."""
+
+        if self.candidate_pin is None:
+            return ["candidate_pin_unavailable"]
+        reasons: list[str] = []
+        try:
+            approved = self.candidate_pin.normalized_launcher()
+            candidate = canonical_launcher_identity(
+                self.candidate_manifest.launcher_identity
+            )
+            if candidate != approved:
+                reasons.append("approved_launcher_candidate_manifest_mismatch")
+            request = dict(approved)
+            request["worker_node_identity"] = self.candidate_pin.worker_node_identity
+            if (
+                request["worker_node_identity"]
+                != self.candidate_pin.worker_node_identity
+            ):
+                reasons.append("approved_launcher_request_node_mismatch")
+        except (CandidateManifestError, OSError, TypeError, ValueError) as exc:
+            reasons.append(f"approved_launcher_identity_invalid:{type(exc).__name__}")
+        if not self.candidate_pin.worker_node_identity:
+            reasons.append("approved_worker_node_identity_unavailable")
+        if not snapshot.worker_node_identity:
+            reasons.append("start_worker_node_identity_unavailable")
+        elif snapshot.worker_node_identity != self.candidate_pin.worker_node_identity:
+            reasons.append("start_worker_node_identity_mismatch")
+        return reasons
+
+    def _approved_launcher_request(self) -> dict[str, Any]:
+        if self.candidate_pin is None:
+            raise ControllerSafetyError("candidate pin unavailable for start")
+        try:
+            approved = self.candidate_pin.normalized_launcher()
+            candidate = canonical_launcher_identity(
+                self.candidate_manifest.launcher_identity
+            )
+        except (CandidateManifestError, OSError, TypeError, ValueError) as exc:
+            raise ControllerSafetyError("approved launcher identity invalid") from exc
+        if candidate != approved:
+            raise ControllerSafetyError("approved launcher identity changed")
+        request = dict(approved)
+        request["worker_node_identity"] = self.candidate_pin.worker_node_identity
+        return request
+
     def _maintenance_status(self, snapshot: WorkerObservation) -> str | None:
         if snapshot.maintenance_window is None:
             return HOLD_MAINTENANCE_WINDOW_NOT_PROVEN
@@ -978,6 +1239,31 @@ class WorkerOnlyController:
             "worker_pid": gate.worker_pid,
             "worker_start_ticks": gate.worker_start_ticks,
             "linux_boot_id": gate.linux_boot_id,
+            "approved_launcher_identity": (
+                self.candidate_pin.normalized_launcher()
+                if self.candidate_pin is not None
+                else None
+            ),
+            "approved_worker_node_identity": (
+                self.candidate_pin.worker_node_identity
+                if self.candidate_pin is not None
+                else None
+            ),
+            "approved_configuration_schema_version": (
+                self.candidate_pin.configuration_schema_version
+                if self.candidate_pin is not None
+                else None
+            ),
+            "approved_configuration_fingerprint": (
+                self.candidate_pin.configuration_fingerprint
+                if self.candidate_pin is not None
+                else None
+            ),
+            "approved_configuration_policy_id": (
+                self.candidate_pin.configuration_policy_id
+                if self.candidate_pin is not None
+                else None
+            ),
         }
 
     def _authorize_and_claim(
@@ -1022,16 +1308,17 @@ class WorkerOnlyController:
 
     def _transition_claim(
         self, claim_id: str | None, expected: str, state: str
-    ) -> None:
+    ) -> bool:
         if claim_id is None or self.claim_store is None:
-            return
+            return False
         try:
             self.claim_store.transition(claim_id, expected=expected, state=state)
         except (ControllerSafetyError, OSError):
             # The operation is already single-use.  A lifecycle persistence
             # failure is intentionally not converted into a retryable control
             # action.
-            return
+            return False
+        return True
 
     @staticmethod
     def _authorization_failure_status(reasons: Sequence[str]) -> str:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import multiprocessing
+import os
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +38,8 @@ from app.services.orchestration.worker_controller import (
 from app.services.orchestration.worker_identity import (
     CONFIG_PROJECTION_INCOMPLETE,
     CandidateIdentityPin,
+    CONFIGURATION_POLICY_ID,
+    CONFIGURATION_PROJECTION_SCHEMA_VERSION,
     DEFAULT_AFFECTED_MODULES,
     EXPECTED_TASK_REGISTRATIONS,
     IDENTITY_INCONCLUSIVE,
@@ -132,12 +136,67 @@ def _config() -> tuple[str, dict]:
         {
             "queue.identity": "celery",
             "worker.concurrency": 4,
+            "worker.prefetch_multiplier": 1,
+            "worker.acks_late": True,
+            "worker.reject_on_worker_lost": True,
+            "worker.acks_on_failure_or_timeout": True,
+            "task.soft_time_limit_seconds": 120,
+            "task.time_limit_seconds": 180,
             "runtime.profile": "standard",
             "route.execution_backend": "local_openclaw",
+            "celery.task_serializer": "json",
+            "celery.accept_content": ["json"],
+            "celery.result_serializer": "json",
+            "celery.timezone": "UTC",
+            "celery.enable_utc": True,
+            "celery.task_default_queue": "celery",
+            "celery.task_routes": {},
+            "celery.broker_route_identity": "redis://127.0.0.1:6379/0",
+            "celery.result_backend_route_identity": "redis://127.0.0.1:6379/1",
+            "retry.max_retries": 3,
+            "retry.countdown_seconds": 60,
+            "retry.redelivery_policy": "reject_on_worker_lost",
+            "task.decorator_time_limits": {"execute": {"soft": 120, "hard": 180}},
+            "policy.timeout_policy": {"planning": 60, "repair": 30},
+            "maintenance.task_identity": {"orphan": "sweep"},
+            "openclaw.gateway_route": "http://127.0.0.1:8000",
+            "openclaw.model_identity": {"execution": "local-model"},
+            "openclaw.fallback_policy": {"agent_backend": "local_openclaw"},
+            "openclaw.cli.executable": "/usr/local/bin/openclaw",
+            "openclaw.cli.args": ["--json"],
+            "d37.binding.route_behavior": "ephemeral-runtime-binding",
+            "d37.binding.provider_base_url_identity": "http://127.0.0.1:8000",
+            "d37.binding.model_selection": "openai/qwen-local",
+            "d37.binding.auth_schema_identity": "api-key",
             "beat.schedule": {"orphan": {"task": "sweep", "interval_seconds": 900}},
         },
         secret_presence={"OPENAI_API_KEY": True},
     )
+
+
+def _pin(manifest: CandidateSourceManifest) -> CandidateIdentityPin:
+    fingerprint, projection = _config()
+    return CandidateIdentityPin(
+        candidate_head=manifest.candidate_head,
+        candidate_tree=manifest.candidate_tree,
+        source_root=manifest.source_root,
+        source_manifest_digest=manifest.source_manifest_digest,
+        launcher_identity=manifest.launcher_identity,
+        worker_node_identity="celery@test",
+        configuration_schema_version=CONFIGURATION_PROJECTION_SCHEMA_VERSION,
+        configuration_fingerprint=fingerprint,
+        configuration_policy_id=projection["projection_policy_id"],
+    )
+
+
+def _transition_in_process(root: str, claim_id: str, result_queue) -> None:
+    store = FileApprovalClaimStore(root)
+    try:
+        store.transition(claim_id, expected="CLAIMED", state="OPERATION_ATTEMPTED")
+    except ControllerSafetyError:
+        result_queue.put(False)
+    else:
+        result_queue.put(True)
 
 
 def _module_record(root: Path, manifest: CandidateSourceManifest) -> dict:
@@ -306,14 +365,7 @@ def _controller(
 
     controller = WorkerOnlyController(
         candidate_manifest=candidate,
-        candidate_pin=CandidateIdentityPin(
-            candidate_head=candidate.candidate_head,
-            candidate_tree=candidate.candidate_tree,
-            source_root=candidate.source_root,
-            source_manifest_digest=candidate.source_manifest_digest,
-            launcher_identity=candidate.launcher_identity,
-            worker_node_identity="celery@test",
-        ),
+        candidate_pin=_pin(candidate),
         boot_manifest=boot,
         snapshot_provider=lambda: state["observation"],
         process_adapter=adapter,
@@ -438,8 +490,10 @@ def test_candidate_manifest_symlink_escape_and_missing_module(candidate, tmp_pat
 def test_non_secret_configuration_fingerprint_is_stable_and_omits_values():
     first, payload = _config()
     second, _ = _config()
+    changed_values = dict(payload["allowlisted_values"])
+    changed_values["queue.identity"] = "other"
     changed, _ = build_non_secret_configuration_fingerprint(
-        {"queue.identity": "other"}, secret_presence={"OPENAI_API_KEY": True}
+        changed_values, secret_presence={"OPENAI_API_KEY": True}
     )
     encoded = json.dumps(payload)
     assert first == second
@@ -527,16 +581,11 @@ def _identity_verification_kwargs(boot, worker, beat, api, manifest, **changes):
         current_child_identities=(_identity(102, "1002"),),
         current_worker_identities=(worker,),
         current_configuration_fingerprint=_config()[0],
+        current_configuration_schema_version=CONFIGURATION_PROJECTION_SCHEMA_VERSION,
+        current_configuration_policy_id=CONFIGURATION_POLICY_ID,
         expected_service_identities={"beat": beat, "api": api},
         current_service_identities={"beat": beat, "api": api},
-        candidate_pin=CandidateIdentityPin(
-            candidate_head=manifest.candidate_head,
-            candidate_tree=manifest.candidate_tree,
-            source_root=manifest.source_root,
-            source_manifest_digest=manifest.source_manifest_digest,
-            launcher_identity=manifest.launcher_identity,
-            worker_node_identity="celery@test",
-        ),
+        candidate_pin=_pin(manifest),
         current_worker_node_identity="celery@test",
     )
     values.update(changes)
@@ -849,14 +898,7 @@ def test_controller_expired_approval_and_no_default_observer_are_safe(candidate)
     del root
     controller = WorkerOnlyController(
         candidate_manifest=manifest,
-        candidate_pin=CandidateIdentityPin(
-            candidate_head=manifest.candidate_head,
-            candidate_tree=manifest.candidate_tree,
-            source_root=manifest.source_root,
-            source_manifest_digest=manifest.source_manifest_digest,
-            launcher_identity=manifest.launcher_identity,
-            worker_node_identity="celery@test",
-        ),
+        candidate_pin=_pin(manifest),
         boot_manifest=boot,
         clock=lambda: NOW,
     )
@@ -1008,6 +1050,8 @@ def test_i3_missing_or_wrong_node_pin_never_verifies(candidate):
 def test_i3_configuration_projection_covers_policy_and_excludes_secrets():
     settings_object = SimpleNamespace(
         OPENCLAW_GATEWAY_URL="http://127.0.0.1:8000",
+        CELERY_BROKER_URL="redis://127.0.0.1:6379/0",
+        CELERY_RESULT_BACKEND="redis://127.0.0.1:6379/1",
         OPENCLAW_CLI_PATH="/usr/local/bin/openclaw",
         OPENCLAW_CLI_ARGS="--profile local --json",
         EXECUTION_MODEL="local-model-a",
@@ -1049,7 +1093,12 @@ def test_i3_configuration_projection_covers_policy_and_excludes_secrets():
             "retry.max_retries": 3,
             "retry.countdown_seconds": 60,
             "retry.redelivery_policy": "reject_on_worker_lost",
+            "task.decorator_time_limits": {"execute": {"soft": 120, "hard": 180}},
+            "policy.timeout_policy": {"planning": 60, "repair": 30},
             "d37.binding.route_behavior": "ephemeral-runtime-binding",
+            "d37.binding.provider_base_url_identity": "http://127.0.0.1:8000",
+            "d37.binding.model_selection": "openai/qwen-local",
+            "d37.binding.auth_schema_identity": "api-key",
         },
     )
     changed_schedule = dict(celery_config)
@@ -1070,7 +1119,12 @@ def test_i3_configuration_projection_covers_policy_and_excludes_secrets():
             "retry.max_retries": 3,
             "retry.countdown_seconds": 60,
             "retry.redelivery_policy": "reject_on_worker_lost",
+            "task.decorator_time_limits": {"execute": {"soft": 120, "hard": 180}},
+            "policy.timeout_policy": {"planning": 60, "repair": 30},
             "d37.binding.route_behavior": "ephemeral-runtime-binding",
+            "d37.binding.provider_base_url_identity": "http://127.0.0.1:8000",
+            "d37.binding.model_selection": "openai/qwen-local",
+            "d37.binding.auth_schema_identity": "api-key",
         },
     )
     assert first != second
@@ -1114,6 +1168,29 @@ def test_i3_candidate_pin_and_reviewed_module_boundary_are_explicit(candidate):
         "app.services.agents.runtime_configuration",
         "app.services.orchestration.lifecycle.worker_bootstrap",
         "app.services.orchestration.lifecycle.worker_capacity",
+        "app.services.orchestration.execution.runtime",
+        "app.services.agents.agent_runtime",
+        "app.services.agents.agent_backends",
+        "app.services.agents.runtime_adapters.openclaw_adapter",
+        "app.services.orchestration.policy",
+        "app.services.orchestration.coordinators.completion_coordinator",
+        "app.services.orchestration.coordinators.failure_coordinator",
+        "app.services.orchestration.phases.execution_loop",
+        "app.services.orchestration.phases.planning_flow",
+        "app.services.orchestration.state.persistence",
+        "app.services.orchestration.state.execution_states",
+        "app.services.orchestration.state.session_state",
+        "app.services.workspace.control_state_paths",
+        "app.services.workspace.checkpoint_service",
+        "app.services.workspace.project_isolation_service",
+        "app.services.workspace.task_sandbox_allocator",
+        "app.services.workspace.system_settings",
+        "app.services.workspace.project_mutation_lock",
+        "app.services.session.execution_policy",
+        "app.services.session.session_execution_service",
+        "app.services.session.session_runtime_service",
+        "app.services.execution.process_identity",
+        "app.tasks.worker_support.workspace",
     }.issubset(DEFAULT_AFFECTED_MODULES)
 
 
@@ -1219,3 +1296,378 @@ def test_i3_pidfd_rechecks_full_provenance_before_signal(monkeypatch):
     with pytest.raises(ControllerSafetyError):
         adapter.stop_worker(expected)
     assert not signals
+
+
+@pytest.mark.parametrize(
+    "pin_change,reason",
+    [
+        (
+            {"executable": "/synthetic/unapproved-launcher"},
+            "approved_launcher_candidate_manifest_mismatch",
+        ),
+        (
+            {"cwd": "/synthetic/unapproved-cwd"},
+            "approved_launcher_candidate_manifest_mismatch",
+        ),
+        (
+            {"argv": ["/venv/bin/python3", "--unapproved"]},
+            "approved_launcher_candidate_manifest_mismatch",
+        ),
+        (
+            {"worker_node_identity": "celery@other"},
+            "start_worker_node_identity_mismatch",
+        ),
+    ],
+)
+def test_i5_start_rejects_launcher_pin_mismatch_before_claim_or_adapter(
+    candidate, pin_change, reason
+):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    del worker
+    launcher = dict(manifest.launcher_identity)
+    worker_node_identity = "celery@test"
+    if "worker_node_identity" in pin_change:
+        worker_node_identity = pin_change["worker_node_identity"]
+    else:
+        launcher.update(pin_change)
+    wrong_pin = replace(
+        _pin(manifest),
+        launcher_identity=launcher,
+        worker_node_identity=worker_node_identity,
+    )
+    claim_root = root.parent / "i5-launcher-claims"
+    controller, state, adapter = _controller(
+        manifest,
+        boot,
+        _observation(None, beat, api, workers=()),
+        claim_store=FileApprovalClaimStore(claim_root),
+    )
+    controller.candidate_pin = wrong_pin
+    approval = _approval("start")
+    result = controller.start(
+        approval,
+        _gate(
+            manifest,
+            _identity(101, "1001", cwd=manifest.source_root),
+            beat,
+            api,
+            approval,
+            operation="start",
+        ),
+    )
+    assert result.status == PREFLIGHT_BLOCKED
+    assert reason in result.reasons
+    assert not adapter.start_calls
+    assert not list(claim_root.glob("*.json"))
+    assert state["observation"].worker is None
+
+
+def test_i5_start_passes_only_canonically_approved_launcher(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    controller, _state, adapter = _controller(
+        manifest,
+        boot,
+        _observation(None, beat, api, workers=()),
+    )
+    approval = _approval("start")
+    result = controller.start(
+        approval,
+        _gate(manifest, worker, beat, api, approval, operation="start"),
+    )
+    assert result.status == START_REQUESTED
+    assert adapter.start_calls == [
+        {
+            **manifest.launcher_identity,
+            "worker_node_identity": "celery@test",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "changed_key,changed_value",
+    [
+        ("openclaw.gateway_route", "http://127.0.0.1:9999"),
+        ("openclaw.model_identity", {"execution": "unapproved-model"}),
+        ("openclaw.fallback_policy", {"agent_backend": "unapproved"}),
+        ("d37.binding.provider_base_url_identity", "http://127.0.0.1:9999"),
+        ("celery.task_serializer", "pickle"),
+        ("task.decorator_time_limits", {"execute": {"hard": 999}}),
+        ("beat.schedule", {"orphan": {"kwargs": {"days": 99}}}),
+        ("retry.redelivery_policy", "ack_on_failure"),
+    ],
+)
+def test_i5_approved_configuration_rejects_self_consistent_unapproved_drift(
+    candidate, changed_key, changed_value
+):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    changed_values = dict(_config()[1]["allowlisted_values"])
+    changed_values[changed_key] = changed_value
+    wrong_fingerprint, _projection = build_non_secret_configuration_fingerprint(
+        changed_values,
+        secret_presence={"OPENAI_API_KEY": True},
+    )
+    result = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot,
+            worker,
+            beat,
+            api,
+            manifest,
+            candidate_pin=replace(
+                _pin(manifest), configuration_fingerprint=wrong_fingerprint
+            ),
+            current_configuration_fingerprint=wrong_fingerprint,
+        ),
+    )
+    assert result.classification == IDENTITY_MISMATCH
+    assert "approved_configuration_boot_digest_mismatch" in result.reasons
+
+
+def test_i5_missing_or_unsupported_configuration_pin_never_verifies(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    missing = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot,
+            worker,
+            beat,
+            api,
+            manifest,
+            candidate_pin=replace(
+                _pin(manifest),
+                configuration_fingerprint=None,
+                configuration_policy_id=None,
+            ),
+        ),
+    )
+    assert missing.classification == IDENTITY_INCONCLUSIVE
+    assert "approved_configuration_digest_unavailable" in missing.reasons
+    unsupported = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot,
+            worker,
+            beat,
+            api,
+            manifest,
+            candidate_pin=replace(_pin(manifest), configuration_schema_version=99),
+        ),
+    )
+    assert unsupported.classification != IDENTITY_VERIFIED
+    assert "unsupported_configuration_projection_schema" in unsupported.reasons
+
+
+def test_i5_secret_bearing_route_is_rejected_without_serialization():
+    settings_object = SimpleNamespace(
+        OPENCLAW_GATEWAY_URL="https://user:synthetic-secret@example.invalid/gateway",
+        CELERY_BROKER_URL="redis://127.0.0.1:6379/0",
+        CELERY_RESULT_BACKEND="redis://127.0.0.1:6379/1",
+        OPENCLAW_CLI_PATH="/usr/local/bin/openclaw",
+        OPENCLAW_CLI_ARGS="--json",
+    )
+    with pytest.raises(
+        worker_identity.ConfigurationFingerprintError,
+        match=CONFIG_PROJECTION_INCOMPLETE,
+    ):
+        collect_worker_configuration(
+            settings_object,
+            {
+                "task_default_queue": "celery",
+                "task_serializer": "json",
+                "accept_content": ["json"],
+                "result_serializer": "json",
+                "timezone": "UTC",
+                "enable_utc": True,
+                "worker_prefetch_multiplier": 1,
+                "task_acks_late": True,
+                "task_reject_on_worker_lost": True,
+                "task_acks_on_failure_or_timeout": True,
+                "task_routes": {},
+                "beat_schedule": {},
+            },
+            worker_runtime=SimpleNamespace(concurrency=1),
+            operational_values={},
+        )
+
+
+def test_i5_claim_store_legal_cas_graph_and_terminal_replay_rejection(tmp_path):
+    store = FileApprovalClaimStore(tmp_path / "claims")
+    claim_id = "a" * 64
+    now = NOW
+    store.claim(
+        claim_id=claim_id,
+        binding={"operation": "start", "candidate": "approved"},
+        expires_at=now + timedelta(minutes=5),
+        now=now,
+    )
+    store.transition(claim_id, expected="CLAIMED", state="OPERATION_ATTEMPTED")
+    store.transition(claim_id, expected="OPERATION_ATTEMPTED", state="COMPLETED")
+    with pytest.raises(
+        ControllerSafetyError, match="illegal approval claim transition"
+    ):
+        store.transition(claim_id, expected="COMPLETED", state="CLAIMED")
+    record = json.loads((tmp_path / "claims" / f"{claim_id}.json").read_text())
+    assert [item["state"] for item in record["state_history"]] == [
+        "CLAIMED",
+        "OPERATION_ATTEMPTED",
+        "COMPLETED",
+    ]
+
+
+def test_i5_claim_store_serializes_competing_transitions(tmp_path):
+    store = FileApprovalClaimStore(tmp_path / "claims")
+    claim_id = "b" * 64
+    store.claim(
+        claim_id=claim_id,
+        binding={"operation": "stop"},
+        expires_at=NOW + timedelta(minutes=5),
+        now=NOW,
+    )
+
+    def transition():
+        try:
+            store.transition(claim_id, expected="CLAIMED", state="OPERATION_ATTEMPTED")
+            return True
+        except ControllerSafetyError:
+            return False
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _item: transition(), (1, 2)))
+    assert sorted(results) == [False, True]
+
+
+def test_i5_claim_store_serializes_competing_process_transitions(tmp_path):
+    store = FileApprovalClaimStore(tmp_path / "claims")
+    claim_id = "d" * 64
+    store.claim(
+        claim_id=claim_id,
+        binding={"operation": "stop"},
+        expires_at=NOW + timedelta(minutes=5),
+        now=NOW,
+    )
+    context = multiprocessing.get_context("fork")
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_transition_in_process,
+            args=(str(store.root), claim_id, result_queue),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+    assert all(process.exitcode == 0 for process in processes)
+    assert sorted(result_queue.get(timeout=2) for _ in processes) == [False, True]
+
+
+def test_i5_claim_store_rejects_symlink_ancestor_and_unsafe_permissions(tmp_path):
+    real_parent = tmp_path / "real-parent"
+    real_parent.mkdir()
+    symlink_parent = tmp_path / "symlink-parent"
+    symlink_parent.symlink_to(real_parent, target_is_directory=True)
+    with pytest.raises(ControllerSafetyError, match="symlinked ancestor"):
+        FileApprovalClaimStore(symlink_parent / "claims")
+
+    unsafe = tmp_path / "unsafe"
+    unsafe.mkdir()
+    os.chmod(unsafe, 0o755)
+    with pytest.raises(ControllerSafetyError, match="permissions unsafe"):
+        FileApprovalClaimStore(unsafe)
+
+    store = FileApprovalClaimStore(tmp_path / "secure")
+    claim_id = "e" * 64
+    store.claim(
+        claim_id=claim_id,
+        binding={"operation": "stop"},
+        expires_at=NOW + timedelta(minutes=5),
+        now=NOW,
+    )
+    os.chmod(store.root / f"{claim_id}.json", 0o644)
+    with pytest.raises(ControllerSafetyError, match="claim file permissions unsafe"):
+        store.transition(claim_id, expected="CLAIMED", state="OPERATION_ATTEMPTED")
+
+
+def test_i5_claim_persistence_failure_is_uncertain_and_not_released(
+    tmp_path, monkeypatch
+):
+    store = FileApprovalClaimStore(tmp_path / "claims")
+    claim_id = "c" * 64
+    original = store._fsync_directory
+    calls = {"count": 0}
+
+    def fail_after_claim():
+        calls["count"] += 1
+        if calls["count"] > 0:
+            raise ControllerSafetyError("synthetic fsync failure")
+        return original()
+
+    monkeypatch.setattr(store, "_fsync_directory", fail_after_claim)
+    with pytest.raises(ControllerSafetyError, match="fsync failure"):
+        store.claim(
+            claim_id=claim_id,
+            binding={"operation": "start"},
+            expires_at=NOW + timedelta(minutes=5),
+            now=NOW,
+        )
+    assert (tmp_path / "claims" / f"{claim_id}.json").exists()
+    with pytest.raises(ControllerSafetyError, match="approval replay rejected"):
+        store.claim(
+            claim_id=claim_id,
+            binding={"operation": "start"},
+            expires_at=NOW + timedelta(minutes=5),
+            now=NOW,
+        )
+
+
+def test_i5_completion_persistence_failure_is_not_reported_as_success(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+
+    class CompletionFailureStore(FileApprovalClaimStore):
+        def transition(self, claim_id, *, expected, state):
+            if state == "COMPLETED":
+                raise ControllerSafetyError("synthetic completion fsync failure")
+            return super().transition(claim_id, expected=expected, state=state)
+
+    store = CompletionFailureStore(root.parent / "completion-failure")
+    controller, _state, adapter = _controller(
+        manifest, boot, _observation(worker, beat, api), claim_store=store
+    )
+    approval = _approval("stop")
+    gate = _gate(manifest, worker, beat, api, approval)
+    result = controller.stop(approval, gate)
+    assert result.status == PREFLIGHT_INCONCLUSIVE
+    assert "claim_completion_persistence_uncertain" in result.reasons
+    assert len(adapter.stop_calls) == 1
+    replay = controller.stop(approval, gate)
+    assert replay.status == PREFLIGHT_BLOCKED
+    assert "START_REQUESTED" not in replay.reasons
+
+
+def test_i5_lazy_module_provenance_is_inconclusive_not_attested(candidate):
+    root, manifest = candidate
+    boot, worker, beat, api = _boot(root, manifest)
+    lazy = dict(boot.affected_module_provenance[0])
+    lazy.update(
+        resolved_source_path=None,
+        source_sha256=None,
+        loaded=False,
+        load_timing="lazy_or_unloaded",
+    )
+    result = verify_worker_identity(
+        replace(boot, affected_module_provenance=(lazy,)),
+        manifest,
+        **_identity_verification_kwargs(boot, worker, beat, api, manifest),
+    )
+    assert result.classification == IDENTITY_INCONCLUSIVE
+    assert "lazy_module_provenance_unavailable:app.worker" in result.reasons

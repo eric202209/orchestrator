@@ -25,9 +25,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping, Sequence
+from urllib.parse import urlsplit, urlunsplit
 
 
 SCHEMA_VERSION = 1
+CONFIGURATION_PROJECTION_SCHEMA_VERSION = 1
+CONFIGURATION_POLICY_ID = "phase37-preb-worker-effective-v1"
 IDENTITY_VERIFIED = "IDENTITY_VERIFIED"
 IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
 IDENTITY_INCONCLUSIVE = "IDENTITY_INCONCLUSIVE"
@@ -42,6 +45,10 @@ ROADMAP_DOC_PREFIX = "docs/roadmap/"
 # subprocess/boot helpers that can affect those paths.  It intentionally does
 # not become a transitive import dump.
 DEFAULT_AFFECTED_MODULES = (
+    "app.config",
+    "app.database",
+    "app.task_intent",
+    "app.services",
     "app.celery_app",
     "app.tasks.worker",
     "app.tasks.maintenance",
@@ -57,6 +64,55 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.agents.runtime_configuration",
     "app.services.orchestration.lifecycle.worker_bootstrap",
     "app.services.orchestration.lifecycle.worker_capacity",
+    # Direct Worker execution and backend dependencies.  These are reviewed
+    # load-bearing imports, not a recursive package scan.
+    "app.services.agents.agent_runtime",
+    "app.services.agents.agent_backends",
+    "app.services.agents.runtime_adapters.openclaw_adapter",
+    "app.services.agents.runtime_invocation",
+    "app.services.orchestration.execution.runtime",
+    "app.services.orchestration.policy",
+    "app.services.orchestration.coordinators.completion_coordinator",
+    "app.services.orchestration.coordinators.failure_coordinator",
+    "app.services.orchestration.phases.execution_loop",
+    "app.services.orchestration.phases.planning_flow",
+    "app.services.orchestration.state.persistence",
+    "app.services.orchestration.state.execution_states",
+    "app.services.orchestration.state.session_state",
+    "app.services.orchestration.lifecycle.transitions",
+    "app.services.orchestration.lifecycle.terminal_handoff",
+    "app.services.orchestration.validation.workspace_guard",
+    "app.services.workspace.control_state_paths",
+    "app.services.workspace.checkpoint_service",
+    "app.services.workspace.project_isolation_service",
+    "app.services.workspace.task_sandbox_allocator",
+    "app.services.workspace.system_settings",
+    "app.services.workspace.project_mutation_lock",
+    "app.services.session.execution_policy",
+    "app.services.session.session_execution_service",
+    "app.services.session.session_runtime_service",
+    "app.services.execution.process_identity",
+    "app.tasks.worker_support.workspace",
+    "app.services.orchestration.events.event_types",
+    "app.services.orchestration.error_handler",
+    "app.services.orchestration.prompt_templates",
+    "app.services.tasks.service",
+    "app.services.tasks.execution",
+    "app.services.human_guidance.service",
+    "app.services.observability.runtime_identity",
+    # Direct imports of the selected OpenClaw execution service.
+    "app.services.agents.interfaces",
+    "app.services.model_adaptation",
+    "app.services.orchestration.task_rules",
+    "app.services.orchestration.validation.git_containment_guard",
+    "app.services.orchestration.validation.runtime_pollution_guard",
+    "app.services.observability",
+    "app.services.observability.planning_provider_evidence",
+    "app.services.permissions.approval",
+    "app.services.orchestration.prompt_optimization",
+    "app.services.tasks.tool_tracking",
+    "app.services.workspace.workspace_paths",
+    "app.services.agents.openclaw_response",
 )
 
 EXPECTED_TASK_REGISTRATIONS = frozenset(
@@ -116,9 +172,13 @@ NON_SECRET_CONFIGURATION_KEYS = frozenset(
         "celery.worker_send_task_events",
         "celery.task_publish_retry",
         "celery.task_publish_retry_policy",
+        "celery.broker_route_identity",
+        "celery.result_backend_route_identity",
         "retry.max_retries",
         "retry.countdown_seconds",
         "retry.redelivery_policy",
+        "task.decorator_time_limits",
+        "policy.timeout_policy",
         "maintenance.task_identity",
         "openclaw.gateway_route",
         "openclaw.model_identity",
@@ -126,6 +186,9 @@ NON_SECRET_CONFIGURATION_KEYS = frozenset(
         "openclaw.cli.executable",
         "openclaw.cli.args",
         "d37.binding.route_behavior",
+        "d37.binding.provider_base_url_identity",
+        "d37.binding.model_selection",
+        "d37.binding.auth_schema_identity",
         "beat.schedule",
     }
 )
@@ -139,6 +202,44 @@ SECRET_KEY_MARKERS = (
     "oauth",
     "cookie",
     "private",
+)
+
+REQUIRED_EFFECTIVE_CONFIGURATION_KEYS = frozenset(
+    {
+        "queue.identity",
+        "worker.concurrency",
+        "worker.prefetch_multiplier",
+        "worker.acks_late",
+        "worker.reject_on_worker_lost",
+        "worker.acks_on_failure_or_timeout",
+        "task.soft_time_limit_seconds",
+        "task.time_limit_seconds",
+        "celery.task_serializer",
+        "celery.accept_content",
+        "celery.result_serializer",
+        "celery.timezone",
+        "celery.enable_utc",
+        "celery.task_default_queue",
+        "celery.task_routes",
+        "celery.broker_route_identity",
+        "celery.result_backend_route_identity",
+        "retry.max_retries",
+        "retry.countdown_seconds",
+        "retry.redelivery_policy",
+        "task.decorator_time_limits",
+        "policy.timeout_policy",
+        "maintenance.task_identity",
+        "openclaw.gateway_route",
+        "openclaw.model_identity",
+        "openclaw.fallback_policy",
+        "openclaw.cli.executable",
+        "openclaw.cli.args",
+        "d37.binding.route_behavior",
+        "d37.binding.provider_base_url_identity",
+        "d37.binding.model_selection",
+        "d37.binding.auth_schema_identity",
+        "beat.schedule",
+    }
 )
 
 
@@ -159,6 +260,43 @@ class ConfigurationFingerprintError(WorkerIdentityError):
 
 
 CONFIG_PROJECTION_INCOMPLETE = "CONFIG_PROJECTION_INCOMPLETE"
+
+
+def _configuration_pin_reasons(
+    candidate_pin: "CandidateIdentityPin | None",
+) -> list[str]:
+    """Validate independently provisioned configuration identity metadata."""
+
+    if candidate_pin is None:
+        return [
+            "candidate_pin_unavailable",
+            "approved_configuration_identity_unavailable",
+        ]
+    reasons: list[str] = []
+    if candidate_pin.configuration_schema_version is None:
+        reasons.append("approved_configuration_schema_unavailable")
+    elif candidate_pin.configuration_schema_version != (
+        CONFIGURATION_PROJECTION_SCHEMA_VERSION
+    ):
+        reasons.append("unsupported_configuration_projection_schema")
+    if not candidate_pin.configuration_policy_id:
+        reasons.append("approved_configuration_policy_unavailable")
+    elif candidate_pin.configuration_policy_id != CONFIGURATION_POLICY_ID:
+        reasons.append("unsupported_configuration_policy")
+    digest = candidate_pin.configuration_fingerprint
+    if not isinstance(digest, str) or len(digest) != 64:
+        reasons.append("approved_configuration_digest_unavailable")
+    elif any(character not in "0123456789abcdef" for character in digest):
+        reasons.append("approved_configuration_digest_invalid")
+    return reasons
+
+
+def configuration_pin_reasons(
+    candidate_pin: "CandidateIdentityPin | None",
+) -> tuple[str, ...]:
+    """Return fail-closed reasons for absent or unsupported approved config."""
+
+    return tuple(_configuration_pin_reasons(candidate_pin))
 
 
 def _utc_now() -> datetime:
@@ -314,6 +452,12 @@ def _canonical_launcher_identity(value: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def canonical_launcher_identity(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the reviewed launcher identity without executing it."""
+
+    return _canonical_launcher_identity(value)
+
+
 def _launcher_process_reasons(
     expected: Mapping[str, Any], actual: "ProcessIdentity", prefix: str
 ) -> list[str]:
@@ -435,6 +579,9 @@ class CandidateIdentityPin:
     source_manifest_digest: str
     launcher_identity: Mapping[str, Any]
     worker_node_identity: str
+    configuration_schema_version: int | None = None
+    configuration_fingerprint: str | None = None
+    configuration_policy_id: str | None = None
 
     def normalized_launcher(self) -> dict[str, Any]:
         return _canonical_launcher_identity(self.launcher_identity)
@@ -775,6 +922,9 @@ def capture_loaded_module_provenance(
                 "loader_type": loader_type,
                 "spec_origin": origin,
                 "cached_path": cached,
+                "load_timing": (
+                    "boot" if (module and resolved_path) else "lazy_or_unloaded"
+                ),
                 "in_memory_code_attestation": "unavailable",
             }
         )
@@ -821,6 +971,7 @@ def build_non_secret_configuration_fingerprint(
     values: Mapping[str, Any],
     *,
     secret_presence: Mapping[str, bool] | None = None,
+    policy_id: str = CONFIGURATION_POLICY_ID,
 ) -> tuple[str, dict[str, Any]]:
     """Return a stable digest over an explicit non-secret allowlist.
 
@@ -839,6 +990,15 @@ def build_non_secret_configuration_fingerprint(
         raise ConfigurationFingerprintError(
             f"configuration fields are not allowlisted: {sorted(unknown)}"
         )
+    missing = sorted(
+        key
+        for key in REQUIRED_EFFECTIVE_CONFIGURATION_KEYS
+        if key not in values or values[key] is None
+    )
+    if missing:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: effective values unavailable: {missing}"
+        )
     canonical_values = {
         key: _canonical_configuration_value(values[key]) for key in sorted(values)
     }
@@ -849,8 +1009,13 @@ def build_non_secret_configuration_fingerprint(
                 f"presence indicator is not credential-related: {key}"
             )
         presence[str(key)] = bool(present)
+    if policy_id != CONFIGURATION_POLICY_ID:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported configuration policy"
+        )
     payload = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": CONFIGURATION_PROJECTION_SCHEMA_VERSION,
+        "projection_policy_id": policy_id,
         "allowlisted_values": canonical_values,
         "secret_presence": dict(sorted(presence.items())),
     }
@@ -894,6 +1059,38 @@ def _safe_cli_args(value: Any) -> list[str]:
             f"{CONFIG_PROJECTION_INCOMPLETE}: CLI argument policy may contain secrets"
         )
     return [str(item) for item in args]
+
+
+def _safe_route_identity(value: Any, *, field_name: str) -> str | None:
+    """Keep only non-secret route components for an endpoint identity."""
+
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: {field_name} is not a string"
+        )
+    try:
+        parsed = urlsplit(value)
+    except ValueError as exc:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: {field_name} is not parseable"
+        ) from exc
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: {field_name} contains secret-bearing URL parts"
+        )
+    if parsed.scheme:
+        if not parsed.netloc and parsed.scheme not in {"file", "unix"}:
+            raise ConfigurationFingerprintError(
+                f"{CONFIG_PROJECTION_INCOMPLETE}: {field_name} has no route authority"
+            )
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    if _secret_like_key(value):
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: {field_name} may contain credentials"
+        )
+    return value
 
 
 def collect_worker_configuration(
@@ -945,6 +1142,37 @@ def collect_worker_configuration(
     }
     cli_path = getattr(settings_object, "OPENCLAW_CLI_PATH", None)
     cli_args = _safe_cli_args(getattr(settings_object, "OPENCLAW_CLI_ARGS", ""))
+    broker_route = _safe_route_identity(
+        celery_config.get("broker_url")
+        or getattr(settings_object, "CELERY_BROKER_URL", None),
+        field_name="celery.broker_route_identity",
+    )
+    result_backend_route = _safe_route_identity(
+        celery_config.get("result_backend")
+        or getattr(settings_object, "CELERY_RESULT_BACKEND", None),
+        field_name="celery.result_backend_route_identity",
+    )
+    gateway_route = _safe_route_identity(
+        getattr(settings_object, "OPENCLAW_GATEWAY_URL", None),
+        field_name="openclaw.gateway_route",
+    )
+    policy_timeout_values = {
+        name: getattr(settings_object, name, None)
+        for name in (
+            "PLANNING_SYNTHESIS_TIMEOUT_SECONDS",
+            "REPLAN_SYNTHESIS_TIMEOUT_SECONDS",
+            "PLANNING_REPAIR_TIMEOUT_SECONDS",
+            "DEBUG_FEEDBACK_TIMEOUT_SECONDS",
+            "SUMMARY_TIMEOUT_SECONDS",
+            "COMPLETION_REPAIR_TIMEOUT_SECONDS",
+            "PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS",
+        )
+    }
+    task_decorator_limits = operational.get("task.decorator_time_limits")
+    d37_provider_route = _safe_route_identity(
+        operational.get("d37.binding.provider_base_url_identity"),
+        field_name="d37.binding.provider_base_url_identity",
+    )
     values = {
         "queue.identity": celery_config.get("task_default_queue", "celery"),
         "worker.concurrency": getattr(worker_runtime, "concurrency", None),
@@ -1004,13 +1232,15 @@ def collect_worker_configuration(
         "celery.task_publish_retry_policy": celery_config.get(
             "task_publish_retry_policy", {}
         ),
+        "celery.broker_route_identity": broker_route,
+        "celery.result_backend_route_identity": result_backend_route,
         "retry.max_retries": operational.get("retry.max_retries"),
         "retry.countdown_seconds": operational.get("retry.countdown_seconds"),
         "retry.redelivery_policy": operational.get("retry.redelivery_policy"),
+        "task.decorator_time_limits": task_decorator_limits,
+        "policy.timeout_policy": policy_timeout_values,
         "maintenance.task_identity": maintenance_identity,
-        "openclaw.gateway_route": getattr(
-            settings_object, "OPENCLAW_GATEWAY_URL", None
-        ),
+        "openclaw.gateway_route": gateway_route,
         "openclaw.model_identity": {
             "execution": getattr(settings_object, "EXECUTION_MODEL", None),
             "planning": getattr(settings_object, "PLANNER_MODEL", None),
@@ -1025,8 +1255,23 @@ def collect_worker_configuration(
         "openclaw.cli.executable": cli_path or None,
         "openclaw.cli.args": cli_args,
         "d37.binding.route_behavior": operational.get("d37.binding.route_behavior"),
+        "d37.binding.provider_base_url_identity": d37_provider_route,
+        "d37.binding.model_selection": operational.get("d37.binding.model_selection"),
+        "d37.binding.auth_schema_identity": operational.get(
+            "d37.binding.auth_schema_identity"
+        ),
         "beat.schedule": schedule_identity,
     }
+    missing_effective = [
+        key
+        for key in sorted(REQUIRED_EFFECTIVE_CONFIGURATION_KEYS)
+        if values.get(key) is None
+    ]
+    if missing_effective:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: effective values unavailable: "
+            f"{missing_effective}"
+        )
     # Remove absent optional values only when the live object does not expose
     # them; a configured None remains a meaningful canonical value.
     secret_presence = {
@@ -1067,6 +1312,8 @@ class WorkerBootIdentityManifest:
     configuration_projection: Mapping[str, Any]
     identity_status: str
     record_id: str
+    configuration_schema_version: int = CONFIGURATION_PROJECTION_SCHEMA_VERSION
+    configuration_policy_id: str = CONFIGURATION_POLICY_ID
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -1105,6 +1352,8 @@ class WorkerBootIdentityManifest:
             "configuration_projection",
             "identity_status",
             "record_id",
+            "configuration_schema_version",
+            "configuration_policy_id",
         }
         missing = required - set(value)
         if missing:
@@ -1139,6 +1388,8 @@ class WorkerBootIdentityManifest:
             configuration_projection=dict(value["configuration_projection"]),
             identity_status=str(value["identity_status"]),
             record_id=str(value["record_id"]),
+            configuration_schema_version=int(value["configuration_schema_version"]),
+            configuration_policy_id=str(value["configuration_policy_id"]),
         )
 
 
@@ -1252,6 +1503,16 @@ def create_worker_boot_identity(
     children = tuple(child_identities or capture_child_identities(process.pid))
     projection = dict(configuration_fingerprint[1])
     fingerprint = str(configuration_fingerprint[0])
+    projection_schema = projection.get("schema_version")
+    projection_policy = projection.get("projection_policy_id")
+    if projection_schema != CONFIGURATION_PROJECTION_SCHEMA_VERSION:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported projection schema"
+        )
+    if projection_policy != CONFIGURATION_POLICY_ID:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported projection policy"
+        )
     actual_tasks = tuple(
         sorted(
             str(item)
@@ -1269,6 +1530,8 @@ def create_worker_boot_identity(
     # identity-inconclusive, never verified.
     status = IDENTITY_INCONCLUSIVE if candidate_pin is None else IDENTITY_VERIFIED
     if candidate_pin is not None:
+        if _configuration_pin_reasons(candidate_pin):
+            status = IDENTITY_INCONCLUSIVE
         status_reasons = _launcher_process_reasons(
             candidate_pin.launcher_identity, process, "boot_launcher_"
         )
@@ -1313,6 +1576,8 @@ def create_worker_boot_identity(
         configuration_projection=projection,
         identity_status=status,
         record_id=record_id,
+        configuration_schema_version=int(projection_schema),
+        configuration_policy_id=str(projection_policy),
     )
     target_dir = Path(identity_dir)
     target = target_dir / f"worker-{record_id}.json"
@@ -1366,6 +1631,8 @@ def verify_worker_identity(
     current_worker_identities: Sequence[ProcessIdentity] | None = None,
     current_module_provenance: Sequence[Mapping[str, Any]] | None = None,
     current_configuration_fingerprint: str | None = None,
+    current_configuration_schema_version: int | None = None,
+    current_configuration_policy_id: str | None = None,
     expected_service_identities: Mapping[str, ProcessIdentity] | None = None,
     current_service_identities: Mapping[str, ProcessIdentity] | None = None,
     candidate_pin: CandidateIdentityPin | None = None,
@@ -1420,9 +1687,12 @@ def verify_worker_identity(
         reasons.append("boot_source_root_mismatch")
     if boot.source_manifest_digest != candidate.source_manifest_digest:
         reasons.append("boot_source_manifest_mismatch")
+    configuration_pin_failures: list[str] = []
     if candidate_pin is None:
         reasons.append("candidate_pin_unavailable")
     else:
+        configuration_pin_failures = _configuration_pin_reasons(candidate_pin)
+        reasons.extend(configuration_pin_failures)
         if boot.candidate_head != candidate_pin.candidate_head:
             reasons.append("boot_pinned_candidate_head_mismatch")
         if boot.candidate_tree != candidate_pin.candidate_tree:
@@ -1548,7 +1818,10 @@ def verify_worker_identity(
             continue
         resolved_text = record.get("resolved_source_path")
         if not resolved_text:
-            reasons.append(f"missing_module:{name}")
+            if record.get("load_timing") == "lazy_or_unloaded":
+                reasons.append(f"lazy_module_provenance_unavailable:{name}")
+            else:
+                reasons.append(f"missing_module:{name}")
             continue
         try:
             resolved = Path(str(resolved_text)).resolve(strict=True)
@@ -1576,6 +1849,12 @@ def verify_worker_identity(
         if set(current_by_name) != set(expected_by_name):
             reasons.append("current_module_provenance_drift")
         for name, record in current_by_name.items():
+            if (
+                not record.get("resolved_source_path")
+                and record.get("load_timing") == "lazy_or_unloaded"
+            ):
+                reasons.append(f"current_lazy_module_provenance_unavailable:{name}")
+                continue
             if record.get("resolved_source_path") != expected_by_name.get(name, {}).get(
                 "expected_source_path"
             ):
@@ -1593,6 +1872,32 @@ def verify_worker_identity(
         reasons.append("configuration_fingerprint_unavailable")
     elif current_configuration_fingerprint != boot.configuration_fingerprint:
         reasons.append("configuration_fingerprint_mismatch")
+    if current_configuration_schema_version is None:
+        reasons.append("configuration_schema_unavailable")
+    elif current_configuration_schema_version != boot.configuration_schema_version:
+        reasons.append("configuration_schema_mismatch")
+    if current_configuration_policy_id is None:
+        reasons.append("configuration_policy_unavailable")
+    elif current_configuration_policy_id != boot.configuration_policy_id:
+        reasons.append("configuration_policy_mismatch")
+    if candidate_pin is not None and not configuration_pin_failures:
+        if (
+            boot.configuration_schema_version
+            != candidate_pin.configuration_schema_version
+        ):
+            reasons.append("approved_configuration_boot_schema_mismatch")
+        if boot.configuration_policy_id != candidate_pin.configuration_policy_id:
+            reasons.append("approved_configuration_boot_policy_mismatch")
+        if boot.configuration_fingerprint != candidate_pin.configuration_fingerprint:
+            reasons.append("approved_configuration_boot_digest_mismatch")
+        if current_configuration_fingerprint != candidate_pin.configuration_fingerprint:
+            reasons.append("approved_configuration_current_digest_mismatch")
+        if current_configuration_schema_version != (
+            candidate_pin.configuration_schema_version
+        ):
+            reasons.append("approved_configuration_current_schema_mismatch")
+        if current_configuration_policy_id != candidate_pin.configuration_policy_id:
+            reasons.append("approved_configuration_current_policy_mismatch")
 
     if boot.identity_status != IDENTITY_VERIFIED:
         reasons.append(f"boot_identity_status:{boot.identity_status}")
@@ -1609,7 +1914,7 @@ def verify_worker_identity(
         "source_drift",
         "missing_module",
         "wrong_module",
-        "boot_identity_status:",
+        "boot_identity_status:IDENTITY_MISMATCH",
         "registration_drift",
     )
     effective_reasons = [
@@ -1645,6 +1950,8 @@ __all__ = [
     "CandidateIdentityPin",
     "CandidateSourceManifest",
     "CONFIG_PROJECTION_INCOMPLETE",
+    "CONFIGURATION_POLICY_ID",
+    "CONFIGURATION_PROJECTION_SCHEMA_VERSION",
     "ConfigurationFingerprintError",
     "DEFAULT_AFFECTED_MODULES",
     "DEFAULT_WORKER_IDENTITY_DIR",
@@ -1658,6 +1965,7 @@ __all__ = [
     "ModuleSourceRecord",
     "NON_SECRET_CONFIGURATION_KEYS",
     "ProcessIdentity",
+    "REQUIRED_EFFECTIVE_CONFIGURATION_KEYS",
     "SCHEMA_VERSION",
     "WorkerBootIdentityManifest",
     "WorkerIdentityError",
@@ -1666,6 +1974,8 @@ __all__ = [
     "capture_child_identities",
     "capture_loaded_module_provenance",
     "capture_process_identity",
+    "canonical_launcher_identity",
+    "configuration_pin_reasons",
     "collect_worker_configuration",
     "create_worker_boot_identity",
     "load_candidate_source_manifest",

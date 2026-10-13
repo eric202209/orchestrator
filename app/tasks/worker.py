@@ -152,8 +152,13 @@ from app.services.tasks.execution import (
 from app.services.human_guidance.service import resolve_guidance_runtime_target
 from app.services.orchestration.policy import get_policy_profile
 from app.services.orchestration.policy import (
+    COMPLETION_REPAIR_TIMEOUT_SECONDS,
+    COMPLETION_VERIFICATION_TIMEOUT_SECONDS,
+    DEBUG_TIMEOUT_SECONDS,
     ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
     ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
+    PLANNING_REPAIR_TIMEOUT_SECONDS,
+    SUMMARY_TIMEOUT_SECONDS,
 )
 from app.task_intent import normalize_task_intent
 from app.services.orchestration.state.execution_states import TerminalReason
@@ -271,6 +276,25 @@ def on_worker_ready(sender, **kwargs):
                     "acks_late": True,
                     "reject_on_worker_lost": True,
                     "acks_on_failure_or_timeout": True,
+                },
+                "task.decorator_time_limits": {
+                    "execute_orchestration_task": {
+                        "soft": ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
+                        "hard": ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
+                    }
+                },
+                "policy.timeout_policy": {
+                    "planning_synthesis": getattr(
+                        settings, "PLANNING_SYNTHESIS_TIMEOUT_SECONDS", None
+                    ),
+                    "replan_synthesis": getattr(
+                        settings, "REPLAN_SYNTHESIS_TIMEOUT_SECONDS", None
+                    ),
+                    "planning_repair": PLANNING_REPAIR_TIMEOUT_SECONDS,
+                    "debug": DEBUG_TIMEOUT_SECONDS,
+                    "summary": SUMMARY_TIMEOUT_SECONDS,
+                    "completion_verification": COMPLETION_VERIFICATION_TIMEOUT_SECONDS,
+                    "completion_repair": COMPLETION_REPAIR_TIMEOUT_SECONDS,
                 },
                 "d37.binding.route_behavior": {
                     "binding": "ephemeral-runtime",
