@@ -79,6 +79,10 @@ from app.services.orchestration.lifecycle.worker_bootstrap import (
     run_start_runtime_identity as _run_start_runtime_identity,
     should_use_configured_planning_runtime,
 )
+from app.services.orchestration.worker_identity import (
+    collect_worker_configuration as _collect_worker_configuration,
+    create_worker_boot_identity as _create_worker_boot_identity,
+)
 from app.services.orchestration.lifecycle.worker_capacity import (
     BACKEND_CAPACITY_RETRY_MAX_RETRIES,
     backend_capacity_retry_state,
@@ -243,6 +247,36 @@ def on_worker_ready(sender, **kwargs):
     The periodic beat sweep fires every 15 min; this closes the cold-start gap.
     stale_after_seconds=60 gives a brief grace window for rolling restarts.
     """
+    try:
+        worker_app = getattr(sender, "app", celery_app)
+        configuration_fingerprint = _collect_worker_configuration(
+            settings,
+            getattr(worker_app, "conf", {}),
+            worker_runtime=sender,
+            operational_values={
+                "task.soft_time_limit_seconds": ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
+                "task.time_limit_seconds": ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
+            },
+        )
+        manifest_path, boot_manifest = _create_worker_boot_identity(
+            source_root=Path.cwd(),
+            identity_dir=Path.cwd() / "run" / "worker-identities",
+            sender=sender,
+            configuration_fingerprint=configuration_fingerprint,
+        )
+        logger.info(
+            "Worker boot identity manifest created: record_id=%s status=%s path=%s",
+            boot_manifest.record_id,
+            boot_manifest.identity_status,
+            manifest_path,
+        )
+    except (
+        Exception
+    ) as exc:  # noqa: BLE001 - readiness must not loop on evidence failure
+        logger.error(
+            "Worker boot identity manifest unavailable; Worker is not identity-verified: %s",
+            exc,
+        )
     try:
         db = get_db_session()
         try:
