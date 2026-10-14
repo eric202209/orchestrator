@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import importlib
 import importlib.util
 import json
 from pathlib import Path
@@ -109,6 +110,246 @@ def selected_policy(tmp_path, root, body):
     }
     path.write_text(json.dumps(envelope))
     return v.load_policy(path, candidate_root=root, expected_digest=envelope["digest"])
+
+
+def planning_lazy_source(exports=("PlanCommitService", "PlanningSessionService")):
+    export_map = {
+        name: (f"app.services.planning.{name.lower()}", name) for name in exports
+    }
+    return (
+        f"_EXPORTS = {export_map!r}\n"
+        "def __getattr__(name):\n"
+        "    module_name, attr_name = _EXPORTS[name]\n"
+        "    from importlib import import_module\n"
+        "    value = getattr(import_module(module_name), attr_name)\n"
+        "    globals()[name] = value\n"
+        "    return value\n"
+    )
+
+
+def add_planning_lazy_package(
+    root, exports=("PlanCommitService", "PlanningSessionService")
+):
+    path = add_module(
+        root, "app.services.planning", planning_lazy_source(exports), package=True
+    )
+    for name in exports:
+        add_module(
+            root,
+            f"app.services.planning.{name.lower()}",
+            f"class {name}: pass\n",
+        )
+    return path
+
+
+def test_l2_parent_initializer_removes_only_planning_reexports():
+    module = ast.parse((REPO / "app/services/__init__.py").read_text())
+    planning_imports = [
+        node
+        for node in module.body
+        if isinstance(node, ast.ImportFrom)
+        and node.level == 1
+        and node.module == "planning"
+    ]
+    assert planning_imports == []
+    all_assignment = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "__all__"
+            for target in node.targets
+        )
+    )
+    exports = ast.literal_eval(all_assignment.value)
+    assert "PlanCommitService" not in exports
+    assert "PlanningSessionService" not in exports
+    assert {"AgentRuntime", "TaskService", "PromptTemplates"} <= set(exports)
+
+
+def test_l2_1_original_eager_parent_exports_are_detected(tree):
+    root, _ = tree
+    add_planning_lazy_package(root)
+    add_module(
+        root,
+        "app.services",
+        "from .planning import PlanCommitService, PlanningSessionService\n",
+        package=True,
+    )
+    add_module(root, "app.tasks.worker", "import app.services\n")
+    result = verify(tree)
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert any(
+        reason.startswith("LAZY_REVIEW_REQUIRED:app.services.planning")
+        for reason in result.reasons
+    )
+    assert "app.services.planning" in result.derivation.parsed_modules
+
+
+def test_l2_2_corrected_parent_does_not_trigger_planning_lazy_exports(tree):
+    root, _ = tree
+    add_planning_lazy_package(root)
+    add_module(root, "app.services", "\n", package=True)
+    add_module(root, "app.tasks.worker", "import app.services\n")
+    result = verify(tree)
+    assert result.finite_gate_passed, result.reasons
+    assert "app.services.planning" not in result.derivation.parsed_modules
+    assert not any("app.services.planning" in reason for reason in result.reasons)
+
+
+def test_l2_3_unrelated_worker_facing_eager_planning_export_reopens_hold(tree):
+    root, _ = tree
+    add_planning_lazy_package(root, exports=("PlannerService",))
+    add_module(
+        root, "app.services", "from .planning import PlannerService\n", package=True
+    )
+    add_module(root, "app.tasks.worker", "import app.services\n")
+    result = verify(tree)
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert any(
+        reason.startswith("LAZY_REVIEW_REQUIRED:app.services.planning")
+        for reason in result.reasons
+    )
+
+
+def test_l2_4_moving_eager_export_to_required_initializer_does_not_bypass(tree):
+    root, _ = tree
+    add_planning_lazy_package(root)
+    add_module(root, "app.services", "\n", package=True)
+    add_module(
+        root,
+        "app.services.agents",
+        "from app.services.planning import PlanCommitService\n",
+        package=True,
+    )
+    result = verify(tree)
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert any(
+        reason.startswith("LAZY_REVIEW_REQUIRED:app.services.planning")
+        for reason in result.reasons
+    )
+
+
+def test_l2_5_computed_planning_dynamic_import_remains_inconclusive(tree):
+    root, _ = tree
+    add_module(
+        root,
+        "app.services.planning",
+        "def __getattr__(name):\n"
+        "    from importlib import import_module\n"
+        "    target = 'app.services.planning.' + name\n"
+        "    return getattr(import_module(target), name)\n",
+        package=True,
+    )
+    add_module(
+        root, "app.services", "from .planning import PlannerService\n", package=True
+    )
+    add_module(root, "app.tasks.worker", "import app.services\n")
+    result = verify(tree)
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert any(
+        reason.startswith("UNRESOLVED_DYNAMIC_IMPORT:app.services.planning")
+        for reason in result.reasons
+    )
+
+
+def test_l2_6_explicit_synthetic_planning_lazy_import_retains_semantics(tmp_path):
+    package_root = tmp_path / "synthetic-l2"
+    write(package_root, "synthetic_l2/__init__.py")
+    write(package_root, "synthetic_l2/services/__init__.py")
+    write(
+        package_root,
+        "synthetic_l2/services/planning/__init__.py",
+        "_EXPORTS = {'Export': ('synthetic_l2.services.planning.leaf', 'Export')}\n"
+        "def __getattr__(name):\n"
+        "    from importlib import import_module\n"
+        "    module_name, attr_name = _EXPORTS[name]\n"
+        "    value = getattr(import_module(module_name), attr_name)\n"
+        "    globals()[name] = value\n"
+        "    return value\n",
+    )
+    write(
+        package_root,
+        "synthetic_l2/services/planning/leaf.py",
+        "class Export:\n    marker = 'explicit-planning-import'\n",
+    )
+    write(
+        package_root,
+        "synthetic_l2/consumer.py",
+        "from synthetic_l2.services.planning import Export\n",
+    )
+    sys.path.insert(0, str(package_root))
+    try:
+        consumer = importlib.import_module("synthetic_l2.consumer")
+        assert consumer.Export.marker == "explicit-planning-import"
+        assert "synthetic_l2.services.planning.leaf" in sys.modules
+    finally:
+        sys.path.remove(str(package_root))
+        for name in list(sys.modules):
+            if name == "synthetic_l2" or name.startswith("synthetic_l2."):
+                del sys.modules[name]
+
+
+def test_l2_7_candidate_controlled_mutation_cannot_suppress_required_identities(tree):
+    root, policy = tree
+    original = v.derive(root, policy).required
+    add_module(
+        root,
+        "app.services.orchestration.worker_identity",
+        "DEFAULT_AFFECTED_MODULES = ()\n"
+        "def inspect_worker_provenance_boundary(*args, **kwargs):\n"
+        "    raise RuntimeError('candidate checker must not execute')\n",
+    )
+    result = verify(tree, omit="app.services.model_adaptation")
+    assert result.root_status == "ROOT_INVALID"
+    assert result.derivation.required == original
+    assert "MISSING_REQUIRED_IDENTITY:app.services.model_adaptation" in result.reasons
+
+
+def test_l2_8_i12_model_adaptation_omission_still_fails_closed(tree):
+    result = verify(tree, omit="app.services.model_adaptation")
+    assert result.root_status == "ROOT_INVALID"
+    assert "MISSING_REQUIRED_IDENTITY:app.services.model_adaptation" in result.reasons
+    assert {
+        edge.source
+        for edge in result.derivation.edges
+        if edge.target == "app.services.model_adaptation" and edge.kind == "from"
+    } == {
+        "app.services.agents.agent_runtime",
+        "app.services.agents.openclaw_service",
+    }
+
+
+@pytest.mark.parametrize("drift", ["source_root", "initializer", "manifest"])
+def test_l2_9_source_initializer_and_manifest_drift_reject(tree, drift):
+    root, _ = tree
+    if drift == "initializer":
+        (root / "app/services/agents/__init__.py").unlink()
+        result = verify(tree)
+        assert result.root_status == "ROOT_INVALID"
+        assert not result.finite_gate_passed
+        return
+    result = verify(tree)
+    evidence = manifest(result.derivation)
+    if drift == "source_root":
+        evidence["source_root"] = "/wrong-root"
+    else:
+        evidence["records"][0]["hash"] = "sha256:" + "0" * 64
+    checked = v.compare(result.derivation, evidence)
+    assert checked.root_status == "ROOT_VALID"
+    assert checked.module_status == "MODULE_IDENTITY_INVALID"
+    assert not checked.finite_gate_passed
+
+
+def test_l2_10_correction_needs_no_lazy_exception(tree):
+    root, policy = tree
+    add_planning_lazy_package(root)
+    add_module(root, "app.services", "\n", package=True)
+    add_module(root, "app.tasks.worker", "import app.services\n")
+    result = verify(tree)
+    assert result.finite_gate_passed, result.reasons
+    assert policy.body["lazy_imports"] == []
+    assert not any("LAZY" in reason for reason in result.reasons)
 
 
 @pytest.mark.parametrize(

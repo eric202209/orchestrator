@@ -11,7 +11,6 @@ from .tasks import TaskService, ToolTrackingService
 from .permissions import PermissionApprovalService
 from .observability import LogStreamService
 from .integrations import GitHubService
-from .planning import PlanCommitService, PlanningSessionService
 from .orchestration.prompt_templates import PromptTemplates
 from .session import (
     build_task_subfolder_name,
@@ -91,8 +90,6 @@ __all__ = [
     "LogStreamService",
     "GitHubService",
     "ToolTrackingService",
-    "PlanCommitService",
-    "PlanningSessionService",
     "PromptTemplates",
     "build_task_subfolder_name",
     "ensure_task_workspace",
