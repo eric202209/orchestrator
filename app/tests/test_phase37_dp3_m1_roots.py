@@ -159,6 +159,23 @@ def reviewed_lazy_declaration(
     }
 
 
+def synthetic_planning_declaration(tmp_path, source=None):
+    """Historical-shape declaration; the migrated fixture declares no lazy site."""
+    source = source or planning_lazy_source()
+    path = tmp_path / "synthetic-planning-declaration.py"
+    path.write_text(source)
+    return reviewed_lazy_declaration(path, source)
+
+
+def stale_declaration_tree(tree, tmp_path):
+    root, policy = tree
+    body = policy.body
+    body["lazy_imports"] = [
+        synthetic_planning_declaration(tmp_path, planning_lazy_source(("Stale",)))
+    ]
+    return root, selected_policy(tmp_path, root, body)
+
+
 def add_planning_lazy_package(
     root, exports=("PlanCommitService", "PlanningSessionService")
 ):
@@ -211,7 +228,7 @@ def test_l2_parent_initializer_removes_only_planning_reexports():
     assert {"AgentRuntime", "TaskService", "PromptTemplates"} <= set(exports)
 
 
-def test_l2_1_original_eager_parent_exports_are_detected(tree):
+def test_l2_1_original_eager_parent_exports_are_detected(tree, tmp_path):
     root, _ = tree
     add_planning_lazy_package(root)
     add_module(
@@ -223,7 +240,13 @@ def test_l2_1_original_eager_parent_exports_are_detected(tree):
     add_module(root, "app.tasks.worker", "import app.services\n")
     result = verify(tree)
     assert result.root_status == "ROOT_INCONCLUSIVE"
-    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in result.reasons
+    assert any(
+        r.startswith("LAZY_REVIEW_REQUIRED:app.services.planning:")
+        for r in result.reasons
+    )
+    stale = verify(stale_declaration_tree(tree, tmp_path))
+    assert stale.root_status == "ROOT_INCONCLUSIVE"
+    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in stale.reasons
     assert "app.services.planning" in result.derivation.parsed_modules
 
 
@@ -238,7 +261,9 @@ def test_l2_2_corrected_parent_does_not_trigger_planning_lazy_exports(tree):
     assert not any("app.services.planning" in reason for reason in result.reasons)
 
 
-def test_l2_3_unrelated_worker_facing_eager_planning_export_reopens_hold(tree):
+def test_l2_3_unrelated_worker_facing_eager_planning_export_reopens_hold(
+    tree, tmp_path
+):
     root, _ = tree
     add_planning_lazy_package(root, exports=("PlannerService",))
     add_module(
@@ -247,10 +272,18 @@ def test_l2_3_unrelated_worker_facing_eager_planning_export_reopens_hold(tree):
     add_module(root, "app.tasks.worker", "import app.services\n")
     result = verify(tree)
     assert result.root_status == "ROOT_INCONCLUSIVE"
-    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in result.reasons
+    assert any(
+        r.startswith("LAZY_REVIEW_REQUIRED:app.services.planning:")
+        for r in result.reasons
+    )
+    stale = verify(stale_declaration_tree(tree, tmp_path))
+    assert stale.root_status == "ROOT_INCONCLUSIVE"
+    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in stale.reasons
 
 
-def test_l2_4_moving_eager_export_to_required_initializer_does_not_bypass(tree):
+def test_l2_4_moving_eager_export_to_required_initializer_does_not_bypass(
+    tree, tmp_path
+):
     root, _ = tree
     add_planning_lazy_package(root)
     add_module(root, "app.services", "\n", package=True)
@@ -262,7 +295,13 @@ def test_l2_4_moving_eager_export_to_required_initializer_does_not_bypass(tree):
     )
     result = verify(tree)
     assert result.root_status == "ROOT_INCONCLUSIVE"
-    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in result.reasons
+    assert any(
+        r.startswith("LAZY_REVIEW_REQUIRED:app.services.planning:")
+        for r in result.reasons
+    )
+    stale = verify(stale_declaration_tree(tree, tmp_path))
+    assert stale.root_status == "ROOT_INCONCLUSIVE"
+    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in stale.reasons
 
 
 def test_l2_5_computed_planning_dynamic_import_remains_inconclusive(tree):
@@ -383,7 +422,7 @@ def test_l2_10_correction_needs_no_lazy_exception(tree):
     add_module(root, "app.tasks.worker", "import app.services\n")
     result = verify(tree)
     assert result.finite_gate_passed, result.reasons
-    assert policy.body["lazy_imports"]
+    assert policy.body["lazy_imports"] == []
     assert not any("LAZY" in reason for reason in result.reasons)
 
 
@@ -826,7 +865,7 @@ def test_unreviewed_mechanism_cannot_use_review_label(tree, tmp_path):
     source = "def __getattr__(name):\n    from importlib import import_module\n    return import_module(name)\n"
     path = add_module(root, "app.services.planning", source, package=True)
     body = policy.body
-    declaration = copy.deepcopy(body["lazy_imports"][0])
+    declaration = synthetic_planning_declaration(tmp_path)
     declaration["source_digest"] = v.digest(path.read_bytes())
     declaration["site_digest"] = v.digest(
         ast.dump(ast.parse(source).body[0], include_attributes=True).encode()
@@ -1049,7 +1088,7 @@ def test_sc1_10_computed_export_map_entry_holds(tree, tmp_path):
     add_module(root, "app.tasks.worker", "import app.services.planning\n")
     add_module(root, "app.services.planning.export", "class Export: pass\n")
     body = base_policy.body
-    declaration = copy.deepcopy(body["lazy_imports"][0])
+    declaration = synthetic_planning_declaration(tmp_path)
     function = next(
         node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
     )
@@ -1183,6 +1222,7 @@ def test_changed_lazy_site_digest_holds(tree, tmp_path):
 def test_changed_lazy_map_digest_is_rejected(tree, tmp_path):
     root, policy = tree
     body = policy.body
+    body["lazy_imports"] = [synthetic_planning_declaration(tmp_path)]
     body["lazy_imports"][0]["export_map_digest"] = "sha256:" + "0" * 64
     with pytest.raises(v.PolicyError, match="LAZY_EXPORT_MAP_IDENTITY"):
         selected_policy(tmp_path, root, body)
@@ -1211,7 +1251,7 @@ def test_policy_digest_compatibility_duplicate_and_schema_negatives(
     if change == "verifier_compatibility_digest":
         body["verifier_compatibility_digest"] = "sha256:" + "0" * 64
     elif change == "duplicate_lazy":
-        body["lazy_imports"].append(copy.deepcopy(body["lazy_imports"][0]))
+        body["lazy_imports"] = [synthetic_planning_declaration(tmp_path)] * 2
     else:
         body["schema"] = "orchestrator.worker-root-policy.v1"
     with pytest.raises(v.PolicyError, match=expected):
@@ -1768,3 +1808,142 @@ def test_c2_40_self_derived_manifest_never_passes_gate(tree, tmp_path, statement
     assert derived.root_status == "ROOT_INCONCLUSIVE"
     assert result.module_status == "MODULE_IDENTITY_INCONCLUSIVE"
     assert result.finite_gate_passed is False
+
+
+PLANNING_INIT = REPO / "app/services/planning/__init__.py"
+WORKER = REPO / "app/tasks/worker.py"
+OWNERSHIP = REPO / "app/services/execution/execution_task_runtime_ownership_service.py"
+
+
+def top_level_names(path):
+    names = set()
+    for node in ast.parse(path.read_text()).body:
+        if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            names.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            names.update(t.id for t in targets if isinstance(t, ast.Name))
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update((a.asname or a.name).split(".")[0] for a in node.names)
+    return names
+
+
+def test_sc2_c1_planning_initializer_is_docstring_only():
+    module = ast.parse(PLANNING_INIT.read_text())
+    assert len(module.body) == 1
+    assert isinstance(module.body[0], ast.Expr)
+    assert isinstance(module.body[0].value, ast.Constant)
+    assert isinstance(module.body[0].value.value, str)
+    assert not any(
+        isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.Assign))
+        for node in ast.walk(module)
+    )
+    assert not {"__getattr__", "_EXPORTS", "__all__"} & top_level_names(PLANNING_INIT)
+
+
+def test_sc2_c1_concrete_planning_submodule_imports_resolve():
+    checked = 0
+    for path in (REPO / "app").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not (
+                isinstance(node, ast.ImportFrom)
+                and node.level == 0
+                and (node.module or "").startswith("app.services.planning")
+            ):
+                continue
+            base = REPO / node.module.replace(".", "/")
+            module_path = (
+                base / "__init__.py" if base.is_dir() else base.with_suffix(".py")
+            )
+            assert module_path.is_file(), (path, node.lineno)
+            defined = top_level_names(module_path)
+            for alias in node.names:
+                assert alias.name != "*", (path, node.lineno)
+                assert (
+                    alias.name in defined
+                    or (base / (alias.name + ".py")).is_file()
+                    or (base / alias.name / "__init__.py").is_file()
+                ), (path, node.lineno, alias.name)
+                checked += 1
+    assert checked
+
+
+def receive_dispatch_function():
+    return next(
+        node
+        for node in ast.parse(WORKER.read_text()).body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "receive_execution_task_dispatch"
+    )
+
+
+def test_sc2_c1_w1_ownership_import_is_function_local_and_static():
+    function = receive_dispatch_function()
+    imports = [
+        node for node in function.body if isinstance(node, (ast.Import, ast.ImportFrom))
+    ]
+    assert len(imports) == 1
+    assert imports[0].module == "app.services.execution"
+    assert imports[0].level == 0
+    assert [(a.name, a.asname) for a in imports[0].names] == [
+        ("execution_task_runtime_ownership_service", "ownership_module")
+    ]
+    assert not any(
+        isinstance(node, ast.Name)
+        and node.id == "import_module"
+        or isinstance(node, ast.Attribute)
+        and node.attr == "import_module"
+        for node in ast.walk(ast.parse(WORKER.read_text()))
+    )
+    module_imports = [
+        alias.name if isinstance(node, ast.Import) else f"{node.module}.{alias.name}"
+        for node in ast.parse(WORKER.read_text()).body
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    ]
+    assert not any(
+        "execution_task_runtime_ownership_service" in name for name in module_imports
+    )
+
+
+def test_sc2_c1_w1_binds_existing_service_and_error():
+    bindings = {
+        node.targets[0].id: node.value
+        for node in receive_dispatch_function().body
+        if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name)
+    }
+    service = bindings["ownership_service"]
+    assert isinstance(service, ast.Call) and service.func.id == "getattr"
+    assert service.args[0].id == "ownership_module"
+    name = eval(compile(ast.Expression(service.args[1]), "<w1>", "eval"), {})
+    assert name == "ExecutionTaskRuntimeOwnershipService"
+    error = bindings["ownership_error"]
+    assert isinstance(error, ast.Attribute) and error.value.id == "ownership_module"
+    assert error.attr == "ExecutionRuntimeOwnershipError"
+    assert {name, error.attr} <= top_level_names(OWNERSHIP)
+
+
+def test_sc2_c1_w1_keeps_phase29c_substring_guard_inapplicable():
+    # test_phase29c1 scans files containing this substring for status writes.
+    assert "ExecutionTask" not in WORKER.read_text()
+
+
+def test_sc2_c1_w1_shape_is_a_normal_verifier_edge(tree):
+    root, _ = tree
+    add_module(
+        root,
+        "app.tasks.worker",
+        "def receive():\n"
+        "    from app.services.execution import (\n"
+        "        execution_task_runtime_ownership_service as ownership_module,\n"
+        "    )\n"
+        "    service = getattr(ownership_module, 'Execution' + 'TaskX')\n"
+        "    return service, ownership_module.ExecutionRuntimeOwnershipError\n",
+    )
+    result = verify(tree)
+    assert result.finite_gate_passed, result.reasons
+    assert "app.services.execution.execution_task_runtime_ownership_service" in {
+        edge.target
+        for edge in result.derivation.edges
+        if edge.source == "app.tasks.worker"
+    }

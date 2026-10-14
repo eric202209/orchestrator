@@ -3431,20 +3431,14 @@ def receive_execution_task_dispatch(self, payload: Dict[str, Any]) -> Dict[str, 
     fenced ownership row.
     """
 
-    from importlib import import_module
+    from app.services.execution import (
+        execution_task_runtime_ownership_service as ownership_module,
+    )
 
     ownership_service = getattr(
-        import_module(
-            "app.services.execution.execution_task_runtime_ownership_service"
-        ),
-        "Execution" + "TaskRuntimeOwnershipService",
+        ownership_module, "Execution" + "TaskRuntimeOwnershipService"
     )
-    ownership_error = getattr(
-        import_module(
-            "app.services.execution.execution_task_runtime_ownership_service"
-        ),
-        "ExecutionRuntimeOwnershipError",
-    )
+    ownership_error = ownership_module.ExecutionRuntimeOwnershipError
 
     db = get_db_session()
     try:

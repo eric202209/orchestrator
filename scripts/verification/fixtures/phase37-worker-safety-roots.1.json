@@ -2,59 +2,7 @@
   "body": {
     "canonicalization_id": "orchestrator.canonical-json.v1",
     "issuer_id": "isolated-test-owner",
-    "lazy_imports": [
-      {
-        "classification": "DORMANT_UNLOADED_LAZY_SITE",
-        "export_map": [
-          {"attribute": "Dependency", "module": "app.services.planning.structured_task_plan", "name": "Dependency"},
-          {"attribute": "ExecutionGroup", "module": "app.services.planning.structured_task_plan", "name": "ExecutionGroup"},
-          {"attribute": "InputManifest", "module": "app.services.planning.input_manifest", "name": "InputManifest"},
-          {"attribute": "InputManifestBuilder", "module": "app.services.planning.input_manifest", "name": "InputManifestBuilder"},
-          {"attribute": "OperatorReviewPersistenceService", "module": "app.services.planning.operator_review_persistence", "name": "OperatorReviewPersistenceService"},
-          {"attribute": "OperatorReviewService", "module": "app.services.planning.operator_review_persistence", "name": "OperatorReviewService"},
-          {"attribute": "PlanCommitService", "module": "app.services.planning.plan_commit_service", "name": "PlanCommitService"},
-          {"attribute": "PlannerService", "module": "app.services.planning.planner_service", "name": "PlannerService"},
-          {"attribute": "PlanningBrief", "module": "app.services.planning.planning_brief", "name": "PlanningBrief"},
-          {"attribute": "PlanningBriefAcceptance", "module": "app.services.planning.planning_brief", "name": "PlanningBriefAcceptance"},
-          {"attribute": "PlanningProvider", "module": "app.services.planning.providers", "name": "PlanningBriefProvider"},
-          {"attribute": "PlanningBriefStage", "module": "app.services.planning.planning_brief_stage", "name": "PlanningBriefStage"},
-          {"attribute": "PlanningProtocolPersistenceService", "module": "app.services.planning.protocol_persistence", "name": "PlanningProtocolPersistenceService"},
-          {"attribute": "PlanningProvider", "module": "app.services.planning.providers", "name": "PlanningProvider"},
-          {"attribute": "PlanningRequest", "module": "app.services.planning.providers", "name": "PlanningRequest"},
-          {"attribute": "PlanningResponse", "module": "app.services.planning.providers", "name": "PlanningResponse"},
-          {"attribute": "PlanningSessionService", "module": "app.services.planning.planning_session_service", "name": "PlanningSessionService"},
-          {"attribute": "ProtocolPersistenceService", "module": "app.services.planning.protocol_persistence", "name": "ProtocolPersistenceService"},
-          {"attribute": "ReviewActor", "module": "app.services.planning.operator_review", "name": "ReviewActor"},
-          {"attribute": "ReviewCandidateBinding", "module": "app.services.planning.operator_review", "name": "ReviewCandidateBinding"},
-          {"attribute": "ReviewDecisionRequest", "module": "app.services.planning.operator_review", "name": "ReviewDecisionRequest"},
-          {"attribute": "StructuredTaskPlan", "module": "app.services.planning.structured_task_plan", "name": "StructuredTaskPlan"},
-          {"attribute": "PlanningProvider", "module": "app.services.planning.providers", "name": "StructuredTaskPlanProvider"},
-          {"attribute": "StructuredTaskPlanStage", "module": "app.services.planning.structured_task_plan_stage", "name": "StructuredTaskPlanStage"},
-          {"attribute": "Task", "module": "app.services.planning.structured_task_plan", "name": "Task"},
-          {"attribute": "TaskPlan", "module": "app.services.planning.structured_task_plan", "name": "TaskPlan"},
-          {"attribute": "Traceability", "module": "app.services.planning.structured_task_plan", "name": "Traceability"},
-          {"attribute": "WorkItem", "module": "app.services.planning.structured_task_plan", "name": "WorkItem"},
-          {"attribute": "build_protocol_v2_stage_configuration", "module": "app.services.planning.structured_task_plan_stage", "name": "build_protocol_v2_stage_configuration"},
-          {"attribute": "build_protocol_v2_stage_definitions", "module": "app.services.planning.planning_brief_stage", "name": "build_protocol_v2_stage_definitions"},
-          {"attribute": "diff_structured_task_plans", "module": "app.services.planning.structured_task_plan", "name": "diff_structured_task_plans"},
-          {"attribute": "project_compatibility", "module": "app.services.planning.planning_brief", "name": "project_compatibility"},
-          {"attribute": "project_structured_task_plan", "module": "app.services.planning.structured_task_plan", "name": "project_structured_task_plan"},
-          {"attribute": "render_planning_brief", "module": "app.services.planning.planning_brief", "name": "render_planning_brief"},
-          {"attribute": "render_structured_task_plan", "module": "app.services.planning.structured_task_plan", "name": "render_structured_task_plan"},
-          {"attribute": "validate_input_manifest", "module": "app.services.planning.input_manifest", "name": "validate_input_manifest"},
-          {"attribute": "validate_planning_brief", "module": "app.services.planning.planning_brief", "name": "validate_planning_brief"},
-          {"attribute": "validate_structured_task_plan", "module": "app.services.planning.structured_task_plan", "name": "validate_structured_task_plan"}
-        ],
-        "export_map_digest": "sha256:491b24e7ae80fba61287e5df0a82f9d41f9bc39862651b33abda781b6fb5debf",
-        "export_names": ["Dependency", "ExecutionGroup", "InputManifest", "InputManifestBuilder", "OperatorReviewPersistenceService", "OperatorReviewService", "PlanCommitService", "PlannerService", "PlanningBrief", "PlanningBriefAcceptance", "PlanningBriefProvider", "PlanningBriefStage", "PlanningProtocolPersistenceService", "PlanningProvider", "PlanningRequest", "PlanningResponse", "PlanningSessionService", "ProtocolPersistenceService", "ReviewActor", "ReviewCandidateBinding", "ReviewDecisionRequest", "StructuredTaskPlan", "StructuredTaskPlanProvider", "StructuredTaskPlanStage", "Task", "TaskPlan", "Traceability", "WorkItem", "build_protocol_v2_stage_configuration", "build_protocol_v2_stage_definitions", "diff_structured_task_plans", "project_compatibility", "project_structured_task_plan", "render_planning_brief", "render_structured_task_plan", "validate_input_manifest", "validate_planning_brief", "validate_structured_task_plan"],
-        "loader_grammar": "getattr-export-map-importlib-attribute-cache.1",
-        "module": "app.services.planning",
-        "review_record_id": "SC1-B1-planning-lazy-review-001",
-        "site_digest": "sha256:c1f6e91614a43c2bf339aa9fc8919fa546a02dd7ee4c38ff67b6a7fcfef87dd3",
-        "source_digest": "sha256:18e1fa3a8846b38a7e91dcfa84232ac0f504b42c16f2dba588ceae8f16990c63",
-        "verifier_compatibility_digest": "sha256:80b91bfa7f2ab9724ab0a6d30ded048cb97fa3747dfc372a8e9001e40a2011a5"
-      }
-    ],
+    "lazy_imports": [],
     "limits": {
       "derived_identities": 4096,
       "dotted_components": 64,
@@ -219,7 +167,7 @@
     "source_namespace": "app",
     "verifier_compatibility_digest": "sha256:80b91bfa7f2ab9724ab0a6d30ded048cb97fa3747dfc372a8e9001e40a2011a5"
   },
-  "digest": "sha256:876da821eb385fa822bc32301467d359c875587726a91bbf639f40fa1ad4f743",
+  "digest": "sha256:8776d0793cd944808adee31a34014fe61ad96221033620f094f396575f6141e5",
   "issuer_envelope": {
     "kind": "isolated-test-fixture"
   }
