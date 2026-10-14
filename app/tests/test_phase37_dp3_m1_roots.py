@@ -127,6 +127,38 @@ def planning_lazy_source(exports=("PlanCommitService", "PlanningSessionService")
     )
 
 
+def reviewed_lazy_declaration(
+    path, source, review_record="synthetic-independent-review-only"
+):
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__getattr__"
+    )
+    assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "_EXPORTS"
+    )
+    mapping = ast.literal_eval(assignment.value)
+    export_map = v.lazy_export_map_entries(mapping)
+    return {
+        "module": "app.services.planning",
+        "source_digest": v.digest(path.read_bytes()),
+        "site_digest": v.digest(ast.dump(function, include_attributes=True).encode()),
+        "export_map_digest": v.lazy_export_map_digest(export_map),
+        "export_map": export_map,
+        "export_names": [entry["name"] for entry in export_map],
+        "loader_grammar": v.LAZY_LOADER_GRAMMAR,
+        "verifier_compatibility_digest": v.COMPATIBILITY_DIGEST,
+        "review_record_id": review_record,
+        "classification": v.LAZY_CLASSIFICATION,
+    }
+
+
 def add_planning_lazy_package(
     root, exports=("PlanCommitService", "PlanningSessionService")
 ):
@@ -140,6 +172,18 @@ def add_planning_lazy_package(
             f"class {name}: pass\n",
         )
     return path
+
+
+def reviewed_planning_tree(tree, tmp_path, source=None):
+    root, policy = tree
+    source = source or planning_lazy_source(("Export",))
+    path = add_module(root, "app.services.planning", source, package=True)
+    add_module(root, "app.services", "\n", package=True)
+    add_module(root, "app.tasks.worker", "import app.services.planning\n")
+    add_module(root, "app.services.planning.export", "class Export: pass\n")
+    body = policy.body
+    body["lazy_imports"] = [reviewed_lazy_declaration(path, source)]
+    return root, selected_policy(tmp_path, root, body), path
 
 
 def test_l2_parent_initializer_removes_only_planning_reexports():
@@ -179,10 +223,7 @@ def test_l2_1_original_eager_parent_exports_are_detected(tree):
     add_module(root, "app.tasks.worker", "import app.services\n")
     result = verify(tree)
     assert result.root_status == "ROOT_INCONCLUSIVE"
-    assert any(
-        reason.startswith("LAZY_REVIEW_REQUIRED:app.services.planning")
-        for reason in result.reasons
-    )
+    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in result.reasons
     assert "app.services.planning" in result.derivation.parsed_modules
 
 
@@ -206,10 +247,7 @@ def test_l2_3_unrelated_worker_facing_eager_planning_export_reopens_hold(tree):
     add_module(root, "app.tasks.worker", "import app.services\n")
     result = verify(tree)
     assert result.root_status == "ROOT_INCONCLUSIVE"
-    assert any(
-        reason.startswith("LAZY_REVIEW_REQUIRED:app.services.planning")
-        for reason in result.reasons
-    )
+    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in result.reasons
 
 
 def test_l2_4_moving_eager_export_to_required_initializer_does_not_bypass(tree):
@@ -224,10 +262,7 @@ def test_l2_4_moving_eager_export_to_required_initializer_does_not_bypass(tree):
     )
     result = verify(tree)
     assert result.root_status == "ROOT_INCONCLUSIVE"
-    assert any(
-        reason.startswith("LAZY_REVIEW_REQUIRED:app.services.planning")
-        for reason in result.reasons
-    )
+    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in result.reasons
 
 
 def test_l2_5_computed_planning_dynamic_import_remains_inconclusive(tree):
@@ -348,7 +383,7 @@ def test_l2_10_correction_needs_no_lazy_exception(tree):
     add_module(root, "app.tasks.worker", "import app.services\n")
     result = verify(tree)
     assert result.finite_gate_passed, result.reasons
-    assert policy.body["lazy_imports"] == []
+    assert policy.body["lazy_imports"]
     assert not any("LAZY" in reason for reason in result.reasons)
 
 
@@ -576,28 +611,16 @@ def test_lazy_without_independent_review(tree, statement):
     add_module(root, "app.tasks.worker", "import app.services.planning\n")
     result = verify(tree)
     assert result.root_status == "ROOT_INCONCLUSIVE"
-    assert any("LAZY_REVIEW_REQUIRED" in r for r in result.reasons)
+    assert any("LAZY" in marker for marker in result.reasons)
 
 
 def test_exact_reviewed_lazy_exception_and_new_worker_access(tree, tmp_path):
     root, policy = tree
-    source = "_EXPORTS = {'Export': ('app.services.planning.leaf', 'Export')}\ndef __getattr__(name):\n    module_name, attr_name = _EXPORTS[name]\n    from importlib import import_module\n    return getattr(import_module(module_name), attr_name)\n"
+    source = "_EXPORTS = {'Export': ('app.services.planning.leaf', 'Export')}\ndef __getattr__(name):\n    module_name, attr_name = _EXPORTS[name]\n    from importlib import import_module\n    value = getattr(import_module(module_name), attr_name)\n    return value\n"
     path = add_module(root, "app.services.planning", source, package=True)
     add_module(root, "app.tasks.worker", "import app.services.planning\n")
-    function = ast.parse(source).body[1]
     body = policy.body
-    body["lazy_imports"] = [
-        {
-            "module": "app.services.planning",
-            "source_digest": v.digest(path.read_bytes()),
-            "site_digest": v.digest(
-                ast.dump(function, include_attributes=True).encode()
-            ),
-            "review_record_id": "synthetic-independent-review-only",
-            "export_names": ["Export"],
-            "mechanism": "getattr-export-map",
-        }
-    ]
+    body["lazy_imports"] = [reviewed_lazy_declaration(path, source)]
     selected = selected_policy(tmp_path, root, body)
     assert verify((root, selected)).finite_gate_passed
     add_module(root, "app.tasks.worker", "from app.services.planning import Export\n")
@@ -750,36 +773,40 @@ def test_deterministic_and_no_candidate_execution(tree):
 
 
 @pytest.mark.parametrize(
-    "statement",
+    "statement, expect_access",
     [
-        "import app.services.planning as p\np.Export",
-        "import app.services.planning as p\nconsumer(p)",
-        "from importlib import import_module\np = import_module('app.services.planning')",
+        ("import app.services.planning as p\np.Export", True),
+        ("import app.services.planning as p\nconsumer(p)", True),
+        (
+            "from importlib import import_module\np = import_module('app.services.planning')",
+            False,
+        ),
     ],
 )
-def test_reviewed_lazy_alias_access_holds(tree, tmp_path, statement):
+def test_reviewed_lazy_alias_access_holds(tree, tmp_path, statement, expect_access):
     root, policy = tree
-    source = "_EXPORTS = {'Export': ('app.services.planning.leaf', 'Export')}\ndef __getattr__(name):\n    module_name, attr_name = _EXPORTS[name]\n    from importlib import import_module\n    return getattr(import_module(module_name), attr_name)\n"
+    source = "_EXPORTS = {'Export': ('app.services.planning.leaf', 'Export')}\ndef __getattr__(name):\n    module_name, attr_name = _EXPORTS[name]\n    from importlib import import_module\n    value = getattr(import_module(module_name), attr_name)\n    return value\n"
     path = add_module(root, "app.services.planning", source, package=True)
-    function = ast.parse(source).body[1]
     body = policy.body
-    body["lazy_imports"] = [
-        {
-            "module": "app.services.planning",
-            "source_digest": v.digest(path.read_bytes()),
-            "site_digest": v.digest(
-                ast.dump(function, include_attributes=True).encode()
-            ),
-            "review_record_id": "synthetic-only",
-            "export_names": ["Export"],
-            "mechanism": "getattr-export-map",
-        }
-    ]
+    body["lazy_imports"] = [reviewed_lazy_declaration(path, source, "synthetic-only")]
     selected = selected_policy(tmp_path, root, body)
     add_module(root, "app.tasks.worker", statement + "\n")
     result = verify((root, selected))
-    assert result.root_status == "ROOT_INCONCLUSIVE"
-    assert "WORKER_FACING_LAZY_ACCESS:app.services.planning" in result.reasons
+    if expect_access:
+        assert result.root_status == "ROOT_INCONCLUSIVE"
+        assert any(
+            marker in result.reasons
+            for marker in (
+                "WORKER_FACING_LAZY_ACCESS:app.services.planning",
+                "PACKAGE_HANDLE_ESCAPE:app.tasks.worker:2",
+            )
+        )
+    else:
+        assert result.finite_gate_passed, result.reasons
+        assert any(
+            reason == "DORMANT_UNLOADED_LAZY_SITE:app.services.planning"
+            for reason in result.derivation.diagnostics
+        )
 
 
 def test_builtin_import_shadow_is_not_proof(tree):
@@ -799,18 +826,12 @@ def test_unreviewed_mechanism_cannot_use_review_label(tree, tmp_path):
     source = "def __getattr__(name):\n    from importlib import import_module\n    return import_module(name)\n"
     path = add_module(root, "app.services.planning", source, package=True)
     body = policy.body
-    body["lazy_imports"] = [
-        {
-            "module": "app.services.planning",
-            "source_digest": v.digest(path.read_bytes()),
-            "site_digest": v.digest(
-                ast.dump(ast.parse(source).body[0], include_attributes=True).encode()
-            ),
-            "review_record_id": "synthetic-only",
-            "export_names": ["Export"],
-            "mechanism": "getattr-export-map",
-        }
-    ]
+    declaration = copy.deepcopy(body["lazy_imports"][0])
+    declaration["source_digest"] = v.digest(path.read_bytes())
+    declaration["site_digest"] = v.digest(
+        ast.dump(ast.parse(source).body[0], include_attributes=True).encode()
+    )
+    body["lazy_imports"] = [declaration]
     selected = selected_policy(tmp_path, root, body)
     add_module(root, "app.tasks.worker", "import app.services.planning\n")
     assert not verify((root, selected)).finite_gate_passed
@@ -870,3 +891,351 @@ def test_cli_requires_both_verdicts_and_never_claims_production(
     output = json.loads(capsys.readouterr().out)
     assert output["root_status"] == "ROOT_INVALID"
     assert not output["finite_gate_passed"]
+
+
+def test_sc1_01_exact_reviewed_dormant_site(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    result = verify((root, policy))
+    assert result.finite_gate_passed, result.reasons
+    assert result.root_status == "ROOT_VALID"
+    assert (
+        result.derivation.dormant_lazy_sites[0]["classification"]
+        == v.LAZY_CLASSIFICATION
+    )
+    assert (
+        "DORMANT_UNLOADED_LAZY_SITE:app.services.planning"
+        in result.derivation.diagnostics
+    )
+    assert not any("LAZY" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize(
+    "case, statement, reason",
+    [
+        (
+            "SC1-02",
+            "from app.services.planning import Export",
+            "WORKER_FACING_LAZY_ACCESS",
+        ),
+        (
+            "SC1-03",
+            "import app.services.planning as p\np.Export",
+            "WORKER_FACING_LAZY_ACCESS",
+        ),
+        (
+            "SC1-04",
+            "import app.services.planning as p\ngetattr(p, dynamic_name)",
+            "WORKER_FACING_LAZY_ACCESS",
+        ),
+        (
+            "SC1-05",
+            "import app.services.planning as p\nhasattr(p, 'Export')",
+            "WORKER_FACING_LAZY_ACCESS",
+        ),
+        (
+            "SC1-05-direct",
+            "import app.services.planning as p\np.__getattr__('Export')",
+            "WORKER_FACING_LAZY_ACCESS",
+        ),
+        ("SC1-06", "from app.services.planning import *", "WILDCARD_IMPORT"),
+        (
+            "SC1-13",
+            "from app.services.planning import Export",
+            "WORKER_FACING_LAZY_ACCESS",
+        ),
+    ],
+)
+def test_sc1_lazy_access_and_unsupported_cases(tree, tmp_path, case, statement, reason):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", statement + "\n")
+    result = verify((root, policy))
+    assert not result.finite_gate_passed, case
+    assert any(reason in item for item in result.reasons), result.reasons
+
+
+@pytest.mark.parametrize(
+    "statement, child",
+    [
+        ("import app.services.planning", None),
+        ("import app.services.planning.export", "app.services.planning.export"),
+        ("from app.services.planning import export", "app.services.planning.export"),
+        (
+            "from importlib import import_module\nimport_module('app.services.planning')",
+            None,
+        ),
+        (
+            "from importlib import import_module\nimport_module('app.services.planning.export')",
+            "app.services.planning.export",
+        ),
+    ],
+)
+def test_sc1_07_literal_imports_are_not_lazy_attribute_access(
+    tree, tmp_path, statement, child
+):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    if child:
+        add_module(root, child, "class Export: pass\n")
+    add_module(root, "app.tasks.worker", statement + "\n")
+    result = verify((root, policy))
+    assert result.finite_gate_passed, result.reasons
+    assert "WORKER_FACING_LAZY_ACCESS:app.services.planning" not in result.reasons
+
+
+def test_sc1_08_computed_importlib_target_holds(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(
+        root,
+        "app.tasks.worker",
+        "import importlib\nimportlib.import_module(computed_target)\n",
+    )
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert any("UNRESOLVED_DYNAMIC_IMPORT" in reason for reason in result.reasons)
+
+
+def test_unknown_fromlist_holds(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", "from app.services.planning import Unknown\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert any("UNRESOLVED_FROM_IMPORT" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "_EXPORTS.update({'Export': ('app.other', 'Export')})",
+        "_EXPORTS.clear()",
+        "_EXPORTS.pop('Export')",
+        "_EXPORTS.popitem()",
+        "_EXPORTS.setdefault('Export', ('app.other', 'Export'))",
+        "_EXPORTS |= {'Export': ('app.other', 'Export')}",
+        "_EXPORTS.rotate()",
+        "_EXPORTS['Export'] = ('app.other', 'Export')",
+        "del _EXPORTS['Export']",
+        "alias = _EXPORTS\nalias.clear()",
+        "container = [_EXPORTS]",
+        "unknown_helper(_EXPORTS)",
+        "def return_map():\n    return _EXPORTS",
+        "_EXPORTS = {}",
+        "first, second = _EXPORTS",
+    ],
+)
+def test_sc1_09_export_map_mutations_and_escapes_hold(tree, tmp_path, mutation):
+    source = planning_lazy_source(("Export",)) + "\n" + mutation + "\n"
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path, source)
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE", mutation
+    assert any(
+        marker in reason
+        for reason in result.reasons
+        for marker in ("EXPORT_MAP", "LAZY_MECHANISM", "LAZY_POLICY")
+    ), result.reasons
+
+
+def test_sc1_10_computed_export_map_entry_holds(tree, tmp_path):
+    source = (
+        "module_name = 'app.services.planning.export'\n"
+        "_EXPORTS = {'Export': (module_name, 'Export')}\n"
+        "def __getattr__(name):\n"
+        "    module_name, attr_name = _EXPORTS[name]\n"
+        "    from importlib import import_module\n"
+        "    value = getattr(import_module(module_name), attr_name)\n"
+        "    return value\n"
+    )
+    root, base_policy = tree
+    path = add_module(root, "app.services.planning", source, package=True)
+    add_module(root, "app.services", "\n", package=True)
+    add_module(root, "app.tasks.worker", "import app.services.planning\n")
+    add_module(root, "app.services.planning.export", "class Export: pass\n")
+    body = base_policy.body
+    declaration = copy.deepcopy(body["lazy_imports"][0])
+    function = next(
+        node for node in ast.parse(source).body if isinstance(node, ast.FunctionDef)
+    )
+    declaration["source_digest"] = v.digest(path.read_bytes())
+    declaration["site_digest"] = v.digest(
+        ast.dump(function, include_attributes=True).encode()
+    )
+    body["lazy_imports"] = [declaration]
+    policy = selected_policy(tmp_path, root, body)
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert any("LAZY_MECHANISM_UNSUPPORTED" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import app.services.planning as p\nq = p\nq.Export",
+        "import app.services.planning as p\ncontainer = [p]",
+        "import app.services.planning as p\nhelper(p)",
+        "import app.services.planning as p\ndef return_package():\n    return p",
+        "import app.services.planning as p\np = other",
+        "import app.services.planning as p\ndef helper(p):\n    return p.Export",
+    ],
+)
+def test_sc1_11_alias_assignment_rebinding_and_escape_hold(tree, tmp_path, statement):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", statement + "\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE", result.reasons
+    assert any("PACKAGE_" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import app.services.planning as p\nglobals()['p'].Export",
+        "import app.services.planning as p\nlocals()['p'].Export",
+        "import app.services.planning as p\nvars(p).get('Export')",
+        "import app.services.planning as p\np.__dict__['Export']",
+        "import app.services.planning as p\nunknown_helper(p)",
+    ],
+)
+def test_sc1_12_reflection_and_helper_access_hold(tree, tmp_path, statement):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", statement + "\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE", result.reasons
+    assert any(
+        "REFLECTION_UNSUPPORTED" in reason or "PACKAGE_HANDLE_ESCAPE" in reason
+        for reason in result.reasons
+    )
+
+
+def test_sc1_14_candidate_policy_substitution_is_rejected(tree):
+    root, policy = tree
+    candidate_policy = root / "candidate-policy.json"
+    candidate_policy.write_bytes(FIXTURE.read_bytes())
+    with pytest.raises(v.PolicyError, match="CANDIDATE_POLICY_NOT_AUTHORITATIVE"):
+        v.load_policy(
+            candidate_policy, candidate_root=root, expected_digest=policy.digest
+        )
+
+
+def test_sc1_15_candidate_checker_substitution_is_never_executed(tree):
+    root, policy = tree
+    add_module(
+        root,
+        "app.services.orchestration.worker_identity",
+        "raise RuntimeError('candidate checker executed')\n",
+    )
+    result = verify((root, policy), omit="app.services.model_adaptation")
+    assert result.root_status == "ROOT_INVALID"
+    assert "MISSING_REQUIRED_IDENTITY:app.services.model_adaptation" in result.reasons
+
+
+def test_sc1_16_i12_model_adaptation_omission_remains_invalid(tree):
+    result = verify(tree, omit="app.services.model_adaptation")
+    assert result.root_status == "ROOT_INVALID"
+    assert "MISSING_REQUIRED_IDENTITY:app.services.model_adaptation" in result.reasons
+
+
+@pytest.mark.parametrize(
+    "mutation, reason",
+    [
+        ("_EXPORTS.update({'Export': ('app.other', 'Export')})", "EXPORT_MAP"),
+        ("_EXPORTS.clear()", "EXPORT_MAP"),
+        ("_EXPORTS.pop('Export')", "EXPORT_MAP"),
+        ("_EXPORTS.setdefault('Export', ('app.other', 'Export'))", "EXPORT_MAP"),
+        ("_EXPORTS['Export'] = ('app.other', 'Export')", "EXPORT_MAP"),
+        ("del _EXPORTS['Export']", "EXPORT_MAP"),
+        ("alias = _EXPORTS\nalias['Export'] = ('app.other', 'Export')", "EXPORT_MAP"),
+        ("box = {'exports': _EXPORTS}", "EXPORT_MAP"),
+        ("send(_EXPORTS)", "EXPORT_MAP"),
+        ("def get_map():\n    return _EXPORTS", "EXPORT_MAP"),
+        ("_EXPORTS = {}", "EXPORT_MAP"),
+        ("a, b = _EXPORTS", "EXPORT_MAP"),
+        ("globals()['x'] = _EXPORTS", "EXPORT_MAP"),
+        ("locals()['x'] = _EXPORTS", "EXPORT_MAP"),
+        ("vars()['x'] = _EXPORTS", "EXPORT_MAP"),
+        ("module.__dict__['_EXPORTS'] = {}", "REFLECTION"),
+    ],
+)
+def test_additional_export_map_mutation_negatives(tree, tmp_path, mutation, reason):
+    source = planning_lazy_source(("Export",)) + "\n" + mutation + "\n"
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path, source)
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE", result.reasons
+    assert any(reason in item for item in result.reasons), result.reasons
+
+
+def test_changed_lazy_source_site_and_map_identities_hold(tree, tmp_path):
+    root, policy, path = reviewed_planning_tree(tree, tmp_path)
+    body = policy.body
+    body["lazy_imports"][0]["source_digest"] = "sha256:" + "0" * 64
+    changed = selected_policy(tmp_path, root, body)
+    result = verify((root, changed))
+    assert any("LAZY_POLICY_IDENTITY_MISMATCH" in reason for reason in result.reasons)
+    assert path.exists()
+
+
+def test_changed_lazy_site_digest_holds(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    body = policy.body
+    body["lazy_imports"][0]["site_digest"] = "sha256:" + "0" * 64
+    selected = selected_policy(tmp_path, root, body)
+    result = verify((root, selected))
+    assert any("LAZY_POLICY_IDENTITY_MISMATCH" in reason for reason in result.reasons)
+
+
+def test_changed_lazy_map_digest_is_rejected(tree, tmp_path):
+    root, policy = tree
+    body = policy.body
+    body["lazy_imports"][0]["export_map_digest"] = "sha256:" + "0" * 64
+    with pytest.raises(v.PolicyError, match="LAZY_EXPORT_MAP_IDENTITY"):
+        selected_policy(tmp_path, root, body)
+
+
+@pytest.mark.parametrize(
+    "change, expected",
+    [
+        ("policy_digest", "POLICY_DIGEST_MISMATCH"),
+        ("verifier_compatibility_digest", "POLICY_VERSION_COMPATIBILITY"),
+        ("duplicate_lazy", "DUPLICATE_LAZY_SITE"),
+        ("schema", "POLICY_VERSION_COMPATIBILITY"),
+    ],
+)
+def test_policy_digest_compatibility_duplicate_and_schema_negatives(
+    tree, tmp_path, change, expected
+):
+    root, policy = tree
+    body = policy.body
+    if change == "policy_digest":
+        with pytest.raises(v.PolicyError, match="POLICY_DIGEST_MISMATCH"):
+            v.load_policy(
+                FIXTURE, candidate_root=root, expected_digest="sha256:" + "0" * 64
+            )
+        return
+    if change == "verifier_compatibility_digest":
+        body["verifier_compatibility_digest"] = "sha256:" + "0" * 64
+    elif change == "duplicate_lazy":
+        body["lazy_imports"].append(copy.deepcopy(body["lazy_imports"][0]))
+    else:
+        body["schema"] = "orchestrator.worker-root-policy.v1"
+    with pytest.raises(v.PolicyError, match=expected):
+        selected_policy(tmp_path, root, body)
+
+
+def test_unknown_loader_and_parent_initializer_edge_hold(tree, tmp_path):
+    source = (
+        "_EXPORTS = {'Export': ('app.services.planning.export', 'Export')}\n"
+        "def __getattr__(name):\n"
+        "    module_name, attr_name = _EXPORTS[name]\n"
+        "    from importlib import import_module as load\n"
+        "    value = getattr(load(module_name), attr_name)\n"
+        "    return value\n"
+    )
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path, source)
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert any("LAZY_MECHANISM_UNSUPPORTED" in reason for reason in result.reasons)
+    add_module(
+        root,
+        "app.services.agents",
+        "from app.services.planning import Export\n",
+        package=True,
+    )
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE"

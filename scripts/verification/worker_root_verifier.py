@@ -20,14 +20,19 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-SCHEMA = "orchestrator.worker-root-policy.v1"
+SCHEMA = "orchestrator.worker-root-policy.v2"
 POLICY_ID = "phase37-worker-safety-roots.1"
 CANONICALIZATION = "orchestrator.canonical-json.v1"
-RESOLVER_VERSION = "finite-ast.1"
+RESOLVER_VERSION = "finite-ast.2"
+LAZY_LOADER_GRAMMAR = "getattr-export-map-importlib-attribute-cache.1"
+LAZY_CLASSIFICATION = "DORMANT_UNLOADED_LAZY_SITE"
 COMPATIBILITY_DIGEST = (
     "sha256:"
     + hashlib.sha256(
-        b"finite-ast.1:explicit-roots:direct-edges:initializer-fixed-point:fail-closed"
+        (
+            "finite-ast.2:explicit-roots:direct-edges:initializer-fixed-point:"
+            "fail-closed:lazy-dormant-v1:export-map-immutable:package-alias-v1"
+        ).encode()
     ).hexdigest()
 )
 # Independently reviewed contract constants, NOT imported from candidate code.
@@ -126,6 +131,21 @@ def digest(data: bytes) -> str:
 
 def body_digest(body: dict) -> str:
     return digest(SCHEMA.encode() + b"\0" + canonical(body))
+
+
+def lazy_export_map_entries(
+    mapping: dict[str, tuple[str, str]]
+) -> list[dict[str, str]]:
+    """Return the only canonical representation of a reviewed export map."""
+
+    return [
+        {"name": name, "module": value[0], "attribute": value[1]}
+        for name, value in sorted(mapping.items())
+    ]
+
+
+def lazy_export_map_digest(entries: list[dict[str, str]]) -> str:
+    return digest(b"orchestrator.lazy-export-map.v1\0" + canonical(entries))
 
 
 def _keys(value: Any, keys: set[str], reason: str) -> None:
@@ -283,14 +303,23 @@ def load_policy(path: Path, *, candidate_root: Path, expected_digest: str) -> Po
                 "module",
                 "source_digest",
                 "site_digest",
+                "export_map_digest",
+                "export_map",
                 "review_record_id",
                 "export_names",
-                "mechanism",
+                "loader_grammar",
+                "verifier_compatibility_digest",
+                "classification",
             },
             "LAZY_FIELDS",
         )
         name = _module(item["module"])
-        if name != "app.services.planning" or item["mechanism"] != "getattr-export-map":
+        if (
+            name != "app.services.planning"
+            or item["loader_grammar"] != LAZY_LOADER_GRAMMAR
+            or item["verifier_compatibility_digest"] != COMPATIBILITY_DIGEST
+            or item["classification"] != LAZY_CLASSIFICATION
+        ):
             raise PolicyError("UNSUPPORTED_LAZY_DECLARATION")
         for key in ("source_digest", "site_digest"):
             if not isinstance(item[key], str) or not DIGEST_RE.fullmatch(item[key]):
@@ -301,13 +330,40 @@ def load_policy(path: Path, *, candidate_root: Path, expected_digest: str) -> Po
             or not exports
             or not all(type(x) is str and x.isidentifier() for x in exports)
             or exports != sorted(set(exports))
-            or not item["review_record_id"]
+            or not isinstance(item["review_record_id"], str)
+            or not item["review_record_id"].strip()
         ):
             raise PolicyError("LAZY_REVIEW_REQUIRED")
-        key = (name, item["site_digest"])
-        if key in sites:
+        export_map = item["export_map"]
+        if (
+            not isinstance(export_map, list)
+            or not all(
+                isinstance(value, dict) and "name" in value for value in export_map
+            )
+            or export_map != sorted(export_map, key=lambda value: value["name"])
+        ):
+            raise PolicyError("LAZY_EXPORT_MAP_REQUIRED")
+        names = []
+        for entry in export_map:
+            _keys(entry, {"name", "module", "attribute"}, "LAZY_EXPORT_FIELDS")
+            entry_name = entry["name"]
+            if (
+                type(entry_name) is not str
+                or not entry_name.isidentifier()
+                or entry_name in names
+                or _module(entry["module"]) != entry["module"]
+                or type(entry["attribute"]) is not str
+                or not entry["attribute"].isidentifier()
+            ):
+                raise PolicyError("LAZY_EXPORT_MAP_REQUIRED")
+            names.append(entry_name)
+        if names != exports or not DIGEST_RE.fullmatch(item["export_map_digest"]):
+            raise PolicyError("LAZY_EXPORT_MAP_IDENTITY")
+        if lazy_export_map_digest(export_map) != item["export_map_digest"]:
+            raise PolicyError("LAZY_EXPORT_MAP_IDENTITY")
+        if name in sites:
             raise PolicyError("DUPLICATE_LAZY_SITE")
-        sites.add(key)
+        sites.add(name)
     # Envelope retained only as unauthenticated metadata. Never infer authorization.
     _keys(envelope["issuer_envelope"], {"kind"}, "ISSUER_ENVELOPE_FIELDS")
     if envelope["issuer_envelope"]["kind"] != "isolated-test-fixture":
@@ -339,6 +395,7 @@ class Derivation:
     parsed_modules: tuple[str, ...]
     reasons: tuple[str, ...]
     diagnostics: tuple[str, ...]
+    dormant_lazy_sites: tuple[dict, ...]
     parsed_bytes: int
 
     @property
@@ -387,6 +444,11 @@ class _Deriver:
         }
         self.lazy_access: set[str] = set()
         self.lazy_modules: set[str] = set()
+        self.dormant_lazy_sites: dict[str, dict] = {}
+        self.lazy_declarations = {
+            item["module"]: item for item in self.body["lazy_imports"]
+        }
+        self.export_binding_id: int | None = None
 
     def contain(self, relative: str) -> Path:
         try:
@@ -523,6 +585,7 @@ class _Deriver:
         }
         package_aliases: dict[str, str] = {}
         bindings: dict[str, int] = {}
+        allowed_package_stores: set[int] = set()
         for node in nodes:
             if isinstance(node, ast.Import):
                 for item in node.names:
@@ -532,7 +595,7 @@ class _Deriver:
                         item.name if item.asname else item.name.split(".")[0]
                     )
                     if item.name.startswith("app"):
-                        package_aliases[bound] = item.name if item.asname else "app"
+                        package_aliases[bound] = item.name if item.asname else bound
             elif isinstance(node, ast.ImportFrom):
                 base = (
                     self.relative(name, path, node.module or "", node.level)
@@ -543,8 +606,18 @@ class _Deriver:
                     bound = item.asname or item.name
                     bindings[bound] = bindings.get(bound, 0) + 1
                     aliases[bound] = base + "." + item.name
-                    if base.startswith("app"):
-                        package_aliases[bound] = base + "." + item.name
+                    if base.startswith("app") and item.name != "*":
+                        try:
+                            resolved = self.resolve(
+                                base + "." + item.name, optional=True
+                            )
+                        except SourceError:
+                            resolved = None
+                        if resolved is not None and resolved[1] in (
+                            "initializer",
+                            "namespace",
+                        ):
+                            package_aliases[bound] = base + "." + item.name
             elif isinstance(node, ast.Name) and isinstance(
                 node.ctx, (ast.Store, ast.Del)
             ):
@@ -555,6 +628,31 @@ class _Deriver:
                 bindings[node.name] = bindings.get(node.name, 0) + 1
             elif isinstance(node, ast.arg):
                 bindings[node.arg] = bindings.get(node.arg, 0) + 1
+        for node in nodes:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = node.value
+            if not (
+                isinstance(value, ast.Call)
+                and self.call_name(value.func, aliases) == "importlib.import_module"
+                and len(value.args) == 1
+                and isinstance(value.args[0], ast.Constant)
+                and type(value.args[0].value) is str
+            ):
+                continue
+            target = node.targets[0] if isinstance(node, ast.Assign) else node.target
+            if not isinstance(target, ast.Name):
+                continue
+            try:
+                resolved = self.resolve(value.args[0].value, optional=True)
+            except SourceError:
+                resolved = None
+            if resolved is not None and resolved[1] in ("initializer", "namespace"):
+                package_aliases[target.id] = value.args[0].value
+                allowed_package_stores.add(id(target))
+        for node in nodes:
+            if isinstance(node, ast.arg) and node.arg in package_aliases:
+                self.uncertain.add("PACKAGE_ALIAS_REBIND:" + name + ":" + node.arg)
         if name == "app.celery_app":
             declarations = []
             for call in nodes:
@@ -589,38 +687,63 @@ class _Deriver:
             if declarations != [REGISTRATIONS]:
                 self.invalid.add("REGISTRATION_CONTRACT_MISMATCH")
         lazy_functions = [
-            n
-            for n in nodes
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and n.name == "__getattr__"
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "__getattr__"
+        ]
+        nested_lazy_functions = [
+            node
+            for node in nodes
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "__getattr__"
+            and node not in lazy_functions
         ]
         parents = {
             id(child): parent
             for parent in nodes
             for child in ast.iter_child_nodes(parent)
         }
-        lazy_calls = {
-            id(child)
-            for function in lazy_functions
-            for child in ast.walk(function)
-            if isinstance(child, ast.Call)
-        }
-        if lazy_functions:
+        if lazy_functions or nested_lazy_functions:
             self.lazy_modules.add(name)
-        reviewed_sites = set()
-        for function in lazy_functions:
+        if nested_lazy_functions:
+            self.uncertain.add("LAZY_FUNCTION_NOT_MODULE_LEVEL:" + name)
+        reviewed_sites: set[str] = set()
+        lazy_calls: set[int] = set()
+        self.export_binding_id = None
+        if len(lazy_functions) > 1:
+            self.uncertain.add("LAZY_FUNCTION_COUNT:" + name)
+        elif lazy_functions:
+            function = lazy_functions[0]
             site = digest(ast.dump(function, include_attributes=True).encode())
-            for declaration in self.body["lazy_imports"]:
-                if (
-                    declaration["module"] == name
-                    and declaration["source_digest"] == digest(data)
-                    and declaration["site_digest"] == site
-                ):
-                    if self.lazy_shape(tree, function, declaration["export_names"]):
-                        reviewed_sites.add(site)
-                    else:
-                        self.uncertain.add("LAZY_MECHANISM_UNSUPPORTED:" + name)
-        self.reviewed_sites = reviewed_sites
+            declaration = self.lazy_declarations.get(name)
+            reviewed = self.reviewed_lazy_site(tree, function, declaration, data)
+            if reviewed and not reviewed.get("identity_mismatch"):
+                reviewed_sites.add(site)
+                self.dormant_lazy_sites[name] = {
+                    "module": name,
+                    "source_digest": digest(data),
+                    "site_digest": site,
+                    "export_map_digest": reviewed["export_map_digest"],
+                    "classification": LAZY_CLASSIFICATION,
+                }
+                self.diagnostics.add(LAZY_CLASSIFICATION + ":" + name)
+                lazy_calls = {
+                    id(node)
+                    for node in ast.walk(function)
+                    if isinstance(node, ast.Call)
+                    and self.call_name(node.func, {"import_module": "import_module"})
+                    == "import_module"
+                }
+            elif declaration is None:
+                self.uncertain.add(
+                    "LAZY_REVIEW_REQUIRED:" + name + ":" + str(function.lineno)
+                )
+            elif reviewed and reviewed.get("identity_mismatch"):
+                self.uncertain.add("LAZY_POLICY_IDENTITY_MISMATCH:" + name)
+            else:
+                self.uncertain.add("LAZY_MECHANISM_UNSUPPORTED:" + name)
+        elif name in self.lazy_declarations:
+            self.uncertain.add("LAZY_DECLARATION_WITHOUT_SITE:" + name)
         for node in sorted(
             nodes,
             key=lambda n: (
@@ -664,8 +787,16 @@ class _Deriver:
                             child = base + "." + item.name
                             if self.resolve(child, optional=True) is not None:
                                 self.require(child, name, node, "from-submodule")
-                            else:
+                            elif (
+                                base in self.lazy_declarations
+                                and item.name
+                                in self.lazy_declarations[base]["export_names"]
+                            ):
                                 self.lazy_access.add(base)
+                                self.diagnostics.add("LAZY_SYMBOL_IMPORT:" + child)
+                            elif base in self.lazy_declarations:
+                                self.uncertain.add("UNRESOLVED_FROM_IMPORT:" + child)
+                            else:
                                 self.diagnostics.add("SYMBOL_IMPORT:" + child)
                 elif isinstance(node, ast.Call):
                     function = self.call_name(node.func, aliases)
@@ -678,6 +809,23 @@ class _Deriver:
                                 "AMBIGUOUS_DYNAMIC_ALIAS:" + name, uncertain=True
                             )
                         self.dynamic(name, path, node, lazy_calls, lazy_functions)
+                    elif function in ("globals", "locals", "vars"):
+                        if not self.is_exact_lazy_cache(node, parents):
+                            raise SourceError(
+                                "REFLECTION_UNSUPPORTED:"
+                                + name
+                                + ":"
+                                + str(node.lineno),
+                                uncertain=True,
+                            )
+                    elif function in ("getattr", "hasattr") and node.args:
+                        package = self.lazy_package_name(node.args[0], package_aliases)
+                        if package:
+                            self.lazy_access.add(package)
+                        elif function == "getattr" and self.call_name(
+                            node.args[0], aliases
+                        ).startswith("importlib"):
+                            raise SourceError("COMPUTED_LOADER:" + name, uncertain=True)
                     elif (
                         function in ("eval", "exec")
                         or function.rsplit(".", 1)[-1]
@@ -699,14 +847,6 @@ class _Deriver:
                             "UNKNOWN_LOADER:" + name + ":" + str(node.lineno),
                             uncertain=True,
                         )
-                    elif (
-                        function == "getattr"
-                        and node.args
-                        and self.call_name(node.args[0], aliases).startswith(
-                            "importlib"
-                        )
-                    ):
-                        raise SourceError("COMPUTED_LOADER:" + name, uncertain=True)
                     elif isinstance(node.func, ast.Attribute) and node.func.attr in (
                         "append",
                         "extend",
@@ -720,23 +860,46 @@ class _Deriver:
                             raise SourceError(
                                 "IMPORT_PATH_MUTATION:" + name, uncertain=True
                             )
-                if isinstance(node, (ast.Name, ast.Attribute)):
-                    package_value = self.call_name(node, package_aliases)
-                    parent = parents.get(id(node))
-                    if package_value in {
-                        d["module"] for d in self.body["lazy_imports"]
-                    }:
-                        if not (
-                            isinstance(parent, ast.Attribute) and parent.value is node
-                        ):
-                            self.lazy_access.add(package_value)
                 if isinstance(node, ast.Attribute):
+                    package = self.lazy_package_name(node.value, package_aliases)
                     full = self.call_name(node, package_aliases)
-                    for declaration in self.body["lazy_imports"]:
-                        if full.startswith(declaration["module"] + "."):
-                            suffix = full[len(declaration["module"]) + 1 :]
-                            if suffix in declaration["export_names"]:
-                                self.lazy_access.add(declaration["module"])
+                    if full in self.lazy_declarations:
+                        parent = parents.get(id(node))
+                        if not (
+                            isinstance(node.ctx, ast.Store)
+                            or isinstance(parent, ast.Attribute)
+                            and parent.value is node
+                        ):
+                            raise SourceError(
+                                "PACKAGE_HANDLE_ESCAPE:"
+                                + name
+                                + ":"
+                                + str(node.lineno),
+                                uncertain=True,
+                            )
+                    if node.attr == "__dict__":
+                        raise SourceError(
+                            "REFLECTION_UNSUPPORTED:" + name + ":" + str(node.lineno),
+                            uncertain=True,
+                        )
+                    if package:
+                        parent = parents.get(id(node))
+                        if node.attr == "__getattr__":
+                            if isinstance(parent, ast.Call) and parent.func is node:
+                                self.lazy_access.add(package)
+                        else:
+                            declaration = self.lazy_declarations.get(package)
+                            suffix = full[len(package) + 1 :]
+                            if declaration and suffix in declaration["export_names"]:
+                                self.lazy_access.add(package)
+                            elif suffix and not self.is_concrete_child(package, suffix):
+                                raise SourceError(
+                                    "UNRESOLVED_PACKAGE_ATTRIBUTE:"
+                                    + name
+                                    + ":"
+                                    + str(node.lineno),
+                                    uncertain=True,
+                                )
                     if node.attr in (
                         "__path__",
                         "__loader__",
@@ -745,79 +908,299 @@ class _Deriver:
                         raise SourceError(
                             "IMPORT_PATH_MUTATION:" + name, uncertain=True
                         )
+                if isinstance(node, ast.Name) and node.id in package_aliases:
+                    parent = parents.get(id(node))
+                    if not (isinstance(parent, ast.Attribute) and parent.value is node):
+                        if isinstance(node.ctx, ast.Load):
+                            raise SourceError(
+                                "PACKAGE_HANDLE_ESCAPE:"
+                                + name
+                                + ":"
+                                + str(node.lineno),
+                                uncertain=True,
+                            )
+                if (
+                    isinstance(node, ast.Name)
+                    and self.call_name(node, package_aliases) in self.lazy_declarations
+                ):
+                    parent = parents.get(id(node))
+                    if isinstance(node.ctx, ast.Load) and not (
+                        isinstance(parent, ast.Attribute) and parent.value is node
+                    ):
+                        raise SourceError(
+                            "PACKAGE_HANDLE_ESCAPE:" + name + ":" + str(node.lineno),
+                            uncertain=True,
+                        )
+                if isinstance(node, ast.Name) and node.id == "_EXPORTS":
+                    if not self.allowed_export_map_use(node, parents):
+                        raise SourceError(
+                            "EXPORT_MAP_ESCAPE_OR_MUTATION:"
+                            + name
+                            + ":"
+                            + str(node.lineno),
+                            uncertain=True,
+                        )
+                if (
+                    isinstance(node, ast.Name)
+                    and isinstance(node.ctx, (ast.Store, ast.Del))
+                    and node.id in package_aliases
+                    and id(node) not in allowed_package_stores
+                ):
+                    raise SourceError(
+                        "PACKAGE_ALIAS_REBIND:" + name + ":" + str(node.lineno),
+                        uncertain=True,
+                    )
             except (SourceError, PolicyError) as exc:
                 self.record_error(
                     exc
                     if isinstance(exc, SourceError)
                     else SourceError(str(exc), uncertain=True)
                 )
-        for function in lazy_functions:
-            site = digest(ast.dump(function, include_attributes=True).encode())
-            if site not in reviewed_sites:
-                self.uncertain.add(
-                    "LAZY_REVIEW_REQUIRED:" + name + ":" + str(function.lineno)
-                )
+
+    def lazy_package_name(
+        self, node: ast.AST, package_aliases: dict[str, str]
+    ) -> str | None:
+        full = self.call_name(node, package_aliases)
+        if full in self.lazy_declarations:
+            return full
+        return None
+
+    def is_concrete_child(self, package: str, suffix: str) -> bool:
+        try:
+            return self.resolve(package + "." + suffix, optional=True) is not None
+        except SourceError:
+            return False
 
     @staticmethod
-    def lazy_shape(tree: ast.Module, function: ast.AST, exports: list[str]) -> bool:
-        """Recognize the reviewed literal export-map mechanism, without running it."""
+    def is_exact_lazy_cache(node: ast.Call, parents: dict[int, ast.AST]) -> bool:
+        parent = parents.get(id(node))
+        if not (
+            isinstance(parent, ast.Subscript)
+            and parent.value is node
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "globals"
+            and not node.args
+            and not node.keywords
+            and isinstance(parent.slice, ast.Name)
+            and parent.slice.id == "name"
+        ):
+            return False
+        assignment = parents.get(id(parent))
+        return (
+            isinstance(assignment, ast.Assign)
+            and len(assignment.targets) == 1
+            and assignment.targets[0] is parent
+            and isinstance(assignment.value, ast.Name)
+            and assignment.value.id == "value"
+        )
+
+    def allowed_export_map_use(
+        self, node: ast.Name, parents: dict[int, ast.AST]
+    ) -> bool:
+        if id(node) == self.export_binding_id:
+            return isinstance(node.ctx, ast.Store)
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            return False
+        parent = parents.get(id(node))
+        if (
+            isinstance(parent, ast.Subscript)
+            and parent.value is node
+            and isinstance(parent.slice, ast.Name)
+            and parent.slice.id == "name"
+        ):
+            return True
+        if isinstance(parent, ast.Compare):
+            return (
+                isinstance(parent.left, ast.Name)
+                and parent.left.id == "name"
+                and len(parent.ops) == 1
+                and isinstance(parent.ops[0], ast.NotIn)
+            )
+        if isinstance(parent, ast.Call) and node in parent.args:
+            grandparent = parents.get(id(parent))
+            return (
+                isinstance(parent.func, ast.Name)
+                and parent.func.id == "sorted"
+                and not parent.args[1:]
+                and not parent.keywords
+                and isinstance(grandparent, ast.Assign)
+                and len(grandparent.targets) == 1
+                and isinstance(grandparent.targets[0], ast.Name)
+                and grandparent.targets[0].id == "__all__"
+            )
+        return False
+
+    def reviewed_lazy_site(
+        self,
+        tree: ast.Module,
+        function: ast.FunctionDef,
+        declaration: dict | None,
+        data: bytes,
+    ) -> dict | None:
         assignments = [
             node
             for node in tree.body
             if isinstance(node, ast.Assign)
-            and any(
-                isinstance(t, ast.Name) and t.id == "_EXPORTS" for t in node.targets
-            )
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "_EXPORTS"
         ]
         if len(assignments) != 1:
-            return False
+            return None
+        self.export_binding_id = id(assignments[0].targets[0])
         try:
             mapping = ast.literal_eval(assignments[0].value)
         except (ValueError, TypeError, SyntaxError, RecursionError):
-            return False
-        if (
-            not isinstance(mapping, dict)
-            or sorted(mapping) != exports
-            or not all(
-                isinstance(value, tuple)
-                and len(value) == 2
-                and all(type(x) is str for x in value)
-                for value in mapping.values()
-            )
+            return None
+        if not isinstance(mapping, dict) or not all(
+            type(key) is str
+            and key.isidentifier()
+            and isinstance(value, tuple)
+            and len(value) == 2
+            and type(value[0]) is str
+            and type(value[1]) is str
+            for key, value in mapping.items()
         ):
-            return False
+            return None
         try:
             for module, attribute in mapping.values():
                 _module(module)
                 if not attribute.isidentifier():
-                    return False
+                    return None
         except PolicyError:
+            return None
+        entries = lazy_export_map_entries(mapping)
+        if declaration is None:
+            return None
+        if (
+            declaration["source_digest"] != digest(data)
+            or declaration["site_digest"]
+            != digest(ast.dump(function, include_attributes=True).encode())
+            or declaration["export_names"] != [entry["name"] for entry in entries]
+            or declaration["export_map"] != entries
+            or declaration["export_map_digest"] != lazy_export_map_digest(entries)
+        ):
+            return {"identity_mismatch": True}
+        if not self.lazy_shape(tree, function):
+            return None
+        return {"export_map_digest": declaration["export_map_digest"]}
+
+    @staticmethod
+    def lazy_shape(tree: ast.Module, function: ast.FunctionDef) -> bool:
+        """Recognize only the reviewed finite lazy-loader grammar."""
+
+        args = function.args
+        if (
+            function.decorator_list
+            or len(args.posonlyargs) + len(args.args) != 1
+            or args.args[0].arg != "name"
+            or args.vararg
+            or args.kwarg
+            or args.kwonlyargs
+            or args.defaults
+            or args.kw_defaults
+        ):
             return False
-        # Exact source/site digests are still mandatory. Shape alone is NOT review.
-        nodes = list(ast.walk(function))
-        binding = any(
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Tuple)
-            and [getattr(x, "id", None) for x in node.targets[0].elts]
+        statements = list(function.body)
+        if statements and _Deriver.lazy_guard(statements[0]):
+            statements = statements[1:]
+        if len(statements) not in (4, 5):
+            return False
+        map_binding, import_stmt, value_binding = statements[:3]
+        if not (
+            isinstance(map_binding, ast.Assign)
+            and len(map_binding.targets) == 1
+            and isinstance(map_binding.targets[0], ast.Tuple)
+            and [getattr(item, "id", None) for item in map_binding.targets[0].elts]
             == ["module_name", "attr_name"]
-            and isinstance(node.value, ast.Subscript)
-            and isinstance(node.value.value, ast.Name)
-            and node.value.value.id == "_EXPORTS"
-            and isinstance(node.value.slice, ast.Name)
-            and node.value.slice.id == "name"
-            for node in nodes
+            and isinstance(map_binding.value, ast.Subscript)
+            and isinstance(map_binding.value.value, ast.Name)
+            and map_binding.value.value.id == "_EXPORTS"
+            and isinstance(map_binding.value.slice, ast.Name)
+            and map_binding.value.slice.id == "name"
+        ):
+            return False
+        if not (
+            isinstance(import_stmt, ast.ImportFrom)
+            and import_stmt.level == 0
+            and import_stmt.module == "importlib"
+            and len(import_stmt.names) == 1
+            and import_stmt.names[0].name == "import_module"
+            and import_stmt.names[0].asname is None
+        ):
+            return False
+        if not (
+            isinstance(value_binding, ast.Assign)
+            and len(value_binding.targets) == 1
+            and isinstance(value_binding.targets[0], ast.Name)
+            and value_binding.targets[0].id == "value"
+            and isinstance(value_binding.value, ast.Call)
+            and isinstance(value_binding.value.func, ast.Name)
+            and value_binding.value.func.id == "getattr"
+            and len(value_binding.value.args) == 2
+            and isinstance(value_binding.value.args[0], ast.Call)
+            and isinstance(value_binding.value.args[0].func, ast.Name)
+            and value_binding.value.args[0].func.id == "import_module"
+            and len(value_binding.value.args[0].args) == 1
+            and isinstance(value_binding.value.args[0].args[0], ast.Name)
+            and value_binding.value.args[0].args[0].id == "module_name"
+            and isinstance(value_binding.value.args[1], ast.Name)
+            and value_binding.value.args[1].id == "attr_name"
+            and not value_binding.value.keywords
+        ):
+            return False
+        index = 3
+        if len(statements) == 5:
+            if not _Deriver.is_exact_lazy_cache_statement(statements[index]):
+                return False
+            index += 1
+        return (
+            index == len(statements) - 1
+            and isinstance(statements[index], ast.Return)
+            and isinstance(statements[index].value, ast.Name)
+            and statements[index].value.id == "value"
         )
-        call = any(
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "import_module"
-            and len(node.args) == 1
-            and isinstance(node.args[0], ast.Name)
-            and node.args[0].id == "module_name"
-            for node in nodes
+
+    @staticmethod
+    def lazy_guard(statement: ast.stmt) -> bool:
+        if not (
+            isinstance(statement, ast.If)
+            and not statement.orelse
+            and len(statement.body) == 1
+            and isinstance(statement.test, ast.Compare)
+            and len(statement.test.ops) == 1
+            and isinstance(statement.test.ops[0], ast.NotIn)
+            and isinstance(statement.test.left, ast.Name)
+            and statement.test.left.id == "name"
+            and len(statement.test.comparators) == 1
+            and isinstance(statement.test.comparators[0], ast.Name)
+            and statement.test.comparators[0].id == "_EXPORTS"
+        ):
+            return False
+        raise_stmt = statement.body[0]
+        return (
+            isinstance(raise_stmt, ast.Raise)
+            and isinstance(raise_stmt.exc, ast.Call)
+            and isinstance(raise_stmt.exc.func, ast.Name)
+            and raise_stmt.exc.func.id == "AttributeError"
         )
-        return binding and call
+
+    @staticmethod
+    def is_exact_lazy_cache_statement(statement: ast.stmt) -> bool:
+        return (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Subscript)
+            and isinstance(statement.targets[0].value, ast.Call)
+            and isinstance(statement.targets[0].value.func, ast.Name)
+            and statement.targets[0].value.func.id == "globals"
+            and not statement.targets[0].value.args
+            and not statement.targets[0].value.keywords
+            and isinstance(statement.targets[0].slice, ast.Name)
+            and statement.targets[0].slice.id == "name"
+            and isinstance(statement.value, ast.Name)
+            and statement.value.id == "value"
+        )
 
     @staticmethod
     def left_name(node: ast.AST) -> str:
@@ -842,12 +1225,10 @@ class _Deriver:
         functions: list,
     ) -> None:
         if id(node) in lazy_calls:
-            # An exception is a reviewed diagnostic, never loaded evidence.
-            for function in functions:
-                site = digest(ast.dump(function, include_attributes=True).encode())
-                if site in self.reviewed_sites:
-                    self.diagnostics.add("REVIEWED_UNLOADED_LAZY_SITE:" + name)
-                    return
+            # The exact reviewed loader is a dormant diagnostic, never loaded
+            # evidence. Its target comes from the independently reviewed map.
+            self.diagnostics.add(LAZY_CLASSIFICATION + ":" + name)
+            return
         argument = (
             node.args[0]
             if node.args
@@ -883,9 +1264,8 @@ class _Deriver:
                 raise SourceError(
                     "UNSUPPORTED_IMPORT_ARGUMENTS:" + name, uncertain=True
                 )
-        self.lazy_access.add(
-            target
-        )  # Dynamic package handles cannot prove non-use of lazy exports.
+        # Literal package and concrete-child imports are import edges, not
+        # attribute access. Package-handle use is analyzed separately.
         self.require(target, name, node, "literal-dynamic")
 
     def run(self) -> Derivation:
@@ -968,6 +1348,7 @@ class _Deriver:
             tuple(sorted(self.parsed)),
             tuple(sorted(self.invalid | self.uncertain)),
             tuple(sorted(self.diagnostics)),
+            tuple(self.dormant_lazy_sites[n] for n in sorted(self.dormant_lazy_sites)),
             self.parsed_bytes,
         )
 
