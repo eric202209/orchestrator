@@ -1239,3 +1239,214 @@ def test_unknown_loader_and_parent_initializer_edge_hold(tree, tmp_path):
     )
     result = verify((root, policy))
     assert result.root_status == "ROOT_INCONCLUSIVE"
+
+
+PLANNING_ALIAS = "import app.services.planning as p\n"
+C1_REASON = "LAZY_GETATTR_CALLABLE_ACCESS:app.tasks.worker:"
+
+
+@pytest.mark.parametrize(
+    "case, statement, line",
+    [
+        ("C1-01", "p.__getattr__('Export')", 2),
+        ("C1-02", "fn = p.__getattr__\nfn('Export')", 2),
+        ("C1-03", "fn = p.__getattr__", 2),
+        ("C1-04", "box = [p.__getattr__]", 2),
+        ("C1-05", "box = {'loader': p.__getattr__}", 2),
+        ("C1-06", "helper(p.__getattr__)", 2),
+        ("C1-07", "def leak():\n    return p.__getattr__", 3),
+        (
+            "C1-08",
+            "def outer():\n    fn = p.__getattr__\n"
+            "    def inner():\n        return fn('Export')\n    return inner",
+            3,
+        ),
+        ("C1-08-lambda", "leak = lambda: p.__getattr__", 2),
+        ("C1-09", "if flag:\n    fn = p.__getattr__", 3),
+        ("C1-10", "def never_called():\n    p.__getattr__", 3),
+        ("C1-11", "p.__getattr__.__call__('Export')", 2),
+        ("C1-12", "getattr(p, '__getattr__')", 2),
+        ("C1-store", "p.__getattr__ = replacement", 2),
+    ],
+)
+def test_c1_lazy_getattr_callable_access_holds(tree, tmp_path, case, statement, line):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    assert verify((root, policy)).finite_gate_passed
+    add_module(root, "app.tasks.worker", PLANNING_ALIAS + statement + "\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE", case
+    assert result.module_status == "MODULE_IDENTITY_INCONCLUSIVE", case
+    assert not result.finite_gate_passed, case
+    assert C1_REASON + str(line) in result.reasons, (case, result.reasons)
+    assert "WORKER_FACING_LAZY_ACCESS:app.services.planning" in result.reasons
+    assert not any(r.startswith("MISSING") for r in result.reasons), result.reasons
+
+
+@pytest.mark.parametrize(
+    "case, statement, line",
+    [
+        (
+            "C1-13-from",
+            "from app.services import planning as pl\nfn = pl.__getattr__",
+            2,
+        ),
+        (
+            "C1-13-dotted",
+            "import app.services.planning\nfn = app.services.planning.__getattr__",
+            2,
+        ),
+        (
+            "C1-13-importlib",
+            "from importlib import import_module\n"
+            "pl = import_module('app.services.planning')\nfn = pl.__getattr__",
+            3,
+        ),
+    ],
+)
+def test_c1_13_package_alias_callable_extraction_holds(
+    tree, tmp_path, case, statement, line
+):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", statement + "\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE", case
+    assert not result.finite_gate_passed, case
+    assert C1_REASON + str(line) in result.reasons, (case, result.reasons)
+
+
+@pytest.mark.parametrize(
+    "statement, reason",
+    [
+        ("q = p\nfn = q.__getattr__", "PACKAGE_HANDLE_ESCAPE:app.tasks.worker:2"),
+        (
+            "fn = (p if flag else other).__getattr__",
+            "PACKAGE_HANDLE_ESCAPE:app.tasks.worker:2",
+        ),
+        (
+            "from app.services.planning import __getattr__ as fn",
+            "UNRESOLVED_FROM_IMPORT:app.services.planning.__getattr__",
+        ),
+    ],
+)
+def test_c1_14_unsupported_alias_flow_remains_hold(tree, tmp_path, statement, reason):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", PLANNING_ALIAS + statement + "\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE", result.reasons
+    assert reason in result.reasons, result.reasons
+
+
+def test_c1_15_unrelated_object_getattr_does_not_trigger(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(
+        root,
+        "app.tasks.worker",
+        "import app.services.planning\nimport collections\n"
+        "from app.services import agents\n"
+        "fn = collections.OrderedDict().__getattr__\nother = obj.__getattr__\n"
+        "unreviewed = agents.__getattr__\n",
+    )
+    result = verify((root, policy))
+    assert result.finite_gate_passed, result.reasons
+    assert not any("LAZY" in reason for reason in result.reasons)
+
+
+@pytest.mark.parametrize(
+    "case, statement, child",
+    [
+        ("C1-16", "import app.services.planning", None),
+        (
+            "C1-17",
+            "from app.services.planning import export",
+            "app.services.planning.export",
+        ),
+        ("C1-18", "", None),
+    ],
+)
+def test_c1_16_18_literal_imports_and_dormant_site_remain_eligible(
+    tree, tmp_path, case, statement, child
+):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    if statement:
+        add_module(root, "app.tasks.worker", statement + "\n")
+    result = verify((root, policy))
+    assert result.finite_gate_passed, (case, result.reasons)
+    assert result.root_status == "ROOT_VALID"
+    assert (
+        "DORMANT_UNLOADED_LAZY_SITE:app.services.planning"
+        in result.derivation.diagnostics
+    )
+    if child:
+        assert child in result.derivation.required
+    assert not any("LAZY" in reason for reason in result.reasons)
+
+
+def test_c1_19_i12_omission_remains_invalid_with_correction(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    result = verify((root, policy), omit="app.services.model_adaptation")
+    assert result.root_status == "ROOT_INVALID"
+    assert result.module_status == "MODULE_IDENTITY_INVALID"
+    assert "MISSING_REQUIRED_IDENTITY:app.services.model_adaptation" in result.reasons
+
+
+def test_c1_20_candidate_policy_substitution_remains_rejected(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    candidate_policy = root / "candidate-policy.json"
+    candidate_policy.write_bytes(Path(policy.selected_path).read_bytes())
+    with pytest.raises(v.PolicyError, match="CANDIDATE_POLICY_NOT_AUTHORITATIVE"):
+        v.load_policy(
+            candidate_policy, candidate_root=root, expected_digest=policy.digest
+        )
+
+
+def test_c1_21_candidate_checker_cannot_alter_trusted_derivation(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(
+        root,
+        "app.services.orchestration.worker_identity",
+        "raise RuntimeError('candidate checker executed')\n"
+        "LAZY_GETATTR_ALLOWED = True\n",
+    )
+    add_module(root, "app.tasks.worker", PLANNING_ALIAS + "fn = p.__getattr__\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert C1_REASON + "2" in result.reasons
+    assert "app.services.model_adaptation" in result.derivation.required
+
+
+def test_c1_22_policy_digest_mismatch_remains_rejected(tree):
+    root, _ = tree
+    with pytest.raises(v.PolicyError, match="POLICY_DIGEST_MISMATCH"):
+        v.load_policy(
+            FIXTURE, candidate_root=root, expected_digest="sha256:" + "0" * 64
+        )
+
+
+@pytest.mark.parametrize("field", ["source_digest", "site_digest"])
+def test_c1_23_source_site_and_map_drift_remain_fail_closed(tree, tmp_path, field):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    body = policy.body
+    body["lazy_imports"][0][field] = "sha256:" + "0" * 64
+    result = verify((root, selected_policy(tmp_path, root, body)))
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in result.reasons
+    body = policy.body
+    body["lazy_imports"][0]["export_map_digest"] = "sha256:" + "0" * 64
+    with pytest.raises(v.PolicyError, match="LAZY_EXPORT_MAP_IDENTITY"):
+        selected_policy(tmp_path, root, body)
+
+
+def test_c1_24_ar6_self_derived_manifest_never_passes_finite_gate(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(
+        root,
+        "app.tasks.worker",
+        "import app.services.planning as p\n"
+        "getattr_fn = p.__getattr__\ngetattr_fn('Export')\n",
+    )
+    derived = v.derive(root, policy)
+    result = v.compare(derived, manifest(derived))
+    assert derived.root_status == "ROOT_INCONCLUSIVE"
+    assert result.module_status == "MODULE_IDENTITY_INCONCLUSIVE"
+    assert result.finite_gate_passed is False
+    assert C1_REASON + "2" in result.reasons

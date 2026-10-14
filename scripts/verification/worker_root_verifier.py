@@ -822,6 +822,18 @@ class _Deriver:
                         package = self.lazy_package_name(node.args[0], package_aliases)
                         if package:
                             self.lazy_access.add(package)
+                            attribute = node.args[1] if len(node.args) > 1 else None
+                            if (
+                                isinstance(attribute, ast.Constant)
+                                and attribute.value == "__getattr__"
+                            ):
+                                raise SourceError(
+                                    "LAZY_GETATTR_CALLABLE_ACCESS:"
+                                    + name
+                                    + ":"
+                                    + str(node.lineno),
+                                    uncertain=True,
+                                )
                         elif function == "getattr" and self.call_name(
                             node.args[0], aliases
                         ).startswith("importlib"):
@@ -883,10 +895,17 @@ class _Deriver:
                             uncertain=True,
                         )
                     if package:
-                        parent = parents.get(id(node))
                         if node.attr == "__getattr__":
-                            if isinstance(parent, ast.Call) and parent.func is node:
-                                self.lazy_access.add(package)
+                            # Any extraction of the reviewed loader callable is
+                            # treated as a lazy load; aliases are never followed.
+                            self.lazy_access.add(package)
+                            raise SourceError(
+                                "LAZY_GETATTR_CALLABLE_ACCESS:"
+                                + name
+                                + ":"
+                                + str(node.lineno),
+                                uncertain=True,
+                            )
                         else:
                             declaration = self.lazy_declarations.get(package)
                             suffix = full[len(package) + 1 :]
