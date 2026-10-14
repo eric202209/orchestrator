@@ -1,0 +1,174 @@
+{
+  "body": {
+    "canonicalization_id": "orchestrator.canonical-json.v1",
+    "issuer_id": "isolated-test-owner",
+    "lazy_imports": [],
+    "limits": {
+      "derived_identities": 4096,
+      "dotted_components": 64,
+      "explicit_roots": 256,
+      "initializer_parses": 1024,
+      "source_bytes": 4194304,
+      "total_parsed_bytes": 67108864
+    },
+    "namespaces": [
+      {
+        "locations": [
+          "app"
+        ],
+        "module": "app"
+      },
+      {
+        "locations": [
+          "app/services/agents/runtime_adapters"
+        ],
+        "module": "app.services.agents.runtime_adapters"
+      }
+    ],
+    "policy_id": "phase37-worker-safety-roots.1",
+    "resolver_version": "finite-ast.1",
+    "review_record_id": "M1-PREP-contract-fixture-not-issued",
+    "revision": 1,
+    "roots": {
+      "d37": [
+        {
+          "module": "app.services.agents.agent_runtime",
+          "path": "app/services/agents/agent_runtime.py"
+        },
+        {
+          "module": "app.services.agents.openclaw_service",
+          "path": "app/services/agents/openclaw_service.py"
+        },
+        {
+          "module": "app.services.agents.runtime_adapters.openclaw_adapter",
+          "path": "app/services/agents/runtime_adapters/openclaw_adapter.py"
+        },
+        {
+          "module": "app.services.agents.runtime_configuration",
+          "path": "app/services/agents/runtime_configuration.py"
+        },
+        {
+          "module": "app.services.agents.runtime_invocation",
+          "path": "app/services/agents/runtime_invocation.py"
+        },
+        {
+          "module": "app.services.agents.subprocess_lifecycle",
+          "path": "app/services/agents/subprocess_lifecycle.py"
+        },
+        {
+          "module": "app.services.execution.execution_task_runtime_ownership_service",
+          "path": "app/services/execution/execution_task_runtime_ownership_service.py"
+        },
+        {
+          "module": "app.services.orchestration.execution.executor_workspace_binding",
+          "path": "app/services/orchestration/execution/executor_workspace_binding.py"
+        }
+      ],
+      "helpers": [
+        {
+          "module": "app.services.orchestration",
+          "path": "app/services/orchestration/__init__.py"
+        },
+        {
+          "module": "app.tasks.worker_support.checkpoint",
+          "path": "app/tasks/worker_support/checkpoint.py"
+        },
+        {
+          "module": "app.tasks.worker_support.common",
+          "path": "app/tasks/worker_support/common.py"
+        },
+        {
+          "module": "app.tasks.worker_support.context",
+          "path": "app/tasks/worker_support/context.py"
+        },
+        {
+          "module": "app.tasks.worker_support.dispatch",
+          "path": "app/tasks/worker_support/dispatch.py"
+        },
+        {
+          "module": "app.tasks.worker_support.execution_state",
+          "path": "app/tasks/worker_support/execution_state.py"
+        },
+        {
+          "module": "app.tasks.worker_support.worker_helpers",
+          "path": "app/tasks/worker_support/worker_helpers.py"
+        },
+        {
+          "module": "app.tasks.worker_support.workspace",
+          "path": "app/tasks/worker_support/workspace.py"
+        }
+      ],
+      "registration": [
+        {
+          "module": "app.celery_app",
+          "path": "app/celery_app.py"
+        },
+        {
+          "module": "app.tasks.github_tasks",
+          "path": "app/tasks/github_tasks.py"
+        },
+        {
+          "module": "app.tasks.maintenance",
+          "path": "app/tasks/maintenance.py"
+        },
+        {
+          "module": "app.tasks.planning_tasks",
+          "path": "app/tasks/planning_tasks.py"
+        },
+        {
+          "module": "app.tasks.worker",
+          "path": "app/tasks/worker.py"
+        }
+      ],
+      "s1": [
+        {
+          "module": "app.services.agents.backend_concurrency",
+          "path": "app/services/agents/backend_concurrency.py"
+        },
+        {
+          "module": "app.services.agents.backend_slot_reconciliation",
+          "path": "app/services/agents/backend_slot_reconciliation.py"
+        },
+        {
+          "module": "app.services.observability.maintenance_observability",
+          "path": "app/services/observability/maintenance_observability.py"
+        },
+        {
+          "module": "app.services.orchestration.execution.binding_reconciliation",
+          "path": "app/services/orchestration/execution/binding_reconciliation.py"
+        },
+        {
+          "module": "app.services.orchestration.lifecycle.continuation_recovery",
+          "path": "app/services/orchestration/lifecycle/continuation_recovery.py"
+        },
+        {
+          "module": "app.services.orchestration.lifecycle.worker_bootstrap",
+          "path": "app/services/orchestration/lifecycle/worker_bootstrap.py"
+        },
+        {
+          "module": "app.services.orchestration.lifecycle.worker_capacity",
+          "path": "app/services/orchestration/lifecycle/worker_capacity.py"
+        },
+        {
+          "module": "app.services.session.orphan_ownership",
+          "path": "app/services/session/orphan_ownership.py"
+        },
+        {
+          "module": "app.services.session.recovery_coordinator",
+          "path": "app/services/session/recovery_coordinator.py"
+        },
+        {
+          "module": "app.services.session.session_lifecycle_service",
+          "path": "app/services/session/session_lifecycle_service.py"
+        }
+      ]
+    },
+    "schema": "orchestrator.worker-root-policy.v1",
+    "source_namespace": "app",
+    "verifier_compatibility_digest": "sha256:ad3bf5fddb6d793d1e8f5f68f496df5c089cd099f5495f8bc3e16bb154b45e15"
+  },
+  "digest": "sha256:5ac58c23fa7ecaecff107d0d2319f89b4b28c81b48441f6a8d7c32aec2e94e97",
+  "issuer_envelope": {
+    "kind": "isolated-test-fixture"
+  }
+}
