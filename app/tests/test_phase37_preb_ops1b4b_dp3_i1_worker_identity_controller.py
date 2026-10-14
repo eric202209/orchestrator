@@ -1307,9 +1307,8 @@ def test_i9_complete_bounded_boundary_is_independently_valid():
     assert result.required_modules == tuple(sorted(DEFAULT_AFFECTED_MODULES))
     assert result.missing_modules == ()
     assert result.missing_source_modules == ()
-    assert result.literal_dynamic_imports == (
-        "app.services.execution.execution_task_runtime_ownership_service",
-    )
+    # SC2-C1 normalized the Worker dispatch import to a static import.
+    assert result.literal_dynamic_imports == ()
 
 
 @pytest.mark.parametrize(
@@ -1339,13 +1338,13 @@ def test_i9_omitted_direct_package_reexport_is_detected():
     assert omitted in result.missing_modules
 
 
-def test_i9_omitted_literal_dynamic_import_is_detected():
+def test_i9_omitted_worker_dispatch_import_is_detected():
     omitted = "app.services.execution.execution_task_runtime_ownership_service"
     result = inspect_worker_provenance_boundary(
         Path.cwd(), set(DEFAULT_AFFECTED_MODULES) - {omitted}
     )
     assert result.classification == BOUNDARY_COMPLETENESS_INVALID
-    assert omitted in result.literal_dynamic_imports
+    assert omitted not in result.literal_dynamic_imports
     assert omitted in result.missing_modules
 
 

@@ -166,7 +166,7 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.orchestration.stage_engine",
     "app.services.orchestration.types",
     "app.services.orchestration.validation",
-    # Literal importlib.import_module() from the Worker dispatch task.
+    # Function-local static import from the Worker dispatch task.
     "app.services.execution.execution_task_runtime_ownership_service",
     # Source-backed parent package initializers executed before the bounded
     # modules above.  These are a finite package-loading boundary, not a
