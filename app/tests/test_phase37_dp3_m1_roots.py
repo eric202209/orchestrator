@@ -1450,3 +1450,321 @@ def test_c1_24_ar6_self_derived_manifest_never_passes_finite_gate(tree, tmp_path
     assert result.module_status == "MODULE_IDENTITY_INCONCLUSIVE"
     assert result.finite_gate_passed is False
     assert C1_REASON + "2" in result.reasons
+
+
+C2_PREFIX = "import app.services.planning\n"
+C2_DYNAMIC = "DYNAMIC_IMPORT_RESULT_ACCESS_UNSUPPORTED:app.tasks.worker:"
+C2_REFLECTION = "REFLECTION_UNSUPPORTED:app.tasks.worker:"
+IM = "from importlib import import_module\n"
+PLAN = "import_module('app.services.planning')"
+
+
+@pytest.mark.parametrize(
+    "case, statement, reason",
+    [
+        (
+            "C2-01",
+            "import importlib\nf = importlib.import_module("
+            "'app.services.planning').__getattr__",
+            C2_DYNAMIC + "3",
+        ),
+        ("C2-02", IM + PLAN + ".__getattr__('Export')", C2_DYNAMIC + "3"),
+        (
+            "C2-03",
+            "import importlib\nimportlib.import_module("
+            "'app.services').planning.__getattr__('Export')",
+            C2_DYNAMIC + "3",
+        ),
+        (
+            "C2-04",
+            "import importlib\nimportlib.import_module('app.services.planning').Export",
+            C2_DYNAMIC + "3",
+        ),
+        (
+            "C2-05",
+            "__import__('app.services.planning').services.planning"
+            ".__getattr__('Export')",
+            C2_DYNAMIC + "2",
+        ),
+        (
+            "C2-06",
+            "__import__('app.services.planning').services.planning.Export",
+            C2_DYNAMIC + "2",
+        ),
+        (
+            "C2-07",
+            "import sys\nf = sys.modules['app.services.planning'].__getattr__",
+            C2_REFLECTION + "3",
+        ),
+        (
+            "C2-08",
+            "import sys\nsys.modules.get('app.services.planning')"
+            ".__getattr__('Export')",
+            C2_REFLECTION + "3",
+        ),
+        (
+            "C2-09",
+            "import sys\nsys.modules['app.services.planning'].Export",
+            C2_REFLECTION + "3",
+        ),
+        ("C2-10", IM + "getattr(" + PLAN + ", 'Export')", C2_DYNAMIC + "3"),
+        ("C2-11", IM + "hasattr(" + PLAN + ", 'Export')", C2_DYNAMIC + "3"),
+        ("C2-12", IM + "getattr(" + PLAN + ", '__getattr__')", C2_DYNAMIC + "3"),
+        ("C2-13", IM + PLAN + "['Export']", C2_DYNAMIC + "3"),
+        (
+            "C2-14",
+            IM + "import_module('app').services.planning.plan.Export",
+            C2_DYNAMIC + "3",
+        ),
+        ("C2-15", IM + "f = lambda: " + PLAN + ".Export", C2_DYNAMIC + "3"),
+        (
+            "C2-16",
+            IM + "def never():\n    return " + PLAN + ".Export",
+            C2_DYNAMIC + "4",
+        ),
+        ("C2-17", IM + "[" + PLAN + ".Export for _ in ()]", C2_DYNAMIC + "3"),
+        ("C2-18", IM + "if flag:\n    " + PLAN + ".Export", C2_DYNAMIC + "4"),
+        (
+            "C2-19",
+            IM + "@" + PLAN + ".__getattr__\ndef decorated():\n    pass",
+            C2_DYNAMIC + "3",
+        ),
+        (
+            "C2-20",
+            "import sys\nsys.modules['app.services.planning']",
+            C2_REFLECTION + "3",
+        ),
+        (
+            "C2-21",
+            "import sys\nsys.modules.get('app.services.planning')",
+            C2_REFLECTION + "3",
+        ),
+        ("C2-22", "import sys\ntable = sys.modules", C2_REFLECTION + "3"),
+        ("C2-23", "import sys\nget = sys.modules.get", C2_REFLECTION + "3"),
+        (
+            "C2-24",
+            "import sys\ndef helper(name):\n    return sys.modules[name]",
+            C2_REFLECTION + "4",
+        ),
+        ("C2-25", "import sys\nif False:\n    sys.modules", C2_REFLECTION + "4"),
+        ("C2-x-from-sys", "from sys import modules", C2_REFLECTION + "2"),
+        (
+            "C2-x-from-sys-alias",
+            "from sys import modules as m\nm['x']",
+            C2_REFLECTION + "2",
+        ),
+        ("C2-x-sys-alias", "import sys as s\ns.modules", C2_REFLECTION + "3"),
+        ("C2-x-os-sys", "import os\nos.sys.modules", C2_REFLECTION + "3"),
+        ("C2-x-sys-attr", "import os\nhandle = os.sys", C2_REFLECTION + "3"),
+        (
+            "C2-x-getattr-sys",
+            "import sys\ngetattr(sys, 'modules')",
+            C2_REFLECTION + "3",
+        ),
+        (
+            "C2-x-getattr-sys-computed",
+            "import sys\ngetattr(sys, name)",
+            C2_REFLECTION + "3",
+        ),
+        ("C2-x-getattr-sys-attr", "import os\ngetattr(os, 'sys')", C2_REFLECTION + "3"),
+        ("C2-x-sys-store", "import sys\nsys.modules['x'] = None", C2_REFLECTION + "3"),
+        ("C2-x-sys-del", "import sys\ndel sys.modules['x']", C2_REFLECTION + "3"),
+        ("C2-x-import-sys-call", "__import__('sys').modules", C2_DYNAMIC + "2"),
+        (
+            "C2-x-external-assign",
+            "import importlib\nhandle = importlib.import_module('sys')",
+            C2_DYNAMIC + "3",
+        ),
+        (
+            "C2-x-dunder-assign",
+            "root_pkg = __import__('app.services.planning')\n"
+            "root_pkg.services.planning.Export",
+            C2_DYNAMIC + "2",
+        ),
+        (
+            "C2-x-relative-assign",
+            IM + "pl = import_module('.planning', 'app.services')\npl.Export",
+            C2_DYNAMIC + "3",
+        ),
+        ("C2-x-helper", IM + "helper(" + PLAN + ")", C2_DYNAMIC + "3"),
+        ("C2-x-return", IM + "def leak():\n    return " + PLAN, C2_DYNAMIC + "4"),
+        ("C2-x-container", IM + "box = [" + PLAN + "]", C2_DYNAMIC + "3"),
+        ("C2-x-tuple-assign", IM + "a, b = " + PLAN + ", 1", C2_DYNAMIC + "3"),
+    ],
+)
+def test_c2_computed_module_handle_holds(tree, tmp_path, case, statement, reason):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.services.planning.plan", "Export = 1\n")
+    assert verify((root, policy)).finite_gate_passed
+    add_module(root, "app.tasks.worker", C2_PREFIX + statement + "\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE", case
+    assert result.module_status == "MODULE_IDENTITY_INCONCLUSIVE", case
+    assert not result.finite_gate_passed, case
+    assert reason in result.reasons, (case, result.reasons)
+    assert not any(r.startswith("MISSING") for r in result.reasons), result.reasons
+
+
+@pytest.mark.parametrize(
+    "case, statement",
+    [
+        ("C2-26", "import sys\nversion = sys.version_info\nsys.path"),
+        ("C2-27", IM + PLAN),
+        (
+            "C2-27-child",
+            "import importlib\nimportlib.import_module('app.services.planning.export')",
+        ),
+        ("C2-27-dunder", "__import__('app.services.planning')"),
+        ("C2-27-relative", IM + "import_module('.planning', 'app.services')"),
+        ("C2-28", IM + "pl = " + PLAN),
+        (
+            "C2-28-child",
+            IM + "pc = import_module('app.services.planning.export')\npc.Export",
+        ),
+    ],
+)
+def test_c2_supported_imports_remain_eligible(tree, tmp_path, case, statement):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", C2_PREFIX + statement + "\n")
+    result = verify((root, policy))
+    assert result.finite_gate_passed, (case, result.reasons)
+    assert result.root_status == "ROOT_VALID"
+    assert (
+        "DORMANT_UNLOADED_LAZY_SITE:app.services.planning"
+        in result.derivation.diagnostics
+    )
+
+
+@pytest.mark.parametrize(
+    "case, statement, reason",
+    [
+        (
+            "C2-29",
+            "import app.services.planning as p\np.Export",
+            "WORKER_FACING_LAZY_ACCESS:app.services.planning",
+        ),
+        (
+            "C2-29-c1",
+            "import app.services.planning as p\nfn = p.__getattr__",
+            "LAZY_GETATTR_CALLABLE_ACCESS:app.tasks.worker:2",
+        ),
+        (
+            "C2-31",
+            "import app.services.planning as p\n"
+            "getattr_fn = p.__getattr__\ngetattr_fn('Export')",
+            "LAZY_GETATTR_CALLABLE_ACCESS:app.tasks.worker:2",
+        ),
+        (
+            "C2-37",
+            "import importlib.util\nimportlib.util.spec_from_file_location('x', 'y')",
+            "UNKNOWN_LOADER:app.tasks.worker:2",
+        ),
+        (
+            "C2-38",
+            "__import__('app.services.planning', fromlist=[name])",
+            "UNSUPPORTED_IMPORT_ARGUMENTS:app.tasks.worker",
+        ),
+        (
+            "C2-38-computed",
+            "import importlib\nimportlib.import_module(name)",
+            "UNRESOLVED_DYNAMIC_IMPORT:app.tasks.worker:2",
+        ),
+        (
+            "C2-39",
+            "import sys\nsys.meta_path.append(hook)",
+            "IMPORT_PATH_MUTATION:app.tasks.worker",
+        ),
+        (
+            "C2-39-path-hooks",
+            "import sys\nsys.path_hooks.insert(0, hook)",
+            "IMPORT_PATH_MUTATION:app.tasks.worker",
+        ),
+    ],
+)
+def test_c2_existing_holds_preserved(tree, tmp_path, case, statement, reason):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", statement + "\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE", (case, result.reasons)
+    assert not result.finite_gate_passed
+    assert reason in result.reasons, (case, result.reasons)
+
+
+def test_c2_30_exact_dormant_site_remains_eligible(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    result = verify((root, policy))
+    assert result.finite_gate_passed, result.reasons
+    assert [site["module"] for site in result.derivation.dormant_lazy_sites] == [
+        "app.services.planning"
+    ]
+
+
+def test_c2_32_i12_omission_remains_invalid(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", "import sys\nsys.modules\n")
+    result = verify((root, policy), omit="app.services.model_adaptation")
+    assert result.root_status == "ROOT_INVALID"
+    assert "MISSING_REQUIRED_IDENTITY:app.services.model_adaptation" in result.reasons
+
+
+def test_c2_33_candidate_policy_substitution_rejected(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    candidate_policy = root / "app" / "candidate-policy.json"
+    candidate_policy.write_bytes(Path(policy.selected_path).read_bytes())
+    with pytest.raises(v.PolicyError, match="CANDIDATE_POLICY_NOT_AUTHORITATIVE"):
+        v.load_policy(
+            candidate_policy, candidate_root=root, expected_digest=policy.digest
+        )
+
+
+def test_c2_34_candidate_checker_cannot_alter_derivation(tree, tmp_path):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(
+        root,
+        "app.services.orchestration.worker_identity",
+        "raise RuntimeError('candidate checker executed')\nSYS_MODULES_OK = True\n",
+    )
+    add_module(root, "app.tasks.worker", C2_PREFIX + "import sys\nsys.modules\n")
+    result = verify((root, policy))
+    assert result.root_status == "ROOT_INCONCLUSIVE"
+    assert C2_REFLECTION + "3" in result.reasons
+    assert "app.services.model_adaptation" in result.derivation.required
+
+
+def test_c2_35_policy_digest_mismatch_rejected(tree):
+    root, _ = tree
+    with pytest.raises(v.PolicyError, match="POLICY_DIGEST_MISMATCH"):
+        v.load_policy(
+            FIXTURE, candidate_root=root, expected_digest="sha256:" + "2" * 64
+        )
+
+
+@pytest.mark.parametrize("field", ["source_digest", "site_digest"])
+def test_c2_36_identity_drift_rejected(tree, tmp_path, field):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    body = policy.body
+    body["lazy_imports"][0][field] = "sha256:" + "3" * 64
+    result = verify((root, selected_policy(tmp_path, root, body)))
+    assert "LAZY_POLICY_IDENTITY_MISMATCH:app.services.planning" in result.reasons
+    body = policy.body
+    body["lazy_imports"][0]["export_map_digest"] = "sha256:" + "3" * 64
+    with pytest.raises(v.PolicyError, match="LAZY_EXPORT_MAP_IDENTITY"):
+        selected_policy(tmp_path, root, body)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "import importlib\nf = importlib.import_module('app.services.planning')"
+        ".__getattr__\nf('Export')",
+        "import sys\nsys.modules['app.services.planning'].Export",
+    ],
+)
+def test_c2_40_self_derived_manifest_never_passes_gate(tree, tmp_path, statement):
+    root, policy, _ = reviewed_planning_tree(tree, tmp_path)
+    add_module(root, "app.tasks.worker", C2_PREFIX + statement + "\n")
+    derived = v.derive(root, policy)
+    result = v.compare(derived, manifest(derived))
+    assert derived.root_status == "ROOT_INCONCLUSIVE"
+    assert result.module_status == "MODULE_IDENTITY_INCONCLUSIVE"
+    assert result.finite_gate_passed is False

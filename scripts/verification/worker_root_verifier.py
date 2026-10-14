@@ -770,6 +770,17 @@ class _Deriver:
                         raise SourceError(
                             "IMPORT_PATH_MUTATION:" + name, uncertain=True
                         )
+                    # The module cache is reflection; never simulate its contents.
+                    if (
+                        resolved_name == "sys.modules"
+                        or resolved_name.endswith(".sys.modules")
+                        or isinstance(node, ast.Attribute)
+                        and node.attr == "sys"
+                    ):
+                        raise SourceError(
+                            "REFLECTION_UNSUPPORTED:" + name + ":" + str(node.lineno),
+                            uncertain=True,
+                        )
                 if isinstance(node, ast.Import):
                     for item in node.names:
                         self.require(item.name, name, node, "import")
@@ -781,6 +792,13 @@ class _Deriver:
                         if node.level
                         else node.module or ""
                     )
+                    if base == "sys" and any(
+                        item.name == "modules" for item in node.names
+                    ):
+                        raise SourceError(
+                            "REFLECTION_UNSUPPORTED:" + name + ":" + str(node.lineno),
+                            uncertain=True,
+                        )
                     self.require(base, name, node, "from")
                     if base == "app" or base.startswith("app."):
                         for item in node.names:
@@ -809,6 +827,18 @@ class _Deriver:
                                 "AMBIGUOUS_DYNAMIC_ALIAS:" + name, uncertain=True
                             )
                         self.dynamic(name, path, node, lazy_calls, lazy_functions)
+                        if id(
+                            node
+                        ) not in lazy_calls and not self.dynamic_result_allowed(
+                            node, function, parents, allowed_package_stores
+                        ):
+                            raise SourceError(
+                                "DYNAMIC_IMPORT_RESULT_ACCESS_UNSUPPORTED:"
+                                + name
+                                + ":"
+                                + str(node.lineno),
+                                uncertain=True,
+                            )
                     elif function in ("globals", "locals", "vars"):
                         if not self.is_exact_lazy_cache(node, parents):
                             raise SourceError(
@@ -818,6 +848,15 @@ class _Deriver:
                                 + str(node.lineno),
                                 uncertain=True,
                             )
+                    elif (
+                        function in ("getattr", "hasattr", "setattr", "delattr")
+                        and node.args
+                        and self.sys_reflection(node, aliases)
+                    ):
+                        raise SourceError(
+                            "REFLECTION_UNSUPPORTED:" + name + ":" + str(node.lineno),
+                            uncertain=True,
+                        )
                     elif function in ("getattr", "hasattr") and node.args:
                         package = self.lazy_package_name(node.args[0], package_aliases)
                         if package:
@@ -983,6 +1022,59 @@ class _Deriver:
         if full in self.lazy_declarations:
             return full
         return None
+
+    def dynamic_result_allowed(
+        self,
+        node: ast.Call,
+        function: str,
+        parents: dict[int, ast.AST],
+        package_stores: set[int],
+    ) -> bool:
+        """Accept only a bare literal import or a finitely tracked name binding."""
+
+        parent = parents.get(id(node))
+        if isinstance(parent, ast.Expr):
+            return True
+        if isinstance(parent, ast.Assign) and len(parent.targets) == 1:
+            target = parent.targets[0]
+        elif isinstance(parent, ast.AnnAssign) and parent.value is node:
+            target = parent.target
+        else:
+            return False
+        if not isinstance(target, ast.Name):
+            return False
+        if id(target) in package_stores:
+            return True
+        argument = node.args[0] if len(node.args) == 1 else None
+        if (
+            function != "importlib.import_module"
+            or node.keywords
+            or not isinstance(argument, ast.Constant)
+            or type(argument.value) is not str
+            or not argument.value.startswith("app.")
+        ):
+            return False
+        # A concrete app module handle cannot reach a package-level loader.
+        try:
+            resolved = self.resolve(argument.value, optional=True)
+        except SourceError:
+            return False
+        return resolved is not None and resolved[1] == "module"
+
+    def sys_reflection(self, node: ast.Call, aliases: dict[str, str]) -> bool:
+        target = self.call_name(node.args[0], aliases)
+        attribute = node.args[1] if len(node.args) > 1 else None
+        literal = (
+            attribute.value
+            if isinstance(attribute, ast.Constant) and type(attribute.value) is str
+            else None
+        )
+        if literal == "sys":
+            return True
+        return (target == "sys" or target.endswith(".sys")) and literal in (
+            None,
+            "modules",
+        )
 
     def is_concrete_child(self, package: str, suffix: str) -> bool:
         try:
