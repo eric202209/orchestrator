@@ -1,6 +1,8 @@
 """Disposable AST-only fixtures; run with scripts/verification/run_root_tests.py.
 
-No app imports, candidate execution, application conftest or production state.
+The standalone runner forbids application imports and production state. When
+collected by the full suite, the normal application conftest may have already
+loaded ``app``; the non-execution assertion accounts for that pre-existing set.
 """
 
 from __future__ import annotations
@@ -490,10 +492,20 @@ def test_deterministic_and_no_candidate_execution(tree):
         "raise RuntimeError('must not execute')\nimport app.literal\n",
     )
     add_module(root, "app.literal", "raise RuntimeError('leaf must not execute')\n")
+    existing_app_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "app" or name.startswith("app.")
+    }
     first = v.derive(root, policy)
     assert first == v.derive(root, policy)
     assert first.root_status == "ROOT_VALID"
-    assert not any(name == "app" or name.startswith("app.") for name in sys.modules)
+    current_app_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "app" or name.startswith("app.")
+    }
+    assert current_app_modules == existing_app_modules
 
 
 @pytest.mark.parametrize(
