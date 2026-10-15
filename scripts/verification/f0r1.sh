@@ -713,17 +713,49 @@ proc_creds() { # PID -> "Uid=.. Gid=.. Groups=.. CapEff=.. NoNewPrivs=.."
 # Rehearsal steps
 # --------------------------------------------------------------------------
 
+readonly SHARED_DIRS="db runtime checkpoints candidate-content projects beat"
+
+verify_provisioned() { # every provisioned path must match "uid:gid mode" exactly
+    local owner mode path expect bad=""
+    while read -r owner mode path; do
+        [[ -n "$path" ]] || continue
+        expect="$owner $mode"
+        [[ "$(stat -c '%u:%g %a' -- "$path" 2>&1)" == "$expect" ]] ||
+            bad+="$path=$(stat -c '%u:%g %a' -- "$path" 2>&1) want $expect; "
+    done
+    if [[ -n "$bad" ]]; then
+        result R4-PROVISION FAIL "$bad"
+        return 1
+    fi
+    result R4-PROVISION PASS "verified: shared dirs 2770 0:$SHARED_GID; db 0660 $API_UID:$SHARED_GID; homes 0700"
+}
+
 provision_state() {
+    local d
     install -d -m 0755 -o 0 -g 0 "$STATE/cwd" "$STATE/logs" "$EVIDENCE/launch"
-    install -d -m 2770 -o 0 -g "$SHARED_GID" "$STATE/db" "$STATE/runtime" \
-        "$STATE/checkpoints" "$STATE/candidate-content" "$STATE/projects" "$STATE/beat"
+    # Root has no CAP_FSETID: chmod silently drops S_ISGID unless root is in the
+    # file's group. Set 2770 while the group is 0, then change the group (a dir keeps
+    # S_ISGID across chown).
+    for d in $SHARED_DIRS; do
+        install -d -m 2770 -o 0 -g 0 "$STATE/$d"
+        chown ":$SHARED_GID" -- "$STATE/$d"
+    done
     install -d -m 0700 -o "$REDIS_UID" -g "$REDIS_UID" "$STATE/redis"
     install -d -m 0700 -o "$API_UID" -g "$API_UID" "$STATE/home-api"
     install -d -m 0700 -o "$WORKER_UID" -g "$WORKER_UID" "$STATE/home-worker"
     install -d -m 0755 -o 0 -g 0 "$STATE/pycache-empty"
     # U5 recipe R (a): provisioning pre-creates the DB file 0660 before any opener.
-    install -m 0660 -o "$API_UID" -g "$SHARED_GID" /dev/null "$STATE/db/orchestrator.db"
-    result R4-PROVISION INFO "db dir 2770 root:$SHARED_GID; db 0660 $API_UID:$SHARED_GID"
+    # Root has no CAP_FOWNER: chmod must happen while root still owns the file.
+    # `install -o` chowns before it chmods, so give the file away last.
+    install -m 0660 -o 0 -g 0 /dev/null "$STATE/db/orchestrator.db"
+    chown "$API_UID:$SHARED_GID" -- "$STATE/db/orchestrator.db"
+    {
+        for d in $SHARED_DIRS; do printf '0:%s 2770 %s\n' "$SHARED_GID" "$STATE/$d"; done
+        printf '%s:%s 660 %s\n' "$API_UID" "$SHARED_GID" "$STATE/db/orchestrator.db"
+        printf '%s:%s 700 %s\n' "$REDIS_UID" "$REDIS_UID" "$STATE/redis" \
+            "$API_UID" "$API_UID" "$STATE/home-api" "$WORKER_UID" "$WORKER_UID" "$STATE/home-worker"
+        printf '0:0 755 %s\n' "$STATE/cwd" "$STATE/logs" "$STATE/pycache-empty"
+    } | verify_provisioned
 
     # Release B: root-owned DAC-protected copy with precompiled bytecode.
     cp -a -- "$REL_A" "$REL_B"
