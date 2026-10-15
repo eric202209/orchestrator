@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from app.services.orchestration.execution.python_resolution import (
+    ProjectPythonResolutionError,
     resolve_project_python,
 )
 from app.services.orchestration.types import CandidateFinding
@@ -196,6 +197,19 @@ def _candidate_python(project_dir: Path) -> str:
     return resolve_project_python(project_dir)
 
 
+def _python_unavailable_finding(exc: ProjectPythonResolutionError) -> CandidateFinding:
+    return CandidateFinding(
+        rule_id="candidate_python_unavailable",
+        source="python_resolution",
+        category="infrastructure",
+        severity="error",
+        attribution="unknown",
+        repairable=False,
+        message="Candidate verification interpreter could not be resolved",
+        evidence={"error": str(exc)},
+    )
+
+
 def select_candidate_verification(
     *,
     project_dir: Path,
@@ -342,17 +356,23 @@ def validate_candidate_delta(
 ) -> CandidateCheckRun:
     """Run candidate-owned checks and return typed, attributed findings."""
 
-    selection = select_candidate_verification(
-        project_dir=project_dir,
-        change_set=change_set,
-        plan=plan,
-        task_prompt=task_prompt,
-        allow_broad_fallback=allow_broad_fallback,
-        observed_scope=observed_scope,
-        verification_scope=verification_scope,
-    )
-    static_policy = discover_candidate_static_policy(project_dir)
     findings: list[CandidateFinding] = []
+    try:
+        selection = select_candidate_verification(
+            project_dir=project_dir,
+            change_set=change_set,
+            plan=plan,
+            task_prompt=task_prompt,
+            allow_broad_fallback=allow_broad_fallback,
+            observed_scope=observed_scope,
+            verification_scope=verification_scope,
+        )
+    except ProjectPythonResolutionError as exc:
+        findings.append(_python_unavailable_finding(exc))
+        selection = CandidateVerificationSelection(
+            command="", source="candidate_python_unavailable", paths=()
+        )
+    static_policy = discover_candidate_static_policy(project_dir)
     commands_run: list[str] = []
     if selection.command:
         commands_run.append(selection.command)
@@ -407,8 +427,17 @@ def validate_candidate_delta(
             for path in observed_paths
             if path.endswith(".py") and (project_dir / path).is_file()
         )
+        quoted_python = None
         if python_paths:
-            quoted_python = shlex.quote(_candidate_python(project_dir))
+            try:
+                quoted_python = shlex.quote(_candidate_python(project_dir))
+            except ProjectPythonResolutionError as exc:
+                if not any(
+                    finding.rule_id == "candidate_python_unavailable"
+                    for finding in findings
+                ):
+                    findings.append(_python_unavailable_finding(exc))
+        if quoted_python is not None:
             quoted_paths = " ".join(shlex.quote(path) for path in python_paths)
             static_commands = [
                 (

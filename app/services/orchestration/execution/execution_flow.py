@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 
-from .python_resolution import resolve_project_python
+from .python_resolution import ProjectPythonResolutionError, resolve_project_python
 from .executor import ExecutorService
 from .runtime import build_workspace_discovery_step
 from ..types import ValidationVerdict
@@ -375,7 +375,22 @@ def execute_verification_command(
     if portable_result is not None:
         return portable_result
 
-    resolved_python = resolve_project_python(project_dir)
+    python_rewrite = raw_command in {"python", "python3"} or raw_command.startswith(
+        ("python ", "python3 ")
+    )
+    try:
+        resolved_python = resolve_project_python(project_dir)
+    except ProjectPythonResolutionError as exc:
+        if python_rewrite:
+            return {
+                "success": False,
+                "command": raw_command,
+                "returncode": 2,
+                "output": str(exc),
+            }
+        # Non-Python commands never needed the interpreter; they keep running
+        # without the interpreter PATH prefix.
+        resolved_python = None
     command_to_run = raw_command
     if raw_command in {"python", "python3"}:
         command_to_run = subprocess.list2cmdline([resolved_python])
@@ -390,8 +405,9 @@ def execute_verification_command(
 
     try:
         env = os.environ.copy()
-        python_dir = str(Path(resolved_python).parent)
-        env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
+        if resolved_python is not None:
+            python_dir = str(Path(resolved_python).parent)
+            env["PATH"] = python_dir + os.pathsep + env.get("PATH", "")
         env = workspace_python_command_env(project_dir, raw_command, base_env=env)
         env = _inject_project_venv_path(project_dir, env)
         env = _strip_orchestrator_pip_shadow(project_dir, raw_command, env)

@@ -18,6 +18,9 @@ import shlex
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from app.services.orchestration.execution.python_resolution import (
+    ProjectPythonResolutionError,
+)
 from app.services.orchestration.validation.candidate_checks import (
     _candidate_python,
     _run_command,
@@ -188,7 +191,17 @@ def attempt_deterministic_candidate_repair(
             status="skipped", reason="black_gate_not_admitted", rule_ids=rule_ids
         )
 
-    command = shlex.join([_candidate_python(project_dir), "-m", "black", "--", *paths])
+    try:
+        python = _candidate_python(project_dir)
+    except ProjectPythonResolutionError as exc:
+        return DeterministicRepairOutcome(
+            status="failed",
+            reason="deterministic_repair_command_unavailable",
+            rule_ids=rule_ids,
+            paths=paths,
+            output=str(exc),
+        )
+    command = shlex.join([python, "-m", "black", "--", *paths])
     returncode, output = _run_command(
         project_dir=project_dir,
         command=command,
