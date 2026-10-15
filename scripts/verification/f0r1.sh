@@ -34,11 +34,16 @@ readonly EVIDENCE=/evidence        # disposable evidence bind mount
 readonly REL_B=$STATE/release-b    # DAC-protected, precompiled copy of REL_A
 readonly MARKER=.f0r1-disposable
 readonly PY_REL=venv/bin/python
-# CHOWN(0) DAC_OVERRIDE(1) FOWNER(3) SETGID(6) SETUID(7)
-readonly ALLOWED_CAP_MASK=$((0xcb))
+# CHOWN(0) SETGID(6) SETUID(7). Root only provisions state ownership and drops
+# to rehearsal UIDs; it never reads or signals another UID's files/processes.
+readonly ALLOWED_CAP_MASK=$((0xc1))
 readonly NS_ISOLATED="net mnt pid ipc uts"
+# Interpreter flags for any Python run as container root: isolated mode and no
+# site import, so no venv .pth or project code executes before privilege drop.
+readonly ROOT_PY_FLAGS="-I -S"
 
 RESULTS_FILE=""
+SUMMARY_DONE=0
 declare -a STARTED_PIDS=()
 declare -a APP_ENV=()
 
@@ -77,9 +82,10 @@ summary_and_exit() {
         fail=${PREFLIGHT_FAIL:-0}
         blocked=${PREFLIGHT_BLOCKED:-0}
     fi
+    SUMMARY_DONE=1
     printf 'SUMMARY\tfail=%s\tblocked=%s\tnot_tested=%s\t(no F0 verdict issued)\n' \
         "$fail" "$blocked" "$nt"
-    if ((fail > 0 || blocked > 0)); then
+    if ((fail > 0 || blocked > 0 || nt > 0)); then
         exit 1
     fi
     exit 0
@@ -100,9 +106,11 @@ HOST (operator):
      bash scripts/verification/f0r1.sh stage /tmp/orch-f0r1.<id>
      -> prints the exact docker run command.
   3. Run that docker run command (disposable container, --network none).
-  4. Archive <dir>/evidence, then:
+  4. As root: tar -C <dir> -czf <archive outside dir> evidence state/logs, then:
      F0R1_CONFIRM=cleanup F0R1_EVIDENCE_ARCHIVE=<archive> \
      bash scripts/verification/f0r1.sh cleanup /tmp/orch-f0r1.<id>
+  stage and cleanup must run as root on the host (namespace references,
+  0700 staging root, root-owned release).
 
 CONTAINER (entrypoint): bash /opt/f0r1/f0r1.sh rehearse
   R2/R8 preflight gate (read-only) -> blocks on any isolation failure
@@ -145,6 +153,7 @@ cmd_stage() {
     [[ $# -eq 1 ]] || refuse "usage: stage /tmp/orch-f0r1.<id>"
     [[ ! -e /.dockerenv && ! -e /run/.containerenv ]] ||
         refuse "stage must run on the host, not inside a container"
+    [[ "$(id -u)" -eq 0 ]] || refuse "stage must run as root (namespace references, ownership)"
     local dir repo commit venv tree run_id archive_sha
     dir=$(validate_stage_dir_name "$1")
     [[ ! -e "$dir" && ! -L "$dir" ]] || refuse "staging dir already exists: $dir"
@@ -163,18 +172,26 @@ cmd_stage() {
     fi
 
     run_id=$(basename -- "$dir")
-    mkdir -m 0755 -- "$dir"
+    # mkdir (no -p) fails atomically if anything, including a symlink, exists.
+    # 0700 keeps other host users out of container-created files (container
+    # root is host root when the user namespace is shared).
+    mkdir -m 0700 -- "$dir"
     mkdir -m 0755 -- "$dir/release" "$dir/state" "$dir/evidence" "$dir/f0r1"
     printf '%s\n' "$run_id" >"$dir/$MARKER"
     printf '%s\n' "$run_id" >"$dir/state/$MARKER"
 
-    git -C "$repo" archive --format=tar "$commit" | tar -x -C "$dir/release"
+    git -C "$repo" archive --format=tar "$commit" |
+        tar -x --no-same-owner --no-same-permissions -C "$dir/release"
     archive_sha=$(git -C "$repo" archive --format=tar "$commit" | sha256sum | cut -d' ' -f1)
     tar -C "$(dirname -- "$venv")" --exclude='__pycache__' --exclude='*.pyc' \
-        -cf - "$(basename -- "$venv")" | tar -x -C "$dir/release"
+        -cf - "$(basename -- "$venv")" |
+        tar -x --no-same-owner -C "$dir/release"
     if [[ "$(basename -- "$venv")" != venv ]]; then
         mv -- "$dir/release/$(basename -- "$venv")" "$dir/release/venv"
     fi
+    # Protected release model: root-owned, not group/other writable.
+    chown -R 0:0 -- "$dir/release"
+    chmod -R u=rwX,go=rX -- "$dir/release"
     install -m 0644 -- "${BASH_SOURCE[0]}" "$dir/f0r1/f0r1.sh"
 
     {
@@ -211,8 +228,7 @@ Proposed (NOT executed) disposable container command:
 
 docker run --rm --name "$run_id" --hostname f0r1 \\
   --user 0:0 --network none --ipc private \\
-  --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \\
-  --cap-add SETUID --cap-add SETGID \\
+  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID \\
   --security-opt no-new-privileges=true \\
   --pids-limit 512 --memory 8g --memory-swap 8g --cpus 4 \\
   --read-only --tmpfs /tmp:rw,nosuid,nodev,size=256m \\
@@ -230,26 +246,38 @@ EOF
 # cleanup (host side)
 # --------------------------------------------------------------------------
 
-cmd_cleanup() {
-    require_confirm cleanup
-    [[ $# -eq 1 ]] || refuse "usage: cleanup /tmp/orch-f0r1.<id>"
-    local dir base archive
-    dir=$(validate_stage_dir_name "$1")
+validate_cleanup_target() { # DIR — every check that must hold right before rm
+    local dir=$1 base
     [[ -d "$dir" && ! -L "$dir" ]] || refuse "not a real directory: $dir"
     [[ "$(realpath -e -- "$dir")" == "$dir" ]] || refuse "path is not canonical: $dir"
+    [[ "$(stat -c '%u %a' -- "$dir")" == "$(id -u) 700" ]] ||
+        refuse "staging dir must be owned by the invoking user with mode 0700: $dir"
     base=$(basename -- "$dir")
-    [[ -f "$dir/$MARKER" && "$(cat -- "$dir/$MARKER")" == "$base" ]] ||
-        refuse "disposable marker missing or mismatched in $dir"
+    [[ -f "$dir/$MARKER" && ! -L "$dir/$MARKER" &&
+        "$(cat -- "$dir/$MARKER")" == "$base" ]] ||
+        refuse "disposable marker missing, symlinked, or mismatched in $dir"
     if awk -v d="$dir" '$5 == d || index($5, d "/") == 1 { found=1 } END { exit !found }' \
         /proc/self/mountinfo; then
         refuse "a mount exists at or below $dir (is the container still running?)"
     fi
+}
+
+cmd_cleanup() {
+    require_confirm cleanup
+    [[ $# -eq 1 ]] || refuse "usage: cleanup /tmp/orch-f0r1.<id>"
+    local dir archive
+    dir=$(validate_stage_dir_name "$1")
+    validate_cleanup_target "$dir"
     archive=${F0R1_EVIDENCE_ARCHIVE:-}
-    [[ -n "$archive" && -s "$archive" ]] ||
-        refuse "set F0R1_EVIDENCE_ARCHIVE to a non-empty archive of $dir/evidence first"
+    [[ -n "$archive" && -f "$archive" && ! -L "$archive" && -s "$archive" ]] ||
+        refuse "set F0R1_EVIDENCE_ARCHIVE to a non-empty regular-file archive of $dir/evidence"
     case "$(realpath -m -- "$archive")" in
         "$dir" | "$dir"/*) refuse "evidence archive must live outside $dir" ;;
     esac
+    # Re-validate immediately before deletion. rm -rf never follows symlinks
+    # inside the tree; --one-file-system stops at device boundaries, and the
+    # mountinfo check above covers same-device bind mounts.
+    validate_cleanup_target "$dir"
     rm -rf --one-file-system -- "$dir"
     note "removed $dir"
 }
@@ -395,7 +423,7 @@ check_caps() {
     if ((eff & ~ALLOWED_CAP_MASK || bnd & ~ALLOWED_CAP_MASK || amb != 0)); then
         gate R2-CAPS BLOCKED "capabilities exceed allowlist: eff=$(printf %x $eff) bnd=$(printf %x $bnd) amb=$(printf %x $amb)"
     else
-        gate R2-CAPS PASS "eff=$(printf %x $eff) bnd=$(printf %x $bnd) within CHOWN,DAC_OVERRIDE,FOWNER,SETGID,SETUID"
+        gate R2-CAPS PASS "eff=$(printf %x $eff) bnd=$(printf %x $bnd) within CHOWN,SETGID,SETUID"
     fi
     [[ "$nnp" == 1 ]] && gate R2-NNP PASS "NoNewPrivs=1" ||
         gate R2-NNP BLOCKED "NoNewPrivs=$nnp"
@@ -435,29 +463,40 @@ check_namespaces() {
         mine=$(readlink "/proc/self/ns/$ns")
         host=$(ref_ns "HOST_$ns")
         prod=$(ref_ns "PROD_$ns")
-        if [[ -z "$host" || "$host" == unavailable ]]; then
-            gate "R2-NS-$ns" BLOCKED "no host reference for $ns ($mine); cannot demonstrate"
-        elif [[ "$mine" == "$host" || (-n "$prod" && "$mine" == "$prod") ]]; then
+        if [[ ! "$host" =~ ^$ns:\[[0-9]+\]$ ]]; then
+            gate "R2-NS-$ns" BLOCKED "no valid host reference for $ns (${host:-absent}); cannot demonstrate"
+        elif [[ ! "$prod" =~ ^$ns:\[[0-9]+\]$ ]]; then
+            gate "R2-NS-$ns" BLOCKED "no valid production reference for $ns (${prod:-absent})"
+        elif [[ "$host" == "$prod" && "$ns" != uts ]]; then
+            # The production container has private net/mnt/pid/ipc; equality
+            # means a reference was captured from the wrong context.
+            gate "R2-NS-$ns" BLOCKED "host and production references are identical ($host); recapture"
+        elif [[ "$mine" == "$host" || "$mine" == "$prod" ]]; then
             gate "R2-NS-$ns" BLOCKED "$mine shared with host or production container"
-        elif [[ -z "$prod" || "$prod" == unavailable ]]; then
-            gate "R2-NS-$ns" BLOCKED "$mine differs from host; production reference absent"
         else
             gate "R2-NS-$ns" PASS "$mine differs from host $host and production $prod"
         fi
     done
+    # User namespace: separate PID/mount/network namespaces say nothing about
+    # UID isolation. An identity map means container UID 0 is host UID 0.
+    local uid_map
+    uid_map=$(tr -s ' ' </proc/self/uid_map | sed 's/^ //' | tr '\n' ';')
     mine=$(readlink /proc/self/ns/user)
     host=$(ref_ns HOST_user)
-    if [[ -n "$host" && "$mine" == "$host" ]]; then
-        gate R2-NS-user INFO "user namespace shared with host ($mine): container root is host root"
+    if [[ "$uid_map" == "0 0 4294967295;" ]]; then
+        gate R2-NS-user RESIDUAL "identity uid_map ($mine, host reference ${host:-absent}): container root has host-root authority over mounted paths; no user-namespace isolation"
+    elif [[ -n "$host" && "$mine" == "$host" ]]; then
+        gate R2-NS-user RESIDUAL "user namespace $mine shared with host"
     else
-        gate R2-NS-user INFO "user namespace $mine (host reference: ${host:-none})"
+        gate R2-NS-user INFO "user namespace $mine differs from host ${host:-absent}; uid_map $uid_map (remapping not independently verified)"
     fi
-    gate R2-UIDMAP INFO "uid_map: $(tr -s ' ' </proc/self/uid_map | tr '\n' ';') gid_map: $(tr -s ' ' </proc/self/gid_map | tr '\n' ';')"
+    gate R2-UIDMAP INFO "uid_map: $uid_map gid_map: $(tr -s ' ' </proc/self/gid_map | sed 's/^ //' | tr '\n' ';')"
 }
 
 check_tools_and_image() {
     local tool missing=""
-    for tool in setpriv timeout sha256sum find cp chown chmod install redis-server awk; do
+    for tool in setpriv timeout sha256sum find cp chown chmod install redis-server awk \
+        stat realpath sort xargs seq grep sed; do
         command -v "$tool" >/dev/null || missing+="$tool "
     done
     if [[ -n "$missing" ]]; then
@@ -579,17 +618,44 @@ start_bg() { # NAME UID HOME CMD... -> sets BG_PID
     STARTED_PIDS+=("$BG_PID")
 }
 
+proc_alive() { # PID — running and not a zombie
+    [[ -r "/proc/$1/status" ]] &&
+        ! awk '$1=="State:" && $2=="Z" {z=1} END {exit !z}' "/proc/$1/status" 2>/dev/null
+}
+
+signal_as_owner() { # SIG PID — root has no CAP_KILL; signal as the owning UID
+    local sig=$1 pid=$2 uid
+    uid=$(awk '$1=="Uid:" {print $2}' "/proc/$pid/status" 2>/dev/null || true)
+    [[ "$uid" =~ ^[0-9]+$ ]] || return 0
+    if [[ "$uid" -eq 0 ]]; then
+        kill -"$sig" "$pid" 2>/dev/null || true
+    else
+        setpriv --reuid="$uid" --regid="$uid" --clear-groups -- \
+            /bin/bash -c 'kill -"$1" "$2"' _ "$sig" "$pid" 2>/dev/null || true
+    fi
+}
+
 stop_pid() { # PID — signals only a direct child of this script, never a group
     local pid=$1 i
     [[ "$pid" =~ ^[1-9][0-9]*$ && "$pid" -ne 1 && "$pid" -ne $$ ]] || return 0
     [[ -d "/proc/$pid" ]] || return 0
     [[ "$(awk '$1=="PPid:" {print $2}' "/proc/$pid/status" 2>/dev/null)" == "$$" ]] || return 0
-    kill -TERM "$pid" 2>/dev/null || true
+    if proc_alive "$pid"; then signal_as_owner TERM "$pid"; fi
     for i in $(seq 1 30); do
-        [[ -d "/proc/$pid" ]] || break
+        proc_alive "$pid" || break
         sleep 1
     done
-    if [[ -d "/proc/$pid" ]]; then kill -KILL "$pid" 2>/dev/null || true; fi
+    if proc_alive "$pid"; then
+        signal_as_owner KILL "$pid"
+        for i in $(seq 1 10); do
+            proc_alive "$pid" || break
+            sleep 1
+        done
+    fi
+    if proc_alive "$pid"; then
+        result R0-STOP FAIL "PID $pid survived TERM/KILL; container teardown will reap it"
+        return 0
+    fi
     wait "$pid" 2>/dev/null || true
 }
 
@@ -601,8 +667,11 @@ stop_all() {
 wait_for_log() { # LOGFILE REGEX TIMEOUT PID -> 0 when matched
     local log=$1 regex=$2 limit=$3 pid=$4 waited=0
     while ((waited < limit * 10)); do
-        if grep -Eq -- "$regex" "$log" 2>/dev/null; then return 0; fi
-        [[ -d "/proc/$pid" ]] || return 1
+        if grep -Eq -- "$regex" "$log" 2>/dev/null; then
+            proc_alive "$pid"
+            return
+        fi
+        proc_alive "$pid" || return 1
         sleep 0.1
         waited=$((waited + 1))
     done
@@ -646,8 +715,11 @@ provision_state() {
     cp -a -- "$REL_A" "$REL_B"
     chown -R 0:0 -- "$REL_B"
     chmod -R u=rwX,go=rX -- "$REL_B"
-    if (cd "$STATE/cwd" && env -i PATH=/usr/bin:/bin "$REL_B/$PY_REL" -m compileall -q -j 0 \
-        "$REL_B/app" "$REL_B/venv/lib" >"$STATE/logs/compileall.log" 2>&1); then
+    # Root compiles (parses) only; -I -S keeps venv .pth code from executing.
+    # shellcheck disable=SC2086
+    if (cd "$STATE/cwd" && env -i PATH=/usr/bin:/bin "$REL_B/$PY_REL" $ROOT_PY_FLAGS \
+        -m compileall -q -j 0 "$REL_B/app" "$REL_B/venv/lib" \
+        >"$STATE/logs/compileall.log" 2>&1); then
         result R5-B-PREP PASS "release B precompiled (root-owned, 0755/0644)"
     else
         # Some third-party files never compile; B startup below is the real check.
@@ -658,22 +730,38 @@ provision_state() {
         >"$EVIDENCE/release-b.sha256"
 }
 
-r1_write_probes() { # LABEL RELEASE
-    local label=$1 rel=$2 target ok=0 total=0
+r1_write_probes() { # LABEL RELEASE EXPECTED_ERROR
+    # Each probe is a single mkdir or file create as the Worker UID. It passes
+    # only when it fails with the expected reason: A is protected by the
+    # read-only mount (EROFS), B by root ownership/DAC (EACCES).
+    local label=$1 rel=$2 expected=$3 target op out ok=0 total=0
     for target in "$rel/__f0r1_probe" "$rel/app/__f0r1_probe" \
-        "$rel/app/__pycache__/__f0r1_probe" "$rel/venv/lib/__f0r1_probe" "$rel/run/__f0r1_probe"; do
+        "$rel/app/__pycache__" "$rel/venv/lib/__f0r1_probe" "$rel/run"; do
         total=$((total + 1))
-        if as_uid "$WORKER_UID" "$STATE/home-worker" /bin/sh -c \
-            'mkdir -p "$(dirname "$1")" 2>/dev/null; : >"$1"' _ "$target" 2>/dev/null; then
+        if [[ "$target" == */__f0r1_probe ]]; then op='exec 2>&1; : >"$1"'; else op='mkdir -- "$1" 2>&1'; fi
+        [[ -d "$target" ]] && { target=$target/__f0r1_probe; op='exec 2>&1; : >"$1"'; }
+        if out=$(as_uid "$WORKER_UID" "$STATE/home-worker" /bin/sh -c "$op" _ "$target"); then
             result "R1-WRITE-$label" FAIL "Worker UID created $target"
         elif [[ -e "$target" ]]; then
             result "R1-WRITE-$label" FAIL "$target exists after denied write"
+        elif [[ "$out" != *"$expected"* ]]; then
+            result "R1-WRITE-$label" FAIL "$target denied for an unexpected reason: ${out:0:120}"
         else
             ok=$((ok + 1))
         fi
     done
     if ((ok == total)); then
-        result "R1-WRITE-$label" PASS "$total/$total Worker write/mkdir probes denied in $rel"
+        result "R1-WRITE-$label" PASS "$total/$total Worker write/mkdir probes denied ($expected) in $rel"
+    fi
+}
+
+r1_positive_control() { # the Worker UID can write where the contract says it may
+    local target=$STATE/runtime/__f0r1_control
+    if as_uid "$WORKER_UID" "$STATE/home-worker" /bin/sh -c ': >"$1" && rm -f -- "$1"' \
+        _ "$target" >/dev/null 2>&1; then
+        result R1-CONTROL PASS "Worker UID can write the shared runtime dir (denials are not a broken UID setup)"
+    else
+        result R1-CONTROL FAIL "Worker UID cannot write $STATE/runtime; negative probes are inconclusive"
     fi
 }
 
@@ -687,11 +775,13 @@ r1_import_probes() { # release A, cache-free (B3-01..04 equivalents)
 for name in '$probe'.split(','):
     module = importlib.import_module(name)
     assert module.__file__.startswith('$REL_A/'), module.__file__
-import app
-print(app.__file__)"
+assert sys.flags.dont_write_bytecode == 1
+assert sys.pycache_prefix == '$STATE/pycache-empty', sys.pycache_prefix
+print('F0R1_IMPORT_OK')"
         if as_uid "$WORKER_UID" "$STATE/home-worker" "$REL_A/$PY_REL" -c "$code" \
-            >"$STATE/logs/import-${probe//,/_}.log" 2>&1; then
-            result "R1-IMPORT" PASS "import $probe from $REL_A as UID $WORKER_UID"
+            >"$STATE/logs/import-${probe//,/_}.log" 2>&1 &&
+            grep -qx F0R1_IMPORT_OK "$STATE/logs/import-${probe//,/_}.log"; then
+            result "R1-IMPORT" PASS "import-only (not runtime startup) $probe from $REL_A as UID $WORKER_UID, cache-free flags confirmed"
         else
             result "R1-IMPORT" FAIL "import $probe failed; see logs/import-${probe//,/_}.log"
         fi
@@ -750,7 +840,7 @@ c.execute('CREATE TABLE IF NOT EXISTS f0r1_probe (uid INTEGER, ts REAL)')
 c.commit()
 c.execute('BEGIN')
 c.execute('SELECT count(*) FROM f0r1_probe').fetchone()
-time.sleep(5)
+time.sleep(10)
 c.execute('COMMIT')
 c.execute('INSERT INTO f0r1_probe VALUES (?, ?)', ($API_UID, time.time()))
 c.commit()
@@ -772,6 +862,21 @@ print(c.execute('PRAGMA integrity_check').fetchone()[0])"
     else
         result R4-WORKER-WRITE FAIL "see logs/r4-worker.log"
     fi
+    # Recipe R: while the holder is open, WAL/SHM exist with the shared group
+    # (setgid dir) and the DB file mode (0660).
+    local aux_bad="" aux
+    for aux in "$db-wal" "$db-shm"; do
+        if [[ ! -e "$aux" ]]; then
+            aux_bad+="$aux absent; "
+        elif [[ "$(stat -c '%g %a' -- "$aux")" != "$SHARED_GID 660" ]]; then
+            aux_bad+="$(stat -c '%n %u:%g %a' -- "$aux"); "
+        fi
+    done
+    if [[ -z "$aux_bad" ]]; then
+        result R4-AUX PASS "WAL/SHM present with gid $SHARED_GID mode 0660 during concurrent access"
+    else
+        result R4-AUX FAIL "$aux_bad"
+    fi
     if wait "$holder_pid" && grep -qx wal "$STATE/logs/r4-holder.log"; then
         result R4-API-WRITE PASS "API UID wrote after Worker write; journal_mode=wal"
     else
@@ -781,8 +886,11 @@ print(c.execute('PRAGMA integrity_check').fetchone()[0])"
         --clear-groups -- env -i PATH=/usr/bin:/bin "$REL_A/$PY_REL" -c "$writer" \
         >"$STATE/logs/r4-outsider.log" 2>&1); then
         result R4-NEGATIVE FAIL "UID $OUTSIDER_UID without group $SHARED_GID wrote the DB"
+    elif grep -qE 'sqlite3\.OperationalError: (unable to open database file|attempt to write a readonly database)' \
+        "$STATE/logs/r4-outsider.log"; then
+        result R4-NEGATIVE PASS "UID $OUTSIDER_UID without group $SHARED_GID denied by SQLite open/permission"
     else
-        result R4-NEGATIVE PASS "UID $OUTSIDER_UID without group $SHARED_GID denied"
+        result R4-NEGATIVE FAIL "outsider failed for an unexpected reason; see logs/r4-outsider.log"
     fi
     for f in "$db" "$db-wal" "$db-shm"; do
         [[ -e "$f" ]] && result R4-FILES INFO "after: $(stat -c '%n %u:%g %a' -- "$f")"
@@ -811,26 +919,36 @@ r5_worker_run() { # LABEL RELEASE
         else
             result "R3-CREDS-$label" FAIL "$creds"
         fi
-        if grep -q 'Worker boot identity manifest created' "$log"; then
-            manifest=$(find "$STATE/runtime/worker-identities" -name 'worker-*.json' \
-                -newer "$STATE/logs/worker-$label.log.start" -print -quit 2>/dev/null || true)
-            if [[ -n "$manifest" ]] && [[ "$(env -i "$REL_A/$PY_REL" -I -c \
-                'import json, sys; print(json.load(open(sys.argv[1]))["candidate_source_root"])' \
-                "$manifest" 2>/dev/null)" == "$rel" ]]; then
-                cp -- "$manifest" "$EVIDENCE/identity-$label.json"
-                result "R6-IDENTITY-$label" PASS "boot identity under RUNTIME_ROOT; source root $rel"
-            else
-                result "R6-IDENTITY-$label" FAIL "manifest missing or source root not $rel"
-            fi
+        # Broker round trip: "ready" in the log alone is not full startup.
+        if as_uid "$WORKER_UID" "$STATE/home-worker" timeout 90 "$rel/$PY_REL" -m celery \
+            -A app.celery_app inspect ping --destination="f0r1-$label@localhost" --timeout=10 \
+            >"$STATE/logs/ping-$label.log" 2>&1 && grep -q 'pong' "$STATE/logs/ping-$label.log"; then
+            result "R5-PING-$label" PASS "Worker answered a broker ping via disposable redis"
         else
-            result "R6-IDENTITY-$label" FAIL "boot identity not created; see logs/worker-$label.log"
+            result "R5-PING-$label" FAIL "no pong; see logs/ping-$label.log"
         fi
-        if [[ "$(tcp_exchange 6379 'PING\r\n')" == "+PONG" ]]; then
-            result "R5-BROKER-$label" INFO "Worker used disposable broker only (no route off-host)"
+        # The identity directory/file are 0700/0600 Worker-owned; read them as
+        # the Worker (root has no DAC_OVERRIDE). Root only redirects stdout.
+        local reader
+        reader="import json, pathlib, sys
+start = pathlib.Path(sys.argv[1]).stat().st_mtime
+found = sorted(p for p in pathlib.Path(sys.argv[2]).glob('worker-*.json') if p.stat().st_mtime >= start)
+assert len(found) == 1, found
+data = json.loads(found[0].read_text())
+assert data['candidate_source_root'] == sys.argv[3], data['candidate_source_root']
+print(json.dumps(data, indent=2, sort_keys=True))"
+        if grep -q 'Worker boot identity manifest created' "$log" &&
+            as_uid "$WORKER_UID" "$STATE/home-worker" "$rel/$PY_REL" -I -S -c "$reader" \
+                "$STATE/logs/worker-$label.log.start" "$STATE/runtime/worker-identities" "$rel" \
+                >"$EVIDENCE/identity-$label.json" 2>"$STATE/logs/identity-$label.err"; then
+            result "R6-IDENTITY-$label" PASS "one boot identity under RUNTIME_ROOT; candidate_source_root $rel"
+        else
+            result "R6-IDENTITY-$label" FAIL "boot identity absent, ambiguous, or wrong source root; see logs/identity-$label.err and worker-$label.log"
         fi
     else
-        result "R5-START-$label" FAIL "Worker not ready within 240s; see logs/worker-$label.log"
+        result "R5-START-$label" FAIL "Worker not ready within 240s or exited; see logs/worker-$label.log"
         result "R3-CREDS-$label" NOT_TESTED "Worker did not reach ready"
+        result "R5-PING-$label" NOT_TESTED "Worker did not reach ready"
         result "R6-IDENTITY-$label" NOT_TESTED "Worker did not reach ready"
     fi
     stop_pid "$pid"
@@ -847,7 +965,7 @@ r6_beat() {
     log=$STATE/logs/beat.log
     if wait_for_log "$log" 'beat: Starting' 120 "$pid"; then
         sleep 10
-        if [[ -d "/proc/$pid" ]]; then
+        if proc_alive "$pid"; then
             result R6-BEAT PASS "Beat running as UID $WORKER_UID from $REL_A for 10s"
         else
             result R6-BEAT FAIL "Beat exited after start; see logs/beat.log"
@@ -859,11 +977,12 @@ r6_beat() {
 }
 
 r1_integrity() {
-    if (cd "$REL_A" && sha256sum --quiet -c "$EVIDENCE/release-source.sha256" \
-        >"$STATE/logs/release-a-verify.log" 2>&1); then
-        result R1-INTEGRITY-A PASS "release A source unchanged after rehearsal"
+    if (cd "$REL_A" && sha256sum --quiet -c "$EVIDENCE/release-source.sha256" &&
+        sha256sum --quiet -c "$EVIDENCE/release-venv.sha256") \
+        >"$STATE/logs/release-a-verify.log" 2>&1; then
+        result R1-INTEGRITY-A PASS "release A source and venv match the staged manifests"
     else
-        result R1-INTEGRITY-A FAIL "release A source changed; see logs/release-a-verify.log"
+        result R1-INTEGRITY-A FAIL "release A changed or manifest unreadable; see logs/release-a-verify.log"
     fi
     if (cd "$REL_B" && sha256sum --quiet -c "$EVIDENCE/release-b.sha256" \
         >"$STATE/logs/release-b-verify.log" 2>&1); then
@@ -871,24 +990,41 @@ r1_integrity() {
     else
         result R1-INTEGRITY-B FAIL "release B changed; see logs/release-b-verify.log"
     fi
-    local cached
+    # Run A is cache-free because PYTHONPYCACHEPREFIX points at an empty,
+    # root-owned directory (Python then ignores every __pycache__, stdlib
+    # included) and bytecode writing is disabled. Confirm both held.
+    local cached prefix_entries flags_ok
     cached=$(find "$REL_A" \( -name __pycache__ -o -name '*.pyc' \) -print -quit)
-    [[ -z "$cached" ]] && result R5-CACHEFREE-A PASS "no bytecode written into release A" ||
-        result R5-CACHEFREE-A FAIL "bytecode present in release A: $cached"
+    prefix_entries=$(find "$STATE/pycache-empty" -mindepth 1 -print -quit)
+    flags_ok=$(grep -c "PYTHONPYCACHEPREFIX=$STATE/pycache-empty" "$EVIDENCE/launch/worker-A.txt" 2>/dev/null || true)
+    if [[ -z "$cached" && -z "$prefix_entries" && "$flags_ok" == 1 ]] &&
+        awk -F'\t' '$1=="R1-IMPORT" && $2!="PASS" {bad=1} $1=="R1-IMPORT" {n++} END {exit bad || n!=5}' \
+            "$RESULTS_FILE"; then
+        result R5-CACHEFREE-A PASS "empty pycache prefix and no bytecode in release A; flags confirmed in-process by R1-IMPORT"
+    else
+        result R5-CACHEFREE-A FAIL "cache-free conditions not all met (release=${cached:-none} prefix=${prefix_entries:-empty} launch_flag=$flags_ok)"
+    fi
 }
 
 r3_write_set() {
-    local uid
+    # Run find as each UID: it sees exactly what that UID can traverse, and
+    # root (no DAC_OVERRIDE) could not enter the 0700 homes anyway.
+    local uid home errors
     for uid in $WORKER_UID $API_UID; do
-        find "$STATE" "$EVIDENCE" /tmp -xdev -uid "$uid" -printf '%u:%g %m %p\n' \
-            2>/dev/null | sort >"$EVIDENCE/write-set-$uid.txt" || true
-        result R3-WRITESET INFO "UID $uid owns $(wc -l <"$EVIDENCE/write-set-$uid.txt") paths (write-set-$uid.txt)"
+        home=$STATE/home-worker
+        [[ "$uid" -eq "$API_UID" ]] && home=$STATE/home-api
+        as_uid "$uid" "$home" find "$STATE" /tmp -xdev -uid "$uid" -printf '%u:%g %m %p\n' \
+            2>"$STATE/logs/write-set-$uid.err" | sort >"$EVIDENCE/write-set-$uid.txt" || true
+        errors=$(grep -vc 'Permission denied' "$STATE/logs/write-set-$uid.err" || true)
+        result R3-WRITESET INFO "UID $uid owns $(wc -l <"$EVIDENCE/write-set-$uid.txt") reachable paths (write-set-$uid.txt; unreadable dirs listed in write-set-$uid.err; other errors: $errors)"
     done
-    if as_uid "$WORKER_UID" "$STATE/home-worker" /bin/sh -c 'ls "$1"' _ "$STATE/home-api" \
-        >/dev/null 2>&1; then
+    local out
+    if out=$(as_uid "$WORKER_UID" "$STATE/home-worker" /bin/sh -c 'ls -- "$1" 2>&1' _ "$STATE/home-api"); then
         result R3-SEPARATION FAIL "Worker UID can read the API home"
+    elif [[ "$out" == *"Permission denied"* ]]; then
+        result R3-SEPARATION PASS "Worker UID cannot read the API home (EACCES)"
     else
-        result R3-SEPARATION PASS "Worker UID cannot read the API home"
+        result R3-SEPARATION FAIL "API home check failed for an unexpected reason: ${out:0:120}"
     fi
 }
 
@@ -900,6 +1036,7 @@ r7_residual() {
     result R7-VERIFY RESIDUAL "verification/candidate commands (execute_verification_command, candidate_checks._run_command) run as the Worker UID; not sandboxed"
     result R7-DB RESIDUAL "Worker UID has read/write on the shared DB and runtime state (R4/R3)"
     result R7-BROKER RESIDUAL "broker has no authentication; any process in the Worker netns can reach it"
+    result R7-ROOT-PROVISION RESIDUAL "container root (CHOWN/SETUID/SETGID) provisions state and launches every UID; trusted orchestration, not sandboxed"
     local userns_note
     userns_note=$(awk -F'\t' '$1=="R2-NS-user" {print $3}' "$RESULTS_FILE")
     result R7-USERNS RESIDUAL "${userns_note:-user namespace not recorded}"
@@ -907,9 +1044,24 @@ r7_residual() {
 
 r8_portability() {
     result R8-HOST INFO "kernel=$(uname -r) arch=$(uname -m) os=$(. /etc/os-release && printf '%s' "$PRETTY_NAME")"
-    result R8-VERSIONS INFO "python=$("$REL_A/$PY_REL" -V 2>&1) sqlite=$("$REL_A/$PY_REL" -c 'import sqlite3; print(sqlite3.sqlite_version)') redis=$(redis-server --version | awk '{print $3}')"
+    # shellcheck disable=SC2086
+    result R8-VERSIONS INFO "python=$("$REL_A/$PY_REL" $ROOT_PY_FLAGS -V 2>&1) sqlite=$("$REL_A/$PY_REL" $ROOT_PY_FLAGS -c 'import sqlite3; print(sqlite3.sqlite_version)' 2>&1) redis=$(redis-server --version | awk '{print $3}')"
     result R8-GENERIC INFO "generic Linux: numeric UIDs/shared GID, setgid 2770 state dirs, 0660 DB pre-provisioning, read-only release, env-configured roots"
     result R8-HOST-SPECIFIC INFO "host/runtime-specific: Docker seccomp/AppArmor profile, user-namespace mapping, aarch64 wheels in venv, image python path"
+}
+
+ABORT_LINE=""
+
+on_rehearse_exit() {
+    local status=$?
+    stop_all
+    if ((SUMMARY_DONE == 0)); then
+        # set -e stopped the rehearsal early: never leave a silent partial run.
+        result R0-ABORT FAIL "rehearsal aborted (status $status, line ${ABORT_LINE:-unknown}); later checks did not run"
+        cp -- "$STATE"/logs/*.log "$EVIDENCE/" 2>/dev/null || true
+        printf 'SUMMARY\taborted\t(no F0 verdict issued)\n'
+        exit 1
+    fi
 }
 
 cmd_rehearse() {
@@ -924,13 +1076,14 @@ cmd_rehearse() {
         summary_and_exit
     fi
     note "preflight passed; recording results to $RESULTS_FILE"
-    trap stop_all EXIT
-    trap 'note "aborted at line $LINENO; partial results in $RESULTS_FILE"' ERR
+    trap on_rehearse_exit EXIT
+    trap 'ABORT_LINE=$LINENO' ERR
 
     provision_state
     build_app_env "$REL_A"
-    r1_write_probes A "$REL_A"
-    r1_write_probes B "$REL_B"
+    r1_positive_control
+    r1_write_probes A "$REL_A" "Read-only file system"
+    r1_write_probes B "$REL_B" "Permission denied"
     r1_import_probes
     if start_redis; then
         r4_api_start
