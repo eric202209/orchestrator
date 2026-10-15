@@ -261,7 +261,9 @@ def on_worker_ready(sender, **kwargs):
         configuration_fingerprint = _collect_worker_configuration(
             settings,
             getattr(worker_app, "conf", {}),
-            worker_runtime=sender,
+            # worker_ready's sender is the Consumer; the effective concurrency
+            # lives on its WorkController.
+            worker_runtime=getattr(sender, "controller", None),
             operational_values={
                 "task.soft_time_limit_seconds": ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
                 "task.time_limit_seconds": ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,

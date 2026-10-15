@@ -2225,7 +2225,9 @@ def collect_worker_configuration(
         "celery.task_default_routing_key": celery_config.get(
             "task_default_routing_key"
         ),
-        "celery.task_routes": celery_config.get("task_routes", {}),
+        # Celery exposes an unset task_routes as None, which its router treats
+        # as no routes; canonicalize exactly as the task-policy routing table.
+        "celery.task_routes": _canonical_task_routes(celery_config.get("task_routes")),
         "celery.worker_send_task_events": celery_config.get("worker_send_task_events"),
         "celery.task_publish_retry": celery_config.get("task_publish_retry"),
         "celery.task_publish_retry_policy": celery_config.get(
