@@ -732,7 +732,7 @@ provision_state() {
     # Root compiles (parses) only; -I -S keeps venv .pth code from executing.
     # shellcheck disable=SC2086
     if (cd "$STATE/cwd" && env -i PATH=/usr/bin:/bin "$REL_B/$PY_REL" $ROOT_PY_FLAGS \
-        -m compileall -q -j 0 "$REL_B/app" "$REL_B/venv/lib" \
+        -m compileall -q -j 0 --invalidation-mode checked-hash "$REL_B/app" "$REL_B/venv/lib" \
         >"$STATE/logs/compileall.log" 2>&1); then
         result R5-B-PREP PASS "release B precompiled (root-owned, 0755/0644)"
     else
