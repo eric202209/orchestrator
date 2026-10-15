@@ -140,6 +140,19 @@ validate_stage_dir_name() { # DIR -> validated absolute path on stdout
     printf '%s\n' "$dir"
 }
 
+# The staged release has no .git, so the Worker reads this file instead of
+# Git: HEAD, tree, and the raw commit object binding them. The Worker
+# recomputes the tree from the release contents. Integrity only; authenticity
+# rests on the root-owned release and an external identity pin.
+write_release_identity() { # REPO COMMIT TREE RELEASE_DIR
+    local target=$4/.orchestrator-release-identity.json commit_b64
+    [[ ! -e "$target" && ! -L "$target" ]] ||
+        refuse "commit tree already contains $(basename -- "$target")"
+    commit_b64=$(git -C "$1" cat-file commit "$2" | base64 -w0)
+    printf '{"schema_version":1,"kind":"git-archive-release","candidate_head":"%s","candidate_tree":"%s","commit_object":"%s"}\n' \
+        "$2" "$3" "$commit_b64" >"$target"
+}
+
 capture_ns() { # PREFIX PID -> KEY=VALUE lines
     local prefix=$1 pid=$2 ns value
     for ns in net mnt pid ipc uts user cgroup; do
@@ -183,6 +196,7 @@ cmd_stage() {
     git -C "$repo" archive --format=tar "$commit" |
         tar -x --no-same-owner --no-same-permissions -C "$dir/release"
     archive_sha=$(git -C "$repo" archive --format=tar "$commit" | sha256sum | cut -d' ' -f1)
+    write_release_identity "$repo" "$commit" "$tree" "$dir/release"
     tar -C "$(dirname -- "$venv")" --exclude='__pycache__' --exclude='*.pyc' \
         -cf - "$(basename -- "$venv")" |
         tar -x --no-same-owner -C "$dir/release"

@@ -12,11 +12,15 @@ constitute an in-memory bytecode attestation.
 from __future__ import annotations
 
 import ast
+import base64
+import binascii
 import hashlib
 import json
 import os
+import re
 import shlex
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -46,6 +50,16 @@ BOUNDARY_COMPLETENESS_NOT_APPLICABLE = "BOUNDARY_COMPLETENESS_NOT_APPLICABLE"
 
 WORKER_IDENTITY_DIRECTORY_NAME = "worker-identities"
 ROADMAP_DOC_PREFIX = "docs/roadmap/"
+# A protected release (git-archive output, no .git) carries this file at its
+# root, written by the stager.  Only the release-local dependency payload,
+# this file, and interpreter bytecode caches may exist outside the recorded
+# Git tree.
+RELEASE_IDENTITY_FILE_NAME = ".orchestrator-release-identity.json"
+RELEASE_IDENTITY_SCHEMA_VERSION = 1
+RELEASE_IDENTITY_KIND = "git-archive-release"
+RELEASE_UNTRACKED_TOP_LEVEL = frozenset({"venv", RELEASE_IDENTITY_FILE_NAME})
+RELEASE_UNTRACKED_DIRECTORY = "__pycache__"
+_GIT_SHA1_OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 
 # This is the fixed, reviewable allowlist for the Phase 37 Worker identity
 # contract.  It covers the Worker registration/readiness boundary, S1's
@@ -657,6 +671,13 @@ def _git_output(root: Path, *arguments: str) -> str:
             capture_output=True,
             text=True,
             encoding="utf-8",
+            # The repository comes from the source root only, never from an
+            # inherited GIT_DIR/GIT_WORK_TREE-style override.
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            },
         )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise CandidateManifestError(
@@ -688,6 +709,152 @@ def _git_identity(root: Path) -> tuple[str, str]:
         _git_output(root, "rev-parse", "HEAD"),
         _git_output(root, "rev-parse", "HEAD^{tree}"),
     )
+
+
+def _source_identity(root: Path) -> tuple[tuple[str, ...], str, str]:
+    """Return ``(dirty entries, HEAD, tree)`` for the source root.
+
+    The source root alone selects its form: ``.git`` at the root is a
+    development checkout read through Git; a release identity file at the root
+    is a protected release verified without Git.  Neither or both is
+    unavailable.  Git may never resolve a parent or unrelated repository.
+    """
+
+    has_git = os.path.lexists(root / ".git")
+    has_release = os.path.lexists(root / RELEASE_IDENTITY_FILE_NAME)
+    if has_git and has_release:
+        raise CandidateManifestError(
+            "source root is both a Git checkout and a protected release"
+        )
+    if has_release:
+        return _release_identity(root)
+    if not has_git:
+        raise CandidateManifestError(
+            "source root is neither a Git checkout nor a protected release"
+        )
+    toplevel = Path(_git_output(root, "rev-parse", "--show-toplevel")).resolve()
+    if toplevel != root:
+        raise CandidateManifestError(
+            f"source root is not its Git top-level directory: {toplevel}"
+        )
+    head, tree = _git_identity(root)
+    return _dirty_entries(root), head, tree
+
+
+def _git_object_id(kind: bytes, data: bytes) -> bytes:
+    return hashlib.sha1(b"%s %d\0" % (kind, len(data)) + data).digest()
+
+
+def _writable_by_process(path: Path) -> bool:
+    return os.access(path, os.W_OK)
+
+
+def _release_tree_id(directory: Path, *, top_level: bool) -> bytes | None:
+    """Recompute the Git (SHA-1) tree ID of release contents, without Git."""
+
+    if _writable_by_process(directory):
+        raise CandidateManifestError(
+            f"protected release is writable by this process: {directory}"
+        )
+    entries: list[tuple[bytes, bytes]] = []
+    with os.scandir(directory) as iterator:
+        for entry in iterator:
+            name = os.fsencode(entry.name)
+            mode = entry.stat(follow_symlinks=False).st_mode
+            if top_level and entry.name in RELEASE_UNTRACKED_TOP_LEVEL:
+                continue
+            if stat.S_ISDIR(mode):
+                if entry.name == RELEASE_UNTRACKED_DIRECTORY:
+                    continue
+                subtree = _release_tree_id(Path(entry.path), top_level=False)
+                if subtree is not None:
+                    entries.append((name + b"/", b"40000 " + name + b"\0" + subtree))
+            elif stat.S_ISLNK(mode):
+                target = os.fsencode(os.readlink(entry.path))
+                blob = _git_object_id(b"blob", target)
+                entries.append((name, b"120000 " + name + b"\0" + blob))
+            elif stat.S_ISREG(mode):
+                if _writable_by_process(Path(entry.path)):
+                    raise CandidateManifestError(
+                        f"protected release is writable by this process: {entry.path}"
+                    )
+                blob = _git_object_id(b"blob", Path(entry.path).read_bytes())
+                git_mode = b"100755" if mode & stat.S_IXUSR else b"100644"
+                entries.append((name, git_mode + b" " + name + b"\0" + blob))
+            else:
+                raise CandidateManifestError(
+                    f"unsupported file type in protected release: {entry.path}"
+                )
+    if not entries:
+        return None
+    entries.sort(key=lambda item: item[0])
+    return _git_object_id(b"tree", b"".join(item[1] for item in entries))
+
+
+def _release_identity(root: Path) -> tuple[tuple[str, ...], str, str]:
+    """Verify a protected release against its recorded Git identity.
+
+    Integrity: the recorded commit object must hash to the recorded HEAD and
+    name the recorded tree, and the tree ID recomputed from the release
+    contents must equal it.  This is not authenticity: whoever can rewrite
+    the release can rewrite this file too.  The release must therefore not be
+    writable by this process (the protected-release ownership boundary), and
+    approval still comes only from an external ``CandidateIdentityPin``.
+    """
+
+    path = root / RELEASE_IDENTITY_FILE_NAME
+    try:
+        if not stat.S_ISREG(path.lstat().st_mode):
+            raise CandidateManifestError(
+                "protected release identity is not a regular file"
+            )
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CandidateManifestError(
+            "protected release identity is unreadable"
+        ) from exc
+    fields = {
+        "schema_version",
+        "kind",
+        "candidate_head",
+        "candidate_tree",
+        "commit_object",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or isinstance(value["schema_version"], bool)
+        or value["schema_version"] != RELEASE_IDENTITY_SCHEMA_VERSION
+        or value["kind"] != RELEASE_IDENTITY_KIND
+        or not all(
+            isinstance(value[key], str) and _GIT_SHA1_OBJECT_ID.fullmatch(value[key])
+            for key in ("candidate_head", "candidate_tree")
+        )
+        or not isinstance(value["commit_object"], str)
+    ):
+        raise CandidateManifestError("protected release identity is malformed")
+    head = value["candidate_head"]
+    tree = value["candidate_tree"]
+    try:
+        commit = base64.b64decode(value["commit_object"], validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise CandidateManifestError("protected release identity is malformed") from exc
+    if _git_object_id(b"commit", commit).hex() != head:
+        raise CandidateManifestError(
+            "protected release commit object does not match its recorded HEAD"
+        )
+    if not commit.startswith(f"tree {tree}\n".encode()):
+        raise CandidateManifestError(
+            "protected release commit object does not name its recorded tree"
+        )
+    if _writable_by_process(path):
+        raise CandidateManifestError(
+            "protected release identity is writable by this process"
+        )
+    actual = _release_tree_id(root, top_level=True)
+    actual_tree = actual.hex() if actual is not None else ""
+    dirty = () if actual_tree == tree else (f"release_tree_mismatch:{actual_tree}",)
+    return dirty, head, actual_tree
 
 
 def _validate_launcher_identity(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -1124,16 +1291,16 @@ def build_candidate_source_manifest(
 ) -> CandidateSourceManifest:
     """Build a deterministic candidate manifest from the actual checkout.
 
-    Git is read directly; no supplied SHA environment value participates in
-    the result.  The caller may provide expected identities to make a
+    Git (or, for a protected release, the recomputed release tree) is read
+    directly; no supplied SHA environment value participates in the result.
+    The caller may provide expected identities to make a
     pre-start gate fail closed if the checkout is not the reviewed candidate.
     """
 
     root = _safe_source_root(source_root)
-    dirty = _dirty_entries(root)
+    dirty, head, tree = _source_identity(root)
     if dirty:
         raise CandidateManifestError(f"candidate source is dirty: {dirty}")
-    head, tree = _git_identity(root)
     if expected_head is not None and head != expected_head:
         raise CandidateManifestError("candidate HEAD mismatch")
     if expected_tree is not None and tree != expected_tree:
@@ -1207,10 +1374,9 @@ def verify_candidate_source_manifest(
         root = _safe_source_root(candidate.source_root)
         if candidate.source_root != str(root):
             reasons.append("source_root_not_canonical")
-        dirty = _dirty_entries(root)
+        dirty, current_head, current_tree = _source_identity(root)
         if dirty:
             reasons.append("dirty_source")
-        current_head, current_tree = _git_identity(root)
         if current_head != candidate.candidate_head:
             reasons.append("candidate_head_mismatch")
         if current_tree != candidate.candidate_tree:

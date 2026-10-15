@@ -1,0 +1,3 @@
+# The image copies nothing. If this directory is ever used as a build context
+# instead of stdin, send nothing but the Dockerfile.
+*
