@@ -263,8 +263,11 @@ class Settings(BaseSettings):
     # Phase 23B: Orchestrator-owned runtime root for Task Execution Sandboxes.
     # Deliberately outside every project repo and outside the OpenClaw
     # workspace tree (see phase23a-workspace-runtime-separation-plan.md §8
-    # Stage 1). Not yet read by any execution path.
+    # Stage 1). Also anchors Worker boot identity records.
     RUNTIME_ROOT: str = "~/.orchestrator/runtime"
+    # Explicit repository root used by Worker boot identity evidence. This is
+    # intentionally derived from this config module, never from process cwd.
+    WORKER_SOURCE_ROOT: str = str(BASE_DIR)
     # RTO1: explicit OpenClaw template identity. Empty means no normal
     # OpenClaw invocation is eligible; selection must never fall back to the
     # ProjectRoot agent, main, or a generic workspace.

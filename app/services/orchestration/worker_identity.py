@@ -44,7 +44,7 @@ BOUNDARY_COMPLETENESS_INVALID = "BOUNDARY_COMPLETENESS_INVALID"
 BOUNDARY_COMPLETENESS_INCONCLUSIVE = "BOUNDARY_COMPLETENESS_INCONCLUSIVE"
 BOUNDARY_COMPLETENESS_NOT_APPLICABLE = "BOUNDARY_COMPLETENESS_NOT_APPLICABLE"
 
-DEFAULT_WORKER_IDENTITY_DIR = Path("run/worker-identities")
+WORKER_IDENTITY_DIRECTORY_NAME = "worker-identities"
 ROADMAP_DOC_PREFIX = "docs/roadmap/"
 
 # This is the fixed, reviewable allowlist for the Phase 37 Worker identity
@@ -419,6 +419,10 @@ class ManifestWriteError(WorkerIdentityError):
     """An identity record could not be written atomically."""
 
 
+class WorkerIdentityPathError(WorkerIdentityError):
+    """Worker source/runtime identity paths are missing or unsafe."""
+
+
 class ConfigurationFingerprintError(WorkerIdentityError):
     """An unapproved or secret-bearing setting was supplied."""
 
@@ -513,6 +517,80 @@ def _under_root(path: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+@dataclass(frozen=True)
+class WorkerIdentityPaths:
+    """Canonical, validated paths used by the Worker boot identity hook."""
+
+    source_root: Path
+    runtime_root: Path
+    identity_dir: Path
+
+
+def _configured_directory(value: str | Path | None, *, name: str) -> Path:
+    if value is None or not str(value).strip():
+        raise WorkerIdentityPathError(f"{name} is required")
+    candidate = Path(str(value).strip()).expanduser()
+    if not candidate.is_absolute():
+        raise WorkerIdentityPathError(f"{name} must be absolute: {candidate}")
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise WorkerIdentityPathError(f"{name} does not exist: {candidate}") from exc
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise WorkerIdentityPathError(
+            f"{name} cannot be resolved: {candidate}"
+        ) from exc
+    if not resolved.is_dir():
+        raise WorkerIdentityPathError(f"{name} is not a directory: {resolved}")
+    if not os.access(resolved, os.R_OK | os.X_OK):
+        raise WorkerIdentityPathError(f"{name} is not readable: {resolved}")
+    return resolved
+
+
+def resolve_worker_identity_paths(
+    source_root: str | Path | None,
+    runtime_root: str | Path | None,
+) -> WorkerIdentityPaths:
+    """Resolve the explicit Worker source/runtime identity path contract.
+
+    Both roots must be absolute existing directories. Symlink aliases are
+    canonicalized before validation, source/runtime overlap is rejected, and
+    the runtime root must be writable. The identity directory is a fixed child
+    of that runtime root; it may be created by the existing atomic manifest
+    writer, but an existing file or symlink at that location is rejected.
+    """
+
+    source = _configured_directory(source_root, name="source root")
+    runtime = _configured_directory(runtime_root, name="runtime root")
+    if _under_root(source, runtime) or _under_root(runtime, source):
+        raise WorkerIdentityPathError(
+            f"source/runtime root overlap: source={source} runtime={runtime}"
+        )
+    if not os.access(runtime, os.W_OK | os.X_OK):
+        raise WorkerIdentityPathError(f"runtime root is not writable: {runtime}")
+
+    identity_dir = runtime / WORKER_IDENTITY_DIRECTORY_NAME
+    if identity_dir.is_symlink():
+        raise WorkerIdentityPathError(
+            f"identity directory must not be a symlink: {identity_dir}"
+        )
+    if identity_dir.exists():
+        if not identity_dir.is_dir():
+            raise WorkerIdentityPathError(
+                f"identity directory is not a directory: {identity_dir}"
+            )
+        if not os.access(identity_dir, os.W_OK | os.X_OK):
+            raise WorkerIdentityPathError(
+                f"identity directory is not writable: {identity_dir}"
+            )
+
+    return WorkerIdentityPaths(
+        source_root=source,
+        runtime_root=runtime,
+        identity_dir=identity_dir,
+    )
 
 
 def _module_source_path(root: Path, module_name: str) -> Path:
@@ -2216,7 +2294,7 @@ def _registered_tasks_from_sender(sender: Any) -> tuple[str, ...]:
 def create_worker_boot_identity(
     *,
     source_root: str | Path,
-    identity_dir: str | Path = DEFAULT_WORKER_IDENTITY_DIR,
+    identity_dir: str | Path | None = None,
     candidate_manifest: CandidateSourceManifest | None = None,
     candidate_pin: CandidateIdentityPin | None = None,
     sender: Any | None = None,
@@ -2335,7 +2413,13 @@ def create_worker_boot_identity(
         configuration_schema_version=int(projection_schema),
         configuration_policy_id=str(projection_policy),
     )
-    target_dir = Path(identity_dir)
+    if identity_dir is None or not str(identity_dir).strip():
+        raise WorkerIdentityPathError("identity directory is required")
+    target_dir = Path(str(identity_dir).strip()).expanduser()
+    if not target_dir.is_absolute():
+        raise WorkerIdentityPathError(
+            f"identity directory must be absolute: {target_dir}"
+        )
     target = target_dir / f"worker-{record_id}.json"
     path = _write_json_atomic(target, manifest.to_dict(), overwrite=False)
     return path, manifest
@@ -2750,7 +2834,6 @@ __all__ = [
     "CONFIGURATION_PROJECTION_SCHEMA_VERSION",
     "ConfigurationFingerprintError",
     "DEFAULT_AFFECTED_MODULES",
-    "DEFAULT_WORKER_IDENTITY_DIR",
     "EXPECTED_TASK_REGISTRATIONS",
     "IDENTITY_INCONCLUSIVE",
     "IDENTITY_MISMATCH",
@@ -2770,6 +2853,8 @@ __all__ = [
     "TASK_POLICY_PROJECTION_SCHEMA_VERSION",
     "WorkerBootIdentityManifest",
     "WorkerIdentityError",
+    "WorkerIdentityPathError",
+    "WorkerIdentityPaths",
     "build_candidate_source_manifest",
     "build_effective_task_policy_projection",
     "build_non_secret_configuration_fingerprint",
@@ -2783,6 +2868,7 @@ __all__ = [
     "create_worker_boot_identity",
     "load_candidate_source_manifest",
     "process_identity_from_mapping",
+    "resolve_worker_identity_paths",
     "sha256_file",
     "verify_candidate_source_manifest",
     "verify_worker_identity",

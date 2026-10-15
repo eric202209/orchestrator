@@ -82,6 +82,7 @@ from app.services.orchestration.lifecycle.worker_bootstrap import (
 from app.services.orchestration.worker_identity import (
     collect_worker_configuration as _collect_worker_configuration,
     create_worker_boot_identity as _create_worker_boot_identity,
+    resolve_worker_identity_paths as _resolve_worker_identity_paths,
 )
 from app.services.orchestration.execution.executor_workspace_binding import (
     SUPPORTED_LOCAL_MODEL_REF as _SUPPORTED_LOCAL_MODEL_REF,
@@ -304,9 +305,13 @@ def on_worker_ready(sender, **kwargs):
             },
             task_registry=getattr(worker_app, "tasks", None),
         )
+        identity_paths = _resolve_worker_identity_paths(
+            source_root=settings.WORKER_SOURCE_ROOT,
+            runtime_root=settings.RUNTIME_ROOT,
+        )
         manifest_path, boot_manifest = _create_worker_boot_identity(
-            source_root=Path.cwd(),
-            identity_dir=Path.cwd() / "run" / "worker-identities",
+            source_root=identity_paths.source_root,
+            identity_dir=identity_paths.identity_dir,
             sender=sender,
             configuration_fingerprint=configuration_fingerprint,
         )
