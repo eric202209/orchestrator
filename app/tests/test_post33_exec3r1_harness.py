@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from celery.result import allow_join_result, denied_join_result
 
 from app.config import settings
 from app.models import (
@@ -164,7 +165,13 @@ def _make_worker_sync(monkeypatch, db_session_factory):
         @staticmethod
         def delay(**kwargs: Any) -> SyncResult:
             applied = real_task.apply(kwargs=kwargs)
-            return SyncResult(applied.get(propagate=True))
+            # Eager task execution runs the real Celery task body in-process.
+            # Celery's task trace may leave synchronous-result joins denied,
+            # but this adapter is collecting an already-completed eager result,
+            # not launching a child task from production code.
+            with allow_join_result():
+                outcome = applied.get(propagate=True)
+            return SyncResult(outcome)
 
     monkeypatch.setattr(worker_module, "get_db_session", db_session_factory)
     monkeypatch.setattr(worker_module, "execute_orchestration_task", SyncTask)
@@ -404,12 +411,16 @@ def test_exec3r1_provider_free_full_lifecycle_uses_production_seam(
     db.commit()
     db.refresh(execution_session)
 
-    queue_result = queue_task_for_session(
-        db,
-        execution_session,
-        committed_tasks[0].id,
-        timeout_seconds=120,
-    )
+    # Celery's worker trace normally enables this guard.  The provider-free
+    # seam must remain valid when another test leaves that task-context guard
+    # active, because it executes the production task eagerly in-process.
+    with denied_join_result():
+        queue_result = queue_task_for_session(
+            db,
+            execution_session,
+            committed_tasks[0].id,
+            timeout_seconds=120,
+        )
     assert queue_result["task_execution_id"]
 
     db.refresh(committed_tasks[0])
