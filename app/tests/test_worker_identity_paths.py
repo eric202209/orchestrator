@@ -43,6 +43,9 @@ def _minimal_candidate(tmp_path: Path):
         {
             "schema_version": worker_identity.CONFIGURATION_PROJECTION_SCHEMA_VERSION,
             "projection_policy_id": worker_identity.CONFIGURATION_POLICY_ID,
+            "identity_scope": worker_identity.IDENTITY_SCOPE,
+            "invocation_identity": worker_identity.INVOCATION_IDENTITY,
+            "invocation_identity_reason": worker_identity.INVOCATION_IDENTITY_REASON,
         },
     )
     process = worker_identity.ProcessIdentity(

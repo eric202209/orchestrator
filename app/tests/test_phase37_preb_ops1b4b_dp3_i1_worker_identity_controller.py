@@ -219,9 +219,6 @@ def _config() -> tuple[str, dict]:
             "openclaw.cli.executable": "/usr/local/bin/openclaw",
             "openclaw.cli.args": ["--json"],
             "d37.binding.route_behavior": "ephemeral-runtime-binding",
-            "d37.binding.provider_base_url_identity": "http://127.0.0.1:8000",
-            "d37.binding.model_selection": "openai/qwen-local",
-            "d37.binding.auth_schema_identity": "api-key",
             "beat.schedule": {"orphan": {"task": "sweep", "interval_seconds": 900}},
             "task.effective_policies": build_effective_task_policy_projection(
                 _task_registry(), _task_policy_celery_config()
@@ -2136,7 +2133,6 @@ def test_i5_start_passes_only_canonically_approved_launcher(candidate):
         ("openclaw.gateway_route", "http://127.0.0.1:9999"),
         ("openclaw.model_identity", {"execution": "unapproved-model"}),
         ("openclaw.fallback_policy", {"agent_backend": "unapproved"}),
-        ("d37.binding.provider_base_url_identity", "http://127.0.0.1:9999"),
         ("celery.task_serializer", "pickle"),
         ("task.decorator_time_limits", {"execute": {"hard": 999}}),
         ("beat.schedule", {"orphan": {"kwargs": {"days": 99}}}),
@@ -2208,6 +2204,7 @@ def test_i5_missing_or_unsupported_configuration_pin_never_verifies(candidate):
     )
     assert unsupported.classification != IDENTITY_VERIFIED
     assert "unsupported_configuration_projection_schema" in unsupported.reasons
+    assert "approved_configuration_boot_schema_mismatch" in unsupported.reasons
 
 
 def test_i5_secret_bearing_route_is_rejected_without_serialization():

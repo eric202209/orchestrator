@@ -35,8 +35,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 SCHEMA_VERSION = 1
-CONFIGURATION_PROJECTION_SCHEMA_VERSION = 1
-CONFIGURATION_POLICY_ID = "phase37-preb-worker-effective-v1"
+CONFIGURATION_PROJECTION_SCHEMA_VERSION = 2
+CONFIGURATION_POLICY_ID = "phase37-preb-worker-boot-v2"
+IDENTITY_SCOPE = "worker_boot"
+INVOCATION_IDENTITY = "UNVERIFIED"
+INVOCATION_IDENTITY_REASON = "trusted_invocation_projection_not_implemented"
 IDENTITY_VERIFIED = "IDENTITY_VERIFIED"
 IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
 IDENTITY_INCONCLUSIVE = "IDENTITY_INCONCLUSIVE"
@@ -362,9 +365,6 @@ NON_SECRET_CONFIGURATION_KEYS = frozenset(
         "openclaw.cli.executable",
         "openclaw.cli.args",
         "d37.binding.route_behavior",
-        "d37.binding.provider_base_url_identity",
-        "d37.binding.model_selection",
-        "d37.binding.auth_schema_identity",
         "beat.schedule",
         "task.effective_policies",
     }
@@ -412,9 +412,6 @@ REQUIRED_EFFECTIVE_CONFIGURATION_KEYS = frozenset(
         "openclaw.cli.executable",
         "openclaw.cli.args",
         "d37.binding.route_behavior",
-        "d37.binding.provider_base_url_identity",
-        "d37.binding.model_selection",
-        "d37.binding.auth_schema_identity",
         "beat.schedule",
         "task.effective_policies",
     }
@@ -1765,6 +1762,9 @@ def build_non_secret_configuration_fingerprint(
     payload = {
         "schema_version": CONFIGURATION_PROJECTION_SCHEMA_VERSION,
         "projection_policy_id": policy_id,
+        "identity_scope": IDENTITY_SCOPE,
+        "invocation_identity": INVOCATION_IDENTITY,
+        "invocation_identity_reason": INVOCATION_IDENTITY_REASON,
         "allowlisted_values": canonical_values,
         "secret_presence": dict(sorted(presence.items())),
     }
@@ -2140,6 +2140,14 @@ def collect_worker_configuration(
         if isinstance(entry, Mapping)
     }
     cli_path = getattr(settings_object, "OPENCLAW_CLI_PATH", None)
+    if cli_path is None or (isinstance(cli_path, str) and not cli_path.strip()):
+        cli_identity: str | dict[str, bool] = {"configured": False}
+    elif isinstance(cli_path, str):
+        cli_identity = cli_path
+    else:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: OPENCLAW_CLI_PATH is not a string"
+        )
     cli_args = _safe_cli_args(getattr(settings_object, "OPENCLAW_CLI_ARGS", ""))
     broker_route = _safe_route_identity(
         celery_config.get("broker_url")
@@ -2168,10 +2176,6 @@ def collect_worker_configuration(
         )
     }
     task_decorator_limits = operational.get("task.decorator_time_limits")
-    d37_provider_route = _safe_route_identity(
-        operational.get("d37.binding.provider_base_url_identity"),
-        field_name="d37.binding.provider_base_url_identity",
-    )
     values = {
         "queue.identity": celery_config.get("task_default_queue", "celery"),
         "worker.concurrency": getattr(worker_runtime, "concurrency", None),
@@ -2253,14 +2257,11 @@ def collect_worker_configuration(
                 settings_object, "AGENT_SECONDARY_BACKEND", None
             ),
         },
-        "openclaw.cli.executable": cli_path or None,
+        # This is configured-path metadata only.  Effective CLI resolution is
+        # invocation-owned and must not consult PATH during Worker boot.
+        "openclaw.cli.executable": cli_identity,
         "openclaw.cli.args": cli_args,
         "d37.binding.route_behavior": operational.get("d37.binding.route_behavior"),
-        "d37.binding.provider_base_url_identity": d37_provider_route,
-        "d37.binding.model_selection": operational.get("d37.binding.model_selection"),
-        "d37.binding.auth_schema_identity": operational.get(
-            "d37.binding.auth_schema_identity"
-        ),
         "beat.schedule": schedule_identity,
         "task.effective_policies": task_policy_projection,
     }
@@ -2316,6 +2317,9 @@ class WorkerBootIdentityManifest:
     record_id: str
     configuration_schema_version: int = CONFIGURATION_PROJECTION_SCHEMA_VERSION
     configuration_policy_id: str = CONFIGURATION_POLICY_ID
+    identity_scope: str = IDENTITY_SCOPE
+    invocation_identity: str = INVOCATION_IDENTITY
+    invocation_identity_reason: str = INVOCATION_IDENTITY_REASON
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -2392,6 +2396,13 @@ class WorkerBootIdentityManifest:
             record_id=str(value["record_id"]),
             configuration_schema_version=int(value["configuration_schema_version"]),
             configuration_policy_id=str(value["configuration_policy_id"]),
+            identity_scope=str(value.get("identity_scope", IDENTITY_SCOPE)),
+            invocation_identity=str(
+                value.get("invocation_identity", INVOCATION_IDENTITY)
+            ),
+            invocation_identity_reason=str(
+                value.get("invocation_identity_reason", INVOCATION_IDENTITY_REASON)
+            ),
         )
 
 
@@ -2515,6 +2526,18 @@ def create_worker_boot_identity(
         raise ConfigurationFingerprintError(
             f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported projection policy"
         )
+    if projection.get("identity_scope") != IDENTITY_SCOPE:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported identity scope"
+        )
+    if projection.get("invocation_identity") != INVOCATION_IDENTITY:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported invocation identity status"
+        )
+    if projection.get("invocation_identity_reason") != INVOCATION_IDENTITY_REASON:
+        raise ConfigurationFingerprintError(
+            f"{CONFIG_PROJECTION_INCOMPLETE}: unsupported invocation identity reason"
+        )
     actual_tasks = tuple(
         sorted(
             str(item)
@@ -2580,6 +2603,9 @@ def create_worker_boot_identity(
         record_id=record_id,
         configuration_schema_version=int(projection_schema),
         configuration_policy_id=str(projection_policy),
+        identity_scope=IDENTITY_SCOPE,
+        invocation_identity=INVOCATION_IDENTITY,
+        invocation_identity_reason=INVOCATION_IDENTITY_REASON,
     )
     if identity_dir is None or not str(identity_dir).strip():
         raise WorkerIdentityPathError("identity directory is required")
@@ -2687,6 +2713,12 @@ def verify_worker_identity(
 
     if boot.schema_version != SCHEMA_VERSION:
         reasons.append("boot_schema_mismatch")
+    if boot.identity_scope != IDENTITY_SCOPE:
+        reasons.append("boot_identity_scope_mismatch")
+    if boot.invocation_identity != INVOCATION_IDENTITY:
+        reasons.append("boot_invocation_identity_mismatch")
+    if boot.invocation_identity_reason != INVOCATION_IDENTITY_REASON:
+        reasons.append("boot_invocation_identity_reason_mismatch")
     if boot.candidate_head != candidate.candidate_head:
         reasons.append("boot_candidate_head_mismatch")
     if boot.candidate_tree != candidate.candidate_tree:
@@ -2922,14 +2954,19 @@ def verify_worker_identity(
         reasons.append("configuration_policy_unavailable")
     elif current_configuration_policy_id != boot.configuration_policy_id:
         reasons.append("configuration_policy_mismatch")
-    if candidate_pin is not None and not configuration_pin_failures:
+    if candidate_pin is not None:
         if (
-            boot.configuration_schema_version
+            candidate_pin.configuration_schema_version is not None
+            and boot.configuration_schema_version
             != candidate_pin.configuration_schema_version
         ):
             reasons.append("approved_configuration_boot_schema_mismatch")
-        if boot.configuration_policy_id != candidate_pin.configuration_policy_id:
+        if (
+            candidate_pin.configuration_policy_id is not None
+            and boot.configuration_policy_id != candidate_pin.configuration_policy_id
+        ):
             reasons.append("approved_configuration_boot_policy_mismatch")
+    if candidate_pin is not None and not configuration_pin_failures:
         if boot.configuration_fingerprint != candidate_pin.configuration_fingerprint:
             reasons.append("approved_configuration_boot_digest_mismatch")
         if current_configuration_fingerprint != candidate_pin.configuration_fingerprint:
@@ -3007,6 +3044,9 @@ __all__ = [
     "IDENTITY_MISMATCH",
     "IDENTITY_UNAVAILABLE",
     "IDENTITY_VERIFIED",
+    "IDENTITY_SCOPE",
+    "INVOCATION_IDENTITY",
+    "INVOCATION_IDENTITY_REASON",
     "IdentityVerification",
     "MODULE_IDENTITY_INVALID",
     "MODULE_IDENTITY_VALID",

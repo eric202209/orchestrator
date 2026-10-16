@@ -332,6 +332,9 @@ def test_protected_release_satisfies_worker_boot_identity(tmp_path, protected):
         {
             "schema_version": worker_identity.CONFIGURATION_PROJECTION_SCHEMA_VERSION,
             "projection_policy_id": worker_identity.CONFIGURATION_POLICY_ID,
+            "identity_scope": worker_identity.IDENTITY_SCOPE,
+            "invocation_identity": worker_identity.INVOCATION_IDENTITY,
+            "invocation_identity_reason": worker_identity.INVOCATION_IDENTITY_REASON,
         },
     )
     path, boot = create_worker_boot_identity(

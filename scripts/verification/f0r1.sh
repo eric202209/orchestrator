@@ -981,21 +981,84 @@ start = pathlib.Path(sys.argv[1]).stat().st_mtime
 found = sorted(p for p in pathlib.Path(sys.argv[2]).glob('worker-*.json') if p.stat().st_mtime >= start)
 assert len(found) == 1, found
 data = json.loads(found[0].read_text())
-assert data['candidate_source_root'] == sys.argv[3], data['candidate_source_root']
 print(json.dumps(data, indent=2, sort_keys=True))"
+        local identity_file expected_commit expected_tree
+        identity_file="$EVIDENCE/identity-$label.json"
         if grep -q 'Worker boot identity manifest created' "$log" &&
             as_uid "$WORKER_UID" "$STATE/home-worker" "$rel/$PY_REL" -I -S -c "$reader" \
                 "$STATE/logs/worker-$label.log.start" "$STATE/runtime/worker-identities" "$rel" \
-                >"$EVIDENCE/identity-$label.json" 2>"$STATE/logs/identity-$label.err"; then
-            result "R6-IDENTITY-$label" PASS "one boot identity under RUNTIME_ROOT; candidate_source_root $rel"
+                >"$identity_file" 2>"$STATE/logs/identity-$label.err"; then
+            expected_commit=$(awk -F= '$1=="commit" {print $2}' "$EVIDENCE/stage-identity.txt")
+            expected_tree=$(awk -F= '$1=="tree" {print $2}' "$EVIDENCE/stage-identity.txt")
+            if python3 - "$identity_file" "$rel" "$expected_commit" "$expected_tree" <<'PY'
+import json
+import re
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert data["candidate_source_root"] == str(Path(sys.argv[2]).resolve())
+assert data["candidate_head"] == sys.argv[3]
+assert data["candidate_tree"] == sys.argv[4]
+assert re.fullmatch(r"[0-9a-f]{64}", data["source_manifest_digest"])
+assert data["identity_scope"] == "worker_boot"
+PY
+            then
+                result "R6-IDENTITY-$label" PASS "source identity evidence bound to release root, commit, tree, digest and worker_boot scope"
+                result "R6-SOURCE-$label" PASS "manifest source identity matches staged release"
+            else
+                result "R6-IDENTITY-$label" FAIL "source identity evidence mismatch; see evidence/identity-$label.json"
+                result "R6-SOURCE-$label" FAIL "manifest source identity does not match staged release"
+            fi
+            if python3 - "$identity_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert data["identity_status"] == "IDENTITY_INCONCLUSIVE"
+PY
+            then
+                result "R6-EXTERNAL-$label" PASS "no candidate pin; external identity remains IDENTITY_INCONCLUSIVE"
+            else
+                result "R6-EXTERNAL-$label" FAIL "Worker without a candidate pin was not IDENTITY_INCONCLUSIVE"
+            fi
+            if python3 - "$identity_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+data = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert data["invocation_identity"] == "UNVERIFIED"
+assert data["invocation_identity_reason"] == "trusted_invocation_projection_not_implemented"
+values = data["configuration_projection"]["allowlisted_values"]
+assert values["openclaw.cli.executable"] == {"configured": False}
+for key in (
+    "d37.binding.model_selection",
+    "d37.binding.provider_base_url_identity",
+    "d37.binding.auth_schema_identity",
+):
+    assert key not in values
+PY
+            then
+                result "R6-INVOCATION-$label" PASS "Task Invocation Identity explicitly UNVERIFIED and invocation values absent from boot projection"
+            else
+                result "R6-INVOCATION-$label" FAIL "boot record fabricated invocation identity or projected invocation values"
+            fi
         else
-            result "R6-IDENTITY-$label" FAIL "boot identity absent, ambiguous, or wrong source root; see logs/identity-$label.err and worker-$label.log"
+            result "R6-IDENTITY-$label" FAIL "boot identity absent or ambiguous; see logs/identity-$label.err and worker-$label.log"
+            result "R6-SOURCE-$label" NOT_TESTED "Worker identity manifest was unavailable"
+            result "R6-EXTERNAL-$label" NOT_TESTED "Worker identity manifest was unavailable"
+            result "R6-INVOCATION-$label" NOT_TESTED "Worker identity manifest was unavailable"
         fi
     else
         result "R5-START-$label" FAIL "Worker not ready within 240s or exited; see logs/worker-$label.log"
         result "R3-CREDS-$label" NOT_TESTED "Worker did not reach ready"
         result "R5-PING-$label" NOT_TESTED "Worker did not reach ready"
         result "R6-IDENTITY-$label" NOT_TESTED "Worker did not reach ready"
+        result "R6-SOURCE-$label" NOT_TESTED "Worker did not reach ready"
+        result "R6-EXTERNAL-$label" NOT_TESTED "Worker did not reach ready"
+        result "R6-INVOCATION-$label" NOT_TESTED "Worker did not reach ready"
     fi
     stop_pid "$pid"
 }

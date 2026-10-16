@@ -8,7 +8,7 @@ that no trusted source supplies at boot and must keep failing closed.
 
 from __future__ import annotations
 
-import logging
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -16,10 +16,15 @@ import pytest
 from app.celery_app import celery_app
 from app.services.orchestration.worker_identity import (
     CONFIG_PROJECTION_INCOMPLETE,
+    EXPECTED_TASK_REGISTRATIONS,
     IDENTITY_UNAVAILABLE,
+    REQUIRED_EFFECTIVE_CONFIGURATION_KEYS,
     ConfigurationFingerprintError,
+    ProcessIdentity,
     collect_worker_configuration,
+    create_worker_boot_identity,
 )
+from app.services.orchestration import worker_identity
 from app.services.session import recovery_coordinator
 from app.tasks import worker as worker_tasks
 from app.tests.test_phase37_preb_ops1b4b_dp3_i1_worker_identity_controller import (  # noqa: F401
@@ -29,20 +34,6 @@ from app.tests.test_phase37_preb_ops1b4b_dp3_i1_worker_identity_controller impor
     candidate,
 )
 
-LIVE_MISSING = [
-    "celery.task_routes",
-    "d37.binding.auth_schema_identity",
-    "d37.binding.model_selection",
-    "d37.binding.provider_base_url_identity",
-    "openclaw.cli.executable",
-    "worker.concurrency",
-]
-UNRESOLVED_AT_BOOT = [
-    "d37.binding.auth_schema_identity",
-    "d37.binding.model_selection",
-    "d37.binding.provider_base_url_identity",
-    "openclaw.cli.executable",
-]
 D37_VALUES = {
     "d37.binding.provider_base_url_identity": "http://127.0.0.1:8000",
     "d37.binding.model_selection": "openai/qwen-local",
@@ -136,27 +127,40 @@ def test_worker_ready_sender_is_consumer_without_concurrency(consumer):
     assert consumer.controller.concurrency == 3
 
 
-def test_live_failure_reproduces_with_consumer_and_unset_values(boot_kwargs, consumer):
-    """The F0-R4 inputs, minus the two projection fixes, still fail closed."""
+def test_option_c_projection_accepts_consumer_with_unset_invocation_values(
+    boot_kwargs, consumer
+):
+    """Option C keeps boot projection independent of invocation values."""
 
     captured, _created = boot_kwargs
     assert celery_app.conf.task_routes is None
-    with pytest.raises(ConfigurationFingerprintError) as exc:
-        _collect(captured, worker_runtime=consumer)
-    assert str(exc.value).startswith(CONFIG_PROJECTION_INCOMPLETE)
-    # celery.task_routes is now projected; the other five are the live set.
-    assert _missing(exc) == repr(
-        [key for key in LIVE_MISSING if key != "celery.task_routes"]
+    assert captured["worker_runtime"] is consumer.controller
+    _fingerprint, payload = _collect(captured)
+    values = payload["allowlisted_values"]
+    assert values["openclaw.cli.executable"] == {"configured": False}
+    assert not set(D37_VALUES).intersection(values)
+    assert payload["identity_scope"] == "worker_boot"
+    assert payload["invocation_identity"] == "UNVERIFIED"
+    assert (
+        payload["invocation_identity_reason"]
+        == "trusted_invocation_projection_not_implemented"
     )
 
 
 def test_boot_passes_work_controller_not_consumer(boot_kwargs, consumer):
-    captured, created = boot_kwargs
+    captured, _created = boot_kwargs
     assert captured["worker_runtime"] is consumer.controller
-    assert created == [], "no manifest may be written when projection fails"
 
 
-def test_boot_failure_is_logged_not_identity_verified(monkeypatch, consumer, caplog):
+def test_boot_projection_reaches_manifest_creation_without_invocation_values(
+    monkeypatch, consumer, tmp_path
+):
+    source_root = tmp_path / "source-root"
+    runtime_root = tmp_path / "runtime-root"
+    source_root.mkdir()
+    runtime_root.mkdir()
+    monkeypatch.setattr(worker_tasks.settings, "WORKER_SOURCE_ROOT", str(source_root))
+    monkeypatch.setattr(worker_tasks.settings, "RUNTIME_ROOT", str(runtime_root))
     monkeypatch.setattr(worker_tasks.settings, "OPENCLAW_CLI_PATH", "")
     created = []
     monkeypatch.setattr(
@@ -165,19 +169,11 @@ def test_boot_failure_is_logged_not_identity_verified(monkeypatch, consumer, cap
         lambda **kwargs: created.append(kwargs),
     )
     _stub_boot_side_effects(monkeypatch)
-    with caplog.at_level(logging.ERROR):
-        worker_tasks.on_worker_ready(consumer)
-    messages = [
-        r.getMessage()
-        for r in caplog.records
-        if "not identity-verified" in r.getMessage()
-    ]
-    assert len(messages) == 1
-    assert messages[0].endswith(
-        f"{CONFIG_PROJECTION_INCOMPLETE}: effective values unavailable: "
-        f"{UNRESOLVED_AT_BOOT!r}"
-    )
-    assert created == []
+    worker_tasks.on_worker_ready(consumer)
+    assert len(created) == 1
+    projection = created[0]["configuration_fingerprint"][1]
+    assert projection["identity_scope"] == "worker_boot"
+    assert projection["invocation_identity"] == "UNVERIFIED"
 
 
 def test_projection_succeeds_when_effective_values_exist(boot_kwargs):
@@ -192,9 +188,77 @@ def test_projection_succeeds_when_effective_values_exist(boot_kwargs):
     assert values["celery.task_routes"] == {}
     assert values["task.effective_policies"]["routing_table"] == {}
     assert values["openclaw.cli.executable"] == "/usr/local/bin/openclaw"
-    for key, value in D37_VALUES.items():
-        assert values[key] == value
+    assert not set(D37_VALUES).intersection(values)
     assert "OPENAI_API_KEY" in payload["secret_presence"]
+
+
+def test_real_consumer_projection_creates_inconclusive_unverified_boot_manifest(
+    boot_kwargs, candidate, tmp_path, monkeypatch
+):
+    captured, _created = boot_kwargs
+    fingerprint, projection = _collect(captured)
+    root, candidate_manifest = candidate
+    process = ProcessIdentity(
+        pid=401,
+        linux_boot_id="boot-option-c",
+        start_ticks="4001",
+        executable="/venv/bin/python3",
+        cwd=str(root),
+        argv=("/venv/bin/python3", "-m", "celery", "worker"),
+        ppid=1,
+        pgid=401,
+        sid=401,
+    )
+    monkeypatch.setattr(
+        worker_identity, "capture_loaded_module_provenance", lambda _: ()
+    )
+    _path, manifest = create_worker_boot_identity(
+        source_root=root,
+        identity_dir=tmp_path / "identity",
+        candidate_manifest=candidate_manifest,
+        registered_tasks=EXPECTED_TASK_REGISTRATIONS,
+        configuration_fingerprint=(fingerprint, projection),
+        process_identity=process,
+        child_identities=(),
+    )
+    assert manifest.identity_status == "IDENTITY_INCONCLUSIVE"
+    assert manifest.identity_scope == "worker_boot"
+    assert manifest.invocation_identity == "UNVERIFIED"
+    assert (
+        manifest.invocation_identity_reason
+        == "trusted_invocation_projection_not_implemented"
+    )
+    values = manifest.configuration_projection["allowlisted_values"]
+    assert not set(D37_VALUES).intersection(values)
+
+
+def test_unset_cli_never_uses_path_discovery(boot_kwargs, monkeypatch):
+    captured, _created = boot_kwargs
+
+    def fail_which(*_args, **_kwargs):
+        raise AssertionError("PATH discovery must not run during boot projection")
+
+    monkeypatch.setattr(shutil, "which", fail_which)
+    _fingerprint, projection = _collect(captured)
+    assert projection["allowlisted_values"]["openclaw.cli.executable"] == {
+        "configured": False
+    }
+
+
+def test_every_remaining_required_boot_key_fails_closed(boot_kwargs):
+    captured, _created = boot_kwargs
+    _fingerprint, projection = _collect(captured)
+    values = projection["allowlisted_values"]
+    for field in sorted(REQUIRED_EFFECTIVE_CONFIGURATION_KEYS):
+        missing = dict(values)
+        missing.pop(field)
+        with pytest.raises(
+            ConfigurationFingerprintError, match=CONFIG_PROJECTION_INCOMPLETE
+        ):
+            worker_identity.build_non_secret_configuration_fingerprint(
+                missing,
+                secret_presence=projection["secret_presence"],
+            )
 
 
 def test_explicit_task_routes_are_projected_not_replaced(boot_kwargs):
@@ -225,28 +289,6 @@ def test_unsupported_task_routes_type_still_fails_closed(boot_kwargs):
             operational_values={**captured["operational_values"], **D37_VALUES},
             task_registry=captured["task_registry"],
         )
-
-
-@pytest.mark.parametrize("field", UNRESOLVED_AT_BOOT + ["worker.concurrency"])
-def test_each_genuinely_absent_value_fails_closed(boot_kwargs, field):
-    captured, _created = boot_kwargs
-    operational = {key: value for key, value in D37_VALUES.items() if key != field}
-    settings_object = _settings(
-        captured,
-        OPENCLAW_CLI_PATH=(
-            "" if field == "openclaw.cli.executable" else "/usr/local/bin/openclaw"
-        ),
-    )
-    runtime = None if field == "worker.concurrency" else captured["worker_runtime"]
-    with pytest.raises(ConfigurationFingerprintError) as exc:
-        collect_worker_configuration(
-            settings_object,
-            captured["celery_config"],
-            worker_runtime=runtime,
-            operational_values={**captured["operational_values"], **operational},
-            task_registry=captured["task_registry"],
-        )
-    assert _missing(exc) == repr([field])
 
 
 def test_controller_never_verifies_a_worker_without_boot_manifest(
