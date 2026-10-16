@@ -193,7 +193,7 @@ def test_projection_succeeds_when_effective_values_exist(boot_kwargs):
 
 
 def test_real_consumer_projection_creates_inconclusive_unverified_boot_manifest(
-    boot_kwargs, candidate, tmp_path, monkeypatch
+    boot_kwargs, candidate, tmp_path, monkeypatch  # noqa: F811
 ):
     captured, _created = boot_kwargs
     fingerprint, projection = _collect(captured)
