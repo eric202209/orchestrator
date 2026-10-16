@@ -15,6 +15,7 @@ import ast
 import base64
 import binascii
 import hashlib
+from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import os
 import re
@@ -29,7 +30,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from pathlib import Path
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -297,6 +298,100 @@ EXPECTED_TASK_REGISTRATIONS = frozenset(
         "app.tasks.worker.receive_execution_task_dispatch",
     }
 )
+
+# Celery 5.6.3 is the runtime installed for the project at the time of the
+# Phase 37 F0-R8 repair.  Celery's built-in task names are version policy, not
+# a wildcard namespace: an unsupported Celery minor version returns no
+# approved built-ins and therefore fails closed until this table is reviewed.
+CELERY_BUILTIN_TASKS_BY_VERSION = MappingProxyType(
+    {
+        "5.6": frozenset(
+            {
+                "celery.accumulate",
+                "celery.backend_cleanup",
+                "celery.chain",
+                "celery.chord",
+                "celery.chord_unlock",
+                "celery.chunks",
+                "celery.group",
+                "celery.map",
+                "celery.starmap",
+            }
+        ),
+    }
+)
+
+
+def approved_celery_builtin_tasks(
+    celery_version: str | None = None,
+) -> frozenset[str]:
+    """Return the reviewed built-ins for one Celery minor version.
+
+    The default resolves the installed distribution.  Unknown, unavailable,
+    and unsupported versions deliberately return an empty allowlist.
+    """
+
+    if celery_version is None:
+        try:
+            celery_version = package_version("celery")
+        except PackageNotFoundError:
+            return frozenset()
+    parts = str(celery_version).split(".")
+    if len(parts) < 2 or not parts[0].isdigit() or not parts[1].isdigit():
+        return frozenset()
+    return CELERY_BUILTIN_TASKS_BY_VERSION.get(f"{parts[0]}.{parts[1]}", frozenset())
+
+
+@dataclass(frozen=True)
+class TaskRegistrationClassification:
+    """Strict classification of the names visible in a Celery registry."""
+
+    unexpected_expected_tasks: tuple[str, ...]
+    missing_application_tasks: tuple[str, ...]
+    approved_celery_builtin_tasks: tuple[str, ...]
+    unexpected_application_tasks: tuple[str, ...]
+    unexpected_celery_tasks: tuple[str, ...]
+
+    @property
+    def valid(self) -> bool:
+        return not (
+            self.unexpected_expected_tasks
+            or self.missing_application_tasks
+            or self.unexpected_application_tasks
+            or self.unexpected_celery_tasks
+        )
+
+
+def classify_task_registrations(
+    registered_tasks: Iterable[str],
+    *,
+    expected_tasks: Iterable[str] = EXPECTED_TASK_REGISTRATIONS,
+) -> TaskRegistrationClassification:
+    """Classify application and reviewed Celery built-in registrations.
+
+    Only the supplied expected application set and the version-aware reviewed
+    built-in set are accepted.  Every other name, including an arbitrary
+    ``celery.*`` name, remains an identity contradiction.
+    """
+
+    actual = frozenset(str(item) for item in registered_tasks)
+    expected = frozenset(str(item) for item in expected_tasks)
+    approved = approved_celery_builtin_tasks()
+    unexpected = actual - expected - approved
+    unexpected_celery = tuple(
+        sorted(name for name in unexpected if name.startswith("celery."))
+    )
+    unexpected_application = tuple(
+        sorted(name for name in unexpected if not name.startswith("celery."))
+    )
+    return TaskRegistrationClassification(
+        unexpected_expected_tasks=tuple(sorted(expected - EXPECTED_TASK_REGISTRATIONS)),
+        missing_application_tasks=tuple(sorted(expected - actual)),
+        approved_celery_builtin_tasks=tuple(sorted(actual & approved)),
+        unexpected_application_tasks=unexpected_application,
+        unexpected_celery_tasks=unexpected_celery,
+    )
+
 
 TASK_POLICY_PROJECTION_SCHEMA_VERSION = 1
 TASK_POLICY_FIELDS = (
@@ -2549,6 +2644,7 @@ def create_worker_boot_identity(
         )
     )
     expected_tasks = tuple(sorted(EXPECTED_TASK_REGISTRATIONS))
+    registration = classify_task_registrations(actual_tasks)
     provenance = capture_loaded_module_provenance(candidate)
     # A boot hook may record useful evidence without having authority to
     # approve its own checkout.  Without an external pin it is explicitly
@@ -2569,7 +2665,7 @@ def create_worker_boot_identity(
                 status_reasons.append("boot_worker_node_identity_mismatch")
         if status_reasons:
             status = IDENTITY_MISMATCH
-    if set(actual_tasks) != EXPECTED_TASK_REGISTRATIONS:
+    if not registration.valid:
         status = IDENTITY_MISMATCH
     if any(not item.get("loaded") for item in provenance):
         status = IDENTITY_INCONCLUSIVE if status == IDENTITY_VERIFIED else status
@@ -2800,10 +2896,16 @@ def verify_worker_identity(
     if current_registered_tasks is None:
         reasons.append("registrations_unavailable")
     else:
-        current_tasks = set(str(item) for item in current_registered_tasks)
-        if current_tasks != set(boot.expected_task_registrations):
+        current_tasks = tuple(str(item) for item in current_registered_tasks)
+        registration = classify_task_registrations(
+            current_tasks,
+            expected_tasks=boot.expected_task_registrations,
+        )
+        if registration.unexpected_expected_tasks:
+            reasons.append("registration_contract_mismatch")
+        if not registration.valid:
             reasons.append("registration_drift")
-        if current_tasks != set(boot.registered_task_registrations):
+        if set(current_tasks) != set(boot.registered_task_registrations):
             reasons.append("boot_registration_mismatch")
 
     if current_child_identities is None:
@@ -3034,6 +3136,7 @@ __all__ = [
     "CandidateManifestVerification",
     "CandidateIdentityPin",
     "CandidateSourceManifest",
+    "CELERY_BUILTIN_TASKS_BY_VERSION",
     "CONFIG_PROJECTION_INCOMPLETE",
     "CONFIGURATION_POLICY_ID",
     "CONFIGURATION_PROJECTION_SCHEMA_VERSION",
@@ -3057,6 +3160,7 @@ __all__ = [
     "ProvenanceBoundaryCheck",
     "REQUIRED_EFFECTIVE_CONFIGURATION_KEYS",
     "SCHEMA_VERSION",
+    "TaskRegistrationClassification",
     "TASK_POLICY_FIELDS",
     "TASK_POLICY_PROJECTION_SCHEMA_VERSION",
     "WorkerBootIdentityManifest",
@@ -3066,11 +3170,13 @@ __all__ = [
     "build_candidate_source_manifest",
     "build_effective_task_policy_projection",
     "build_non_secret_configuration_fingerprint",
+    "classify_task_registrations",
     "capture_child_identities",
     "capture_loaded_module_provenance",
     "inspect_worker_provenance_boundary",
     "capture_process_identity",
     "canonical_launcher_identity",
+    "approved_celery_builtin_tasks",
     "configuration_pin_reasons",
     "collect_worker_configuration",
     "create_worker_boot_identity",

@@ -34,6 +34,7 @@ from .worker_identity import (
     ProcessIdentity,
     WorkerBootIdentityManifest,
     canonical_launcher_identity,
+    classify_task_registrations,
     configuration_pin_reasons,
     verify_candidate_source_manifest,
     verify_worker_identity,
@@ -1053,9 +1054,11 @@ class WorkerOnlyController:
             != self.candidate_pin.worker_node_identity
         ):
             reasons.append("boot_worker_node_identity_mismatch")
-        if set(snapshot.registered_tasks) != set(
-            self.boot_manifest.expected_task_registrations
-        ):
+        registration = classify_task_registrations(
+            snapshot.registered_tasks,
+            expected_tasks=self.boot_manifest.expected_task_registrations,
+        )
+        if not registration.valid:
             reasons.append("registration_drift")
         return reasons
 

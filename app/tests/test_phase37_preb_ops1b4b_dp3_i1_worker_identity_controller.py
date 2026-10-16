@@ -72,6 +72,33 @@ from app.services.orchestration.worker_identity import (
 
 NOW = datetime(2026, 10, 13, 16, 0, tzinfo=UTC)
 TASKS = ("app.tasks.worker.execute_orchestration_task",)
+F0_R7_CELERY_BUILTINS = frozenset(
+    {
+        "celery.accumulate",
+        "celery.backend_cleanup",
+        "celery.chain",
+        "celery.chord",
+        "celery.chord_unlock",
+        "celery.chunks",
+        "celery.group",
+        "celery.map",
+        "celery.starmap",
+    }
+)
+
+
+def test_celery_builtin_policy_is_version_aware_and_sender_preserves_raw_tasks():
+    assert (
+        worker_identity.approved_celery_builtin_tasks("5.6.3") == F0_R7_CELERY_BUILTINS
+    )
+    assert worker_identity.approved_celery_builtin_tasks("5.7.0") == frozenset()
+    registered = EXPECTED_TASK_REGISTRATIONS | F0_R7_CELERY_BUILTINS
+    sender = SimpleNamespace(
+        app=SimpleNamespace(tasks={name: object() for name in registered})
+    )
+    assert worker_identity._registered_tasks_from_sender(sender) == tuple(
+        sorted(registered)
+    )
 
 
 @pytest.fixture
@@ -618,6 +645,163 @@ def test_boot_manifest_is_atomic_unique_and_credential_free(candidate, tmp_path)
             process_identity=_identity(403, "4003"),
             child_identities=(),
         )
+
+
+@pytest.mark.parametrize(
+    "registered_tasks, expected_status",
+    [
+        (EXPECTED_TASK_REGISTRATIONS, IDENTITY_INCONCLUSIVE),
+        (
+            EXPECTED_TASK_REGISTRATIONS | F0_R7_CELERY_BUILTINS,
+            IDENTITY_INCONCLUSIVE,
+        ),
+        (
+            EXPECTED_TASK_REGISTRATIONS - {sorted(EXPECTED_TASK_REGISTRATIONS)[0]},
+            IDENTITY_MISMATCH,
+        ),
+        (
+            EXPECTED_TASK_REGISTRATIONS | {"app.tasks.unexpected"},
+            IDENTITY_MISMATCH,
+        ),
+        (
+            EXPECTED_TASK_REGISTRATIONS | {"celery.spoofed"},
+            IDENTITY_MISMATCH,
+        ),
+    ],
+)
+def test_boot_registration_classification_is_strict_and_builtin_aware(
+    candidate, tmp_path, registered_tasks, expected_status
+):
+    root, manifest = candidate
+    _path, boot = create_worker_boot_identity(
+        source_root=root,
+        identity_dir=tmp_path / "identity",
+        candidate_manifest=manifest,
+        registered_tasks=registered_tasks,
+        configuration_fingerprint=_config(),
+        process_identity=_identity(450, "4500", cwd=manifest.source_root),
+        child_identities=(),
+    )
+    assert boot.identity_status == expected_status
+
+
+def test_verifier_registration_classification_matches_boot_policy(candidate):
+    root, manifest = candidate
+    base_boot, worker, beat, api = _boot(root, manifest)
+    registered = EXPECTED_TASK_REGISTRATIONS | F0_R7_CELERY_BUILTINS
+    boot = replace(
+        base_boot,
+        expected_task_registrations=tuple(sorted(EXPECTED_TASK_REGISTRATIONS)),
+        registered_task_registrations=tuple(sorted(registered)),
+        identity_status=IDENTITY_VERIFIED,
+    )
+
+    verified = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot,
+            worker,
+            beat,
+            api,
+            manifest,
+            current_registered_tasks=registered,
+        ),
+    )
+    assert verified.classification == IDENTITY_VERIFIED
+
+    for invalid in (
+        registered - {sorted(EXPECTED_TASK_REGISTRATIONS)[0]},
+        registered | {"app.tasks.unexpected"},
+        registered | {"celery.spoofed"},
+    ):
+        result = verify_worker_identity(
+            boot,
+            manifest,
+            **_identity_verification_kwargs(
+                boot,
+                worker,
+                beat,
+                api,
+                manifest,
+                current_registered_tasks=invalid,
+            ),
+        )
+        assert result.classification == IDENTITY_MISMATCH
+        assert "registration_drift" in result.reasons
+
+
+def test_verifier_valid_registration_without_external_pin_is_inconclusive(candidate):
+    root, manifest = candidate
+    base_boot, worker, beat, api = _boot(root, manifest)
+    registered = EXPECTED_TASK_REGISTRATIONS | F0_R7_CELERY_BUILTINS
+    boot = replace(
+        base_boot,
+        expected_task_registrations=tuple(sorted(EXPECTED_TASK_REGISTRATIONS)),
+        registered_task_registrations=tuple(sorted(registered)),
+        identity_status=IDENTITY_INCONCLUSIVE,
+    )
+    result = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot,
+            worker,
+            beat,
+            api,
+            manifest,
+            current_registered_tasks=registered,
+            candidate_pin=None,
+        ),
+    )
+    assert result.classification == IDENTITY_INCONCLUSIVE
+
+
+def test_verifier_rejects_invalid_external_pin_with_valid_registrations(candidate):
+    root, manifest = candidate
+    base_boot, worker, beat, api = _boot(root, manifest)
+    registered = EXPECTED_TASK_REGISTRATIONS | F0_R7_CELERY_BUILTINS
+    boot = replace(
+        base_boot,
+        expected_task_registrations=tuple(sorted(EXPECTED_TASK_REGISTRATIONS)),
+        registered_task_registrations=tuple(sorted(registered)),
+        identity_status=IDENTITY_VERIFIED,
+    )
+    invalid_pin = replace(_pin(manifest), worker_node_identity="celery@other")
+    result = verify_worker_identity(
+        boot,
+        manifest,
+        **_identity_verification_kwargs(
+            boot,
+            worker,
+            beat,
+            api,
+            manifest,
+            current_registered_tasks=registered,
+            candidate_pin=invalid_pin,
+        ),
+    )
+    assert result.classification == IDENTITY_MISMATCH
+
+
+def test_controller_fresh_registration_check_accepts_approved_builtins(candidate):
+    root, manifest = candidate
+    base_boot, worker, beat, api = _boot(root, manifest)
+    registered = set(TASKS) | F0_R7_CELERY_BUILTINS
+    boot = replace(
+        base_boot,
+        registered_task_registrations=tuple(sorted(registered)),
+    )
+    observation = _observation(
+        worker,
+        beat,
+        api,
+        registered_tasks=tuple(sorted(registered)),
+    )
+    controller, _state, _adapter = _controller(manifest, boot, observation)
+    assert "registration_drift" not in controller._fresh_observation_reasons(
+        observation
+    )
 
 
 def test_manifest_write_failure_is_not_identity_verified(
