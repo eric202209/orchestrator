@@ -75,9 +75,10 @@ jobs:
   #
   # 1. The three backend test tiers below are mutually exclusive partitions
   #    of the full "not live" suite. The marker selectors remain the source
-  #    of truth for zero overlap and zero omission. Keep the fast tier as one
-  #    job: the hosted runner pool can queue matrix children independently,
-  #    leaving the whole workflow apparently stalled when capacity is tight.
+  #    of truth for zero overlap and zero omission. The fast tier is split
+  #    into two deterministic, module-balanced shards because its measured
+  #    runtime dominates the push critical path. Shard markers partition the
+  #    existing fast selector; they do not change test membership.
   # 2. Coverage instrumentation (`--cov`) measured ~3.2x slower than a plain
   #    run on this suite (114 semantic tests: 32.5s -> 104.6s), and applying
   #    it to any majority partition would dominate wall time on its own. The
@@ -87,9 +88,13 @@ jobs:
   #    `needs:` -- it does not block merges or deploys, only the Codecov
   #    dashboard depends on it finishing.
   test-backend-fast:
+    name: test-backend-fast (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 35
-    needs: [test-backend-semantic, test-frontend]
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
 
     steps:
     - name: Checkout code
@@ -110,7 +115,9 @@ jobs:
 
     - name: Run fast backend tests
       run: |
-        PYTHONPATH=. python -m pytest app/tests/ -m "unit and not semantic and not slow and not live" -v
+        export CI_TEST_SHARD_COUNT=2
+        export CI_TEST_SHARD_INDEX=${{ matrix.shard }}
+        PYTHONPATH=. python -m pytest app/tests/ -m "unit and not semantic and not slow and not live and ci_shard_${{ matrix.shard }}" -v
 
   test-backend-semantic:
     runs-on: ubuntu-latest
