@@ -9,6 +9,7 @@ is verified (via /proc) to still lead that group.
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
 import signal
 import sys
@@ -54,6 +55,13 @@ def _reap_leftover(pid_file) -> None:
     stat = sl._read_proc_stat(pid)
     if pid > 1 and stat is not None and stat[1] == pid:
         os.killpg(pid, signal.SIGKILL)
+
+
+async def _reap_abandoned(pid_file) -> None:
+    """Kill a group whose cleanup was faked, then collect its transport in-loop."""
+    _reap_leftover(pid_file)
+    await asyncio.sleep(0.1)
+    gc.collect()
 
 
 async def _wait_for_pid(pid_file) -> int:
@@ -275,3 +283,151 @@ async def test_stop_session_on_launching_instance_terminates_child(tmp_path):
         with pytest.raises(BaseException):
             await task
         _reap_leftover(pid_file)
+
+
+# Closure C2 -- the cleanup helper itself fails after an unexpected error.
+async def _failing_cleanup(process, diagnostics):
+    raise RuntimeError("simulated cleanup failure")
+
+
+@pytest.mark.asyncio
+async def test_c2_prompt_runner_cleanup_failure_keeps_original_identifiable(
+    tmp_path,
+):
+    service = _service()
+    service._terminate_process_with_bounded_reap = _failing_cleanup
+    pid_file = tmp_path / "c2p.pid"
+    try:
+        with pytest.raises(RuntimeError, match="simulated cleanup") as exc_info:
+            await service._run_cli_prompt_with_diagnostics(
+                _command(_body(pid_file, _OVERSIZED_LINE)),
+                timeout_seconds=20,
+                cwd=str(tmp_path),
+            )
+        assert isinstance(exc_info.value.__context__, ValueError)
+        assert _last_diagnostics(service)["cleanup_status"] != "completed"
+    finally:
+        await _reap_abandoned(pid_file)
+
+
+@pytest.mark.asyncio
+async def test_c2_streaming_runner_cleanup_failure_keeps_original_identifiable(
+    tmp_path,
+):
+    pid_file = tmp_path / "c2s.pid"
+    service = _legacy_service(tmp_path, _body(pid_file, _OVERSIZED_LINE))
+    service._terminate_process_with_bounded_reap = _failing_cleanup
+    try:
+        with pytest.raises(RuntimeError, match="simulated cleanup") as exc_info:
+            await service.execute_task_with_streaming("probe", timeout_seconds=20)
+        assert isinstance(exc_info.value.__context__, ValueError)
+        assert any(
+            level == "ERROR" and "simulated cleanup failure" in message
+            for level, message, _metadata in service.logged_entries
+        )
+        assert not any(
+            metadata and '"cleanup_status": "completed"' in metadata
+            for _level, _message, metadata in service.logged_entries
+        )
+        # The streaming runner keeps the unreaped group registered, so the
+        # worker SIGTERM handler can still reach it.
+        assert int(pid_file.read_text()) in sl._active_process_groups
+    finally:
+        await _reap_abandoned(pid_file)
+
+
+# Closure C3 -- failure after the child already exited sends no signal.
+@pytest.mark.asyncio
+async def test_c3_failure_after_child_exit_sends_no_termination(tmp_path):
+    service = _legacy_service(tmp_path, "import sys; sys.exit(3)")
+    calls = []
+
+    async def _spy_cleanup(process, diagnostics):
+        calls.append(process.pid)
+
+    def _post_exit_failure(stdout_text, stderr_text):
+        raise RuntimeError("post-exit failure")
+
+    service._terminate_process_with_bounded_reap = _spy_cleanup
+    service._is_openclaw_cli_lock_contention = _post_exit_failure
+    with patch.object(sl.os, "killpg") as killpg:
+        with pytest.raises(RuntimeError, match="post-exit failure"):
+            await service.execute_task_with_streaming("probe", timeout_seconds=20)
+    assert calls == []
+    killpg.assert_not_called()
+
+
+# Closure C4 -- unconfirmed termination is never reported as completed.
+@pytest.mark.asyncio
+async def test_c4_unreaped_process_is_reported_timed_out():
+    class _UnreapableProcess:
+        pid = 2**22 + 12345  # never registered: kill_process_group refuses
+        returncode = None
+
+        async def wait(self):
+            raise asyncio.TimeoutError
+
+        def kill(self):
+            pass
+
+    diagnostics = {}
+    with patch.object(sl.os, "killpg") as killpg:
+        await _service()._terminate_process_with_bounded_reap(
+            _UnreapableProcess(), diagnostics
+        )
+    killpg.assert_not_called()
+    assert diagnostics["cleanup_status"] == "timed_out"
+    assert diagnostics["cleanup_timed_out"] is True
+
+
+@pytest.mark.asyncio
+async def test_c4_runner_preserves_unconfirmed_cleanup_status(tmp_path):
+    service = _service()
+    pid_file = tmp_path / "c4.pid"
+
+    async def _unconfirmed_cleanup(process, diagnostics):
+        diagnostics["cleanup_status"] = "timed_out"
+
+    service._terminate_process_with_bounded_reap = _unconfirmed_cleanup
+    try:
+        with pytest.raises(ValueError):
+            await service._run_cli_prompt_with_diagnostics(
+                _command(_body(pid_file, _OVERSIZED_LINE)),
+                timeout_seconds=20,
+                cwd=str(tmp_path),
+            )
+        assert _last_diagnostics(service)["cleanup_status"] == "timed_out"
+    finally:
+        await _reap_abandoned(pid_file)
+
+
+# Closure C5 -- an unexpected failure in one run leaves another untouched.
+@pytest.mark.asyncio
+async def test_c5_failure_cleanup_does_not_affect_concurrent_run(tmp_path):
+    victim, survivor = _service(), _service()
+    victim_pid_file = tmp_path / "c5victim.pid"
+    survivor_pid_file = tmp_path / "c5survivor.pid"
+    survivor_task = asyncio.create_task(
+        survivor._run_cli_prompt_with_diagnostics(
+            _command(_body(survivor_pid_file, "print('done', flush=True); ", 1.0)),
+            timeout_seconds=20,
+            cwd=str(tmp_path),
+        )
+    )
+    try:
+        survivor_pid = await _wait_for_pid(survivor_pid_file)
+        with pytest.raises(ValueError):
+            await victim._run_cli_prompt_with_diagnostics(
+                _command(_body(victim_pid_file, _OVERSIZED_LINE)),
+                timeout_seconds=20,
+                cwd=str(tmp_path),
+            )
+        assert not _running(int(victim_pid_file.read_text()))
+        assert _running(survivor_pid)
+
+        process, diagnostics = await survivor_task
+        assert process.returncode == 0
+        assert "cleanup_reap_attempts" not in diagnostics
+    finally:
+        _reap_leftover(victim_pid_file)
+        _reap_leftover(survivor_pid_file)
