@@ -2161,6 +2161,13 @@ class OpenClawSessionService:
             diagnostics["return_code"] = process.returncode
             exc.runtime_diagnostics = diagnostics
             raise
+        except Exception:
+            # Any other failure (e.g. an oversized stream line) must not leave
+            # the child running after the finally below drops its group.
+            if process.returncode is None:
+                await self._terminate_process_with_bounded_reap(process, diagnostics)
+                diagnostics["return_code"] = process.returncode
+            raise
         finally:
             unregister_process_group(process.pid)
             stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
@@ -3335,6 +3342,18 @@ class OpenClawSessionService:
                         cleanup_exc,
                     )
                 exc.runtime_diagnostics = stream_diagnostics
+                raise
+            except Exception:
+                # Any other failure (e.g. an oversized stream line) must still
+                # terminate the live child rather than abandon it.
+                if process is not None and process.returncode is None:
+                    await self._terminate_process_with_bounded_reap(
+                        process, stream_diagnostics
+                    )
+                    return_code = process.returncode
+                    cleanup_status = stream_diagnostics.get(
+                        "cleanup_status", "completed"
+                    )
                 raise
             finally:
                 stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
