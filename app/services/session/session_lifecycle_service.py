@@ -84,6 +84,9 @@ _ORPHANED_PLANNING_RECOVERY_SECONDS = 120
 _STALE_RUNNING_SESSION_SWEEP_SECONDS = DEFAULT_ORCHESTRATION_TIMEOUT_SECONDS + 300
 _EXPLICIT_TASK_ID_RE = re.compile(r"\btask\s*#?(\d+)\b", re.IGNORECASE)
 _BACKEND_LEASE_POLL_INTERVAL_SECONDS = 0.1
+# Per wait; stop waits twice, so the worst case stays inside the frontend's
+# 120 s stop-request timeout.
+_BACKEND_LEASE_RELEASE_TIMEOUT_SECONDS = 30.0
 
 
 def _with_lifecycle_projection(
@@ -160,6 +163,8 @@ async def _await_backend_lease_release(
         if execution is None:
             return {"status": "unverified_no_execution", "backend_id": backend_id}
         raise
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _BACKEND_LEASE_RELEASE_TIMEOUT_SECONDS
     while True:
         try:
             owned = backend_slot_owned_by(redis_client, backend_id, session_id)
@@ -213,6 +218,23 @@ async def _await_backend_lease_release(
                 "backend_id": backend_id,
                 "task_execution_id": execution.id,
             }
+
+        if loop.time() >= deadline:
+            # The lease stays with its owner: an unverified live worker is
+            # never reclaimed, and the stop is not completed or claimed.
+            logger.warning(
+                "[STOP] Backend lease release not confirmed within %ss session=%s "
+                "backend=%s task_execution_id=%s",
+                _BACKEND_LEASE_RELEASE_TIMEOUT_SECONDS,
+                session_id,
+                backend_id,
+                execution.id if execution else None,
+            )
+            raise RuntimeError(
+                f"Backend lease release not confirmed within "
+                f"{_BACKEND_LEASE_RELEASE_TIMEOUT_SECONDS}s for session {session_id}; "
+                f"backend {backend_id} is still held and the session was not stopped"
+            )
 
         await asyncio.sleep(_BACKEND_LEASE_POLL_INTERVAL_SECONDS)
 
@@ -1796,6 +1818,8 @@ async def stop_session_lifecycle(
     except HTTPException:
         raise
     except Exception as exc:
+        # Discard flushed stop mutations so a failed stop never commits them.
+        db.rollback()
         db.add(
             LogEntry(
                 session_id=session_id,
