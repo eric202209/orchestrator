@@ -3937,7 +3937,10 @@ class OpenClawSessionService:
             # Cleanup session resources
             await self.cleanup()
 
-            self._log_entry("INFO", "OpenClaw session stopped")
+            # Only an observed exit of a process this instance owns proves a
+            # stop; the API-side runtime owns none (worker revoke does that).
+            if self.process is not None and self.process.returncode is not None:
+                self._log_entry("INFO", "OpenClaw session stopped")
 
         except Exception as e:
             error_msg = f"Failed to stop session: {str(e)}"
@@ -4160,12 +4163,25 @@ class OpenClawSessionService:
             self._log_entry("INFO", "Cleaning up OpenClaw session")
 
             # Terminate any running processes
-            if self.process:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
+            if not self.process:
+                self._log_entry(
+                    "INFO",
+                    "Session cleanup: no subprocess owned by this runtime "
+                    "instance; nothing terminated",
+                )
+                return
+
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+
+            if self.process.returncode is None:
+                self._log_entry(
+                    "WARN", "Session cleanup: SIGKILL sent, exit not confirmed"
+                )
+                return
 
             self._log_entry("INFO", "Session cleanup complete")
 
