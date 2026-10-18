@@ -17,13 +17,27 @@ HISTORICAL_REENTRY12_OUTPUT = (
 
 
 class _CapturingRuntime:
-    def __init__(self, output: str = HISTORICAL_REENTRY12_OUTPUT):
+    def __init__(
+        self,
+        output: str = HISTORICAL_REENTRY12_OUTPUT,
+        *,
+        status: str = "completed",
+        result: dict | None = None,
+        raises: Exception | None = None,
+    ):
         self.output = output
+        self.status = status
+        self.result = result
+        self.raises = raises
         self.prompt = ""
 
     async def execute_task(self, prompt, timeout_seconds=None):
         self.prompt = prompt
-        return {"output": self.output}
+        if self.raises is not None:
+            raise self.raises
+        if self.result is not None:
+            return self.result
+        return {"status": self.status, "output": self.output}
 
 
 def _candidate_evidence(tmp_path: Path) -> tuple[dict, dict]:
@@ -160,6 +174,60 @@ def test_malformed_embedded_pass_remains_unknown(tmp_path):
     assert _run(runtime)["verdict"] == "UNKNOWN"
 
 
+def test_completed_runtime_with_explicit_pass_is_pass():
+    assert _run(_CapturingRuntime("VERDICT: PASS\n"))["verdict"] == "PASS"
+
+
+def test_completed_runtime_with_needs_review_is_needs_review():
+    assert (
+        _run(_CapturingRuntime("VERDICT: NEEDS_REVIEW\n"))["verdict"] == "NEEDS_REVIEW"
+    )
+
+
+def test_completed_runtime_with_empty_output_is_unknown():
+    assert _run(_CapturingRuntime(""))["verdict"] == "UNKNOWN"
+
+
+def test_failed_runtime_pass_output_is_error():
+    result = _run(_CapturingRuntime("VERDICT: PASS\n", status="failed"))
+
+    assert result["verdict"] == "ERROR"
+
+
+def test_failed_runtime_needs_review_output_is_error():
+    result = _run(_CapturingRuntime("VERDICT: NEEDS_REVIEW\n", status="failed"))
+
+    assert result["verdict"] == "ERROR"
+
+
+def test_failed_runtime_empty_output_is_error():
+    assert _run(_CapturingRuntime("", status="failed"))["verdict"] == "ERROR"
+
+
+def test_missing_runtime_status_pass_output_is_error():
+    result = _run(_CapturingRuntime(result={"output": "VERDICT: PASS\n"}))
+
+    assert result["verdict"] == "ERROR"
+
+
+def test_unrecognized_runtime_status_pass_output_is_error():
+    result = _run(_CapturingRuntime("VERDICT: PASS\n", status="succeeded"))
+
+    assert result["verdict"] == "ERROR"
+
+
+def test_malformed_runtime_status_pass_output_is_error():
+    result = _run(_CapturingRuntime("VERDICT: PASS\n", status={"state": "completed"}))
+
+    assert result["verdict"] == "ERROR"
+
+
+def test_evaluator_runtime_exception_is_error():
+    result = _run(_CapturingRuntime(raises=TimeoutError("evaluator timed out")))
+
+    assert result["verdict"] == "ERROR"
+
+
 def test_final_review_projection_replaces_pre_evaluator_auto_promote(
     db_session, tmp_path, monkeypatch
 ):
@@ -187,3 +255,31 @@ def test_final_review_projection_replaces_pre_evaluator_auto_promote(
     assert record.review_decision["outcome"] == "hold_for_review"
     assert record.review_decision["reason"] == "evaluator_assessment_unavailable"
     assert record.review_decision["evaluator_pending"] is False
+
+
+def test_failed_runtime_pass_cannot_release_changeset_review_hold(
+    db_session, tmp_path, monkeypatch
+):
+    from app.models import TaskExecutionChangeSet
+    from app.tests.test_phase36_maint_gr7_candidate_semantic_verification_authority import (
+        _Runtime,
+        _accepted,
+        _seed_auto_publish,
+    )
+
+    runtime = _Runtime({"status": "failed", "output": "VERDICT: PASS\n"})
+    result, ctx, project_root = _seed_auto_publish(
+        db_session, tmp_path, monkeypatch, runtime, _accepted()
+    )
+
+    record = (
+        db_session.query(TaskExecutionChangeSet)
+        .filter(TaskExecutionChangeSet.task_execution_id == ctx.task_execution_id)
+        .one()
+    )
+    assert result["status"] == "completed"
+    assert record.review_decision["outcome"] == "hold_for_review"
+    assert record.review_decision["held_for_review"] is True
+    assert record.review_decision["evaluator_verdict"] == "ERROR"
+    assert record.review_decision["publication_eligible"] is False
+    assert not (project_root / "README.md").exists()

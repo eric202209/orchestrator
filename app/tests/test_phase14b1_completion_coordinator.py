@@ -119,7 +119,7 @@ def _make_ctx(tmp_path):
         if "independent QA evaluator" in str(prompt):
 
             async def _evaluator_pass():
-                return {"output": "VERDICT: PASS"}
+                return {"status": "completed", "output": "VERDICT: PASS"}
 
             return _evaluator_pass()
         return MagicMock()

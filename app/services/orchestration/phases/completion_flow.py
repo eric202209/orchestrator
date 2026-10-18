@@ -1599,6 +1599,22 @@ def _run_evaluator(
                 evaluator_prompt, timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS
             )
         )
+        runtime_status = (
+            eval_result.get("status") if isinstance(eval_result, dict) else None
+        )
+        if runtime_status != "completed":
+            runtime_error = (
+                eval_result.get("error") if isinstance(eval_result, dict) else None
+            )
+            error = runtime_error or (
+                "Evaluator runtime did not report successful completion "
+                f"(status={runtime_status!r})"
+            )
+            logger.warning(
+                "[EVALUATOR] QA runtime returned non-success status: %r",
+                runtime_status,
+            )
+            return {"verdict": "ERROR", "error": str(error)}
         eval_output = (
             eval_result.get("output", "")
             if isinstance(eval_result, dict)

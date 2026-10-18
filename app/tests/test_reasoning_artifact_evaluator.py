@@ -11,7 +11,10 @@ class _Runtime:
 
     async def execute_task(self, prompt: str, timeout_seconds: int = 120):
         self.prompts.append(prompt)
-        return {"output": "VERDICT: PASS\nNOTES: looks good"}
+        return {
+            "status": "completed",
+            "output": "VERDICT: PASS\nNOTES: looks good",
+        }
 
 
 def test_evaluator_prompt_includes_reasoning_artifact(monkeypatch):

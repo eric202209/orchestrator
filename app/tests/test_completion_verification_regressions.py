@@ -62,7 +62,7 @@ class _FakeRuntime:
     async def execute_task(self, prompt, timeout_seconds=None):
         if "independent QA evaluator" in prompt:
             # GR7: auto-publication requires an explicit evaluator PASS.
-            return {"output": "VERDICT: PASS"}
+            return {"status": "completed", "output": "VERDICT: PASS"}
         return {"output": "Task summary"}
 
     def get_backend_metadata(self):
@@ -81,12 +81,13 @@ class _NeedsReviewEvaluatorRuntime:
     async def execute_task(self, prompt, timeout_seconds=None):
         if "independent QA evaluator" in prompt:
             return {
+                "status": "completed",
                 "output": (
                     "SCORES: goal=1/3 regressions=1/2 quality=1/2 files=1/3\n"
                     "TOTAL: 4/10\n"
                     "VERDICT: NEEDS_REVIEW\n"
                     "NOTES: incomplete task coverage"
-                )
+                ),
             }
         return {"output": "Task summary"}
 

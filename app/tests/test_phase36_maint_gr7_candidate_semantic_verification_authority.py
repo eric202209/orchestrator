@@ -92,7 +92,7 @@ class _Runtime:
             self.evaluator_calls += 1
             if self.raises is not None:
                 raise self.raises
-            return self.evaluator_output
+            return {"status": "completed", **(self.evaluator_output or {})}
         return {"output": "Task summary"}
 
     def get_backend_metadata(self):
@@ -135,7 +135,7 @@ def _no_event_journal(monkeypatch):
         (
             "timeout_shaped_result",
             {"status": "timeout", "output": "", "error": "timed out"},
-            "UNKNOWN",
+            "ERROR",
         ),
         ("template_echo", {"output": "VERDICT: PASS or NEEDS_REVIEW"}, "UNKNOWN"),
         ("pass_mentioned_in_prose", {"output": "I would PASS this."}, "UNKNOWN"),

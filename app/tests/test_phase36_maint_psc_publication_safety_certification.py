@@ -68,8 +68,9 @@ PLAN = [
     }
 ]
 EVALUATOR_PASS = {
+    "status": "completed",
     "output": "SCORES: goal=3/3 regressions=2/2 quality=2/2 files=3/3\n"
-    "TOTAL: 10/10\nVERDICT: PASS\nNOTES: complete"
+    "TOTAL: 10/10\nVERDICT: PASS\nNOTES: complete",
 }
 
 
@@ -87,7 +88,7 @@ class _Runtime:
 
     async def execute_task(self, prompt, timeout_seconds=None, **kwargs):
         if "independent QA evaluator" in prompt:
-            return self.evaluator_output
+            return {"status": "completed", **self.evaluator_output}
         return {"output": "Task summary"}
 
     async def invoke_prompt(self, *args, **kwargs):
