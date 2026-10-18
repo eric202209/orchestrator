@@ -283,8 +283,15 @@ def test_a_l_m_normal_binding_is_private_owned_and_fully_released(
     assert binding._tmp_dir.parent == root
     assert stat.S_IMODE(os.stat(root).st_mode) == 0o700
     assert stat.S_IMODE(os.stat(binding._tmp_dir).st_mode) == 0o700
-    copied = binding._tmp_dir / "agent" / "auth-profiles.json"
-    assert not copied.exists()
+    auth_profile = binding._tmp_dir / "agent" / "auth-profiles.json"
+    assert stat.S_IMODE(os.stat(auth_profile).st_mode) == 0o600
+    profile = json.loads(auth_profile.read_text())
+    assert set(profile["profiles"]) == {"openai:default"}
+    assert (
+        profile["profiles"]["openai:default"]["key"]
+        == json.loads(config.read_text())["models"]["providers"]["openai"]["apiKey"]
+    )
+    assert SYNTHETIC_SECRET not in auth_profile.read_text()
     assert stat.S_IMODE(os.stat(binding._tmp_dir / "agent").st_mode) == 0o700
     assert stat.S_IMODE(os.stat(binding._tmp_dir / "state").st_mode) == 0o700
     assert stat.S_IMODE(os.stat(binding.config_path).st_mode) == 0o600
@@ -542,11 +549,11 @@ def test_f_sigkill_residue_is_discoverable_and_classified_stale_confirmed(
     proc.wait(timeout=15)
     residue = Path(info["dir"])
     assert residue.exists(), "SIGKILL handlers never run; residue must remain"
-    assert not (residue / "agent" / "auth-profiles.json").exists()
+    assert (residue / "agent" / "auth-profiles.json").exists()
 
     report = recon.reconcile_binding_artifacts(isolated_openclaw_binding_root)
     assert _classes(report) == {residue.name: (recon.STALE_CONFIRMED, recon.REPORTED)}
-    assert report["artifacts"][0]["credential_bearing"] is False
+    assert report["artifacts"][0]["credential_bearing"] is True
     assert residue.exists(), "report-only mode must not delete"
 
     applied = recon.reconcile_binding_artifacts(

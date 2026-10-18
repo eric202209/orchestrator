@@ -20,7 +20,7 @@ from app.services.orchestration.execution import executor_workspace_binding as e
 from app.services.orchestration.execution.runtime_context import RuntimeExecutorContext
 
 
-LOCAL_TOKEN = "d37-synthetic-local-gateway-token-not-real"
+LOCAL_TOKEN = "ollama-local"
 EXTERNAL_TOKEN = "d37-synthetic-external-oauth-token-not-real"
 
 
@@ -122,6 +122,8 @@ def _bound_config(binding) -> dict:
 
 def test_local_projection_is_minimal_and_preserves_required_route(tmp_path):
     config, before = _persistent_config(tmp_path)
+    host_auth = config.parent / "agents" / "main" / "agent" / "auth-profiles.json"
+    host_auth_before = host_auth.read_bytes()
     binding = _bind(tmp_path, config)
     try:
         projected = _bound_config(binding)
@@ -139,9 +141,23 @@ def test_local_projection_is_minimal_and_preserves_required_route(tmp_path):
             "fallbacks": [],
         }
         assert Path(agent["workspace"]) == _context(tmp_path).runtime_workspace
-        assert "auth-profiles.json" not in {
-            path.name for path in binding._tmp_dir.rglob("*")
+        auth_path = binding._tmp_dir / "agent" / "auth-profiles.json"
+        assert stat.S_IMODE(os.lstat(auth_path).st_mode) == 0o600
+        assert json.loads(auth_path.read_text(encoding="utf-8")) == {
+            "version": 1,
+            "profiles": {
+                "openai:default": {
+                    "type": "api_key",
+                    "provider": "openai",
+                    "key": LOCAL_TOKEN,
+                }
+            },
         }
+        assert EXTERNAL_TOKEN not in auth_path.read_text(encoding="utf-8")
+        assert host_auth.read_bytes() == host_auth_before
+        assert not list(
+            (_context(tmp_path).project_workspace).rglob("auth-profiles.json")
+        )
         assert config.read_bytes() == before
     finally:
         binding.release()
@@ -156,6 +172,12 @@ def test_external_profiles_keys_and_environment_are_excluded(tmp_path):
         assert "openai-codex" not in payload
         assert "channels" not in payload
         assert "plugins" not in payload
+        auth_profile = json.loads(
+            (binding._tmp_dir / "agent" / "auth-profiles.json").read_text()
+        )
+        assert set(auth_profile["profiles"]) == {"openai:default"}
+        assert auth_profile["profiles"]["openai:default"]["key"] == LOCAL_TOKEN
+        assert EXTERNAL_TOKEN not in json.dumps(auth_profile)
         env = ewb.restricted_openclaw_environment(
             {
                 "PATH": "/synthetic/bin",
@@ -179,6 +201,10 @@ def test_binding_ownership_paths_and_permissions_are_private(tmp_path):
         agent = projected["agents"]["list"][0]
         assert stat.S_IMODE(os.lstat(root).st_mode) == 0o700
         assert stat.S_IMODE(os.lstat(binding.config_path).st_mode) == 0o600
+        assert (
+            stat.S_IMODE(os.lstat(root / "agent" / "auth-profiles.json").st_mode)
+            == 0o600
+        )
         assert stat.S_IMODE(os.lstat(root / ewb.BINDING_METADATA_NAME).st_mode) == 0o600
         for name in ("agent", "home", "state", "tmp"):
             assert stat.S_IMODE(os.lstat(root / name).st_mode) == 0o700
@@ -196,27 +222,39 @@ def test_binding_ownership_paths_and_permissions_are_private(tmp_path):
         binding.release()
 
 
-def test_release_and_partial_failure_remove_owned_artifacts(tmp_path):
+def test_release_and_partial_failure_remove_owned_artifacts(tmp_path, monkeypatch):
     config, _ = _persistent_config(tmp_path)
     binding = _bind(tmp_path, config)
     root = binding._tmp_dir
+    auth_profile = root / "agent" / "auth-profiles.json"
+    assert auth_profile.exists()
     binding.release()
     assert not root.exists()
 
-    def failing_builder(binding_dir: Path) -> dict:
-        agent = binding_dir / "agent"
-        agent.mkdir(mode=0o700)
-        (agent / "auth-profiles.json").write_text(EXTERNAL_TOKEN, encoding="utf-8")
-        raise RuntimeError("synthetic construction failure")
+    written_profiles = []
+    write_private_file = ewb._write_private_file
 
-    with pytest.raises(RuntimeError, match="synthetic construction failure"):
-        ewb.create_managed_binding(
-            agent_id=ewb.EPHEMERAL_AGENT_ID,
-            task_execution_id=3713,
-            build_config=failing_builder,
-        )
-    root = Path(os.environ[ewb.BINDING_ROOT_ENV])
-    assert not root.exists() or list(root.iterdir()) == []
+    def record_private_file(path: Path, text: str) -> None:
+        if path.name == "auth-profiles.json":
+            written_profiles.append(path)
+        write_private_file(path, text)
+
+    monkeypatch.setattr(ewb, "_write_private_file", record_private_file)
+    write_text = Path.write_text
+    binding_root = Path(os.environ[ewb.BINDING_ROOT_ENV])
+
+    def fail_config_write(path, *args, **kwargs):
+        if path.name == "openclaw.json" and path.parent.parent == binding_root:
+            raise OSError("synthetic config write failure")
+        return write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_config_write)
+
+    with pytest.raises(OSError, match="synthetic config write failure"):
+        _bind(tmp_path, config, "partial")
+    assert written_profiles
+    assert all(not path.exists() for path in written_profiles)
+    assert not binding_root.exists() or list(binding_root.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -281,7 +319,7 @@ def test_symlink_binding_root_is_rejected_without_redirecting_artifacts(
     assert list(target.iterdir()) == []
 
 
-def test_reconciliation_observes_minimized_active_binding_without_classifying_it_as_credential_bearing(
+def test_reconciliation_classifies_projected_auth_profile_as_credential_bearing(
     tmp_path, caplog
 ):
     config, _ = _persistent_config(tmp_path)
@@ -295,7 +333,7 @@ def test_reconciliation_observes_minimized_active_binding_without_classifying_it
             if item["path"] == str(binding._tmp_dir)
         )
         assert artifact["classification"] == recon.ACTIVE
-        assert artifact["credential_bearing"] is False
+        assert artifact["credential_bearing"] is True
         assert EXTERNAL_TOKEN not in caplog.text
     finally:
         binding.release()

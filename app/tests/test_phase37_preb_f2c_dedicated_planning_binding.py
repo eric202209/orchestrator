@@ -211,7 +211,21 @@ def test_d1_d6_dedicated_binding_is_a_private_managed_artifact(
             ]
         )
         assert (root / "agent").is_dir()
-        assert not any(p.name == "auth-profiles.json" for p in root.rglob("*"))
+        auth_profile = root / "agent" / "auth-profiles.json"
+        assert stat.S_IMODE(os.lstat(auth_profile).st_mode) == 0o600
+        profile = json.loads(auth_profile.read_text())
+        source = json.loads(_source_config(tmp_path).read_text())
+        assert profile == {
+            "version": 1,
+            "profiles": {
+                "openai:default": {
+                    "type": "api_key",
+                    "provider": "openai",
+                    "key": source["models"]["providers"]["openai"]["apiKey"],
+                }
+            },
+        }
+        assert SYNTHETIC_SECRET not in auth_profile.read_text()
         for content in _snapshot_files(root).values():
             assert SYNTHETIC_SECRET.encode() not in content
         assert sl._active_cleanup_callbacks == [binding.release]
@@ -252,6 +266,14 @@ def test_d7_d10_config_is_equivalent_to_the_previous_builder(
             written["models"]["providers"]["openai"]["apiKey"]
             == source["models"]["providers"]["openai"]["apiKey"]
         )
+        auth_profile = json.loads(
+            (binding._tmp_dir / "agent" / "auth-profiles.json").read_text()
+        )
+        assert (
+            auth_profile["profiles"]["openai:default"]["key"]
+            == source["models"]["providers"]["openai"]["apiKey"]
+        )
+        assert "openai-codex" not in json.dumps(auth_profile)
         # D10: the operator config is the only source and stays untouched;
         # the override points at the binding's own config.
         assert json.loads(_source_config(tmp_path).read_text()) == source
@@ -432,7 +454,7 @@ def test_d19_crash_residue_is_classified_by_the_existing_reconciler(
     report = recon.reconcile_binding_artifacts()
     [entry] = report["artifacts"]
     assert entry["binding_id"] == binding.binding_id
-    assert entry["credential_bearing"] is False
+    assert entry["credential_bearing"] is True
     expected = recon.STALE_SUSPECTED if owner_alive else recon.STALE_CONFIRMED
     assert entry["classification"] == expected
     assert binding._tmp_dir.exists()  # report-only never removes

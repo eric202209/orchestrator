@@ -75,6 +75,7 @@ from app.services.orchestration.execution.executor_workspace_binding import (
     create_managed_binding,
     project_local_openclaw_config,
     restricted_openclaw_environment,
+    write_projected_local_auth_profile,
 )
 from app.services.orchestration.validation.runtime_pollution_guard import (
     detect_runtime_pollution,
@@ -919,7 +920,7 @@ class OpenClawSessionService:
                 raise OpenClawAgentSelectionError(
                     "Dedicated Protocol v2 planning requires an explicit runtime model"
                 )
-            return project_local_openclaw_config(
+            projected = project_local_openclaw_config(
                 config,
                 model_ref=model_ref,
                 agent_id=agent_id,
@@ -927,10 +928,13 @@ class OpenClawSessionService:
                 agent_dir=agent_dir,
                 state_dir=binding_dir / "state",
             )
+            write_projected_local_auth_profile(agent_dir, projected)
+            return projected
 
         # Phase 37 Pre-B-F2C: same managed lifecycle as the runtime binding
         # (managed root, flock, metadata, 0600 config, forced-termination
-        # release, reconciler visibility). No auth profile is copied.
+        # release, reconciler visibility). Only the projected local provider
+        # credential is written as a binding-local auth profile.
         try:
             binding = create_managed_binding(
                 agent_id=agent_id,

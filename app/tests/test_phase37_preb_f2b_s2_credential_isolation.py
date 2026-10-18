@@ -161,8 +161,18 @@ def _assert_self_contained(binding, runtime_workspace: Path) -> None:
     for value in binding.environment.values():
         assert Path(value).parent == root
     assert stat.S_IMODE(os.lstat(root).st_mode) == 0o700
-    copied = root / "agent" / "auth-profiles.json"
-    assert not copied.exists()
+    auth_profile = root / "agent" / "auth-profiles.json"
+    assert stat.S_IMODE(os.lstat(auth_profile).st_mode) == 0o600
+    assert json.loads(auth_profile.read_text()) == {
+        "version": 1,
+        "profiles": {
+            "openai:default": {
+                "type": "api_key",
+                "provider": "openai",
+                "key": config["models"]["providers"]["openai"]["apiKey"],
+            }
+        },
+    }
     assert stat.S_IMODE(os.lstat(binding.config_path).st_mode) == 0o600
 
 
@@ -270,10 +280,18 @@ def test_s2_01_credential_snapshots_are_per_binding(
     second = _bind(tmp_path, config, "snap-b", 2)
     assert _copied_secret(first) == SECRET_A
     assert _copied_secret(second) == SECRET_B
-    assert not (first._tmp_dir / "agent" / "auth-profiles.json").exists()
-    assert not (second._tmp_dir / "agent" / "auth-profiles.json").exists()
+    first_auth = json.loads(
+        (first._tmp_dir / "agent" / "auth-profiles.json").read_text()
+    )
+    second_auth = json.loads(
+        (second._tmp_dir / "agent" / "auth-profiles.json").read_text()
+    )
+    assert first_auth["profiles"]["openai:default"]["key"] == SECRET_A
+    assert second_auth["profiles"]["openai:default"]["key"] == SECRET_B
     first.release()
     assert _copied_secret(second) == SECRET_B
+    assert not (first._tmp_dir / "agent" / "auth-profiles.json").exists()
+    assert (second._tmp_dir / "agent" / "auth-profiles.json").exists()
     second.release()
 
 
@@ -679,7 +697,7 @@ async def test_s2_10_credential_value_absent_from_logs_errors_and_evidence(
     binding = unbound._workspace_binding
     surfaces.append((binding._tmp_dir / ewb.BINDING_METADATA_NAME).read_text())
     active_report = recon.reconcile_binding_artifacts()
-    assert active_report["summary"]["credential_bearing"] == 0
+    assert active_report["summary"]["credential_bearing"] == 1
     surfaces.append(json.dumps(active_report, default=str))
     surfaces.append(
         json.dumps(

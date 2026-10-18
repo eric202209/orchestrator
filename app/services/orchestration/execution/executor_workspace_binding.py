@@ -389,6 +389,49 @@ def project_local_openclaw_config(
     }
 
 
+def write_projected_local_auth_profile(
+    agent_dir: Path, projected_config: Dict[str, Any]
+) -> Path:
+    """Write only the supported local provider credential into the binding.
+
+    OpenClaw resolves non-secret local markers through its agent-local auth
+    profile store.  The current projection supports only ``openai/qwen-local``;
+    keep this helper equally narrow and source its value from that projection.
+    """
+
+    models = projected_config.get("models")
+    providers = models.get("providers") if isinstance(models, dict) else None
+    if not isinstance(providers, dict) or set(providers) != {"openai"}:
+        raise ExecutorWorkspaceBindingError(
+            "Projected OpenClaw auth profile requires the supported openai provider"
+        )
+    provider = providers["openai"]
+    api_key = provider.get("apiKey") if isinstance(provider, dict) else None
+    if not isinstance(api_key, str) or not api_key.strip():
+        raise ExecutorWorkspaceBindingError(
+            "Projected OpenClaw auth profile has no provider credential"
+        )
+
+    profile_path = Path(agent_dir) / "auth-profiles.json"
+    _write_private_file(
+        profile_path,
+        json.dumps(
+            {
+                "version": 1,
+                "profiles": {
+                    "openai:default": {
+                        "type": "api_key",
+                        "provider": "openai",
+                        "key": api_key,
+                    }
+                },
+            },
+            indent=2,
+        ),
+    )
+    return profile_path
+
+
 RUNNER_AGENT_ID_ENV = "OPENCLAW_RUNNER_AGENT_ID"
 EPHEMERAL_AGENT_ID = "orchestrator-runtime"
 
@@ -778,7 +821,7 @@ def bind_openclaw_workspace(
     def build_config(tmp_dir: Path) -> Dict[str, Any]:
         agent_dir = tmp_dir / "agent"
         agent_dir.mkdir(mode=0o700)
-        return project_local_openclaw_config(
+        projected = project_local_openclaw_config(
             real_config,
             model_ref=resolved_model_ref,
             agent_id=agent_id,
@@ -786,6 +829,8 @@ def bind_openclaw_workspace(
             agent_dir=agent_dir,
             state_dir=tmp_dir / "state",
         )
+        write_projected_local_auth_profile(agent_dir, projected)
+        return projected
 
     binding = create_managed_binding(
         agent_id=agent_id,
