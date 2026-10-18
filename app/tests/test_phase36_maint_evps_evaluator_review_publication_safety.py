@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from app.services.orchestration.phases.completion_flow import _run_evaluator
 
@@ -226,6 +230,120 @@ def test_evaluator_runtime_exception_is_error():
     result = _run(_CapturingRuntime(raises=TimeoutError("evaluator timed out")))
 
     assert result["verdict"] == "ERROR"
+
+
+@pytest.mark.parametrize(
+    ("runtime_status", "expected_verdict"),
+    [("completed", "PASS"), ("failed", "ERROR")],
+)
+def test_evaluator_only_direct_call_uses_ephemeral_tool_denial_and_cleans_up(
+    db_session,
+    tmp_path,
+    monkeypatch,
+    isolated_openclaw_binding_root,
+    runtime_status,
+    expected_verdict,
+):
+    from app.models import TaskExecutionChangeSet
+    from app.services.agents.openclaw_service import OpenClawSessionService
+    from app.services.agents.runtime_configuration import (
+        BackendRole,
+        RoleRuntimeConfiguration,
+    )
+    from app.services.orchestration.coordinators.completion_coordinator import (
+        CompletionCoordinator,
+    )
+    from app.tests.test_phase37_preb_f2b_binding_lifecycle import (
+        _context,
+        _persistent_state,
+        _snapshot,
+    )
+
+    persistent_state, config_path = _persistent_state(tmp_path)
+    persistent_before = _snapshot(persistent_state)
+    context = _context(tmp_path, name="evaluator-only")
+    product_root = context.project_workspace
+    product_sentinel = product_root / "protected.txt"
+    product_sentinel.write_text("unchanged", encoding="utf-8")
+    product_before = {
+        path.relative_to(product_root): path.read_bytes()
+        for path in product_root.rglob("*")
+        if path.is_file()
+    }
+
+    monkeypatch.setenv("OPENCLAW_CONFIG_PATH", str(config_path))
+    runtime = OpenClawSessionService(
+        db_session,
+        None,
+        None,
+        use_demo_mode=False,
+        runtime_configuration=RoleRuntimeConfiguration(
+            role=BackendRole.EXECUTION,
+            backend_name="local_openclaw",
+            model_family="qwen-local",
+            adaptation_profile="openclaw_default",
+        ),
+    )
+    runtime.bind_runtime_workspace(context)
+    binding_dir = runtime._workspace_binding._tmp_dir
+    observed = {}
+    changesets_before = db_session.query(TaskExecutionChangeSet).count()
+
+    try:
+
+        async def _offline_execute_task(prompt, timeout_seconds=None):
+            bound = json.loads(runtime._workspace_binding.config_path.read_text())
+            agent = bound["agents"]["list"][0]
+            observed["prompt"] = prompt
+            observed["tool_deny"] = agent["tools"]["deny"]
+            observed["workspace"] = agent["workspace"]
+            return {"status": runtime_status, "output": "VERDICT: PASS\n"}
+
+        runtime._apply_discovery_tool_suppression("PLANNING_DISCOVERY")
+        runtime.execute_task = _offline_execute_task
+
+        def _forbid_completion(*_args, **_kwargs):
+            raise AssertionError("evaluator-only path entered CompletionCoordinator")
+
+        monkeypatch.setattr(CompletionCoordinator, "complete_task", _forbid_completion)
+        candidate, verification = _candidate_evidence(tmp_path)
+        state = SimpleNamespace(
+            reasoning_artifact={"intent": "Check the disposable candidate."},
+            plan=[],
+            execution_results=[],
+            changed_files=["app/api/v1/router.py"],
+            project_dir=str(tmp_path / "control-state"),
+            session_id=None,
+            task_id=None,
+        )
+        result = _run_evaluator(
+            runtime_service=runtime,
+            orchestration_state=state,
+            prompt="Evaluate the disposable candidate.",
+            summary="Offline evaluator-only regression.",
+            candidate_evidence={"change_set": candidate},
+            verification_evidence=verification,
+            emit_live=lambda *_args, **_kwargs: None,
+            logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
+        )
+    finally:
+        runtime.release_runtime_workspace_binding()
+        shutil.rmtree(context.runtime_workspace, ignore_errors=True)
+
+    assert result["verdict"] == expected_verdict
+    assert observed["tool_deny"] == ["*"]
+    assert observed["workspace"] == str(context.runtime_workspace)
+    assert "ACTUAL_CANDIDATE_CHANGE" in observed["prompt"]
+    assert db_session.query(TaskExecutionChangeSet).count() == changesets_before
+    assert {
+        path.relative_to(product_root): path.read_bytes()
+        for path in product_root.rglob("*")
+        if path.is_file()
+    } == product_before
+    assert _snapshot(persistent_state) == persistent_before
+    assert not binding_dir.exists()
+    assert not context.runtime_workspace.exists()
+    assert runtime._workspace_binding is None
 
 
 def test_final_review_projection_replaces_pre_evaluator_auto_promote(
