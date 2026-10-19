@@ -59,7 +59,7 @@ def test_openclaw_invocation_metadata_redacts_prompt_and_captures_flags():
     assert "secret prompt" not in json.dumps(metadata)
 
 
-def test_phase7f_openclaw_diagnostics_classify_boundary_and_redact_stream_tail():
+def test_phase7f_openclaw_diagnostics_classify_boundary_and_bound_evidence_snapshot():
     assert (
         OpenClawSessionService._diagnostic_invocation_kind("PHASE7F_DEBUG_REPAIR")
         == "debug_repair"
@@ -86,8 +86,9 @@ def test_phase7f_openclaw_diagnostics_classify_boundary_and_redact_stream_tail()
         == "planning_wait_for"
     )
 
-    tail = OpenClawSessionService._diagnostic_text_tail(
-        "[tools] read failed\nAuthorization: Bearer abc.def.ghi\npassword=secret"
+    tail = OpenClawSessionService._provider_evidence_partial_snapshot(
+        "[tools] read failed\nAuthorization: Bearer abc.def.ghi\npassword=secret",
+        None,
     )
 
     assert "[tools] read failed" in tail

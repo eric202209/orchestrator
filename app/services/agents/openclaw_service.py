@@ -3594,9 +3594,23 @@ class OpenClawSessionService:
                 # Any other failure (e.g. an oversized stream line) must still
                 # terminate the live child rather than abandon it.
                 if process is not None and process.returncode is None:
-                    await self._terminate_process_with_bounded_reap(
-                        process, stream_diagnostics
-                    )
+                    try:
+                        await self._terminate_process_with_bounded_reap(
+                            process, stream_diagnostics
+                        )
+                    except Exception:
+                        # Preserve a useful failure signal without persisting
+                        # the cleanup exception text or any stream content.
+                        self._log_openclaw_diagnostic(
+                            OpenClawDiagnosticEvent.EXECUTION_FAILURE,
+                            {
+                                "diagnostic_category": "execution_failure",
+                                "runtime_status": "failed",
+                            },
+                            level="ERROR",
+                            failure_category="runtime_error",
+                        )
+                        raise
                     return_code = process.returncode
                     cleanup_status = stream_diagnostics.get(
                         "cleanup_status", "completed"
@@ -4143,7 +4157,7 @@ class OpenClawSessionService:
                 exception=exc,
                 diagnostics=diagnostics,
                 partial_content_snapshot=self._provider_evidence_partial_snapshot(
-                    proc.stdout, proc.stderr
+                    getattr(proc, "stdout", None), getattr(proc, "stderr", None)
                 ),
             )
             diagnostics.update(evidence)
@@ -4152,7 +4166,7 @@ class OpenClawSessionService:
             diagnostics=diagnostics,
             result=result,
             partial_content_snapshot=self._provider_evidence_partial_snapshot(
-                proc.stdout, proc.stderr
+                getattr(proc, "stdout", None), getattr(proc, "stderr", None)
             ),
         )
         result["runtime_diagnostics"] = {

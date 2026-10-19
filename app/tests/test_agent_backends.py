@@ -6,6 +6,7 @@ from app.services.agents.agent_backends import (
     list_supported_backends,
 )
 from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.observability.openclaw_diagnostics import OpenClawDiagnosticEvent
 from app.services.orchestration.execution.runtime_context import RuntimeExecutorContext
 from app.models import Project, Session as SessionModel
 from app.config import settings
@@ -156,8 +157,8 @@ def test_openclaw_workspace_guard_rejects_parent_workspace(tmp_path):
     project_root.mkdir(parents=True)
     logged = []
     service = object.__new__(OpenClawSessionService)
-    service._log_entry = lambda level, message, **kwargs: logged.append(
-        (level, message, kwargs)
+    service._log_openclaw_diagnostic = (
+        lambda event, diagnostics, **kwargs: logged.append((event, diagnostics, kwargs))
     )
 
     result = service._apply_reported_workspace_guard(
@@ -169,4 +170,11 @@ def test_openclaw_workspace_guard_rejects_parent_workspace(tmp_path):
     assert result["status"] == "failed"
     assert result["workspace_contract_failed"] is True
     assert "outside the resolved project root" in result["error"]
-    assert logged and logged[0][0] == "ERROR"
+    assert logged
+    assert logged[0][0] is OpenClawDiagnosticEvent.WORKSPACE_GUARD
+    assert logged[0][1] == {
+        "diagnostic_category": "workspace_contract_failure",
+        "runtime_status": "failed",
+    }
+    assert logged[0][2]["level"] == "ERROR"
+    assert logged[0][2]["failure_category"] == "workspace_contract_failure"

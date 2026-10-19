@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import os
 import signal
 import sys
@@ -321,9 +322,24 @@ async def test_c2_streaming_runner_cleanup_failure_keeps_original_identifiable(
         with pytest.raises(RuntimeError, match="simulated cleanup") as exc_info:
             await service.execute_task_with_streaming("probe", timeout_seconds=20)
         assert isinstance(exc_info.value.__context__, ValueError)
-        assert any(
-            level == "ERROR" and "simulated cleanup failure" in message
-            for level, message, _metadata in service.logged_entries
+        diagnostic = next(
+            (
+                (level, message, json.loads(metadata))
+                for level, message, metadata in service.logged_entries
+                if level == "ERROR" and metadata
+            ),
+            None,
+        )
+        assert diagnostic is not None
+        level, message, metadata = diagnostic
+        assert level == "ERROR"
+        assert message == "[OPENCLAW][EXECUTION_DIAGNOSTICS] content omitted"
+        assert metadata["diagnostic_schema_version"] == 2
+        assert metadata["content_omitted"] is True
+        assert metadata["failure_category"] == "runtime_error"
+        assert metadata["runtime_status"] == "failed"
+        assert "simulated cleanup failure" not in json.dumps(
+            {"message": message, "metadata": metadata}
         )
         assert not any(
             metadata and '"cleanup_status": "completed"' in metadata
