@@ -88,6 +88,8 @@ DEFAULT_AFFECTED_MODULES = (
     "app.models",
     "app.services.orchestration",
     "app.services.orchestration.worker_identity",
+    "app.services.orchestration.invocation_provenance",
+    "app.services.workspace.changeset_service",
     "app.services.session.session_lifecycle_service",
     "app.services.orchestration.execution.executor_workspace_binding",
     "app.services.agents.openclaw_service",

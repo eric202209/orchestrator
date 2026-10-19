@@ -279,6 +279,11 @@ class ChangesetService:
             "deleted_files": list(change_set.get("deleted_files") or []),
             "created_at": datetime.now(UTC).isoformat(),
         }
+        from app.services.orchestration.invocation_provenance import (
+            attach_invocation_provenance,
+        )
+
+        manifest = attach_invocation_provenance(manifest)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
         ensure_shared_tree(manifest_path.parent)
@@ -451,6 +456,11 @@ class ChangesetService:
             ),
             "disposition_metadata": record.disposition_metadata,
         }
+        from app.services.orchestration.invocation_provenance import (
+            attach_invocation_provenance,
+        )
+
+        payload = attach_invocation_provenance(payload)
         project = self.db.query(Project).filter(Project.id == record.project_id).first()
         if project is not None:
             change_set_dir = self.change_set_dir_for_read(
@@ -541,6 +551,11 @@ class ChangesetService:
         review_decision = project_execution_review_decision(
             review_decision, change_set.get("status")
         )
+        from app.services.orchestration.invocation_provenance import (
+            attach_invocation_provenance,
+        )
+
+        review_decision = attach_invocation_provenance(review_decision)
         record.review_decision = review_decision
         record.review_reason = (
             review_decision.get("reason") if review_decision else None
@@ -568,7 +583,11 @@ class ChangesetService:
         record.disposition = disposition
         record.disposition_reason = reason
         record.disposition_at = datetime.now(UTC)
-        record.disposition_metadata = metadata or {}
+        from app.services.orchestration.invocation_provenance import (
+            attach_invocation_provenance,
+        )
+
+        record.disposition_metadata = attach_invocation_provenance(metadata or {})
         if commit:
             self.db.commit()
         return record
@@ -589,7 +608,11 @@ class ChangesetService:
         )
         if not record:
             return None
-        record.review_decision = dict(review_decision)
+        from app.services.orchestration.invocation_provenance import (
+            attach_invocation_provenance,
+        )
+
+        record.review_decision = attach_invocation_provenance(review_decision)
         record.review_reason = review_decision.get("reason")
         if commit:
             self.db.commit()
@@ -630,6 +653,11 @@ class ChangesetService:
                 change_set,
                 target_root=target_root,
             )
+        from app.services.orchestration.invocation_provenance import (
+            attach_invocation_provenance,
+        )
+
+        change_set = attach_invocation_provenance(change_set)
         self.upsert_record(
             change_set=change_set,
             session_id=session_id,
@@ -715,6 +743,28 @@ class ChangesetService:
         record.disposition_reason = reason
         record.disposition_at = datetime.now(UTC)
 
+        from app.services.orchestration.invocation_provenance import (
+            attach_invocation_provenance,
+        )
+
+        unavailable_metadata = attach_invocation_provenance(
+            {
+                "schema": "openclaw.task_execution_change_set.v1",
+                "project_id": project.id,
+                "task_id": task.id,
+                "task_execution_id": task_execution_id,
+                "snapshot_key": snapshot_key,
+                "status": reason,
+                "disposition": "unavailable",
+                "added_files": [],
+                "modified_files": [],
+                "deleted_files": [],
+            }
+        )
+        record.disposition_metadata = attach_invocation_provenance(
+            record.disposition_metadata or {}
+        )
+
         self.db.add(
             LogEntry(
                 session_id=session_id,
@@ -722,20 +772,7 @@ class ChangesetService:
                 task_execution_id=task_execution_id,
                 level="WARNING",
                 message=TASK_CHANGE_SET_LOG_MESSAGE,
-                log_metadata=json.dumps(
-                    {
-                        "schema": "openclaw.task_execution_change_set.v1",
-                        "project_id": project.id,
-                        "task_id": task.id,
-                        "task_execution_id": task_execution_id,
-                        "snapshot_key": snapshot_key,
-                        "status": reason,
-                        "disposition": "unavailable",
-                        "added_files": [],
-                        "modified_files": [],
-                        "deleted_files": [],
-                    }
-                ),
+                log_metadata=json.dumps(unavailable_metadata),
             )
         )
         if commit:

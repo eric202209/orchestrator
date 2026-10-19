@@ -13,7 +13,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from sqlalchemy.orm import Session
 
@@ -47,6 +47,10 @@ logger = logging.getLogger(__name__)
 
 class VerificationEvidencePersistenceError(RuntimeError):
     """Raised when a required verification result cannot be made durable."""
+
+
+class DuplicateInvocationProjectionError(RuntimeError):
+    """Raised when an invocation projection identifier is already journaled."""
 
 
 _PRIVATE_VERIFICATION_OUTPUT_MAX_BYTES = 4096
@@ -390,6 +394,109 @@ def _append_jsonl_line(log_path: Path, payload: Dict[str, Any]) -> None:
                 os.fsync(handle.fileno())
             _normalize_path_ownership_to_parent(log_path)
             ensure_shared_permissions(log_path)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def append_invocation_projection_event(
+    *,
+    project_dir: Any,
+    project_id: int,
+    session_id: int,
+    task_id: int,
+    invocation_attempt_id: str,
+    details: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Atomically append a validated, content-free attempt identity projection."""
+
+    from app.services.orchestration.invocation_provenance import (
+        validate_invocation_projection,
+    )
+    from app.services.workspace.file_lock import fcntl
+
+    location = coerce_control_state_location(project_dir, project_id=project_id)
+    log_path = _orchestration_event_log_path(location, session_id, task_id)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_shared_permissions(log_path.parent)
+    lock_path = log_path.with_suffix(f"{log_path.suffix}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        _normalize_path_ownership_to_parent(lock_path)
+        ensure_shared_permissions(lock_path)
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            execution_id = details.get("task_execution_id")
+            request_id = details.get("celery_request_id")
+            previous_attempts: list[int] = []
+            if log_path.exists():
+                with log_path.open("r", encoding="utf-8") as reader:
+                    for line in reader:
+                        try:
+                            item = json.loads(line)
+                        except (json.JSONDecodeError, TypeError):
+                            continue
+                        if not isinstance(item, dict):
+                            continue
+                        prior = item.get("details")
+                        if item.get("event_id") == invocation_attempt_id or (
+                            isinstance(prior, Mapping)
+                            and prior.get("invocation_attempt_id")
+                            == invocation_attempt_id
+                        ):
+                            raise DuplicateInvocationProjectionError(
+                                "invocation projection identifier already exists"
+                            )
+                        if not isinstance(prior, Mapping):
+                            continue
+                        same_execution = (
+                            type(execution_id) is int
+                            and execution_id > 0
+                            and prior.get("task_execution_id") == execution_id
+                        )
+                        same_request = (
+                            isinstance(request_id, str)
+                            and bool(request_id)
+                            and prior.get("celery_request_id") == request_id
+                        )
+                        if same_execution or same_request:
+                            prior_number = prior.get("attempt_number")
+                            if type(prior_number) is int and prior_number > 0:
+                                previous_attempts.append(prior_number)
+            attempt_number = max(previous_attempts, default=0) + 1
+            projection_input = dict(details)
+            projection_input["invocation_attempt_id"] = invocation_attempt_id
+            projection_input["durable_journal_reference"] = invocation_attempt_id
+            projection_input["attempt_number"] = (
+                attempt_number
+                if type(execution_id) is int
+                and execution_id > 0
+                or execution_id is None
+                and isinstance(request_id, str)
+                and request_id
+                else None
+            )
+            validated = validate_invocation_projection(projection_input)
+            if (
+                validated["project_id"] != project_id
+                or validated["session_id"] != session_id
+                or validated["task_id"] != task_id
+            ):
+                raise ValueError("invocation projection journal identity mismatch")
+            payload: Dict[str, Any] = {
+                "event_id": invocation_attempt_id,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "event_type": EventType.INVOCATION_PROJECTION,
+                "session_id": session_id,
+                "task_id": task_id,
+                "parent_event_id": None,
+                "details": validated,
+            }
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            _normalize_path_ownership_to_parent(log_path)
+            ensure_shared_permissions(log_path)
+            return payload
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
 
@@ -936,6 +1043,12 @@ def append_orchestration_event(
     # ``project_dir`` may already be a ControlStateLocation carrying identity;
     # an explicit ``project_id`` only fills in when it does not.
     project_dir = coerce_control_state_location(project_dir, project_id=project_id)
+    event_details = dict(details or {})
+    from app.services.orchestration.invocation_provenance import (
+        attach_invocation_provenance,
+    )
+
+    event_details = attach_invocation_provenance(event_details)
     payload: Dict[str, Any] = {
         "event_id": str(uuid.uuid4()),
         "timestamp": datetime.now(UTC).isoformat(),
@@ -943,7 +1056,7 @@ def append_orchestration_event(
         "session_id": session_id,
         "task_id": task_id,
         "parent_event_id": parent_event_id,
-        "details": details or {},
+        "details": event_details,
     }
     if phase is not None:
         payload["phase"] = phase
@@ -1004,6 +1117,11 @@ def append_verification_execution_evidence(
     payload.setdefault("session_id", int(session_id))
     payload.setdefault("task_id", int(task_id))
     payload.setdefault("task_execution_id", task_execution_id)
+    from app.services.orchestration.invocation_provenance import (
+        attach_invocation_provenance,
+    )
+
+    payload = attach_invocation_provenance(payload)
     from app.services.orchestration.diagnostics.outcome_observability import (
         redact_observed_text,
     )
@@ -1647,6 +1765,11 @@ def record_live_log(
     metadata: Optional[Dict[str, Any]] = None,
     task_execution_id: Optional[int] = None,
 ) -> None:
+    from app.services.orchestration.invocation_provenance import (
+        attach_invocation_provenance,
+    )
+
+    safe_metadata = attach_invocation_provenance(metadata or {})
     db.add(
         LogEntry(
             session_id=session_id,
@@ -1655,7 +1778,7 @@ def record_live_log(
             level=level,
             message=message,
             session_instance_id=session_instance_id,
-            log_metadata=json.dumps(metadata) if metadata else None,
+            log_metadata=json.dumps(safe_metadata) if safe_metadata else None,
         )
     )
     db.commit()

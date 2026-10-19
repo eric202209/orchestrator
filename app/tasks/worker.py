@@ -8,6 +8,8 @@ PLANNING → EXECUTING (step-by-step) → DEBUGGING (on failure) → PLAN_REVISI
 import os
 import logging
 import json
+import hashlib
+import uuid
 import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any
@@ -40,6 +42,171 @@ def _runtime_worker_identity() -> tuple[str, str, str, int]:
     """Return the shared PID-reuse-safe worker identity."""
 
     return current_worker_identity()
+
+
+def _matching_worker_boot_manifest(
+    identity_dir: Path, process: Any
+) -> tuple[Any, str | None]:
+    """Load only a boot manifest that is tied to this process or its parent."""
+
+    if process is None:
+        return None, None
+    parent = (
+        _capture_process_identity(process.ppid)
+        if getattr(process, "ppid", None)
+        else None
+    )
+    ranked: list[tuple[int, Any, str]] = []
+    for path in identity_dir.glob("worker-*.json"):
+        if path.is_symlink():
+            continue
+        try:
+            raw = path.read_bytes()
+            manifest = _WorkerBootIdentityManifest.from_dict(json.loads(raw))
+        except Exception:
+            continue
+        if manifest.linux_boot_id != process.linux_boot_id:
+            continue
+        if (
+            manifest.worker_pid == process.pid
+            and manifest.worker_start_ticks == process.start_ticks
+        ):
+            ranked.append((0, manifest, hashlib.sha256(raw).hexdigest()))
+            continue
+        if (
+            parent is not None
+            and manifest.worker_pid == parent.pid
+            and manifest.worker_start_ticks == parent.start_ticks
+            and manifest.linux_boot_id == parent.linux_boot_id
+        ):
+            ranked.append((1, manifest, hashlib.sha256(raw).hexdigest()))
+            continue
+        child_match = any(
+            isinstance(child, dict)
+            and child.get("pid") == process.pid
+            and child.get("start_ticks") == process.start_ticks
+            and child.get("linux_boot_id") == process.linux_boot_id
+            for child in manifest.worker_children
+        )
+        if child_match:
+            ranked.append((2, manifest, hashlib.sha256(raw).hexdigest()))
+    if not ranked:
+        return None, None
+    best_rank = min(item[0] for item in ranked)
+    best = [item for item in ranked if item[0] == best_rank]
+    if len(best) != 1:
+        return None, None
+    return best[0][1].to_dict(), best[0][2]
+
+
+def _invocation_worker_evidence() -> tuple[
+    Any,
+    str | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    list[dict[str, Any]] | None,
+]:
+    """Collect bounded source, loaded-module, process, and boot observations."""
+
+    try:
+        process = _capture_process_identity()
+    except Exception:
+        process = None
+    process_data = process.to_dict() if process is not None else None
+    boot_manifest = None
+    boot_digest = None
+    source_data = None
+    loaded_data = None
+    try:
+        identity_paths = _resolve_worker_identity_paths(
+            source_root=settings.WORKER_SOURCE_ROOT,
+            runtime_root=settings.RUNTIME_ROOT,
+        )
+        boot_manifest, boot_digest = _matching_worker_boot_manifest(
+            identity_paths.identity_dir, process
+        )
+        candidate = _build_candidate_source_manifest(
+            identity_paths.source_root,
+            affected_modules=_DEFAULT_AFFECTED_MODULES,
+        )
+        source_data = candidate.to_dict()
+        loaded_data = [
+            dict(item) for item in _capture_loaded_module_provenance(candidate)
+        ]
+    except Exception:
+        # Provenance is optional diagnostic evidence. Its absence is recorded
+        # by the projection as INCONCLUSIVE and never changes task semantics.
+        pass
+    return boot_manifest, boot_digest, process_data, source_data, loaded_data
+
+
+def _start_task_invocation_provenance(
+    *,
+    celery_task: Any,
+    project_id: int | None,
+    session_id: int,
+    task_id: int,
+    task_execution_id: int | None,
+    project_dir: Any,
+    invocation_started_at: datetime,
+) -> tuple[dict[str, Any], Any]:
+    try:
+        request = getattr(celery_task, "request", None)
+        delivery_info = getattr(request, "delivery_info", None)
+        (
+            worker_boot_manifest,
+            worker_boot_manifest_digest,
+            worker_process_identity,
+            current_source_manifest,
+            current_loaded_modules,
+        ) = _invocation_worker_evidence()
+        projection = _build_invocation_projection(
+            project_id=project_id,
+            task_id=task_id,
+            session_id=session_id,
+            task_execution_id=task_execution_id,
+            celery_request_id=getattr(request, "id", None),
+            celery_retry_count=getattr(request, "retries", None),
+            delivery_redelivered=(
+                delivery_info.get("redelivered")
+                if isinstance(delivery_info, dict)
+                else None
+            ),
+            invocation_started_at=invocation_started_at,
+            worker_boot_manifest=worker_boot_manifest,
+            worker_boot_manifest_digest=worker_boot_manifest_digest,
+            worker_process=worker_process_identity,
+            current_source_manifest=current_source_manifest,
+            current_loaded_modules=current_loaded_modules,
+        )
+    except Exception:
+        # Optional provenance cannot alter task/evaluator/publication results.
+        return {}, _bind_invocation_reference(
+            _InvocationProvenanceReference(
+                invocation_attempt_id=uuid.uuid4().hex,
+                projection_journal_reference=None,
+                worker_boot_manifest_id=None,
+                worker_boot_manifest_digest=None,
+                attempt_number=None,
+                classification=_INVOCATION_INCONCLUSIVE,
+            )
+        )
+    if project_dir is not None and project_id is not None:
+        reference = _persist_invocation_projection(
+            project_dir=project_dir,
+            project_id=project_id,
+            session_id=session_id,
+            task_id=task_id,
+            projection=projection,
+        )
+    else:
+        reference = _reference_from_projection(
+            projection,
+            journal_reference=None,
+            attempt_number=None,
+            classification=_INVOCATION_INCONCLUSIVE,
+        )
+    return projection, _bind_invocation_reference(reference)
 
 
 from app.services.agents.agent_runtime import (
@@ -80,10 +247,24 @@ from app.services.orchestration.lifecycle.worker_bootstrap import (
     should_use_configured_planning_runtime,
 )
 from app.services.orchestration.worker_identity import (
+    DEFAULT_AFFECTED_MODULES as _DEFAULT_AFFECTED_MODULES,
+    WorkerBootIdentityManifest as _WorkerBootIdentityManifest,
+    build_candidate_source_manifest as _build_candidate_source_manifest,
+    capture_loaded_module_provenance as _capture_loaded_module_provenance,
+    capture_process_identity as _capture_process_identity,
     collect_worker_configuration as _collect_worker_configuration,
     create_worker_boot_identity as _create_worker_boot_identity,
     preload_evaluator_module_for_worker as _preload_evaluator_module_for_worker,
     resolve_worker_identity_paths as _resolve_worker_identity_paths,
+)
+from app.services.orchestration.invocation_provenance import (
+    INCONCLUSIVE as _INVOCATION_INCONCLUSIVE,
+    InvocationProvenanceReference as _InvocationProvenanceReference,
+    bind_invocation_reference as _bind_invocation_reference,
+    build_invocation_projection as _build_invocation_projection,
+    persist_invocation_projection as _persist_invocation_projection,
+    reference_from_projection as _reference_from_projection,
+    reset_invocation_reference as _reset_invocation_reference,
 )
 from app.services.orchestration.execution.executor_workspace_binding import (
     SUPPORTED_LOCAL_MODEL_REF as _SUPPORTED_LOCAL_MODEL_REF,
@@ -483,6 +664,8 @@ def execute_orchestration_task(
         timeout_seconds: Maximum execution time
         context: Additional context
     """
+    invocation_started_at = datetime.now(timezone.utc)
+    invocation_reference_token = None
     db = get_db_session()
     session: Optional[SessionModel] = None
     task: Optional[Task] = None
@@ -630,6 +813,35 @@ def execute_orchestration_task(
             identity_projection=identity_projection,
         )
 
+        # Establish correlation before the first per-invocation log/event.
+        # The identity-aware control-state root is the same for the canonical
+        # project root and task-subfolder legacy paths used later in dispatch.
+        project = (
+            db.query(Project).filter(Project.id == session.project_id).first()
+            if session.project_id
+            else None
+        )
+        invocation_project_dir = None
+        if project is not None and project.workspace_path:
+            invocation_project_dir = project_control_state_location(
+                Path(
+                    resolve_project_workspace_path(project.workspace_path, project.name)
+                ),
+                project.id,
+                db=db,
+            )
+        _invocation_projection, invocation_reference_token = (
+            _start_task_invocation_provenance(
+                celery_task=self,
+                project_id=project.id if project else None,
+                session_id=session_id,
+                task_id=task_id,
+                task_execution_id=task_execution_id,
+                project_dir=invocation_project_dir,
+                invocation_started_at=invocation_started_at,
+            )
+        )
+
         def emit_live(
             level: str, message: str, metadata: Optional[Dict[str, Any]] = None
         ) -> None:
@@ -722,12 +934,6 @@ def execute_orchestration_task(
                 },
             )
 
-        # Get the project associated with this session
-        project = (
-            db.query(Project).filter(Project.id == session.project_id).first()
-            if session.project_id
-            else None
-        )
         runs_in_canonical_baseline = bool(
             project
             and task
@@ -2906,6 +3112,39 @@ def execute_orchestration_task(
     except Exception as exc:
         from celery.exceptions import Retry as _CeleryRetry
 
+        if invocation_reference_token is None:
+            try:
+                if project is None and session is not None and session.project_id:
+                    project = (
+                        db.query(Project)
+                        .filter(Project.id == session.project_id)
+                        .first()
+                    )
+                if project is not None and project.workspace_path:
+                    interrupted_project_dir = project_control_state_location(
+                        Path(
+                            resolve_project_workspace_path(
+                                project.workspace_path, project.name
+                            )
+                        ),
+                        project.id,
+                        db=db,
+                    )
+                    _incomplete_projection, invocation_reference_token = (
+                        _start_task_invocation_provenance(
+                            celery_task=self,
+                            project_id=project.id,
+                            session_id=session_id,
+                            task_id=task_id,
+                            task_execution_id=task_execution_id,
+                            project_dir=interrupted_project_dir,
+                            invocation_started_at=invocation_started_at,
+                        )
+                    )
+            except Exception:
+                # Initialization provenance is optional. It remains absent
+                # rather than affecting the execution's original failure.
+                pass
         if isinstance(exc, _CeleryRetry):
             raise
         if capacity_retry_scheduled and session is not None:
@@ -3237,7 +3476,13 @@ def execute_orchestration_task(
             # Phase 23D: discard the ephemeral executor workspace binding (if
             # any was established) on every terminal path, mirroring the
             # sandbox disposal below. Never raises.
-            _bound_runtime_service.release_runtime_workspace_binding()
+            try:
+                _bound_runtime_service.release_runtime_workspace_binding()
+            except Exception:
+                if invocation_reference_token is not None:
+                    _reset_invocation_reference(invocation_reference_token)
+                    invocation_reference_token = None
+                raise
         if _runtime_sandbox is not None:
             # Phase 23C (Goal 5): dispose the Task Execution Sandbox on every
             # terminal path -- success, failure, cancellation, timeout, or
@@ -3275,6 +3520,9 @@ def execute_orchestration_task(
                     )
                 except Exception:
                     pass
+        if invocation_reference_token is not None:
+            _reset_invocation_reference(invocation_reference_token)
+            invocation_reference_token = None
         if trace_context_manager is not None:
             trace_context_manager.__exit__(None, None, None)
         flush_langfuse()

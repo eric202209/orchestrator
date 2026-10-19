@@ -86,6 +86,7 @@ class EventType:
     REPAIR_APPLIED = "repair_applied"
     REPAIR_REJECTED = "repair_rejected"
     EVALUATOR_RESULT = "evaluator_result"
+    INVOCATION_PROJECTION = "invocation_projection"
 
     # ── Phase 13B: bounded execution recovery ────────────────────────────────
     EXECUTION_RECOVERY_ATTEMPTED = "execution_recovery_attempted"
