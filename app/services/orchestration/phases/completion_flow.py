@@ -1587,12 +1587,18 @@ def _run_evaluator(
             "2. **No regressions** – Are there signs of broken functionality? (0–2)\n"
             "3. **Code quality** – Is the implementation complete, not stubbed? (0–2)\n"
             "4. **File correctness** – Do the changed files match what the task requires? (0–3)\n\n"
-            "Respond in this exact format:\n"
-            "SCORES: goal=X/3 regressions=X/2 quality=X/2 files=X/3\n"
+            "Return only the following format. Do not include a preamble, heading, explanation, or Markdown code fence.\n"
+            "Use exactly one score field per line, exactly one total score line, exactly one standalone verdict line, and a separate notes line.\n"
+            "SCORES:\n"
+            "goal=X/3\n"
+            "regressions=X/2\n"
+            "quality=X/2\n"
+            "files=X/3\n"
             "TOTAL: X/10\n"
             "VERDICT: PASS or NEEDS_REVIEW\n"
-            "NOTES: one-sentence rationale\n"
-            "Each field must be on its own line; VERDICT must be a standalone line and must not be embedded in TOTAL or NOTES.\n"
+            "NOTES: <brief explanation>\n"
+            "The verdict line must begin at the start of its own line and contain only VERDICT: PASS or VERDICT: NEEDS_REVIEW. Do not put a verdict inline with another field.\n"
+            "NOTES must be the final content line. After the notes line, output only permitted trailing whitespace.\n"
         )
         eval_result = asyncio.run(
             runtime_service.execute_task(

@@ -19,6 +19,14 @@ HISTORICAL_REENTRY12_OUTPUT = (
     "removed, syntax validated, and no regressions introduced."
 )
 
+DOGFOOD03_RETAINED_PARSER_INPUT = (
+    "Let me verify the final state of the implementation and tests independently.\n"
+    "SCORES: goal=3/3 regressions=2/2 quality=2/2 files=3/3 TOTAL: 10/10 "
+    "VERDICT: PASS NOTES: All 5 acceptance tests pass independently; implementation "
+    "uses only stdlib (re, unicodedata), preserves the function interface, and leaves "
+    "tests untouched."
+)
+
 
 class _CapturingRuntime:
     def __init__(
@@ -168,6 +176,35 @@ def test_evaluator_receives_authoritative_noop_candidate_and_verification_eviden
     assert "@@" in runtime.prompt
     assert "+\\n api_router" in runtime.prompt
     assert "Plan intent is not proof of implementation" in runtime.prompt
+
+
+def test_evaluator_prompt_requires_canonical_standalone_verdict_format():
+    runtime = _CapturingRuntime("VERDICT: PASS\n")
+
+    _run(runtime)
+
+    assert "Return only the following format." in runtime.prompt
+    assert "Do not include a preamble" in runtime.prompt
+    assert (
+        "Do not include" in runtime.prompt and "Markdown code fence" in runtime.prompt
+    )
+    assert "Use exactly one score field per line" in runtime.prompt
+    assert (
+        "SCORES:\ngoal=X/3\nregressions=X/2\nquality=X/2\nfiles=X/3\n" in runtime.prompt
+    )
+    assert "TOTAL: X/10\nVERDICT: PASS or NEEDS_REVIEW\n" in runtime.prompt
+    assert "exactly one standalone verdict line" in runtime.prompt
+    assert "The verdict line must begin at the start of its own line" in runtime.prompt
+    assert "Do not put a verdict inline with another field" in runtime.prompt
+    assert "NOTES: <brief explanation>" in runtime.prompt
+    assert "NOTES must be the final content line" in runtime.prompt
+    assert "output only permitted trailing whitespace" in runtime.prompt
+
+
+def test_dogfood03_exact_retained_parser_input_remains_unknown():
+    assert (
+        _run(_CapturingRuntime(DOGFOOD03_RETAINED_PARSER_INPUT))["verdict"] == "UNKNOWN"
+    )
 
 
 def test_malformed_embedded_pass_remains_unknown(tmp_path):
@@ -373,6 +410,7 @@ def test_final_review_projection_replaces_pre_evaluator_auto_promote(
     assert record.review_decision["outcome"] == "hold_for_review"
     assert record.review_decision["reason"] == "evaluator_assessment_unavailable"
     assert record.review_decision["evaluator_pending"] is False
+    assert record.review_decision["publication_eligible"] is False
 
 
 def test_failed_runtime_pass_cannot_release_changeset_review_hold(
