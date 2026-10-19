@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -621,6 +621,19 @@ def test_boot_manifest_is_atomic_unique_and_credential_free(candidate, tmp_path)
     assert "synthetic-secret" not in raw
     assert boot.record_id in raw
     assert boot.identity_status == IDENTITY_INCONCLUSIVE
+    assert boot.worker_pid == process.pid
+    assert boot.worker_start_ticks == process.start_ticks
+    assert boot.boot_timestamp
+    evaluator_record = next(
+        item
+        for item in boot.affected_module_provenance
+        if item["module_name"] == worker_identity.EVALUATOR_MODULE_NAME
+    )
+    assert evaluator_record["evaluator_identity_status"] in {
+        "LOADED_MODULE_IDENTITY_VERIFIED",
+        "IDENTITY_INCONCLUSIVE",
+    }
+    assert "provenance_collected_at" in evaluator_record
     with pytest.raises(worker_identity.ManifestWriteError):
         create_worker_boot_identity(
             source_root=root,
@@ -1909,6 +1922,146 @@ def test_i7_unsupported_dynamic_module_evidence_is_inconclusive(candidate):
     )
     assert result.classification == IDENTITY_INCONCLUSIVE
     assert "dynamic_module_provenance_unavailable:app.worker" in result.reasons
+
+
+def _synthetic_evaluator_module(root: Path, *, source: str):
+    module_name = worker_identity.EVALUATOR_MODULE_NAME
+    path = root.joinpath(*module_name.split(".")).with_suffix(".py")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    module = ModuleType(module_name)
+    module.__file__ = str(path)
+    module.__spec__ = SimpleNamespace(origin=str(path), cached=None)
+    exec(
+        compile(source, str(path), "exec", dont_inherit=True),
+        module.__dict__,
+    )
+    candidate = SimpleNamespace(
+        source_root=str(root),
+        affected_modules=(module_name,),
+        resolved_modules=(
+            SimpleNamespace(
+                module_name=module_name,
+                expected_source_path=str(path.resolve()),
+                source_sha256=worker_identity.sha256_file(path),
+            ),
+        ),
+    )
+    return path, module, candidate
+
+
+def test_worker_evaluator_provenance_records_source_path_hash_and_loaded_identity(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "candidate"
+    source = "VALUE = 1\ndef _run_evaluator():\n    return VALUE\n"
+    path, module, candidate = _synthetic_evaluator_module(root, source=source)
+    monkeypatch.setattr(worker_identity, "_WORKER_EVALUATOR_PRELOAD_PROVENANCE", None)
+    monkeypatch.setattr(
+        worker_identity.importlib, "import_module", lambda _name: module
+    )
+
+    preload = worker_identity.preload_evaluator_module_for_worker(
+        root, established_before_task_execution=True
+    )
+    record = capture_loaded_module_provenance(
+        candidate, modules={worker_identity.EVALUATOR_MODULE_NAME: module}
+    )[0]
+
+    assert preload["module_loaded"] is True
+    assert record["evaluator_identity_status"] == "LOADED_MODULE_IDENTITY_VERIFIED"
+    assert record["source_identity_status"] == "SOURCE_IDENTITY_VERIFIED"
+    assert record["loaded_module_identity_status"] == "LOADED_MODULE_IDENTITY_VERIFIED"
+    assert record["source_sha256"] == candidate.resolved_modules[0].source_sha256
+    assert record["expected_source_sha256"] == worker_identity.sha256_file(path)
+    assert record["resolved_source_path"] == str(path.resolve())
+    assert record["module_loaded"] is True
+    assert record["worker_pid"] == os.getpid()
+    assert record["worker_start_ticks"]
+    assert record["worker_startup_identity"]
+    assert record["established_before_task_execution"] is True
+    assert record["provenance_collected_at"]
+    assert record["in_memory_code_attestation"] == "verified"
+
+
+def test_missing_worker_evaluator_module_is_inconclusive(tmp_path, monkeypatch):
+    root = tmp_path / "candidate"
+    path, _module, candidate = _synthetic_evaluator_module(
+        root, source="def _run_evaluator():\n    return 'PASS'\n"
+    )
+    monkeypatch.setattr(worker_identity, "_WORKER_EVALUATOR_PRELOAD_PROVENANCE", None)
+
+    def missing_module(_name):
+        raise ModuleNotFoundError("synthetic missing evaluator module")
+
+    monkeypatch.setattr(worker_identity.importlib, "import_module", missing_module)
+    preload = worker_identity.preload_evaluator_module_for_worker(root)
+    record = capture_loaded_module_provenance(candidate, modules={})[0]
+
+    assert path.is_file()
+    assert preload["module_loaded"] is False
+    assert preload["evaluator_identity_status"] == "IDENTITY_INCONCLUSIVE"
+    assert record["evaluator_identity_status"] == "IDENTITY_INCONCLUSIVE"
+    assert record["loaded_module_identity_status"] == "IDENTITY_INCONCLUSIVE"
+    assert record["module_loaded"] is False
+
+
+def test_worker_evaluator_source_drift_after_preload_is_inconclusive(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "candidate"
+    path, module, candidate = _synthetic_evaluator_module(
+        root, source="def _run_evaluator():\n    return 'PASS'\n"
+    )
+    monkeypatch.setattr(worker_identity, "_WORKER_EVALUATOR_PRELOAD_PROVENANCE", None)
+    monkeypatch.setattr(
+        worker_identity.importlib, "import_module", lambda _name: module
+    )
+    worker_identity.preload_evaluator_module_for_worker(
+        root, established_before_task_execution=True
+    )
+    path.write_text(
+        path.read_text(encoding="utf-8") + "# source drift\n", encoding="utf-8"
+    )
+    candidate.resolved_modules[0].source_sha256 = worker_identity.sha256_file(path)
+
+    record = capture_loaded_module_provenance(
+        candidate, modules={worker_identity.EVALUATOR_MODULE_NAME: module}
+    )[0]
+
+    assert record["source_identity_status"] == "SOURCE_IDENTITY_VERIFIED"
+    assert record["evaluator_identity_status"] == "IDENTITY_INCONCLUSIVE"
+    assert record["loaded_module_identity_status"] == "IDENTITY_INCONCLUSIVE"
+    assert record["in_memory_code_attestation"] == "verified"
+    assert record["identity_reason"] == "source_drift_since_worker_initialization"
+
+
+def test_worker_evaluator_provenance_import_does_not_execute_evaluator_or_provider(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "candidate"
+    counters = {"evaluator": 0, "provider": 0}
+    source = (
+        "COUNTERS = {'evaluator': 0, 'provider': 0}\n"
+        "def _run_evaluator():\n"
+        "    COUNTERS['evaluator'] += 1\n"
+        "    COUNTERS['provider'] += 1\n"
+    )
+    _path, module, candidate = _synthetic_evaluator_module(root, source=source)
+    monkeypatch.setattr(worker_identity, "_WORKER_EVALUATOR_PRELOAD_PROVENANCE", None)
+    monkeypatch.setattr(
+        worker_identity.importlib, "import_module", lambda _name: module
+    )
+
+    worker_identity.preload_evaluator_module_for_worker(
+        root, established_before_task_execution=True
+    )
+    capture_loaded_module_provenance(
+        candidate, modules={worker_identity.EVALUATOR_MODULE_NAME: module}
+    )
+    counters.update(module.COUNTERS)
+
+    assert counters == {"evaluator": 0, "provider": 0}
 
 
 def test_i7_package_and_module_source_paths_are_not_interchangeable(candidate):

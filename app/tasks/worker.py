@@ -82,6 +82,7 @@ from app.services.orchestration.lifecycle.worker_bootstrap import (
 from app.services.orchestration.worker_identity import (
     collect_worker_configuration as _collect_worker_configuration,
     create_worker_boot_identity as _create_worker_boot_identity,
+    preload_evaluator_module_for_worker as _preload_evaluator_module_for_worker,
     resolve_worker_identity_paths as _resolve_worker_identity_paths,
 )
 from app.services.orchestration.execution.executor_workspace_binding import (
@@ -227,7 +228,7 @@ def _release_backend_slot_safely(
 MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
 
 
-from celery.signals import worker_ready
+from celery.signals import worker_init, worker_ready
 
 from app.tasks.worker_support.worker_helpers import (
     _apply_checkpoint_payload,
@@ -247,6 +248,28 @@ from app.tasks.worker_support.worker_helpers import (
     _sync_task_execution_from_task_state,
     _sync_task_execution_state,
 )
+
+
+@worker_init.connect
+def preload_worker_evaluator_provenance(sender=None, **kwargs):
+    """Load and attest the evaluator before Celery starts the worker pool."""
+    del sender, kwargs
+    try:
+        record = _preload_evaluator_module_for_worker(
+            settings.WORKER_SOURCE_ROOT,
+            established_before_task_execution=True,
+        )
+        logger.info(
+            "Worker evaluator provenance: status=%s pid=%s source_sha256=%s",
+            record.get("evaluator_identity_status"),
+            record.get("worker_pid"),
+            record.get("source_sha256"),
+        )
+    except Exception as exc:  # noqa: BLE001 - provenance must not block worker boot
+        logger.error(
+            "Worker evaluator provenance inconclusive; worker startup continues: %s",
+            type(exc).__name__,
+        )
 
 
 @worker_ready.connect

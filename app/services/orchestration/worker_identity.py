@@ -1,8 +1,8 @@
 """Worker source, process, and boot-identity evidence.
 
-This module deliberately has no application, database, broker, provider, or
-process-control imports.  It is safe to import from the Celery readiness hook
-and from a read-only operator verifier.
+This module deliberately has no top-level application, database, broker,
+provider, or process-control imports.  It is safe to import from the Celery
+readiness hook and from a read-only operator verifier.
 
 The evidence here is intentionally layered.  A source hash and Python import
 origin prove the source file that was observable at the boundary; they do not
@@ -15,6 +15,7 @@ import ast
 import base64
 import binascii
 import hashlib
+import importlib
 from importlib.metadata import PackageNotFoundError, version as package_version
 import json
 import os
@@ -30,7 +31,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatchcase
 from pathlib import Path
-from types import MappingProxyType, ModuleType
+from types import CodeType, MappingProxyType, ModuleType
 from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -45,6 +46,8 @@ IDENTITY_VERIFIED = "IDENTITY_VERIFIED"
 IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
 IDENTITY_INCONCLUSIVE = "IDENTITY_INCONCLUSIVE"
 IDENTITY_UNAVAILABLE = "IDENTITY_UNAVAILABLE"
+SOURCE_IDENTITY_VERIFIED = "SOURCE_IDENTITY_VERIFIED"
+LOADED_MODULE_IDENTITY_VERIFIED = "LOADED_MODULE_IDENTITY_VERIFIED"
 MODULE_IDENTITY_VALID = "MODULE_IDENTITY_VALID"
 MODULE_IDENTITY_INVALID = "MODULE_IDENTITY_INVALID"
 BOUNDARY_COMPLETENESS_VALID = "BOUNDARY_COMPLETENESS_VALID"
@@ -110,6 +113,7 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.orchestration.execution.runtime",
     "app.services.orchestration.policy",
     "app.services.orchestration.coordinators.completion_coordinator",
+    "app.services.orchestration.phases.completion_flow",
     "app.services.orchestration.coordinators.failure_coordinator",
     "app.services.orchestration.phases.execution_loop",
     "app.services.orchestration.phases.planning_flow",
@@ -232,6 +236,10 @@ DEFAULT_AFFECTED_MODULES = (
     "app.tasks",
     "app.tasks.worker_support",
 )
+
+EVALUATOR_MODULE_NAME = "app.services.orchestration.phases.completion_flow"
+EVALUATOR_FUNCTION_NAME = "_run_evaluator"
+_WORKER_EVALUATOR_PRELOAD_PROVENANCE: dict[str, Any] | None = None
 
 # These are the finite source files whose syntax is inspected to derive the
 # Worker boundary. The checker does not recurse through arbitrary application
@@ -1709,6 +1717,238 @@ def _module_origin(module: ModuleType) -> tuple[str | None, str | None, str | No
     )
 
 
+def _compiled_evaluator_code(source_path: Path) -> CodeType | None:
+    try:
+        module_code = compile(
+            source_path.read_bytes(),
+            str(source_path),
+            "exec",
+            dont_inherit=True,
+            optimize=sys.flags.optimize,
+        )
+    except (OSError, SyntaxError, ValueError, TypeError):
+        return None
+    matches = [
+        item
+        for item in module_code.co_consts
+        if isinstance(item, CodeType) and item.co_name == EVALUATOR_FUNCTION_NAME
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _process_startup_identity(process: ProcessIdentity | None) -> str | None:
+    if process is None:
+        return None
+    return f"{process.linux_boot_id}:{process.pid}:{process.start_ticks}"
+
+
+def preload_evaluator_module_for_worker(
+    source_root: str | Path,
+    *,
+    established_before_task_execution: bool = False,
+    collected_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Preload the evaluator and compare its in-memory function code to source."""
+    global _WORKER_EVALUATOR_PRELOAD_PROVENANCE
+
+    observed_at = collected_at or _utc_now()
+    process = capture_process_identity()
+    module = None
+    expected_path = loaded_path = None
+    expected_hash = source_hash = None
+    loaded_code = source_code = None
+    reason = None
+    try:
+        root = _safe_source_root(source_root)
+        expected_path = _module_source_path(root, EVALUATOR_MODULE_NAME)
+        expected_hash = sha256_file(expected_path)
+        module = importlib.import_module(EVALUATOR_MODULE_NAME)
+        loaded_path = Path(str(module.__file__)).expanduser().resolve(strict=True)
+        source_hash = sha256_file(loaded_path)
+        loaded_code = getattr(
+            getattr(module, EVALUATOR_FUNCTION_NAME, None), "__code__", None
+        )
+        source_code = _compiled_evaluator_code(expected_path)
+        if getattr(module, "__name__", None) != EVALUATOR_MODULE_NAME:
+            reason = "evaluator_module_name_mismatch"
+        elif loaded_path != expected_path or source_hash != expected_hash:
+            reason = "evaluator_source_identity_mismatch"
+        elif not isinstance(loaded_code, CodeType) or source_code is None:
+            reason = "evaluator_function_code_unavailable"
+        elif loaded_code != source_code:
+            reason = "evaluator_in_memory_code_source_mismatch"
+    except Exception as exc:  # noqa: BLE001 - provenance must not block worker boot
+        reason = f"evaluator_import_or_source_error:{type(exc).__name__}"
+
+    module_loaded = bool(module is not None and loaded_path is not None)
+    source_verified = bool(
+        module_loaded
+        and expected_path is not None
+        and loaded_path == expected_path
+        and source_hash
+        and source_hash == expected_hash
+    )
+    code_verified = bool(
+        isinstance(loaded_code, CodeType)
+        and isinstance(source_code, CodeType)
+        and loaded_code == source_code
+    )
+    startup_identity = _process_startup_identity(process)
+    loaded_status = IDENTITY_INCONCLUSIVE
+    if (
+        source_verified
+        and code_verified
+        and established_before_task_execution
+        and startup_identity
+    ):
+        loaded_status = LOADED_MODULE_IDENTITY_VERIFIED
+    if reason is None and not established_before_task_execution:
+        reason = "pre_task_initialization_not_established"
+    if reason is None and process is None:
+        reason = "worker_startup_identity_unavailable"
+    if reason is None and loaded_status != LOADED_MODULE_IDENTITY_VERIFIED:
+        reason = "evaluator_loaded_module_identity_unverified"
+
+    record = {
+        "module_name": EVALUATOR_MODULE_NAME,
+        "worker_pid": process.pid if process else os.getpid(),
+        "worker_start_ticks": process.start_ticks if process else None,
+        "worker_startup_identity": startup_identity,
+        "worker_startup_timestamp": _timestamp(observed_at),
+        "provenance_collected_at": _timestamp(observed_at),
+        "resolved_source_path": str(loaded_path) if loaded_path else None,
+        "source_sha256": source_hash,
+        "in_memory_code_sha256": (
+            hashlib.sha256(loaded_code.co_code).hexdigest()
+            if isinstance(loaded_code, CodeType)
+            else None
+        ),
+        "module_loaded": module_loaded,
+        "established_before_task_execution": bool(
+            module_loaded and established_before_task_execution
+        ),
+        "source_identity_status": (
+            SOURCE_IDENTITY_VERIFIED if source_verified else IDENTITY_INCONCLUSIVE
+        ),
+        "loaded_module_identity_status": loaded_status,
+        "evaluator_identity_status": loaded_status,
+        "in_memory_code_attestation": "verified" if code_verified else "unavailable",
+        "identity_reason": reason,
+    }
+    _WORKER_EVALUATOR_PRELOAD_PROVENANCE = {
+        **record,
+        "_module_object_id": id(module) if module is not None else None,
+        "_process_key": process.key() if process is not None else None,
+        "_loaded_code": loaded_code,
+        "_compiled_code": source_code,
+    }
+    return dict(record)
+
+
+def _capture_evaluator_module_provenance(
+    record: dict[str, Any], *, module: ModuleType | None, expected: Any | None
+) -> None:
+    expected_path = Path(expected.expected_source_path).resolve() if expected else None
+    expected_hash = expected.source_sha256 if expected else None
+    try:
+        source_hash = sha256_file(expected_path) if expected_path else None
+    except CandidateManifestError:
+        source_hash = None
+    source_verified = bool(
+        expected_path
+        and source_hash
+        and source_hash == expected_hash
+        and (module is None or record.get("resolved_source_path") == str(expected_path))
+    )
+    process = capture_process_identity()
+    preload = _WORKER_EVALUATOR_PRELOAD_PROVENANCE
+    preload_matches = bool(
+        preload
+        and module is not None
+        and preload.get("_module_object_id") == id(module)
+        and process is not None
+        and preload.get("_process_key") == process.key()
+    )
+    current_code = (
+        getattr(getattr(module, EVALUATOR_FUNCTION_NAME, None), "__code__", None)
+        if module is not None
+        else None
+    )
+    code_matches = bool(
+        preload_matches
+        and isinstance(current_code, CodeType)
+        and current_code == preload.get("_loaded_code") == preload.get("_compiled_code")
+    )
+    source_drift = bool(
+        preload_matches
+        and (
+            preload.get("resolved_source_path") != str(expected_path)
+            or preload.get("source_sha256") != expected_hash
+        )
+    )
+    loaded_status = IDENTITY_INCONCLUSIVE
+    if (
+        preload_matches
+        and not source_drift
+        and source_verified
+        and code_matches
+        and preload.get("established_before_task_execution") is True
+    ):
+        loaded_status = LOADED_MODULE_IDENTITY_VERIFIED
+    if source_drift:
+        reason = "source_drift_since_worker_initialization"
+    elif module is None:
+        reason = (preload or {}).get("identity_reason") or "evaluator_module_not_loaded"
+    elif not preload_matches:
+        reason = "pre_task_evaluator_provenance_unavailable"
+    elif not source_verified:
+        reason = "evaluator_source_hash_mismatch"
+    elif not code_matches:
+        reason = "evaluator_loaded_code_changed_since_worker_initialization"
+    elif loaded_status != LOADED_MODULE_IDENTITY_VERIFIED:
+        reason = "pre_task_initialization_not_established"
+    else:
+        reason = None
+
+    record.update(
+        {
+            "evaluator_module_path": str(expected_path) if expected_path else None,
+            "evaluator_loaded_module_path": record.get("resolved_source_path"),
+            "evaluator_source_sha256": source_hash,
+            "module_loaded": bool(
+                module is not None and record.get("resolved_source_path")
+            ),
+            "source_identity_status": (
+                SOURCE_IDENTITY_VERIFIED if source_verified else IDENTITY_INCONCLUSIVE
+            ),
+            "loaded_module_identity_status": loaded_status,
+            "evaluator_identity_status": loaded_status,
+            "worker_pid": process.pid if process else os.getpid(),
+            "worker_start_ticks": process.start_ticks if process else None,
+            "worker_startup_identity": _process_startup_identity(process),
+            "worker_startup_timestamp": (
+                preload.get("worker_startup_timestamp") if preload_matches else None
+            ),
+            "established_before_task_execution": bool(
+                preload_matches
+                and preload.get("established_before_task_execution") is True
+            ),
+            "provenance_collected_at": _timestamp(_utc_now()),
+            "in_memory_code_sha256": (
+                hashlib.sha256(current_code.co_code).hexdigest()
+                if isinstance(current_code, CodeType)
+                else None
+            ),
+            "in_memory_code_attestation": (
+                "verified"
+                if code_matches
+                else "mismatch" if preload_matches else "unavailable"
+            ),
+            "identity_reason": reason,
+        }
+    )
+
+
 def capture_loaded_module_provenance(
     candidate: CandidateSourceManifest,
     *,
@@ -1740,31 +1980,36 @@ def capture_loaded_module_provenance(
                     source_hash = sha256_file(resolved_path)
             except (OSError, CandidateManifestError, ValueError):
                 resolved_path = None
-        records.append(
-            {
-                "module_name": module_name,
-                "resolved_source_path": str(resolved_path) if resolved_path else None,
-                "expected_source_path": (
-                    expected.expected_source_path if expected else None
-                ),
-                "source_sha256": source_hash,
-                "expected_source_sha256": expected.source_sha256 if expected else None,
-                "loaded": bool(module and resolved_path),
-                "loader_type": loader_type,
-                "spec_origin": origin,
-                "cached_path": cached,
-                "load_timing": (
-                    "boot"
-                    if (module and resolved_path)
-                    else (
-                        "dynamic_literal_unloaded"
-                        if module_name in WORKER_PROVENANCE_LITERAL_DYNAMIC_MODULES
-                        else "lazy_or_unloaded"
-                    )
-                ),
-                "in_memory_code_attestation": "unavailable",
-            }
-        )
+        record = {
+            "module_name": module_name,
+            "resolved_source_path": str(resolved_path) if resolved_path else None,
+            "expected_source_path": (
+                expected.expected_source_path if expected else None
+            ),
+            "source_sha256": source_hash,
+            "expected_source_sha256": expected.source_sha256 if expected else None,
+            "loaded": bool(module and resolved_path),
+            "loader_type": loader_type,
+            "spec_origin": origin,
+            "cached_path": cached,
+            "load_timing": (
+                "boot"
+                if (module and resolved_path)
+                else (
+                    "dynamic_literal_unloaded"
+                    if module_name in WORKER_PROVENANCE_LITERAL_DYNAMIC_MODULES
+                    else "lazy_or_unloaded"
+                )
+            ),
+            "in_memory_code_attestation": "unavailable",
+        }
+        if module_name == EVALUATOR_MODULE_NAME:
+            _capture_evaluator_module_provenance(
+                record,
+                module=module,
+                expected=expected,
+            )
+        records.append(record)
     return tuple(records)
 
 
@@ -2669,6 +2914,20 @@ def create_worker_boot_identity(
         status = IDENTITY_MISMATCH
     if any(not item.get("loaded") for item in provenance):
         status = IDENTITY_INCONCLUSIVE if status == IDENTITY_VERIFIED else status
+    evaluator_provenance = next(
+        (
+            item
+            for item in provenance
+            if item.get("module_name") == EVALUATOR_MODULE_NAME
+        ),
+        None,
+    )
+    if (
+        evaluator_provenance is not None
+        and evaluator_provenance.get("evaluator_identity_status")
+        != LOADED_MODULE_IDENTITY_VERIFIED
+    ):
+        status = IDENTITY_INCONCLUSIVE if status == IDENTITY_VERIFIED else status
     observed_at = boot_timestamp or now()
     record_id = f"{process.linux_boot_id}-{process.pid}-{process.start_ticks}"
     manifest = WorkerBootIdentityManifest(
@@ -3142,6 +3401,8 @@ __all__ = [
     "CONFIGURATION_PROJECTION_SCHEMA_VERSION",
     "ConfigurationFingerprintError",
     "DEFAULT_AFFECTED_MODULES",
+    "EVALUATOR_FUNCTION_NAME",
+    "EVALUATOR_MODULE_NAME",
     "EXPECTED_TASK_REGISTRATIONS",
     "IDENTITY_INCONCLUSIVE",
     "IDENTITY_MISMATCH",
@@ -3151,6 +3412,7 @@ __all__ = [
     "INVOCATION_IDENTITY",
     "INVOCATION_IDENTITY_REASON",
     "IdentityVerification",
+    "LOADED_MODULE_IDENTITY_VERIFIED",
     "MODULE_IDENTITY_INVALID",
     "MODULE_IDENTITY_VALID",
     "ManifestWriteError",
@@ -3160,6 +3422,7 @@ __all__ = [
     "ProvenanceBoundaryCheck",
     "REQUIRED_EFFECTIVE_CONFIGURATION_KEYS",
     "SCHEMA_VERSION",
+    "SOURCE_IDENTITY_VERIFIED",
     "TaskRegistrationClassification",
     "TASK_POLICY_FIELDS",
     "TASK_POLICY_PROJECTION_SCHEMA_VERSION",
@@ -3173,6 +3436,7 @@ __all__ = [
     "classify_task_registrations",
     "capture_child_identities",
     "capture_loaded_module_provenance",
+    "preload_evaluator_module_for_worker",
     "inspect_worker_provenance_boundary",
     "capture_process_identity",
     "canonical_launcher_identity",
