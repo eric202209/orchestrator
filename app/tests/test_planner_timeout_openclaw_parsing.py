@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import json
+import hashlib
 from unittest.mock import MagicMock
 
 import pytest
@@ -13,6 +14,7 @@ from app.services.orchestration.planning.planner import (
 from app.services.orchestration.validation.validator import ValidatorService
 
 from app.services.agents.openclaw_service import (
+    _CapturedStreamDigest,
     OpenClawSessionError,
     OpenClawSessionService,
 )
@@ -117,6 +119,22 @@ def test_openclaw_parse_does_not_treat_diagnostic_stderr_as_plan_output():
     assert result["output_channel_used"] == "none"
     assert result["stderr_contains_model_content"] is False
     assert result["stderr_contains_only_logs"] is True
+
+
+def test_captured_stream_digest_tracks_exact_utf8_bytes_without_retaining_content():
+    stdout_capture = _CapturedStreamDigest()
+    stderr_capture = _CapturedStreamDigest()
+    stdout_bytes = "visible ✓".encode("utf-8")
+    stderr_bytes = b"runtime diagnostic\n"
+
+    stdout_capture.update(stdout_bytes[:4])
+    stdout_capture.update(stdout_bytes[4:])
+    stderr_capture.update(stderr_bytes)
+
+    assert stdout_capture.byte_length == len(stdout_bytes)
+    assert stdout_capture.sha256 == hashlib.sha256(stdout_bytes).hexdigest()
+    assert stderr_capture.byte_length == len(stderr_bytes)
+    assert stderr_capture.sha256 == hashlib.sha256(stderr_bytes).hexdigest()
 
 
 def test_openclaw_repair_diagnostics_log_keeps_task_execution_id():

@@ -7,7 +7,13 @@ from app.services.agents.openclaw_response import parse_openclaw_response
 from app.services.agents.openclaw_service import OpenClawSessionService
 
 
-def _parse_stdout(stdout: str, *, returncode: int = 0, stderr: str = ""):
+def _parse_stdout(
+    stdout: str,
+    *,
+    returncode: int = 0,
+    stderr: str = "",
+    capture_diagnostics: bool = False,
+):
     logs: list[tuple[str, str]] = []
 
     result = parse_openclaw_response(
@@ -18,6 +24,7 @@ def _parse_stdout(stdout: str, *, returncode: int = 0, stderr: str = ""):
             stderr=stderr,
         ),
         lambda level, message, **_: logs.append((level, message)),
+        capture_diagnostics=capture_diagnostics,
     )
 
     return result, logs
@@ -111,6 +118,72 @@ def test_stderr_recovery_still_rejects_diagnostic_only_json():
     assert result["status"] == "failed"
     assert result["output"] == ""
     assert result["stderr_contains_model_content"] is False
+
+
+def test_stderr_recovery_diagnostics_record_selected_assistant_field():
+    result, _ = _parse_stdout(
+        "",
+        stderr=json.dumps(
+            {"payloads": [{"final_assistant_visible_text": "VERDICT: PASS"}]}
+        ),
+        capture_diagnostics=True,
+    )
+
+    diagnostics = result["response_diagnostics"]
+    assert diagnostics["selected_assistant_content_source"] == "stderr"
+    assert diagnostics["selected_assistant_content_field"] == (
+        "final_assistant_visible_text"
+    )
+    assert (
+        "final_assistant_visible_text"
+        in diagnostics["recognized_assistant_content_fields"]
+    )
+    assert diagnostics["assistant_content_nonempty"] is True
+    assert diagnostics["diagnostic_category"] == "VALID_ASSISTANT_CONTENT_EXTRACTED"
+
+
+def test_unsupported_response_envelope_has_specific_category():
+    result, _ = _parse_stdout(
+        json.dumps({"metadata": {"identifier": 42}}), capture_diagnostics=True
+    )
+
+    diagnostics = result["response_diagnostics"]
+    assert diagnostics["parsed_envelope_type"] == "object"
+    assert diagnostics["assistant_content_nonempty"] is False
+    assert diagnostics["diagnostic_category"] == "UNSUPPORTED_RESPONSE_ENVELOPE"
+
+
+def test_diagnostic_only_stderr_has_specific_category():
+    result, _ = _parse_stdout(
+        "",
+        stderr=json.dumps({"generatedAt": "2026-10-19", "systemPrompt": "diagnostic"}),
+        capture_diagnostics=True,
+    )
+
+    assert result["response_diagnostics"]["diagnostic_category"] == (
+        "STDERR_DIAGNOSTIC_ONLY"
+    )
+
+
+def test_empty_assistant_content_has_specific_category():
+    result, _ = _parse_stdout(
+        json.dumps({"payloads": [{"text": ""}]}), capture_diagnostics=True
+    )
+
+    diagnostics = result["response_diagnostics"]
+    assert diagnostics["recognized_assistant_content_fields"] == ["text", "payloads"]
+    assert diagnostics["assistant_content_nonempty"] is False
+    assert diagnostics["diagnostic_category"] == "EMPTY_ASSISTANT_CONTENT"
+
+
+def test_invalid_json_is_classified_without_changing_raw_fallback():
+    result, _ = _parse_stdout('{"payloads": [', capture_diagnostics=True)
+
+    diagnostics = result["response_diagnostics"]
+    assert result["status"] == "completed"
+    assert result["output"] == '{"payloads": ['
+    assert diagnostics["json_parsing_outcome"] == "FAILED"
+    assert diagnostics["diagnostic_category"] == "JSON_PARSE_FAILED"
 
 
 def test_payloads_skip_non_dict_noise_and_extract_later_visible_text():

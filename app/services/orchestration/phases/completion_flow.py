@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Optional
@@ -1509,6 +1510,7 @@ def _run_evaluator(
     orchestration_state: Any,
     prompt: str,
     summary: str,
+    task_execution_id: Optional[int] = None,
     candidate_evidence: Optional[Dict[str, Any]] = None,
     verification_evidence: Any = None,
     emit_live: Any,
@@ -1522,6 +1524,31 @@ def _run_evaluator(
     ERROR) is surfaced to callers so auto-publish paths can hold the workspace
     for review before promotion.
     """
+    evaluator_invocation_id = uuid.uuid4().hex
+    evaluator_diagnostics: Optional[Dict[str, Any]] = None
+    runtime_result: Any = None
+    runtime_exception: Optional[BaseException] = None
+    durable_diagnostics_written = False
+
+    def persist_diagnostics(verdict: str, diagnostics: Dict[str, Any]) -> None:
+        nonlocal durable_diagnostics_written
+        append_orchestration_event(
+            project_dir=control_state_of(orchestration_state),
+            session_id=getattr(orchestration_state, "session_id", None),
+            task_id=getattr(orchestration_state, "task_id", None),
+            event_type=EventType.EVALUATOR_RESULT,
+            details={
+                "verdict": verdict,
+                "reasoning_artifact_used": bool(
+                    getattr(orchestration_state, "reasoning_artifact", None)
+                ),
+                "evaluator_diagnostics": diagnostics,
+            },
+            phase="evaluation",
+            coordinator="CompletionCoordinator",
+        )
+        durable_diagnostics_written = True
+
     try:
         reasoning_artifact = (
             getattr(orchestration_state, "reasoning_artifact", None) or {}
@@ -1600,31 +1627,46 @@ def _run_evaluator(
             "The verdict line must begin at the start of its own line and contain only VERDICT: PASS or VERDICT: NEEDS_REVIEW. Do not put a verdict inline with another field.\n"
             "NOTES must be the final content line. After the notes line, output only permitted trailing whitespace.\n"
         )
-        eval_result = asyncio.run(
+        runtime_result = asyncio.run(
             runtime_service.execute_task(
-                evaluator_prompt, timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS
+                evaluator_prompt,
+                timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS,
+                diagnostic_label="EVALUATOR_RESPONSE_EVIDENCE",
+                diagnostic_metadata={
+                    "task_execution_id": task_execution_id,
+                    "evaluator_invocation_id": evaluator_invocation_id,
+                },
             )
         )
         runtime_status = (
-            eval_result.get("status") if isinstance(eval_result, dict) else None
+            runtime_result.get("status") if isinstance(runtime_result, dict) else None
+        )
+        evaluator_diagnostics = _build_evaluator_response_diagnostics(
+            runtime_result=runtime_result,
+            runtime_exception=None,
+            task_execution_id=task_execution_id,
+            evaluator_invocation_id=evaluator_invocation_id,
+            runtime_status=runtime_status,
         )
         if runtime_status != "completed":
-            runtime_error = (
-                eval_result.get("error") if isinstance(eval_result, dict) else None
-            )
-            error = runtime_error or (
+            error = (
                 "Evaluator runtime did not report successful completion "
                 f"(status={runtime_status!r})"
             )
+            persist_diagnostics("ERROR", evaluator_diagnostics)
             logger.warning(
                 "[EVALUATOR] QA runtime returned non-success status: %r",
                 runtime_status,
             )
-            return {"verdict": "ERROR", "error": str(error)}
+            return {
+                "verdict": "ERROR",
+                "error": error,
+                "diagnostics": evaluator_diagnostics,
+            }
         eval_output = (
-            eval_result.get("output", "")
-            if isinstance(eval_result, dict)
-            else str(eval_result)
+            runtime_result.get("output", "")
+            if isinstance(runtime_result, dict)
+            else str(runtime_result)
         )
         # PASS must be stated explicitly by the evaluator.  Empty or
         # non-assessment output is UNKNOWN, never a Product-defaulted PASS.
@@ -1634,34 +1676,192 @@ def _run_evaluator(
         elif _EVALUATOR_PASS_LINE.search(eval_output):
             verdict = "PASS"
         log_level = "INFO" if verdict == "PASS" else "WARN"
-        emit_live(
-            log_level,
-            f"[EVALUATOR] QA verdict: {verdict}",
-            metadata={
-                "phase": "evaluation",
-                "verdict": verdict,
-                "eval_output": eval_output[:800],
-            },
-        )
-        append_orchestration_event(
-            project_dir=control_state_of(orchestration_state),
-            session_id=getattr(orchestration_state, "session_id", None),
-            task_id=getattr(orchestration_state, "task_id", None),
-            event_type=EventType.EVALUATOR_RESULT,
-            details={
-                "verdict": verdict,
-                "reasoning_artifact_used": bool(reasoning_artifact),
-                "reasoning_intent": reasoning_artifact.get("intent"),
-                "output": eval_output[:800],
-            },
-        )
+        persist_diagnostics(verdict, evaluator_diagnostics)
+        try:
+            emit_live(
+                log_level,
+                f"[EVALUATOR] QA verdict: {verdict}",
+                metadata={
+                    "phase": "evaluation",
+                    "verdict": verdict,
+                    "evaluator_diagnostics": evaluator_diagnostics,
+                },
+            )
+        except Exception as emit_error:
+            logger.warning(
+                "[EVALUATOR] live diagnostic notification failed: %s",
+                type(emit_error).__name__,
+            )
         return {
             "verdict": verdict,
             "output": eval_output[:800],
+            "diagnostics": evaluator_diagnostics,
+        }
+    except asyncio.CancelledError as e:
+        runtime_exception = e
+        evaluator_diagnostics = _build_evaluator_response_diagnostics(
+            runtime_result=runtime_result,
+            runtime_exception=e,
+            task_execution_id=task_execution_id,
+            evaluator_invocation_id=evaluator_invocation_id,
+            runtime_status=None,
+        )
+        if not durable_diagnostics_written:
+            try:
+                persist_diagnostics("ERROR", evaluator_diagnostics)
+            except Exception as persistence_error:
+                logger.warning(
+                    "[EVALUATOR] diagnostic evidence persistence failed: %s",
+                    type(persistence_error).__name__,
+                )
+        logger.warning("[EVALUATOR] QA execution interrupted")
+        return {
+            "verdict": "ERROR",
+            "error": "Evaluator execution interrupted",
+            "diagnostics": evaluator_diagnostics,
         }
     except Exception as e:
-        logger.warning("[EVALUATOR] QA evaluation failed (non-blocking): %s", e)
-        return {"verdict": "ERROR", "error": str(e)}
+        runtime_exception = e
+        evaluator_diagnostics = evaluator_diagnostics or (
+            _build_evaluator_response_diagnostics(
+                runtime_result=runtime_result,
+                runtime_exception=e,
+                task_execution_id=task_execution_id,
+                evaluator_invocation_id=evaluator_invocation_id,
+                runtime_status=(
+                    runtime_result.get("status")
+                    if isinstance(runtime_result, dict)
+                    else None
+                ),
+            )
+        )
+        if not durable_diagnostics_written:
+            try:
+                persist_diagnostics("ERROR", evaluator_diagnostics)
+            except Exception as persistence_error:
+                logger.warning(
+                    "[EVALUATOR] diagnostic evidence persistence failed: %s",
+                    type(persistence_error).__name__,
+                )
+        logger.warning("[EVALUATOR] QA evaluation failed: %s", type(e).__name__)
+        return {
+            "verdict": "ERROR",
+            "error": f"Evaluator execution failed ({type(e).__name__})",
+            "diagnostics": evaluator_diagnostics,
+        }
+
+
+def _build_evaluator_response_diagnostics(
+    *,
+    runtime_result: Any,
+    runtime_exception: Optional[BaseException],
+    task_execution_id: Optional[int],
+    evaluator_invocation_id: str,
+    runtime_status: Optional[str],
+) -> Dict[str, Any]:
+    runtime_details: Dict[str, Any] = {}
+    if isinstance(runtime_result, dict):
+        candidate = runtime_result.get("runtime_diagnostics")
+        if isinstance(candidate, dict):
+            runtime_details = candidate
+    if not runtime_details and runtime_exception is not None:
+        candidate = getattr(runtime_exception, "runtime_diagnostics", None)
+        if isinstance(candidate, dict):
+            runtime_details = candidate
+    response_details = runtime_details.get("response_diagnostics")
+    if not isinstance(response_details, dict):
+        response_details = {}
+
+    timed_out = bool(
+        runtime_details.get("timed_out") or runtime_details.get("no_output_timeout")
+    ) or isinstance(runtime_exception, TimeoutError)
+    interrupted = (
+        bool(runtime_details.get("cancelled"))
+        or (runtime_details.get("activity_classification") == "caller_cancelled")
+        or isinstance(runtime_exception, asyncio.CancelledError)
+    )
+    diagnostic_category = response_details.get("diagnostic_category")
+    if timed_out:
+        diagnostic_category = "TIMEOUT"
+    elif interrupted:
+        diagnostic_category = "INTERRUPTED"
+
+    allowed_categories = {
+        "EMPTY_STDOUT",
+        "STDERR_DIAGNOSTIC_ONLY",
+        "JSON_PARSE_FAILED",
+        "UNSUPPORTED_RESPONSE_ENVELOPE",
+        "EMPTY_ASSISTANT_CONTENT",
+        "TIMEOUT",
+        "INTERRUPTED",
+        "VALID_ASSISTANT_CONTENT_EXTRACTED",
+    }
+    if diagnostic_category not in allowed_categories:
+        diagnostic_category = None
+
+    allowed_fields = {
+        "finalAssistantVisibleText",
+        "final_assistant_visible_text",
+        "text",
+        "output_text",
+        "content_text",
+        "content",
+        "message",
+        "payloads",
+    }
+    recognized_fields_value = response_details.get(
+        "recognized_assistant_content_fields"
+    )
+    recognized_fields = (
+        [field for field in recognized_fields_value if field in allowed_fields]
+        if isinstance(recognized_fields_value, list)
+        else None
+    )
+    selected_field = response_details.get("selected_assistant_content_field")
+    if selected_field not in allowed_fields | {
+        "GENERIC_TEXT_FALLBACK",
+        "PLAIN_TEXT_FALLBACK",
+        "JSON_STRING",
+    }:
+        selected_field = None
+    selected_source = response_details.get("selected_assistant_content_source")
+    if selected_source not in {"stdout", "stderr"}:
+        selected_source = None
+
+    return {
+        "task_execution_id": task_execution_id,
+        "evaluator_invocation_id": evaluator_invocation_id,
+        "cli_return_code": (
+            runtime_details.get("return_code")
+            if type(runtime_details.get("return_code")) is int
+            else None
+        ),
+        "runtime_duration_seconds": runtime_details.get("duration_seconds"),
+        "timeout_category": ("TIMEOUT" if timed_out else None),
+        "interruption_category": ("CALLER_CANCELLED" if interrupted else None),
+        "stdout_byte_length": runtime_details.get("stdout_byte_length"),
+        "stderr_byte_length": runtime_details.get("stderr_byte_length"),
+        "stdout_sha256": runtime_details.get("stdout_sha256"),
+        "stderr_sha256": runtime_details.get("stderr_sha256"),
+        "json_parsing_outcome": response_details.get("json_parsing_outcome"),
+        "parsed_envelope_type": response_details.get("parsed_envelope_type"),
+        "recognized_assistant_content_fields": recognized_fields,
+        "selected_assistant_content_source": selected_source,
+        "selected_assistant_content_field": selected_field,
+        "assistant_content_nonempty": (
+            response_details.get("assistant_content_nonempty")
+            if type(response_details.get("assistant_content_nonempty")) is bool
+            else None
+        ),
+        "diagnostic_category": diagnostic_category,
+        "extraction_failure_category": (
+            None
+            if diagnostic_category == "VALID_ASSISTANT_CONTENT_EXTRACTED"
+            else diagnostic_category
+        ),
+        "final_runtime_status": runtime_status,
+        "capture_policy": "metadata_only",
+    }
 
 
 _PROGRESS_NOTES_COMMANDS_CAP = 10

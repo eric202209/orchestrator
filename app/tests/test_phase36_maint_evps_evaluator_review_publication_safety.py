@@ -42,9 +42,13 @@ class _CapturingRuntime:
         self.result = result
         self.raises = raises
         self.prompt = ""
+        self.diagnostic_label = None
+        self.diagnostic_metadata = None
 
-    async def execute_task(self, prompt, timeout_seconds=None):
+    async def execute_task(self, prompt, timeout_seconds=None, **kwargs):
         self.prompt = prompt
+        self.diagnostic_label = kwargs.get("diagnostic_label")
+        self.diagnostic_metadata = kwargs.get("diagnostic_metadata")
         if self.raises is not None:
             raise self.raises
         if self.result is not None:
@@ -97,7 +101,15 @@ def _candidate_evidence(tmp_path: Path) -> tuple[dict, dict]:
     )
 
 
-def _run(runtime, *, candidate_evidence=None, verification_evidence=None):
+def _run(
+    runtime,
+    *,
+    candidate_evidence=None,
+    verification_evidence=None,
+    project_dir="/tmp/project",
+    task_execution_id=388,
+    emit_live=None,
+):
     state = SimpleNamespace(
         reasoning_artifact={
             "intent": "Make the permissions API available at its public routes.",
@@ -130,7 +142,7 @@ def _run(runtime, *, candidate_evidence=None, verification_evidence=None):
             }
         ],
         changed_files=["app/api/v1/router.py"],
-        project_dir="/tmp/project",
+        project_dir=str(project_dir),
         session_id=242,
         task_id=292,
     )
@@ -139,11 +151,12 @@ def _run(runtime, *, candidate_evidence=None, verification_evidence=None):
         orchestration_state=state,
         prompt="Make the permissions API available at its public routes.",
         summary="The execution model says the duplicate premature call was removed.",
+        task_execution_id=task_execution_id,
         candidate_evidence=(
             {"change_set": candidate_evidence} if candidate_evidence else None
         ),
         verification_evidence=verification_evidence,
-        emit_live=lambda *_args, **_kwargs: None,
+        emit_live=emit_live or (lambda *_args, **_kwargs: None),
         logger=SimpleNamespace(warning=lambda *_args, **_kwargs: None),
     )
 
@@ -269,6 +282,117 @@ def test_evaluator_runtime_exception_is_error():
     assert result["verdict"] == "ERROR"
 
 
+def test_evaluator_timeout_is_not_classified_as_empty_response(tmp_path):
+    runtime = _CapturingRuntime(
+        result={
+            "status": "failed",
+            "output": "",
+            "runtime_diagnostics": {
+                "timed_out": True,
+                "return_code": None,
+                "response_diagnostics": {
+                    "diagnostic_category": "EMPTY_STDOUT",
+                    "assistant_content_nonempty": False,
+                },
+            },
+        }
+    )
+
+    result = _run(runtime, project_dir=tmp_path)
+
+    assert result["verdict"] == "ERROR"
+    assert result["diagnostics"]["diagnostic_category"] == "TIMEOUT"
+    assert result["diagnostics"]["timeout_category"] == "TIMEOUT"
+
+
+def test_interrupted_evaluator_is_distinguished_from_parser_failure(tmp_path):
+    runtime = _CapturingRuntime(
+        result={
+            "status": "failed",
+            "output": "",
+            "runtime_diagnostics": {
+                "cancelled": True,
+                "activity_classification": "caller_cancelled",
+                "return_code": None,
+                "response_diagnostics": {
+                    "diagnostic_category": "EMPTY_STDOUT",
+                    "assistant_content_nonempty": False,
+                },
+            },
+        }
+    )
+
+    result = _run(runtime, project_dir=tmp_path)
+
+    assert result["verdict"] == "ERROR"
+    assert result["diagnostics"]["diagnostic_category"] == "INTERRUPTED"
+    assert result["diagnostics"]["interruption_category"] == "CALLER_CANCELLED"
+
+
+def test_evaluator_diagnostic_event_survives_runtime_workspace_disposal(tmp_path):
+    control_root = tmp_path / "control"
+    runtime_workspace = tmp_path / "runtime" / "tasks" / "388"
+    runtime_workspace.mkdir(parents=True)
+    runtime = _CapturingRuntime("VERDICT: PASS\n")
+
+    result = _run(
+        runtime,
+        project_dir=control_root,
+        task_execution_id=388,
+    )
+    shutil.rmtree(runtime_workspace)
+
+    event_files = list(control_root.rglob("session_242_task_292.jsonl"))
+    assert len(event_files) == 1
+    events = [json.loads(line) for line in event_files[0].read_text().splitlines()]
+    event = next(item for item in events if item["event_type"] == "evaluator_result")
+    diagnostics = event["details"]["evaluator_diagnostics"]
+    assert event["event_type"] == "EVALUATOR_RESULT"
+    assert diagnostics["task_execution_id"] == 388
+    assert diagnostics["evaluator_invocation_id"]
+    assert event_files[0].is_file()
+    assert not event_files[0].is_relative_to(runtime_workspace)
+    assert result["verdict"] == "PASS"
+    assert runtime.diagnostic_label == "EVALUATOR_RESPONSE_EVIDENCE"
+    assert runtime.diagnostic_metadata["task_execution_id"] == 388
+
+
+def test_evaluator_diagnostic_output_does_not_persist_sensitive_response_text(
+    tmp_path,
+):
+    sensitive_value = "sk-test-evaluator-secret"
+    result = _run(
+        _CapturingRuntime(f"VERDICT: PASS\nNOTES: {sensitive_value}\n"),
+        project_dir=tmp_path,
+    )
+
+    event_file = next(tmp_path.rglob("session_242_task_292.jsonl"))
+    events = [json.loads(line) for line in event_file.read_text().splitlines()]
+    event = next(item for item in events if item["event_type"] == "evaluator_result")
+    event_text = json.dumps(event)
+    assert result["verdict"] == "PASS"
+    assert sensitive_value not in event_text
+    assert sensitive_value not in json.dumps(result["diagnostics"])
+    assert "output" not in event["details"]
+
+
+def test_diagnostic_persistence_failure_cannot_return_evaluator_pass(
+    tmp_path, monkeypatch
+):
+    from app.services.orchestration.phases import completion_flow
+
+    def fail_write(**_kwargs):
+        raise OSError("diagnostic write failed")
+
+    monkeypatch.setattr(completion_flow, "append_orchestration_event", fail_write)
+    result = _run(
+        _CapturingRuntime("VERDICT: PASS\n"),
+        project_dir=tmp_path,
+    )
+
+    assert result["verdict"] == "ERROR"
+
+
 @pytest.mark.parametrize(
     ("runtime_status", "expected_verdict"),
     [("completed", "PASS"), ("failed", "ERROR")],
@@ -328,12 +452,13 @@ def test_evaluator_only_direct_call_uses_ephemeral_tool_denial_and_cleans_up(
 
     try:
 
-        async def _offline_execute_task(prompt, timeout_seconds=None):
+        async def _offline_execute_task(prompt, timeout_seconds=None, **kwargs):
             bound = json.loads(runtime._workspace_binding.config_path.read_text())
             agent = bound["agents"]["list"][0]
             observed["prompt"] = prompt
             observed["tool_deny"] = agent["tools"]["deny"]
             observed["workspace"] = agent["workspace"]
+            observed["diagnostic_label"] = kwargs.get("diagnostic_label")
             return {"status": runtime_status, "output": "VERDICT: PASS\n"}
 
         runtime._apply_discovery_tool_suppression("PLANNING_DISCOVERY")

@@ -197,6 +197,22 @@ class OpenClawSessionError(AgentRuntimeError):
     runtime_diagnostics: Dict[str, Any] | None = None
 
 
+class _CapturedStreamDigest:
+    """Track exact subprocess bytes without retaining their contents."""
+
+    def __init__(self) -> None:
+        self.byte_length = 0
+        self._digest = hashlib.sha256()
+
+    def update(self, chunk: bytes) -> None:
+        self.byte_length += len(chunk)
+        self._digest.update(chunk)
+
+    @property
+    def sha256(self) -> str:
+        return self._digest.hexdigest()
+
+
 class OpenClawNoOutputTimeoutError(OpenClawSessionError):
     """Raised when a one-shot OpenClaw prompt produces no output before its guard."""
 
@@ -319,6 +335,7 @@ class OpenClawSessionService:
         *,
         expected_session_id: str | None = None,
         strict_provider_result: bool = False,
+        capture_response_diagnostics: bool = False,
     ) -> Dict[str, Any]:
         if strict_provider_result:
             return parse_openclaw_provider_result(
@@ -329,6 +346,7 @@ class OpenClawSessionService:
             result,
             self._log_entry,
             expected_session_id=expected_session_id,
+            capture_diagnostics=capture_response_diagnostics,
         )
 
     MAX_PROMPT_LENGTH = 50000  # Leave room for model overhead
@@ -1834,6 +1852,15 @@ class OpenClawSessionService:
         partial_response_seen = False
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
+        capture_evaluator_response = diagnostic_label == "EVALUATOR_RESPONSE_EVIDENCE"
+        stream_captures = (
+            {
+                "stdout": _CapturedStreamDigest(),
+                "stderr": _CapturedStreamDigest(),
+            }
+            if capture_evaluator_response
+            else None
+        )
         first_output_event = asyncio.Event()
         response_ready_event = asyncio.Event()
         response_boundary_reached = False
@@ -1972,6 +1999,9 @@ class OpenClawSessionService:
                 line = await stream.readline()
                 if not line:
                     break
+
+                if stream_captures is not None:
+                    stream_captures[stream_name].update(line)
 
                 now = time.monotonic()
                 if first_output_at is None:
@@ -2246,6 +2276,15 @@ class OpenClawSessionService:
                     "provider_response_received": response_ready,
                 }
             )
+            if stream_captures is not None:
+                diagnostics.update(
+                    {
+                        "stdout_byte_length": stream_captures["stdout"].byte_length,
+                        "stderr_byte_length": stream_captures["stderr"].byte_length,
+                        "stdout_sha256": stream_captures["stdout"].sha256,
+                        "stderr_sha256": stream_captures["stderr"].sha256,
+                    }
+                )
             if activity_classification == "caller_cancelled":
                 diagnostics["diagnostic_category"] = "caller_cancelled"
             if diagnostics.get("diagnostic_category") is None:
@@ -3510,14 +3549,24 @@ class OpenClawSessionService:
                     stderr=stderr_text,
                     return_code=return_code,
                 )
-            result = self._parse_openclaw_response(completed)
+            result = self._parse_openclaw_response(
+                completed,
+                capture_response_diagnostics=capture_evaluator_response,
+            )
             if capture is not None:
                 capture.record_runtime_output(result.get("output"))
             if stream_diagnostics:
+                response_diagnostics = result.pop("response_diagnostics", None)
                 result["runtime_diagnostics"] = {
                     **stream_diagnostics,
                     **dict(result.pop("provider_result_diagnostics", {}) or {}),
                 }
+                if capture_evaluator_response and isinstance(
+                    response_diagnostics, dict
+                ):
+                    result["runtime_diagnostics"][
+                        "response_diagnostics"
+                    ] = response_diagnostics
             result["openclaw_version"] = openclaw_version
             result["selected_openclaw_agent"] = self._last_selected_openclaw_agent_id
             result["runtime_result"] = {

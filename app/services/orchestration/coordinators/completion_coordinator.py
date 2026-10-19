@@ -1211,6 +1211,7 @@ class CompletionCoordinator:
                     orchestration_state=orchestration_state,
                     prompt=prompt,
                     summary=wm_summary,
+                    task_execution_id=ctx.task_execution_id,
                     candidate_evidence={"change_set": task_change_set},
                     verification_evidence=completion_validation,
                     emit_live=emit_live,

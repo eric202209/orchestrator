@@ -208,7 +208,7 @@ def channel_metadata(stdout_text: str, stderr_text: str) -> Dict[str, Any]:
     }
 
 
-def parse_openclaw_response(
+def _parse_openclaw_response_impl(
     result: Any,
     log_entry,
     *,
@@ -451,6 +451,193 @@ def parse_openclaw_response(
                 "execution_time": 0.0,
                 "error": error_str,
             }
+
+
+_DIAGNOSTIC_CONTENT_FIELDS = (
+    *_PARTIAL_VISIBLE_TEXT_KEYS,
+    "content",
+    "message",
+    "payloads",
+)
+_DIAGNOSTIC_MAX_DEPTH = 16
+_DIAGNOSTIC_MAX_NODES = 10000
+
+
+def _response_field_metadata(value: Any) -> tuple[list[str], str | None]:
+    """Describe supported response fields without retaining any field values."""
+    recognized: set[str] = set()
+    visited = 0
+
+    def collect(item: Any, depth: int = 0) -> None:
+        nonlocal visited
+        if depth > _DIAGNOSTIC_MAX_DEPTH or visited >= _DIAGNOSTIC_MAX_NODES:
+            return
+        visited += 1
+        if isinstance(item, dict):
+            recognized.update(key for key in _DIAGNOSTIC_CONTENT_FIELDS if key in item)
+            for nested in item.values():
+                if isinstance(nested, (dict, list)):
+                    collect(nested, depth + 1)
+                elif isinstance(nested, str) and nested.lstrip().startswith(("{", "[")):
+                    try:
+                        collect(json.loads(nested), depth + 1)
+                    except (TypeError, ValueError):
+                        pass
+        elif isinstance(item, list):
+            for nested in item:
+                collect(nested, depth + 1)
+
+    visited = 0
+    collect(value)
+
+    visited = 0
+
+    def select(item: Any, depth: int = 0) -> str | None:
+        nonlocal visited
+        if depth > _DIAGNOSTIC_MAX_DEPTH or visited >= _DIAGNOSTIC_MAX_NODES:
+            return None
+        visited += 1
+        if isinstance(item, dict):
+            for key in _PARTIAL_VISIBLE_TEXT_KEYS:
+                candidate = item.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return key
+            for key in ("content", "message", "payloads"):
+                candidate = item.get(key)
+                if isinstance(candidate, str) and candidate.strip():
+                    return key
+                if isinstance(candidate, (dict, list)):
+                    selected = select(candidate, depth + 1)
+                    if selected:
+                        return selected
+            for nested in item.values():
+                if isinstance(nested, (dict, list)):
+                    selected = select(nested, depth + 1)
+                    if selected:
+                        return selected
+                elif isinstance(nested, str):
+                    if nested.lstrip().startswith(("{", "[")):
+                        try:
+                            selected = select(json.loads(nested), depth + 1)
+                        except (TypeError, ValueError):
+                            selected = None
+                        if selected:
+                            return selected
+                    if nested.strip():
+                        return "GENERIC_TEXT_FALLBACK"
+        elif isinstance(item, list):
+            for nested in item:
+                selected = select(nested, depth + 1)
+                if selected:
+                    return selected
+        elif isinstance(item, str) and item.strip():
+            return "GENERIC_TEXT_FALLBACK"
+        return None
+
+    ordered_fields = [key for key in _DIAGNOSTIC_CONTENT_FIELDS if key in recognized]
+    return ordered_fields, select(value)
+
+
+def _response_diagnostics(result: Any, parsed_result: Dict[str, Any]) -> Dict[str, Any]:
+    if isinstance(result, subprocess.CompletedProcess):
+        stdout = str(result.stdout or "").strip()
+        stderr = str(result.stderr or "").strip()
+    else:
+        stdout = str(result or "").strip()
+        stderr = ""
+
+    empty_stdout = not stdout or stdout in {'""', "''", '"', "'"}
+    candidate = None if empty_stdout else stdout
+    source = "stdout" if candidate is not None else None
+    if candidate is None and stderr:
+        recovered = recover_json_like_output_from_stderr(stderr)
+        if recovered:
+            candidate = recovered
+            source = "stderr"
+
+    json_outcome = "NOT_ATTEMPTED"
+    parsed: Any = None
+    if candidate is not None:
+        try:
+            parsed = json.loads(candidate)
+            json_outcome = "SUCCEEDED"
+        except (TypeError, ValueError):
+            json_outcome = "FAILED"
+
+    envelope_type = "UNAVAILABLE"
+    selected_field = None
+    recognized_fields: list[str] = []
+    assistant_content_nonempty = False
+    if json_outcome == "SUCCEEDED":
+        if isinstance(parsed, dict):
+            envelope_type = "object"
+        elif isinstance(parsed, list):
+            envelope_type = "array"
+        elif isinstance(parsed, str):
+            envelope_type = "string"
+        elif isinstance(parsed, bool):
+            envelope_type = "boolean"
+        elif isinstance(parsed, (int, float)):
+            envelope_type = "number"
+        elif parsed is None:
+            envelope_type = "null"
+        recognized_fields, selected_field = _response_field_metadata(parsed)
+        if selected_field is None and isinstance(parsed, str) and parsed.strip():
+            selected_field = "JSON_STRING"
+        assistant_content_nonempty = selected_field is not None
+    elif json_outcome == "FAILED" and source == "stdout":
+        # The existing parser deliberately falls back to raw non-JSON stdout.
+        output = parsed_result.get("output")
+        assistant_content_nonempty = isinstance(output, str) and bool(output.strip())
+        if assistant_content_nonempty:
+            selected_field = "PLAIN_TEXT_FALLBACK"
+
+    if candidate is None:
+        if empty_stdout and stderr and not text_contains_model_content(stderr):
+            category = "STDERR_DIAGNOSTIC_ONLY"
+        else:
+            category = "EMPTY_STDOUT"
+    elif json_outcome == "FAILED":
+        category = "JSON_PARSE_FAILED"
+    elif assistant_content_nonempty:
+        category = "VALID_ASSISTANT_CONTENT_EXTRACTED"
+    elif recognized_fields:
+        category = "EMPTY_ASSISTANT_CONTENT"
+    else:
+        category = "UNSUPPORTED_RESPONSE_ENVELOPE"
+
+    return {
+        "json_parsing_outcome": json_outcome,
+        "parsed_envelope_type": envelope_type,
+        "recognized_assistant_content_fields": recognized_fields,
+        "selected_assistant_content_source": source,
+        "selected_assistant_content_field": selected_field,
+        "assistant_content_nonempty": assistant_content_nonempty,
+        "diagnostic_category": category,
+        "extraction_failure_category": (
+            None if category == "VALID_ASSISTANT_CONTENT_EXTRACTED" else category
+        ),
+    }
+
+
+def parse_openclaw_response(
+    result: Any,
+    log_entry,
+    *,
+    expected_session_id: str | None = None,
+    capture_diagnostics: bool = False,
+) -> Dict[str, Any]:
+    """Parse an OpenClaw response and optionally attach metadata-only evidence."""
+    parsed_result = _parse_openclaw_response_impl(
+        result,
+        log_entry,
+        expected_session_id=expected_session_id,
+    )
+    if capture_diagnostics:
+        parsed_result["response_diagnostics"] = _response_diagnostics(
+            result, parsed_result
+        )
+    return parsed_result
 
 
 def recover_json_like_output_from_stderr(stderr: str) -> str:
