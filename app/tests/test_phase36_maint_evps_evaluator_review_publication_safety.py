@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.phases.completion_flow import _run_evaluator
 
 
@@ -345,9 +346,11 @@ def test_evaluator_diagnostic_event_survives_runtime_workspace_disposal(tmp_path
     event_files = list(control_root.rglob("session_242_task_292.jsonl"))
     assert len(event_files) == 1
     events = [json.loads(line) for line in event_files[0].read_text().splitlines()]
-    event = next(item for item in events if item["event_type"] == "evaluator_result")
+    event = next(
+        item for item in events if item["event_type"] == EventType.EVALUATOR_RESULT
+    )
     diagnostics = event["details"]["evaluator_diagnostics"]
-    assert event["event_type"] == "evaluator_result"
+    assert event["event_type"] == EventType.EVALUATOR_RESULT
     assert diagnostics["task_execution_id"] == 388
     assert diagnostics["evaluator_invocation_id"]
     assert event_files[0].is_file()
