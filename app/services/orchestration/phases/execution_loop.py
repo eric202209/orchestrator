@@ -110,6 +110,7 @@ from app.services.orchestration.state.execution_states import (
 )
 from app.services.orchestration.state.persistence import (
     append_orchestration_event,
+    append_verification_execution_evidence,
     attach_failure_envelope,
     emit_intent_outcome_mismatch,
     maybe_emit_divergence_detected,
@@ -118,6 +119,7 @@ from app.services.orchestration.state.persistence import (
     record_validation_verdict,
     save_orchestration_checkpoint,
     write_orchestration_state_snapshot,
+    VerificationEvidencePersistenceError,
 )
 from app.services.orchestration.state.session_state import (
     mark_session_paused,
@@ -181,6 +183,66 @@ from app.services.orchestration.recovery.recovery_strategy_registry import (
 from app.services.workspace.control_state_paths import control_state_of
 
 _DEBUG_KNOWLEDGE_MIN_CONFIDENCE = 0.85
+
+
+def _persist_step_verification_evidence_records(
+    *,
+    raw_records: Any,
+    project: Any,
+    orchestration_state: Any,
+    task_execution_id: Optional[int],
+    session_id: int,
+    task_id: int,
+    step: Dict[str, Any],
+    step_index: int,
+    step_attempt: int,
+) -> tuple[Optional[str], list[Dict[str, Any]]]:
+    if isinstance(raw_records, dict):
+        records = [raw_records]
+    elif isinstance(raw_records, list):
+        records = raw_records
+    else:
+        records = []
+
+    evidence_ref = None
+    summaries: list[Dict[str, Any]] = []
+    for evidence_index, raw_evidence in enumerate(records):
+        if not isinstance(raw_evidence, dict):
+            continue
+        evidence_record = {
+            **raw_evidence,
+            "project_id": project.id,
+            "task_execution_id": task_execution_id,
+            "session_id": session_id,
+            "task_id": task_id,
+            "plan_step_id": next(
+                (
+                    step.get(key)
+                    for key in ("step_id", "id", "step_number")
+                    if step.get(key) is not None
+                ),
+                None,
+            ),
+            "plan_step_index": step_index + 1,
+            "step_attempt": step_attempt,
+            "verification_invocation_index": evidence_index + 1,
+        }
+        evidence_ref = append_verification_execution_evidence(
+            project_dir=control_state_of(orchestration_state),
+            project_id=project.id,
+            session_id=session_id,
+            task_id=task_id,
+            task_execution_id=task_execution_id,
+            evidence=evidence_record,
+        )
+        summary = {
+            key: value
+            for key, value in evidence_record.items()
+            if key != "bounded_output"
+        }
+        summary["bounded_output_ref"] = evidence_ref
+        summaries.append(summary)
+    return evidence_ref, summaries
 
 
 def _execution_topology_for_runtime(runtime_service: Any) -> Any:
@@ -1087,6 +1149,19 @@ def execute_step_loop(
         tool_failures = assessment.tool_failures
         correction_hints = assessment.correction_hints
         step_result["error"] = assessment.error_message
+        verification_evidence_ref, verification_evidence_summaries = (
+            _persist_step_verification_evidence_records(
+                raw_records=step_result.get("_verification_evidence"),
+                project=project,
+                orchestration_state=orchestration_state,
+                task_execution_id=ctx.task_execution_id,
+                session_id=session_id,
+                task_id=task_id,
+                step=step,
+                step_index=step_index,
+                step_attempt=current_attempt,
+            )
+        )
 
         # Audit-on-write: flag files created/modified outside the declared scope
         scope_violations = detect_scope_violations(
@@ -1249,6 +1324,7 @@ def execute_step_loop(
                 files_changed=observed_files,
                 error_message=terminal_message,
                 attempt=current_attempt,
+                verification_evidence_ref=verification_evidence_ref,
             )
             orchestration_state.status = OrchestrationStatus.ABORTED
             orchestration_state.abort_reason = terminal_message
@@ -1282,6 +1358,14 @@ def execute_step_loop(
                         "post_structured_op_mutations": post_structured_op_mutations[
                             :20
                         ],
+                        **(
+                            {
+                                "verification_evidence_ref": verification_evidence_ref,
+                                "verification_evidence_records": verification_evidence_summaries,
+                            }
+                            if verification_evidence_ref
+                            else {}
+                        ),
                     },
                 )
                 write_orchestration_state_snapshot(
@@ -1292,7 +1376,11 @@ def execute_step_loop(
                     trigger="phase_finished",
                     related_event_id=phase_finished_event.get("event_id"),
                 )
-            except Exception:
+            except Exception as event_error:
+                if verification_evidence_ref:
+                    raise VerificationEvidencePersistenceError(
+                        "Could not link verification evidence from the failed step event"
+                    ) from event_error
                 pass
             emit_live(
                 "ERROR",
@@ -1327,6 +1415,7 @@ def execute_step_loop(
             ),
             error_message=step_result.get("error", ""),
             attempt=current_attempt,
+            verification_evidence_ref=verification_evidence_ref,
         )
         runtime_metadata = (
             runtime_service.get_backend_metadata()
@@ -1414,6 +1503,13 @@ def execute_step_loop(
                 "status": step_status,
                 "error": step_record.error_message[:240],
             }
+            if verification_evidence_ref:
+                step_finished_details["verification_evidence_ref"] = (
+                    verification_evidence_ref
+                )
+                step_finished_details["verification_evidence_records"] = (
+                    verification_evidence_summaries
+                )
             runtime_result_payload = step_result.get("_runtime_backend_result") or {}
             if runtime_result_payload.get("runtime_pollution"):
                 step_finished_details["runtime_pollution"] = runtime_result_payload[
@@ -1427,7 +1523,11 @@ def execute_step_loop(
                 parent_event_id=(step_started_event or {}).get("event_id"),
                 details=step_finished_details,
             )
-        except Exception:
+        except Exception as event_error:
+            if verification_evidence_ref:
+                raise VerificationEvidencePersistenceError(
+                    "Could not link verification evidence from the durable step event"
+                ) from event_error
             pass
 
         if step_status == "success":

@@ -213,6 +213,28 @@ class _CapturedStreamDigest:
         return self._digest.hexdigest()
 
 
+def _captured_evaluator_stream_metadata(
+    captures: Optional[Dict[str, _CapturedStreamDigest]],
+) -> Dict[str, Any]:
+    if captures is None:
+        return {}
+    return {
+        "stdout_byte_length": captures["stdout"].byte_length,
+        "stderr_byte_length": captures["stderr"].byte_length,
+        "stdout_sha256": captures["stdout"].sha256,
+        "stderr_sha256": captures["stderr"].sha256,
+    }
+
+
+def _capture_evaluator_stream_chunk(
+    captures: Optional[Dict[str, _CapturedStreamDigest]],
+    stream_name: str,
+    chunk: bytes,
+) -> None:
+    if captures is not None:
+        captures[stream_name].update(chunk)
+
+
 class OpenClawNoOutputTimeoutError(OpenClawSessionError):
     """Raised when a one-shot OpenClaw prompt produces no output before its guard."""
 
@@ -3155,6 +3177,14 @@ class OpenClawSessionService:
             partial_response_seen = False
             cleanup_status = "not_started"
             stream_diagnostics: Dict[str, Any] = {}
+            stream_captures = (
+                {
+                    "stdout": _CapturedStreamDigest(),
+                    "stderr": _CapturedStreamDigest(),
+                }
+                if capture_evaluator_response
+                else None
+            )
 
             stdout_chunks: List[str] = []
             stderr_chunks: List[str] = []
@@ -3165,6 +3195,7 @@ class OpenClawSessionService:
                 stream,
                 level: str,
                 chunks: List[str],
+                stream_name: str,
                 emit_live_logs: bool = True,
             ) -> None:
                 nonlocal first_output_at, last_output_at
@@ -3174,6 +3205,8 @@ class OpenClawSessionService:
                     line = await stream.readline()
                     if not line:
                         break
+
+                    _capture_evaluator_stream_chunk(stream_captures, stream_name, line)
 
                     now = time.monotonic()
                     if first_output_at is None:
@@ -3247,6 +3280,7 @@ class OpenClawSessionService:
                                 process.stdout,
                                 "INFO",
                                 stdout_chunks,
+                                "stdout",
                                 emit_live_logs=False,
                             ),
                             # Keep stderr visible because it contains actionable warnings/errors.
@@ -3254,6 +3288,7 @@ class OpenClawSessionService:
                                 process.stderr,
                                 "WARN",
                                 stderr_chunks,
+                                "stderr",
                                 emit_live_logs=True,
                             ),
                         ),
@@ -3511,6 +3546,7 @@ class OpenClawSessionService:
                             openclaw_version=openclaw_version,
                             git_containment_active=git_guard_shim_dir is not None,
                         ),
+                        **_captured_evaluator_stream_metadata(stream_captures),
                     }
                 )
                 if activity_classification == "caller_cancelled":

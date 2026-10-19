@@ -79,6 +79,7 @@ class StepResult:
     files_changed: List[str] = field(default_factory=list)
     error_message: str = ""
     attempt: int = 1
+    verification_evidence_ref: Optional[str] = None
 
 
 @dataclass

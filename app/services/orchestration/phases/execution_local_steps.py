@@ -602,13 +602,24 @@ def _execute_local_shell_commands_step(
                 "output": verr,
                 "error": verr,
                 "files_changed": files_changed,
+                "_verification_evidence": (
+                    [vresult["verification_evidence"]]
+                    if isinstance(vresult.get("verification_evidence"), dict)
+                    else []
+                ),
             }
+        verification_evidence = vresult.get("verification_evidence")
+    else:
+        verification_evidence = None
 
     return {
         "status": "completed",
         "output": "\n\n".join(outputs),
         "verification_output": "",
         "files_changed": files_changed,
+        "_verification_evidence": (
+            [verification_evidence] if isinstance(verification_evidence, dict) else []
+        ),
     }
 
 
@@ -666,4 +677,9 @@ def _execute_simple_verification_step(
         "verification_output": result.get("output", ""),
         "error": "" if result.get("success") else result.get("output", ""),
         "files_changed": [],
+        "_verification_evidence": (
+            [result["verification_evidence"]]
+            if isinstance(result.get("verification_evidence"), dict)
+            else []
+        ),
     }

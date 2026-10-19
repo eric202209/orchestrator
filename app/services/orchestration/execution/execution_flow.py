@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+import hashlib
+import io
 import os
 from pathlib import Path
 import re
@@ -11,11 +13,15 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.orchestration.diagnostics.outcome_observability import (
+    redact_observed_text,
+)
 
 from .python_resolution import ProjectPythonResolutionError, resolve_project_python
 from .executor import ExecutorService
@@ -355,24 +361,77 @@ def execute_verification_command(
         timeout_seconds = settings.LOCAL_VERIFICATION_TIMEOUT_SECONDS
     raw_command = str(command or "").strip()
     if not raw_command:
+        evidence = _verification_evidence_record(
+            declared_command=raw_command,
+            executed_command=raw_command,
+            command_execution_status="skipped",
+            verification_status="unknown",
+            process_exit_code=None,
+            started_at=None,
+            ended_at=None,
+            duration_seconds=None,
+            stdout_bytes=None,
+            stderr_bytes=None,
+            output_text="",
+            execution_kind="not_started",
+        )
         return {
             "success": True,
             "command": raw_command,
             "returncode": 0,
             "output": "",
+            "verification_evidence": evidence,
         }
     try:
         assert_no_workspace_cd_escape(raw_command, project_dir)
     except TaskWorkspaceViolationError as exc:
+        evidence = _verification_evidence_record(
+            declared_command=raw_command,
+            executed_command=raw_command,
+            command_execution_status="rejected",
+            verification_status="failed",
+            process_exit_code=None,
+            started_at=None,
+            ended_at=None,
+            duration_seconds=None,
+            stdout_bytes=None,
+            stderr_bytes=None,
+            output_text="",
+            execution_kind="not_started",
+            capture_error="workspace_boundary_rejected",
+        )
         return {
             "success": False,
             "command": raw_command,
             "returncode": 2,
             "output": str(exc),
+            "verification_evidence": evidence,
         }
 
+    portable_started_at = datetime.now(UTC).isoformat()
+    portable_started_monotonic = time.monotonic()
     portable_result = _execute_portable_posix_command(project_dir, raw_command)
     if portable_result is not None:
+        portable_output = str(portable_result.get("output") or "")
+        portable_bytes = portable_output.encode("utf-8", errors="replace")
+        portable_ended_at = datetime.now(UTC).isoformat()
+        portable_duration = max(0.0, time.monotonic() - portable_started_monotonic)
+        portable_result["verification_evidence"] = _verification_evidence_record(
+            declared_command=raw_command,
+            executed_command=raw_command,
+            command_execution_status="completed",
+            verification_status=(
+                "passed" if portable_result.get("success") else "failed"
+            ),
+            process_exit_code=None,
+            started_at=portable_started_at,
+            ended_at=portable_ended_at,
+            duration_seconds=portable_duration,
+            stdout_bytes=portable_bytes,
+            stderr_bytes=b"",
+            output_text=portable_output,
+            execution_kind="in_process_portable",
+        )
         return portable_result
 
     python_rewrite = raw_command in {"python", "python3"} or raw_command.startswith(
@@ -382,11 +441,27 @@ def execute_verification_command(
         resolved_python = resolve_project_python(project_dir)
     except ProjectPythonResolutionError as exc:
         if python_rewrite:
+            evidence = _verification_evidence_record(
+                declared_command=raw_command,
+                executed_command=raw_command,
+                command_execution_status="rejected",
+                verification_status="failed",
+                process_exit_code=None,
+                started_at=None,
+                ended_at=None,
+                duration_seconds=None,
+                stdout_bytes=None,
+                stderr_bytes=None,
+                output_text="",
+                execution_kind="not_started",
+                capture_error="python_resolution_failed",
+            )
             return {
                 "success": False,
                 "command": raw_command,
                 "returncode": 2,
                 "output": str(exc),
+                "verification_evidence": evidence,
             }
         # Non-Python commands never needed the interpreter; they keep running
         # without the interpreter PATH prefix.
@@ -411,19 +486,23 @@ def execute_verification_command(
         env = workspace_python_command_env(project_dir, raw_command, base_env=env)
         env = _inject_project_venv_path(project_dir, env)
         env = _strip_orchestrator_pip_shadow(project_dir, raw_command, env)
+        started_at = datetime.now(UTC).isoformat()
+        started_monotonic = time.monotonic()
         completed = subprocess.run(
             command_to_run,
             cwd=str(project_dir),
             env=env,
             shell=True,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=timeout_seconds,
         )
+        ended_at = datetime.now(UTC).isoformat()
+        duration_seconds = max(0.0, time.monotonic() - started_monotonic)
+        stdout_bytes, stdout_text = _captured_process_stream(completed.stdout)
+        stderr_bytes, stderr_text = _captured_process_stream(completed.stderr)
         output = "\n".join(
-            part
-            for part in [completed.stdout.strip(), completed.stderr.strip()]
-            if part
+            part for part in [stdout_text.strip(), stderr_text.strip()] if part
         ).strip()
         if completed.returncode != 0 and not output:
             output = (
@@ -436,19 +515,197 @@ def execute_verification_command(
             returncode=completed.returncode,
             output=output,
         )
+        evidence = _verification_evidence_record(
+            declared_command=raw_command,
+            executed_command=command_to_run,
+            command_execution_status="completed",
+            verification_status="passed" if success else "failed",
+            process_exit_code=completed.returncode,
+            started_at=started_at,
+            ended_at=ended_at,
+            duration_seconds=duration_seconds,
+            stdout_bytes=stdout_bytes,
+            stderr_bytes=stderr_bytes,
+            output_text=output,
+            execution_kind="subprocess",
+        )
         return {
             "success": success,
             "command": raw_command,
             "returncode": completed.returncode,
             "output": output[:4000],
+            "verification_evidence": evidence,
         }
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        ended_at = datetime.now(UTC).isoformat()
+        duration_seconds = (
+            max(0.0, time.monotonic() - started_monotonic)
+            if "started_monotonic" in locals()
+            else None
+        )
+        try:
+            timeout_stdout_bytes, timeout_stdout_text = _captured_process_stream(
+                exc.stdout
+            )
+            timeout_stderr_bytes, timeout_stderr_text = _captured_process_stream(
+                exc.stderr
+            )
+            capture_error = None
+        except Exception:
+            timeout_stdout_bytes = timeout_stderr_bytes = None
+            timeout_stdout_text = timeout_stderr_text = ""
+            capture_error = "timeout_output_decode_failed"
+        timeout_output = "\n".join(
+            part
+            for part in [timeout_stdout_text.strip(), timeout_stderr_text.strip()]
+            if part
+        )
+        evidence = _verification_evidence_record(
+            declared_command=raw_command,
+            executed_command=command_to_run,
+            command_execution_status="timed_out",
+            verification_status="failed",
+            process_exit_code=None,
+            started_at=started_at if "started_at" in locals() else None,
+            ended_at=ended_at,
+            duration_seconds=duration_seconds,
+            stdout_bytes=timeout_stdout_bytes,
+            stderr_bytes=timeout_stderr_bytes,
+            output_text=timeout_output,
+            execution_kind="subprocess",
+            capture_error=capture_error,
+        )
         return {
             "success": False,
             "command": raw_command,
             "returncode": None,
             "output": f"Verification command timed out after {timeout_seconds}s",
+            "verification_evidence": evidence,
         }
+
+
+_MAX_VERIFICATION_OUTPUT_BYTES = 4096
+_MAX_VERIFICATION_COMMAND_BYTES = 4096
+
+
+def _captured_process_stream(value: Any) -> tuple[bytes, str]:
+    if value is None:
+        return b"", ""
+    if isinstance(value, str):
+        return value.encode("utf-8", errors="replace"), value
+    raw = bytes(value)
+    with io.TextIOWrapper(io.BytesIO(raw), newline=None) as stream:
+        decoded = stream.read()
+    return raw, decoded
+
+
+def _verification_evidence_record(
+    *,
+    declared_command: str,
+    executed_command: str,
+    command_execution_status: str,
+    verification_status: str,
+    process_exit_code: Optional[int],
+    started_at: Optional[str],
+    ended_at: Optional[str],
+    duration_seconds: Optional[float],
+    stdout_bytes: Optional[bytes],
+    stderr_bytes: Optional[bytes],
+    output_text: str,
+    execution_kind: str,
+    capture_error: Optional[str] = None,
+) -> Dict[str, Any]:
+    raw_command = str(executed_command or "")
+    declared_text = str(declared_command or "")
+    command_digest = hashlib.sha256(
+        raw_command.encode("utf-8", errors="replace")
+    ).hexdigest()
+    declared_command_digest = hashlib.sha256(
+        declared_text.encode("utf-8", errors="replace")
+    ).hexdigest()
+    try:
+        safe_command = redact_observed_text(raw_command)
+        safe_declared_command = redact_observed_text(declared_text)
+        command_redaction_error = None
+    except Exception:
+        safe_command = safe_declared_command = ""
+        command_redaction_error = "command_redaction_failed"
+    command_redacted = safe_command != raw_command
+    declared_command_redacted = safe_declared_command != declared_text
+    command_bytes = safe_command.encode("utf-8", errors="replace")
+    declared_bytes = safe_declared_command.encode("utf-8", errors="replace")
+    command_truncated = len(command_bytes) > _MAX_VERIFICATION_COMMAND_BYTES
+    declared_truncated = len(declared_bytes) > _MAX_VERIFICATION_COMMAND_BYTES
+    safe_command = command_bytes[:_MAX_VERIFICATION_COMMAND_BYTES].decode(
+        "utf-8", errors="ignore"
+    )
+    safe_declared_command = declared_bytes[:_MAX_VERIFICATION_COMMAND_BYTES].decode(
+        "utf-8", errors="ignore"
+    )
+
+    output_bytes = (
+        None
+        if stdout_bytes is None or stderr_bytes is None
+        else stdout_bytes + stderr_bytes
+    )
+    safe_output: Optional[str]
+    output_truncated = False
+    if capture_error:
+        safe_output = None
+    else:
+        try:
+            # Only the portion that could be retained is inspected and redacted.
+            redaction_sample = str(output_text or "")[
+                : _MAX_VERIFICATION_OUTPUT_BYTES + 8192
+            ]
+            redacted_output = redact_observed_text(redaction_sample)
+            redacted_bytes = redacted_output.encode("utf-8", errors="replace")
+            output_truncated = (
+                output_bytes is not None
+                and len(output_bytes) > _MAX_VERIFICATION_OUTPUT_BYTES
+            ) or len(redacted_bytes) > _MAX_VERIFICATION_OUTPUT_BYTES
+            safe_output = redacted_bytes[:_MAX_VERIFICATION_OUTPUT_BYTES].decode(
+                "utf-8", errors="ignore"
+            )
+        except Exception:
+            safe_output = None
+            capture_error = "output_redaction_failed"
+
+    record: Dict[str, Any] = {
+        "declared_command": safe_declared_command,
+        "declared_command_sha256": declared_command_digest,
+        "declared_command_redacted": declared_command_redacted,
+        "declared_command_truncated": declared_truncated,
+        "command": safe_command,
+        "command_sha256": command_digest,
+        "command_redacted": command_redacted,
+        "command_truncated": command_truncated,
+        "execution_kind": execution_kind,
+        "status": command_execution_status,
+        "command_execution_status": command_execution_status,
+        "verification_status": verification_status,
+        "process_exit_code": process_exit_code,
+        "started_at": started_at,
+        "ended_at": ended_at,
+        "duration_seconds": duration_seconds,
+        "stdout_byte_count": None if stdout_bytes is None else len(stdout_bytes),
+        "stderr_byte_count": None if stderr_bytes is None else len(stderr_bytes),
+        "stdout_sha256": (
+            None if stdout_bytes is None else hashlib.sha256(stdout_bytes).hexdigest()
+        ),
+        "stderr_sha256": (
+            None if stderr_bytes is None else hashlib.sha256(stderr_bytes).hexdigest()
+        ),
+        "output_byte_count": None if output_bytes is None else len(output_bytes),
+        "output_sha256": (
+            None if output_bytes is None else hashlib.sha256(output_bytes).hexdigest()
+        ),
+        "output_stream_order": "stdout_then_stderr",
+        "bounded_output": safe_output,
+        "output_truncated": output_truncated,
+        "capture_error": capture_error or command_redaction_error,
+    }
+    return record
 
 
 def workspace_python_command_env(
@@ -677,6 +934,15 @@ def assess_step_execution(
         )
         verification_output = verification_result.get("output", "")
         step_result["verification_output"] = verification_output
+        evidence_records = step_result.get("_verification_evidence") or []
+        if isinstance(evidence_records, dict):
+            evidence_records = [evidence_records]
+        elif not isinstance(evidence_records, list):
+            evidence_records = []
+        observed_evidence = verification_result.get("verification_evidence")
+        if isinstance(observed_evidence, dict):
+            evidence_records.append(observed_evidence)
+        step_result["_verification_evidence"] = evidence_records
         if not verification_result.get("success", False):
             step_status = "failed"
             error_message = (

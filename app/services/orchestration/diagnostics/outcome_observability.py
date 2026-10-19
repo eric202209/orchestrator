@@ -15,11 +15,67 @@ _SENSITIVE_VALUE_PATTERN = re.compile(
     r"(?i)(\b(?:authorization|bearer|api[_-]?key|password|passwd|secret|token|"
     r"credential|cookie)\b\s*[:=]\s*)([^\s,;]+)"
 )
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|"
+    r"client[_-]?secret|secret|password|passwd|authorization|credential|cookie)"
+    r"|profiles?"
+)
+_SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)(\b[\w.-]*(?:api[_-]?key|access[_-]?token|refresh[_-]?token|"
+    r"id[_-]?token|client[_-]?secret|token|secret|password|passwd|"
+    r"credential|cookie)[\w.-]*\b\s*[:=]\s*)(['\"]?)[^'\"\s,;]+(['\"]?)"
+)
+_BEARER_TOKEN_PATTERN = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]+")
+_API_TOKEN_PATTERN = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+_AUTH_HEADER_PATTERN = re.compile(
+    r"(?im)(\b(?:authorization|cookie|set-cookie)\b\s*[:=]\s*)[^\r\n]+"
+)
+_CLI_SECRET_OPTION_PATTERN = re.compile(
+    r"(?i)(--?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|"
+    r"secret|password|credential|authorization)(?:=\s*|\s+))[^\s,;]+"
+)
+_AUTH_PROFILE_MARKER_PATTERN = re.compile(
+    r"(?i)(?:host[ _-]?auth(?:entication)?[ _-]?profiles?|auth\.json)"
+)
 
 
 def _redact_sensitive_values(value: str) -> str:
+    value = _AUTH_HEADER_PATTERN.sub(r"\1<redacted>", value)
+    value = _CLI_SECRET_OPTION_PATTERN.sub(r"\1<redacted>", value)
+    value = _BEARER_TOKEN_PATTERN.sub(r"\1<redacted>", value)
     value = _SENSITIVE_VALUE_PATTERN.sub(r"\1<redacted>", value)
-    return re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+", "Bearer <redacted>", value)
+    value = _SENSITIVE_ASSIGNMENT_PATTERN.sub(r"\1\2<redacted>\3", value)
+    return _API_TOKEN_PATTERN.sub("sk-<redacted>", value)
+
+
+def redact_observed_text(value: str) -> str:
+    """Redact common credentials from bounded command or diagnostic text."""
+
+    text = str(value or "")
+    if _AUTH_PROFILE_MARKER_PATTERN.search(text):
+        return "<redacted sensitive authentication profile output>"
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return _redact_sensitive_values(text)
+
+    def redact_json(item: Any) -> Any:
+        if isinstance(item, dict):
+            return {
+                key: (
+                    "<redacted>"
+                    if _SENSITIVE_KEY_PATTERN.search(str(key))
+                    else redact_json(child)
+                )
+                for key, child in item.items()
+            }
+        if isinstance(item, list):
+            return [redact_json(child) for child in item]
+        if isinstance(item, str):
+            return _redact_sensitive_values(item)
+        return item
+
+    return json.dumps(redact_json(parsed), ensure_ascii=False, separators=(",", ":"))
 
 
 def bounded_exception_message(exc: BaseException) -> str:

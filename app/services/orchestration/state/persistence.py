@@ -45,6 +45,14 @@ from ..types import FailureEnvelope, ValidationVerdict
 logger = logging.getLogger(__name__)
 
 
+class VerificationEvidencePersistenceError(RuntimeError):
+    """Raised when a required verification result cannot be made durable."""
+
+
+_PRIVATE_VERIFICATION_OUTPUT_MAX_BYTES = 4096
+_PRIVATE_VERIFICATION_COMMAND_MAX_BYTES = 4096
+
+
 @dataclass
 class CheckpointContext:
     task_id: Optional[int] = None
@@ -966,6 +974,115 @@ def append_orchestration_event(
         except Exception:
             pass
     return payload
+
+
+def append_verification_execution_evidence(
+    *,
+    project_dir: Any,
+    project_id: Optional[int],
+    session_id: int,
+    task_id: int,
+    task_execution_id: Optional[int],
+    evidence: Dict[str, Any],
+) -> str:
+    """Append one redacted verification record to private durable control state."""
+
+    location = coerce_control_state_location(project_dir, project_id=project_id)
+    events_dir = control_state_family_dir(
+        location, FAMILY_EVENTS, project_id=project_id
+    )
+    events_dir.mkdir(parents=True, exist_ok=True)
+    execution_component = (
+        str(int(task_execution_id)) if task_execution_id is not None else "unknown"
+    )
+    path = events_dir / (
+        f"verification_session_{int(session_id)}_task_{int(task_id)}_"
+        f"execution_{execution_component}.jsonl"
+    )
+    payload = dict(evidence)
+    payload.setdefault("project_id", project_id)
+    payload.setdefault("session_id", int(session_id))
+    payload.setdefault("task_id", int(task_id))
+    payload.setdefault("task_execution_id", task_execution_id)
+    from app.services.orchestration.diagnostics.outcome_observability import (
+        redact_observed_text,
+    )
+
+    for field_name in ("command", "declared_command"):
+        if not isinstance(payload.get(field_name), str):
+            continue
+        raw_value = payload[field_name]
+        payload.setdefault(
+            f"{field_name}_sha256",
+            hashlib.sha256(raw_value.encode("utf-8", errors="replace")).hexdigest(),
+        )
+        try:
+            safe_value = redact_observed_text(raw_value)
+        except Exception:
+            safe_value = ""
+            payload["capture_error"] = payload.get("capture_error") or (
+                "command_redaction_failed"
+            )
+        safe_bytes = safe_value.encode("utf-8", errors="replace")
+        was_redacted = safe_value != raw_value
+        was_truncated = len(safe_bytes) > _PRIVATE_VERIFICATION_COMMAND_MAX_BYTES
+        payload[field_name] = safe_bytes[
+            :_PRIVATE_VERIFICATION_COMMAND_MAX_BYTES
+        ].decode("utf-8", errors="ignore")
+        payload[f"{field_name}_redacted"] = bool(
+            payload.get(f"{field_name}_redacted") or was_redacted
+        )
+        payload[f"{field_name}_truncated"] = bool(
+            payload.get(f"{field_name}_truncated") or was_truncated
+        )
+    if isinstance(payload.get("bounded_output"), str):
+        try:
+            safe_output = redact_observed_text(payload["bounded_output"])
+            safe_output_bytes = safe_output.encode("utf-8", errors="replace")
+            output_was_truncated = len(safe_output_bytes) > (
+                _PRIVATE_VERIFICATION_OUTPUT_MAX_BYTES
+            )
+            payload["bounded_output"] = safe_output_bytes[
+                :_PRIVATE_VERIFICATION_OUTPUT_MAX_BYTES
+            ].decode("utf-8", errors="ignore")
+            payload["output_truncated"] = bool(
+                payload.get("output_truncated") or output_was_truncated
+            )
+        except Exception:
+            payload["bounded_output"] = None
+            payload["capture_error"] = payload.get("capture_error") or (
+                "output_redaction_failed"
+            )
+    line = (json.dumps(payload, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor: Optional[int] = None
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        os.fchmod(descriptor, 0o600)
+        from app.services.workspace.file_lock import fcntl
+
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        view = memoryview(line)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("verification evidence write returned no bytes")
+            view = view[written:]
+        os.fsync(descriptor)
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except Exception as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise VerificationEvidencePersistenceError(
+            "Could not persist verification evidence in control state"
+        ) from exc
+    else:
+        os.close(descriptor)
+    return path.name
 
 
 def attach_failure_envelope(
