@@ -3,6 +3,7 @@
 import asyncio
 import difflib
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -1627,17 +1628,40 @@ def _run_evaluator(
             "The verdict line must begin at the start of its own line and contain only VERDICT: PASS or VERDICT: NEEDS_REVIEW. Do not put a verdict inline with another field.\n"
             "NOTES must be the final content line. After the notes line, output only permitted trailing whitespace.\n"
         )
-        runtime_result = asyncio.run(
-            runtime_service.execute_task(
-                evaluator_prompt,
-                timeout_seconds=COMPLETION_REPAIR_TIMEOUT_SECONDS,
-                diagnostic_label="EVALUATOR_RESPONSE_EVIDENCE",
-                diagnostic_metadata={
-                    "task_execution_id": task_execution_id,
-                    "evaluator_invocation_id": evaluator_invocation_id,
-                },
-            )
+        execute_task = runtime_service.execute_task
+        runtime_kwargs: Dict[str, Any] = {
+            "timeout_seconds": COMPLETION_REPAIR_TIMEOUT_SECONDS
+        }
+        try:
+            execute_parameters = inspect.signature(execute_task).parameters
+        except (TypeError, ValueError):
+            execute_parameters = {}
+        accepts_extra_keywords = any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in execute_parameters.values()
         )
+        # Diagnostic capture is an optional runtime capability. Keep older or
+        # test runtimes callable while passing the metadata to OpenClaw, whose
+        # execute_task signature explicitly supports these keywords.
+        diagnostic_kwargs = {
+            "diagnostic_label": "EVALUATOR_RESPONSE_EVIDENCE",
+            "diagnostic_metadata": {
+                "task_execution_id": task_execution_id,
+                "evaluator_invocation_id": evaluator_invocation_id,
+            },
+        }
+        for name, value in diagnostic_kwargs.items():
+            parameter = execute_parameters.get(name)
+            if accepts_extra_keywords or (
+                parameter is not None
+                and parameter.kind
+                in {
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                }
+            ):
+                runtime_kwargs[name] = value
+        runtime_result = asyncio.run(execute_task(evaluator_prompt, **runtime_kwargs))
         runtime_status = (
             runtime_result.get("status") if isinstance(runtime_result, dict) else None
         )

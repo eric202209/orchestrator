@@ -347,7 +347,7 @@ def test_evaluator_diagnostic_event_survives_runtime_workspace_disposal(tmp_path
     events = [json.loads(line) for line in event_files[0].read_text().splitlines()]
     event = next(item for item in events if item["event_type"] == "evaluator_result")
     diagnostics = event["details"]["evaluator_diagnostics"]
-    assert event["event_type"] == "EVALUATOR_RESULT"
+    assert event["event_type"] == "evaluator_result"
     assert diagnostics["task_execution_id"] == 388
     assert diagnostics["evaluator_invocation_id"]
     assert event_files[0].is_file()
