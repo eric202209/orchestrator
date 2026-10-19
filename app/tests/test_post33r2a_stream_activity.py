@@ -85,7 +85,10 @@ async def _invoke(
             cwd=cwd,
             strict_provider_result=True,
         )
-    except BaseException:
+    except BaseException as exc:
+        diagnostics = getattr(exc, "runtime_diagnostics", None)
+        if isinstance(diagnostics, dict):
+            return None, diagnostics
         return None, _last_diagnostics(service)
     return process, diagnostics
 
@@ -192,6 +195,28 @@ async def test_diagnostic_only_stderr_timeout_has_no_partial_model_response(tmp_
 
 
 @pytest.mark.asyncio
+async def test_timeout_log_uses_metadata_only_schema(tmp_path):
+    service = _service()
+    canary = "synthetic-timeout-response-canary"
+    partial = json.dumps({"payloads": [{"text": canary}]})
+
+    _, runtime_diagnostics = await _invoke(
+        service,
+        f"import sys, time; print({partial!r}, file=sys.stderr, flush=True); time.sleep(60)",
+        str(tmp_path),
+        timeout_seconds=0.2,
+    )
+
+    persisted = _last_diagnostics(service)
+    assert runtime_diagnostics["timed_out"] is True
+    assert persisted["diagnostic_schema_version"] == 2
+    assert persisted["content_omitted"] is True
+    assert "stdout_tail" not in persisted
+    assert "stderr_tail" not in persisted
+    assert canary not in json.dumps(persisted)
+
+
+@pytest.mark.asyncio
 async def test_partial_stderr_model_response_is_distinguished(tmp_path):
     service = _service()
     partial = '{"payloads":[{"text":"partial stderr response"}'
@@ -295,10 +320,12 @@ async def test_caller_cancellation_is_distinguished_and_cleaned(tmp_path):
     await asyncio.sleep(0.05)
     task.cancel()
 
-    with pytest.raises(asyncio.CancelledError):
+    with pytest.raises(asyncio.CancelledError) as raised:
         await task
 
-    diagnostics = _last_diagnostics(service)
+    diagnostics = getattr(raised.value, "runtime_diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        diagnostics = _last_diagnostics(service)
     assert diagnostics["activity_classification"] == "caller_cancelled"
     assert diagnostics["terminal_reason"] == "caller_cancelled"
     assert diagnostics["cleanup_status"] == "completed"

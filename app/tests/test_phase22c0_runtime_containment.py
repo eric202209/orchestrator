@@ -19,6 +19,7 @@ from app.services.agents.openclaw_service import (
     OpenClawAgentSelectionError,
     OpenClawSessionService,
 )
+from app.services.observability.openclaw_diagnostics import openclaw_diagnostic_message
 from app.services.agents.runtime_configuration import (
     BackendRole,
     RoleRuntimeConfiguration,
@@ -89,6 +90,11 @@ def test_no_matching_agent_fails_closed(monkeypatch, tmp_path):
     logged = []
     service._log_entry = lambda level, message, **kwargs: logged.append(
         (level, message)
+    )
+    service._log_openclaw_diagnostic = (
+        lambda event, *_args, level="INFO", **_kwargs: logged.append(
+            (level, openclaw_diagnostic_message(event))
+        )
     )
 
     with pytest.raises(OpenClawAgentSelectionError) as exc_info:
@@ -591,6 +597,11 @@ def test_workspace_guard_fails_closed_when_no_evidence_at_all(tmp_path):
     logged = []
     service._log_entry = lambda level, message, **kwargs: logged.append(
         (level, message)
+    )
+    service._log_openclaw_diagnostic = (
+        lambda event, *_args, level="INFO", **_kwargs: logged.append(
+            (level, openclaw_diagnostic_message(event))
+        )
     )
 
     started_at = time.time() + 1  # nothing in tmp_path is newer than "now + 1s"

@@ -7,6 +7,10 @@ instead of being duplicated in each split file.
 """
 
 from app.services.agents.openclaw_service import OpenClawSessionService
+from app.services.observability.openclaw_diagnostics import (
+    build_openclaw_diagnostic_metadata,
+    openclaw_diagnostic_message,
+)
 
 
 def _stub_read_only_discovery_provider(monkeypatch):
@@ -113,4 +117,18 @@ def _openclaw_parse_service():
         )
 
     service._log_entry = log_entry
+
+    def diagnostic_log(event, diagnostics, *, level="INFO", failure_category=None):
+        metadata = build_openclaw_diagnostic_metadata(
+            event, diagnostics, failure_category=failure_category
+        )
+        service.logged_entries.append(
+            {
+                "level": level,
+                "message": openclaw_diagnostic_message(metadata["diagnostic_event"]),
+                "metadata": metadata,
+            }
+        )
+
+    service._log_openclaw_diagnostic = diagnostic_log
     return service

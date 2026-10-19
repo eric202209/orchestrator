@@ -71,10 +71,15 @@ def test_openclaw_parse_normalizes_stderr_only_model_output():
     assert result["output_channel_used"] == "stderr"
     assert result["stderr_contains_model_content"] is True
     assert result["stderr_contains_only_logs"] is False
-    assert any(
-        "normalized model response from stderr" in entry["message"]
+    parser_event = next(
+        entry
         for entry in service.logged_entries
+        if entry["metadata"]["diagnostic_event"] == "openclaw_response_parser"
     )
+    assert parser_event["message"] == "[OPENCLAW][RESPONSE_PARSER] content omitted"
+    assert parser_event["metadata"]["parser_outcome"] == "parsed"
+    assert parser_event["metadata"]["selected_response_channel"] == "stderr"
+    assert parser_event["metadata"]["response_present"] is True
 
 
 def test_openclaw_parse_prefers_stdout_for_mixed_model_output():

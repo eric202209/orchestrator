@@ -224,7 +224,7 @@ def _parse_openclaw_response_impl(
         metadata = channel_metadata(stdout, stderr)
 
         if return_code != 0 and stderr:
-            log_entry("ERROR", f"OpenClaw CLI error: {stderr[:500]}")
+            log_entry("ERROR", "[OPENCLAW_PARSER][CLI_NONZERO_EXIT]")
     else:
         # Already a string (from streaming mode)
         stdout = result.strip()
@@ -238,7 +238,7 @@ def _parse_openclaw_response_impl(
     if "context size has been exceeded" in cli_error_lower or (
         "context" in cli_error_lower and "exceeded" in cli_error_lower
     ):
-        log_entry("ERROR", f"Context window exceeded: {cli_error_message}")
+        log_entry("ERROR", "[OPENCLAW_PARSER][CONTEXT_LIMIT]")
         return {
             "status": "failed",
             "mode": "real",
@@ -248,7 +248,7 @@ def _parse_openclaw_response_impl(
             "logs": [
                 {
                     "level": "ERROR",
-                    "message": cli_error_message,
+                    "message": "Context window exceeded; content omitted",
                     "timestamp": datetime.now(UTC).isoformat(),
                 }
             ],
@@ -260,14 +260,13 @@ def _parse_openclaw_response_impl(
             metadata = channel_metadata("", recovered_output)
             log_entry(
                 "WARN",
-                "[OPENCLAW] stdout was empty; normalized model response from stderr",
-                metadata=json.dumps(metadata),
+                "[OPENCLAW_PARSER][STDERR_RESPONSE_RECOVERED]",
             )
             stdout = recovered_output
 
     # CRITICAL FIX: Validate response before parsing
     if not stdout or stdout in ['""', "''", '"', "'"]:
-        log_entry("ERROR", "[OPENCLAW] CRITICAL: Empty or invalid response")
+        log_entry("ERROR", "[OPENCLAW_PARSER][EMPTY_RESPONSE]")
         return {
             "status": "failed",
             "mode": "real",
@@ -294,7 +293,7 @@ def _parse_openclaw_response_impl(
                 f"{expected_session_id}, received "
                 f"{response_session_id or 'no session identity'}"
             )
-            log_entry("ERROR", f"[OPENCLAW] {error}")
+            log_entry("ERROR", "[OPENCLAW_PARSER][PROVENANCE_MISMATCH]")
             return {
                 "status": "failed",
                 "mode": "real",
@@ -331,7 +330,7 @@ def _parse_openclaw_response_impl(
                 timeout_error = cli_error_message or "Task timed out"
             log_entry(
                 "ERROR",
-                f"[OPENCLAW] Aborted structured response surfaced as failure: {timeout_error}",
+                "[OPENCLAW_PARSER][ABORTED_RESPONSE]",
             )
             return {
                 "status": "failed",
@@ -366,7 +365,7 @@ def _parse_openclaw_response_impl(
         ):
             log_entry(
                 "ERROR",
-                f"[OPENCLAW] DETECTED GARBLED OUTPUT AFTER JSON PARSE FAILURE: '{stdout[:200]}'",
+                "[OPENCLAW_PARSER][GARBLED_OUTPUT]",
             )
             return {
                 "status": "failed",
@@ -377,7 +376,7 @@ def _parse_openclaw_response_impl(
                 "logs": [
                     {
                         "level": "ERROR",
-                        "message": f"Garbled output detected: '{stdout[:500]}'",
+                        "message": "Garbled output detected; content omitted",
                         "timestamp": datetime.now(UTC).isoformat(),
                     }
                 ],
@@ -400,7 +399,7 @@ def _parse_openclaw_response_impl(
         # Handle specific error types
         if "context" in error_str.lower() and "token" in error_str.lower():
             # Context window error - provide helpful message
-            log_entry("ERROR", f"Context window exceeded: {error_str}")
+            log_entry("ERROR", "[OPENCLAW_PARSER][CONTEXT_EXCEPTION]")
             return {
                 "status": "failed",
                 "mode": "real",
@@ -409,7 +408,7 @@ def _parse_openclaw_response_impl(
                 "logs": [
                     {
                         "level": "ERROR",
-                        "message": f"Context window exceeded: {error_str}",
+                        "message": "Context window exceeded; content omitted",
                         "timestamp": datetime.now(UTC).isoformat(),
                     }
                 ],
@@ -418,7 +417,7 @@ def _parse_openclaw_response_impl(
             }
         elif "signal" in error_str.lower() or "killed" in error_str.lower():
             # Process was killed (likely OOM or timeout)
-            log_entry("ERROR", f"Process was killed: {error_str}")
+            log_entry("ERROR", "[OPENCLAW_PARSER][PROCESS_TERMINATED]")
             return {
                 "status": "failed",
                 "mode": "real",
@@ -427,7 +426,7 @@ def _parse_openclaw_response_impl(
                 "logs": [
                     {
                         "level": "ERROR",
-                        "message": f"Process was killed: {error_str}",
+                        "message": "Process was killed; content omitted",
                         "timestamp": datetime.now(UTC).isoformat(),
                     }
                 ],
@@ -435,7 +434,7 @@ def _parse_openclaw_response_impl(
                 "error": "Process killed",
             }
         else:
-            log_entry("ERROR", f"Error executing task via OpenClaw: {error_str}")
+            log_entry("ERROR", "[OPENCLAW_PARSER][PARSER_EXCEPTION]")
             return {
                 "status": "failed",
                 "mode": "real",
@@ -444,7 +443,7 @@ def _parse_openclaw_response_impl(
                 "logs": [
                     {
                         "level": "ERROR",
-                        "message": f"Error: {error_str}",
+                        "message": "Execution error; content omitted",
                         "timestamp": datetime.now(UTC).isoformat(),
                     }
                 ],

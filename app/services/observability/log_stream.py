@@ -11,6 +11,10 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import func, or_
 from app.models import LogEntry, Session as SessionModel
+from app.services.observability.openclaw_diagnostics import (
+    normalize_openclaw_diagnostic_metadata,
+    openclaw_diagnostic_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,16 +105,7 @@ class LogStreamService:
 
         # Convert to dict format
         for log in logs:
-            log_dict = {
-                "id": log.id,
-                "session_id": log.session_id,
-                "task_id": log.task_id,
-                "message": log.message,
-                "level": log.level,
-                "timestamp": log.created_at.isoformat() if log.created_at else None,
-                "metadata": json.loads(log.log_metadata) if log.log_metadata else {},
-                "session_instance_id": log.session_instance_id,
-            }
+            log_dict = self._serialize_log_entry(log)
 
             # Skip verbose tool schema logs (propertiesCount, schemaChars, etc.)
             if self._is_verbose_tool_log(log_dict):
@@ -125,6 +120,28 @@ class LogStreamService:
                 continue
 
             yield log_dict
+
+    @staticmethod
+    def _serialize_log_entry(log: LogEntry) -> Dict[str, Any]:
+        """Preserve legacy rows and validate v2 OpenClaw diagnostics for APIs."""
+
+        metadata = json.loads(log.log_metadata) if log.log_metadata else {}
+        safe_metadata = normalize_openclaw_diagnostic_metadata(metadata)
+        message = log.message
+        if safe_metadata is not None:
+            metadata = safe_metadata
+            message = openclaw_diagnostic_message(safe_metadata["diagnostic_event"])
+
+        return {
+            "id": log.id,
+            "session_id": log.session_id,
+            "task_id": log.task_id,
+            "message": message,
+            "level": log.level,
+            "timestamp": log.created_at.isoformat() if log.created_at else None,
+            "metadata": metadata,
+            "session_instance_id": log.session_instance_id,
+        }
 
     def _is_verbose_tool_log(self, log_dict: Dict[str, Any]) -> bool:
         """Check if this is a verbose tool schema log that should be filtered out"""
@@ -219,7 +236,7 @@ class LogStreamService:
             "recent_logs": [
                 {
                     "id": log.id,
-                    "message": log.message[:100],
+                    "message": self._serialize_log_entry(log)["message"][:100],
                     "level": log.level,
                     "timestamp": log.created_at.isoformat() if log.created_at else None,
                 }

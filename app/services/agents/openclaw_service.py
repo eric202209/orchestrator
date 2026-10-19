@@ -97,6 +97,13 @@ from app.services.observability import (
     start_langfuse_observation,
     update_langfuse_observation,
 )
+from app.services.observability.openclaw_diagnostics import (
+    OpenClawDiagnosticEvent,
+    build_openclaw_diagnostic_metadata,
+    event_for_diagnostic_label,
+    event_for_invocation_kind,
+    openclaw_diagnostic_message,
+)
 from app.services.observability.planning_provider_evidence import (
     begin_planning_provider_evidence_from_runtime,
 )
@@ -364,9 +371,90 @@ class OpenClawSessionService:
                 result,
                 expected_session_id=expected_session_id,
             )
+
+        parser_diagnostics = {
+            "[OPENCLAW_PARSER][CLI_NONZERO_EXIT]": (
+                "provider_failure",
+                "failed",
+                "cli_nonzero_exit",
+            ),
+            "[OPENCLAW_PARSER][CONTEXT_LIMIT]": (
+                "provider_failure",
+                "failed",
+                "runtime_error",
+            ),
+            "[OPENCLAW_PARSER][STDERR_RESPONSE_RECOVERED]": (
+                "response_parse_failure",
+                "parsed",
+                None,
+            ),
+            "[OPENCLAW_PARSER][EMPTY_RESPONSE]": (
+                "response_parse_failure",
+                "response_missing",
+                "response_parse_failure",
+            ),
+            "[OPENCLAW_PARSER][PROVENANCE_MISMATCH]": (
+                "response_parse_failure",
+                "invalid_envelope",
+                "response_parse_failure",
+            ),
+            "[OPENCLAW_PARSER][ABORTED_RESPONSE]": (
+                "provider_failure",
+                "failed",
+                "runtime_error",
+            ),
+            "[OPENCLAW_PARSER][GARBLED_OUTPUT]": (
+                "response_parse_failure",
+                "invalid_json",
+                "response_parse_failure",
+            ),
+            "Failed to parse JSON, using raw output": (
+                "response_parse_failure",
+                "invalid_json",
+                None,
+            ),
+            "[OPENCLAW_PARSER][CONTEXT_EXCEPTION]": (
+                "provider_failure",
+                "failed",
+                "runtime_error",
+            ),
+            "[OPENCLAW_PARSER][PROCESS_TERMINATED]": (
+                "provider_failure",
+                "failed",
+                "interrupted",
+            ),
+            "[OPENCLAW_PARSER][PARSER_EXCEPTION]": (
+                "response_parse_failure",
+                "failed",
+                "response_parse_failure",
+            ),
+        }
+
+        def log_parser_diagnostic(level: str, _message: str, **_kwargs: Any) -> None:
+            category, outcome, failure = parser_diagnostics.get(
+                _message,
+                ("response_parse_failure", "failed", "response_parse_failure"),
+            )
+            diagnostic_data: Dict[str, Any] = {
+                "diagnostic_category": category,
+                "parser_outcome": outcome,
+            }
+            if _message == "[OPENCLAW_PARSER][STDERR_RESPONSE_RECOVERED]":
+                diagnostic_data["selected_response_channel"] = "stderr"
+                diagnostic_data["response_present"] = True
+            if isinstance(result, subprocess.CompletedProcess):
+                diagnostic_data["return_code"] = result.returncode
+            safe_level = level if level in {"INFO", "WARN", "ERROR"} else "INFO"
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.RESPONSE_PARSER,
+                diagnostic_data,
+                level=safe_level,
+                failure_category=failure,
+            )
+
         return _parse_openclaw_cli_response(
             result,
-            self._log_entry,
+            log_parser_diagnostic,
             expected_session_id=expected_session_id,
             capture_diagnostics=capture_response_diagnostics,
         )
@@ -720,10 +808,15 @@ class OpenClawSessionService:
 
         def _fail(message: str) -> None:
             self._last_selected_openclaw_agent_id = None
-            try:
-                self._log_entry("ERROR", f"[OPENCLAW] {message}", commit=True)
-            except AttributeError:
-                pass
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.EXECUTION_FAILURE,
+                {
+                    "diagnostic_category": "execution_failure",
+                    "runtime_status": "failed",
+                },
+                level="ERROR",
+                failure_category="runtime_error",
+            )
             raise OpenClawAgentSelectionError(message)
 
         if not cwd:
@@ -1416,7 +1509,15 @@ class OpenClawSessionService:
                 "OpenClaw reported workspaceDir outside the resolved project root: "
                 f"{reported_workspace_dir} (expected under {expected_project_root})"
             )
-            self._log_entry("ERROR", f"[OPENCLAW] {error}", commit=True)
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.WORKSPACE_GUARD,
+                {
+                    "diagnostic_category": "workspace_contract_failure",
+                    "runtime_status": "failed",
+                },
+                level="ERROR",
+                failure_category="workspace_contract_failure",
+            )
             return {
                 **result,
                 "status": "failed",
@@ -1451,7 +1552,15 @@ class OpenClawSessionService:
                     "workspace evidence is not treated as success (Phase 22C-0 "
                     "containment)."
                 )
-                self._log_entry("ERROR", f"[OPENCLAW] {error}", commit=True)
+                self._log_openclaw_diagnostic(
+                    OpenClawDiagnosticEvent.WORKSPACE_GUARD,
+                    {
+                        "diagnostic_category": "workspace_contract_failure",
+                        "runtime_status": "failed",
+                    },
+                    level="ERROR",
+                    failure_category="workspace_contract_failure",
+                )
                 return {
                     **result,
                     "status": "failed",
@@ -1567,30 +1676,32 @@ class OpenClawSessionService:
             in (pollution.get("known_scaffold_matches") or [])
         ]
         if canonical_scaffolds:
-            self._log_entry(
-                "WARN",
-                "[OPENCLAW][RUNTIME_POLLUTION] New OpenClaw runtime scaffold "
-                f"files appeared in the project root this run: "
-                f"{canonical_scaffolds}. Phase 22C-0 detects "
-                "and reports this; it does not delete anything.",
-                commit=True,
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.WORKSPACE_GUARD,
+                {
+                    "diagnostic_category": "runtime_pollution",
+                    "pollution_classification": "canonical_scaffold",
+                    "pollution_entry_count": len(canonical_scaffolds),
+                },
+                level="WARN",
             )
         elif runtime_scaffolds:
-            self._log_entry(
-                "INFO",
-                "[OPENCLAW][RUNTIME_POLLUTION] Provider scaffold remained inside "
-                f"the disposable Runtime Workspace: {runtime_scaffolds}; "
-                "sandbox disposal owns cleanup.",
-                commit=True,
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.WORKSPACE_GUARD,
+                {
+                    "diagnostic_category": "runtime_pollution",
+                    "pollution_classification": "runtime_workspace_scaffold",
+                    "pollution_entry_count": len(runtime_scaffolds),
+                },
             )
         elif pollution.get("unclassified_new_entries"):
-            self._log_entry(
-                "INFO",
-                "[OPENCLAW][RUNTIME_POLLUTION] New top-level entries appeared "
-                f"in the project root this run: "
-                f"{pollution['unclassified_new_entries']}. May be legitimate "
-                "task output; recorded for investigation.",
-                commit=True,
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.WORKSPACE_GUARD,
+                {
+                    "diagnostic_category": "runtime_pollution",
+                    "pollution_classification": "unclassified_entries",
+                    "pollution_entry_count": len(pollution["unclassified_new_entries"]),
+                },
             )
 
     @staticmethod
@@ -1755,26 +1866,6 @@ class OpenClawSessionService:
             return "debug_repair_wait_for"
         return "planning_wait_for"
 
-    @staticmethod
-    def _diagnostic_text_tail(text: str, max_chars: int = 500) -> str:
-        """Return a bounded, redacted stream tail for timeout diagnostics."""
-
-        if not text:
-            return ""
-        tail = text[-max_chars:]
-        tail = re.sub(
-            r"(?i)(api[_-]?key|access[_-]?token|secret|password|bearer)\s*[:=]\s*"
-            r"['\"]?[^'\"\s,}]+",
-            r"\1=<redacted>",
-            tail,
-        )
-        tail = re.sub(
-            r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+",
-            "bearer <redacted>",
-            tail,
-        )
-        return tail
-
     def _should_use_structured_debug_repair_direct_chat(
         self, diagnostic_label: Optional[str]
     ) -> bool:
@@ -1926,10 +2017,9 @@ class OpenClawSessionService:
                         partial_response_available_in_current_nonstreaming_path=None,
                     )
                 )
-            except Exception as exc:
+            except Exception:
                 logger.warning(
-                    "[OPENCLAW] bounded planning provider evidence could not start: %s",
-                    exc,
+                    "[OPENCLAW] bounded planning provider evidence could not start"
                 )
         diagnostics: Dict[str, Any] = {
             "timeout_seconds": timeout_seconds,
@@ -2033,26 +2123,18 @@ class OpenClawSessionService:
                     if not first_output_logged:
                         first_output_logged = True
                         first_output_elapsed = round(now - started_at, 3)
-                        self._log_entry(
-                            "INFO",
-                            (
-                                f"[OPENCLAW][{invocation_kind.upper()}_DIAGNOSTICS] "
-                                "inference stream output observed"
-                            ),
-                            metadata=json.dumps(
-                                {
-                                    "diagnostic_category": (
-                                        "slow_inference"
-                                        if first_output_elapsed >= 5
-                                        else "inference_progress"
-                                    ),
-                                    "first_output_after_seconds": first_output_elapsed,
-                                    "invocation_kind": invocation_kind,
-                                    "timeout_seconds": timeout_seconds,
-                                    "no_output_timeout_seconds": no_output_timeout_seconds,
-                                }
-                            ),
-                            commit=True,
+                        self._log_openclaw_diagnostic(
+                            OpenClawDiagnosticEvent.STREAM_PROGRESS,
+                            {
+                                "diagnostic_category": (
+                                    "slow_inference"
+                                    if first_output_elapsed >= 5
+                                    else "inference_progress"
+                                ),
+                                "first_output_after_seconds": first_output_elapsed,
+                                "invocation_kind": invocation_kind,
+                                "timeout_seconds": timeout_seconds,
+                            },
                         )
                 if previous_output_at is not None:
                     gap = now - previous_output_at
@@ -2098,7 +2180,16 @@ class OpenClawSessionService:
                     and line_text
                     and self._should_emit_stderr_line(line_text)
                 ):
-                    self._log_entry("WARN", line_text, commit=True)
+                    self._log_openclaw_diagnostic(
+                        OpenClawDiagnosticEvent.OUTPUT_CHUNK,
+                        {
+                            "stream_channel": stream_name,
+                            "stream_byte_count": len(line),
+                            "stream_sha256": hashlib.sha256(line).hexdigest(),
+                            "response_present": partial_response_seen,
+                        },
+                        level="WARN",
+                    )
 
         stream_task = asyncio.ensure_future(
             asyncio.gather(
@@ -2325,12 +2416,9 @@ class OpenClawSessionService:
                 else:
                     diagnostics["diagnostic_category"] = "provider_success"
             cleanup_git_containment_shim(git_guard_shim_dir)
-            self._log_entry(
-                "INFO",
-                "[OPENCLAW][REPAIR_DIAGNOSTICS] "
-                + self._stream_diagnostics_summary(diagnostics),
-                metadata=json.dumps(diagnostics),
-                commit=True,
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.REPAIR_DIAGNOSTICS,
+                {**diagnostics, "invocation_kind": invocation_kind},
             )
 
         stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
@@ -2345,12 +2433,35 @@ class OpenClawSessionService:
             diagnostics,
         )
 
+    @staticmethod
+    def _provider_evidence_partial_snapshot(
+        stdout_text: str | None, stderr_text: str | None
+    ) -> str | None:
+        """Build the legacy bounded snapshot for the separate evidence recorder."""
+
+        text = stdout_text or stderr_text or ""
+        if not text:
+            return None
+        tail = text[-500:]
+        tail = re.sub(
+            r"(?i)(api[_-]?key|access[_-]?token|secret|password|bearer)\s*[:=]\s*"
+            r"['\"]?[^'\"\s,}]+",
+            r"\1=<redacted>",
+            tail,
+        )
+        return re.sub(
+            r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+",
+            "bearer <redacted>",
+            tail,
+        )
+
     def _finish_active_planning_provider_evidence(
         self,
         *,
         exception: BaseException | None = None,
         diagnostics: Optional[Dict[str, Any]] = None,
         result: Optional[Dict[str, Any]] = None,
+        partial_content_snapshot: str | None = None,
     ) -> Dict[str, Any]:
         recorder = getattr(self, "_active_planning_provider_evidence", None)
         self._active_planning_provider_evidence = None
@@ -2361,9 +2472,7 @@ class OpenClawSessionService:
             return recorder.fail(
                 exception,
                 response_received=bool(diagnostics.get("provider_response_received")),
-                partial_content_snapshot=(
-                    diagnostics.get("stdout_tail") or diagnostics.get("stderr_tail")
-                ),
+                partial_content_snapshot=partial_content_snapshot,
                 partial_response_available=bool(
                     diagnostics.get("partial_response_seen")
                 ),
@@ -2409,9 +2518,7 @@ class OpenClawSessionService:
                 result.get("provider_request_correlation_id")
                 or result_diagnostics.get("provider_request_correlation_id")
             ),
-            partial_content_snapshot=(
-                diagnostics.get("stdout_tail") or diagnostics.get("stderr_tail")
-            ),
+            partial_content_snapshot=partial_content_snapshot,
             partial_response_available=bool(diagnostics.get("partial_response_seen")),
         )
 
@@ -2556,10 +2663,12 @@ class OpenClawSessionService:
                 )
 
             return str(project_workspace.resolve())
-        except Exception as exc:
-            self._log_entry(
-                "WARN",
-                f"[OPENCLAW] Failed to resolve execution cwd, falling back to default: {exc}",
+        except Exception:
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.EXECUTION_FAILURE,
+                {"diagnostic_category": "execution_failure"},
+                level="WARN",
+                failure_category="runtime_error",
             )
             return None
 
@@ -2694,11 +2803,13 @@ class OpenClawSessionService:
             OpenClawSessionError: If session creation fails
         """
         try:
-            # Log session creation (commit immediately so WS stream shows it)
-            self._log_entry(
-                "INFO",
-                f"Creating OpenClaw session for task: {task_description[:100]}",
-                commit=True,
+            # Session lifecycle diagnostics are optional and carry no prompt text.
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.SESSION_START,
+                {
+                    "diagnostic_category": "inference_progress",
+                    "runtime_status": "not_started",
+                },
             )
 
             # Use the main OpenClaw session that already exists
@@ -2711,17 +2822,27 @@ class OpenClawSessionService:
                 f"orchestrator-task-{task_id_str}-{int(time.time())}"
             )
 
-            self._log_entry(
-                "INFO",
-                f"✅ OpenClaw session set to: {self.openclaw_session_key}",
-                commit=True,
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.SESSION_READY,
+                {
+                    "diagnostic_category": "inference_progress",
+                    "runtime_status": "running",
+                },
             )
 
             return self.openclaw_session_key
 
         except Exception as e:
             error_msg = f"Failed to create OpenClaw session: {str(e)}"
-            self._log_entry("ERROR", error_msg)
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.EXECUTION_FAILURE,
+                {
+                    "diagnostic_category": "execution_failure",
+                    "runtime_status": "failed",
+                },
+                level="ERROR",
+                failure_category="runtime_error",
+            )
             raise OpenClawSessionError(error_msg)
 
     async def create_openclaw_session(
@@ -2830,9 +2951,13 @@ class OpenClawSessionService:
                                         "context_overflow_retry": True,
                                     },
                                 }
-                            self._log_entry(
-                                "WARN",
-                                "[OPENCLAW] Context overflow detected; retrying once with a compact prompt",
+                            self._log_openclaw_diagnostic(
+                                OpenClawDiagnosticEvent.EXECUTION_RETRY,
+                                {
+                                    "diagnostic_category": "provider_failure",
+                                    "retry_attempt": 1,
+                                },
+                                level="WARN",
                             )
                             result = await self.execute_task_with_streaming(
                                 retry_prompt,
@@ -2844,28 +2969,38 @@ class OpenClawSessionService:
 
                 # OPTIMIZATION: Log performance metrics
                 duration = time.time() - start_time
-                self._log_entry(
-                    "INFO",
-                    f"[PERFORMANCE] Task executed in {duration:.2f}s (optimized prompt)",
+                self._log_openclaw_diagnostic(
+                    OpenClawDiagnosticEvent.PROCESS_RESULT,
+                    {
+                        "duration_seconds": duration,
+                        "runtime_status": result.get("status"),
+                    },
                 )
 
                 result_status = result.get("status")
                 if result_status == "completed":
-                    self._log_entry(
-                        "INFO",
-                        "[OPENCLAW] Request returned output; awaiting orchestration validation",
+                    self._log_openclaw_diagnostic(
+                        OpenClawDiagnosticEvent.PROCESS_RESULT,
+                        {
+                            "diagnostic_category": "provider_success",
+                            "runtime_status": "completed",
+                        },
                     )
                 elif result_status == "failed":
-                    self._log_entry(
-                        "ERROR",
-                        f"[OPENCLAW] Request failed before orchestration validation: "
-                        f"{result.get('error', 'Execution failed')}",
+                    self._log_openclaw_diagnostic(
+                        OpenClawDiagnosticEvent.EXECUTION_FAILURE,
+                        {
+                            "diagnostic_category": "execution_failure",
+                            "runtime_status": "failed",
+                        },
+                        level="ERROR",
+                        failure_category="runtime_error",
                     )
                 else:
-                    self._log_entry(
-                        "WARNING",
-                        f"[OPENCLAW] Request returned unexpected status before orchestration validation: "
-                        f"{result_status or 'unknown'}",
+                    self._log_openclaw_diagnostic(
+                        OpenClawDiagnosticEvent.EXECUTION_FAILURE,
+                        {"runtime_status": "unknown"},
+                        level="WARNING",
                     )
 
                 result.setdefault("backend", self.backend_descriptor.name)
@@ -2894,7 +3029,15 @@ class OpenClawSessionService:
 
             except Exception as e:
                 error_msg = f"Task execution failed: {str(e)}"
-                self._log_entry("ERROR", error_msg)
+                self._log_openclaw_diagnostic(
+                    OpenClawDiagnosticEvent.EXECUTION_FAILURE,
+                    {
+                        "diagnostic_category": "execution_failure",
+                        "runtime_status": "failed",
+                    },
+                    level="ERROR",
+                    failure_category="runtime_error",
+                )
                 update_langfuse_observation(
                     observation,
                     level="ERROR",
@@ -3061,7 +3204,13 @@ class OpenClawSessionService:
             callback: Function to receive log entries (log_level, message, metadata)
         """
         try:
-            self._log_entry("INFO", "Starting log streaming")
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.LOG_STREAM_START,
+                {
+                    "diagnostic_category": "inference_progress",
+                    "runtime_status": "running",
+                },
+            )
 
             # TODO: Implement actual log streaming
             # This would read from OpenClaw session logs and emit via callback
@@ -3074,8 +3223,16 @@ class OpenClawSessionService:
                 # Break for now (would be infinite loop in production)
                 break
 
-        except Exception as e:
-            self._log_entry("ERROR", f"Log streaming failed: {str(e)}")
+        except Exception:
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.EXECUTION_FAILURE,
+                {
+                    "diagnostic_category": "execution_failure",
+                    "runtime_status": "failed",
+                },
+                level="ERROR",
+                failure_category="runtime_error",
+            )
             raise
 
     async def execute_task_with_streaming(
@@ -3238,8 +3395,18 @@ class OpenClawSessionService:
                             ):
                                 continue
                             # Commit each streamed line so the session websocket,
-                            # which polls the database, can surface it immediately.
-                            self._log_entry(level, line_text, commit=True)
+                            # which polls the database, can surface a safe event
+                            # immediately without retaining provider content.
+                            self._log_openclaw_diagnostic(
+                                OpenClawDiagnosticEvent.OUTPUT_CHUNK,
+                                {
+                                    "stream_channel": stream_name,
+                                    "stream_byte_count": len(line),
+                                    "stream_sha256": hashlib.sha256(line).hexdigest(),
+                                    "response_present": partial_response_seen,
+                                },
+                                level=level,
+                            )
 
                             if log_callback:
                                 await log_callback(level, line_text)
@@ -3322,20 +3489,15 @@ class OpenClawSessionService:
                                 retry_delay, 3
                             ),
                         }
-                        self._log_entry(
-                            "WARN",
-                            (
-                                "[OPENCLAW] Local session file was locked; "
-                                f"retrying CLI call in {retry_delay:.2f}s "
-                                f"(attempt {cli_attempt + 1}/{max_lock_retry_attempts})"
-                            ),
-                            metadata=json.dumps(
-                                {
-                                    "event_type": "openclaw_cli_lock_retry",
-                                    **cli_lock_diagnostics,
-                                }
-                            ),
-                            commit=True,
+                        self._log_openclaw_diagnostic(
+                            OpenClawDiagnosticEvent.CLI_RETRY,
+                            {
+                                "diagnostic_category": "inference_progress",
+                                "retry_attempt": cli_attempt,
+                                "retry_max_attempts": max_lock_retry_attempts,
+                                "retry_delay_seconds": retry_delay,
+                            },
+                            level="WARN",
                         )
                         await asyncio.sleep(retry_delay)
                         continue
@@ -3357,10 +3519,9 @@ class OpenClawSessionService:
                         cleanup_status = stream_diagnostics.get(
                             "cleanup_status", "completed"
                         )
-                except Exception as exc:
+                except Exception:
                     logger.debug(
-                        "[OPENCLAW] Failed to terminate timed out process cleanly: %s",
-                        exc,
+                        "[OPENCLAW] Failed to terminate timed out process cleanly"
                     )
                 stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
                 stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
@@ -3381,8 +3542,6 @@ class OpenClawSessionService:
                         "stderr_chars": len(stderr_text),
                         "stdout_lines": len([line for line in stdout_chunks if line]),
                         "stderr_lines": len([line for line in stderr_chunks if line]),
-                        "stdout_tail": self._diagnostic_text_tail(stdout_text),
-                        "stderr_tail": self._diagnostic_text_tail(stderr_text),
                         **self._channel_metadata(stdout_text, stderr_text),
                         **cli_lock_diagnostics,
                         "timed_out": True,
@@ -3403,6 +3562,9 @@ class OpenClawSessionService:
                     }
                 )
                 timeout_error.runtime_diagnostics = stream_diagnostics
+                timeout_error.provider_evidence_partial_snapshot = (
+                    self._provider_evidence_partial_snapshot(stdout_text, stderr_text)
+                )
                 raise timeout_error
             except asyncio.CancelledError as exc:
                 cancelled = True
@@ -3416,14 +3578,19 @@ class OpenClawSessionService:
                         cleanup_status = stream_diagnostics.get(
                             "cleanup_status", "completed"
                         )
-                except Exception as cleanup_exc:
+                except Exception:
                     logger.debug(
-                        "[OPENCLAW] Failed to terminate cancelled process cleanly: %s",
-                        cleanup_exc,
+                        "[OPENCLAW] Failed to terminate cancelled process cleanly"
                     )
                 exc.runtime_diagnostics = stream_diagnostics
+                exc.provider_evidence_partial_snapshot = (
+                    self._provider_evidence_partial_snapshot(
+                        "\n".join(filter(None, stdout_chunks)).strip(),
+                        "\n".join(filter(None, stderr_chunks)).strip(),
+                    )
+                )
                 raise
-            except Exception:
+            except Exception as exc:
                 # Any other failure (e.g. an oversized stream line) must still
                 # terminate the live child rather than abandon it.
                 if process is not None and process.returncode is None:
@@ -3434,6 +3601,12 @@ class OpenClawSessionService:
                     cleanup_status = stream_diagnostics.get(
                         "cleanup_status", "completed"
                     )
+                exc.provider_evidence_partial_snapshot = (
+                    self._provider_evidence_partial_snapshot(
+                        "\n".join(filter(None, stdout_chunks)).strip(),
+                        "\n".join(filter(None, stderr_chunks)).strip(),
+                    )
+                )
                 raise
             finally:
                 stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
@@ -3496,8 +3669,6 @@ class OpenClawSessionService:
                         "stderr_chars": len(stderr_text),
                         "stdout_lines": len([line for line in stdout_chunks if line]),
                         "stderr_lines": len([line for line in stderr_chunks if line]),
-                        "stdout_tail": self._diagnostic_text_tail(stdout_text),
-                        "stderr_tail": self._diagnostic_text_tail(stderr_text),
                         **channel_metadata,
                         **cli_lock_diagnostics,
                         "output_token_estimate": self._estimate_token_count(
@@ -3552,20 +3723,21 @@ class OpenClawSessionService:
                 if activity_classification == "caller_cancelled":
                     stream_diagnostics["diagnostic_category"] = "caller_cancelled"
                 if diagnostic_label:
-                    self._log_entry(
-                        "INFO",
-                        f"[OPENCLAW][{diagnostic_label}_DIAGNOSTICS] "
-                        + self._stream_diagnostics_summary(stream_diagnostics),
-                        metadata=json.dumps(stream_diagnostics),
-                        commit=True,
+                    self._log_openclaw_diagnostic(
+                        event_for_diagnostic_label(diagnostic_label),
+                        stream_diagnostics,
                     )
             stdout_text = "\n".join(filter(None, stdout_chunks)).strip()
             stderr_text = "\n".join(filter(None, stderr_chunks)).strip()
 
-            self._log_entry(
-                "INFO",
-                f"[OPENCLAW] Return code: {return_code}, stdout_len: {len(stdout_text)}, stderr_len: {len(stderr_text)}",
-                commit=True,
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.PROCESS_RESULT,
+                {
+                    **stream_diagnostics,
+                    "return_code": return_code,
+                    "stdout_chars": len(stdout_text),
+                    "stderr_chars": len(stderr_text),
+                },
             )
 
             completed = subprocess.CompletedProcess(
@@ -3634,16 +3806,21 @@ class OpenClawSessionService:
                     await self._terminate_process_with_bounded_reap(
                         process, stream_diagnostics
                     )
-            except Exception as exc:
-                logger.debug(
-                    "[OPENCLAW] Failed to terminate timed out process cleanly: %s",
-                    exc,
-                )
+            except Exception:
+                logger.debug("[OPENCLAW] Failed to terminate timed out process cleanly")
 
             raise OpenClawSessionError(f"Task timed out after {timeout_seconds}s")
 
-        except Exception as e:
-            self._log_entry("ERROR", f"Real mode execution failed: {str(e)}")
+        except Exception:
+            self._log_openclaw_diagnostic(
+                OpenClawDiagnosticEvent.EXECUTION_FAILURE,
+                {
+                    "diagnostic_category": "execution_failure",
+                    "runtime_status": "failed",
+                },
+                level="ERROR",
+                failure_category="runtime_error",
+            )
             raise
         finally:
             cleanup_git_containment_shim(git_guard_shim_dir)
@@ -3898,7 +4075,11 @@ class OpenClawSessionService:
         except subprocess.TimeoutExpired as exc:
             diagnostics = dict(getattr(exc, "runtime_diagnostics", {}) or {})
             evidence = self._finish_active_planning_provider_evidence(
-                exception=exc, diagnostics=diagnostics
+                exception=exc,
+                diagnostics=diagnostics,
+                partial_content_snapshot=getattr(
+                    exc, "provider_evidence_partial_snapshot", None
+                ),
             )
             error = OpenClawSessionError(
                 f"Prompt invocation timed out after {timeout_seconds}s"
@@ -3909,7 +4090,11 @@ class OpenClawSessionService:
         except asyncio.TimeoutError as exc:
             diagnostics = dict(getattr(exc, "runtime_diagnostics", {}) or {})
             evidence = self._finish_active_planning_provider_evidence(
-                exception=exc, diagnostics=diagnostics
+                exception=exc,
+                diagnostics=diagnostics,
+                partial_content_snapshot=getattr(
+                    exc, "provider_evidence_partial_snapshot", None
+                ),
             )
             error = OpenClawSessionError(
                 f"Prompt invocation timed out after {timeout_seconds}s"
@@ -3920,13 +4105,20 @@ class OpenClawSessionService:
         except OpenClawNoOutputTimeoutError as exc:
             diagnostics = dict(getattr(exc, "runtime_diagnostics", {}) or {})
             evidence = self._finish_active_planning_provider_evidence(
-                exception=exc, diagnostics=diagnostics
+                exception=exc,
+                diagnostics=diagnostics,
+                partial_content_snapshot=getattr(
+                    exc, "provider_evidence_partial_snapshot", None
+                ),
             )
             exc.runtime_diagnostics = {**diagnostics, **evidence}
             raise
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
             self._finish_active_planning_provider_evidence(
-                exception=asyncio.CancelledError()
+                exception=exc,
+                partial_content_snapshot=getattr(
+                    exc, "provider_evidence_partial_snapshot", None
+                ),
             )
             raise
         finally:
@@ -3948,12 +4140,20 @@ class OpenClawSessionService:
             )
         except Exception as exc:
             evidence = self._finish_active_planning_provider_evidence(
-                exception=exc, diagnostics=diagnostics
+                exception=exc,
+                diagnostics=diagnostics,
+                partial_content_snapshot=self._provider_evidence_partial_snapshot(
+                    proc.stdout, proc.stderr
+                ),
             )
             diagnostics.update(evidence)
             raise
         evidence = self._finish_active_planning_provider_evidence(
-            diagnostics=diagnostics, result=result
+            diagnostics=diagnostics,
+            result=result,
+            partial_content_snapshot=self._provider_evidence_partial_snapshot(
+                proc.stdout, proc.stderr
+            ),
         )
         result["runtime_diagnostics"] = {
             **diagnostics,
@@ -4002,6 +4202,68 @@ class OpenClawSessionService:
         if commit:
             self.db.commit()
         return log_entry
+
+    def _log_openclaw_diagnostic(
+        self,
+        event: OpenClawDiagnosticEvent,
+        diagnostics: Dict[str, Any],
+        *,
+        level: str = "INFO",
+        failure_category: str | None = None,
+    ) -> bool:
+        """Persist only validated metadata; diagnostic logging is best-effort."""
+
+        try:
+            metadata = build_openclaw_diagnostic_metadata(
+                event, diagnostics, failure_category=failure_category
+            )
+            message = openclaw_diagnostic_message(metadata["diagnostic_event"])
+            serialized_metadata = json.dumps(metadata, sort_keys=True)
+            if isinstance(self.db, Session):
+                diagnostic_db = Session(bind=self.db.get_bind())
+                try:
+                    session_model = getattr(self, "session_model", None)
+                    diagnostic_db.add(
+                        LogEntry(
+                            session_id=getattr(self, "session_id", None),
+                            session_instance_id=(
+                                getattr(session_model, "instance_id", None)
+                                if session_model is not None
+                                else None
+                            ),
+                            task_id=getattr(self, "task_id", None),
+                            task_execution_id=getattr(self, "task_execution_id", None),
+                            level=level,
+                            message=message,
+                            log_metadata=serialized_metadata,
+                        )
+                    )
+                    diagnostic_db.commit()
+                except Exception:
+                    diagnostic_db.rollback()
+                    raise
+                finally:
+                    diagnostic_db.close()
+            else:
+                self._log_entry(
+                    level,
+                    message,
+                    metadata=serialized_metadata,
+                    commit=True,
+                )
+            return True
+        except Exception:
+            db = getattr(self, "db", None)
+            rollback = getattr(db, "rollback", None)
+            if not isinstance(db, Session) and callable(rollback):
+                try:
+                    rollback()
+                except Exception:
+                    pass
+            logger.debug(
+                "[OPENCLAW] Optional metadata-only diagnostic persistence failed"
+            )
+            return False
 
     async def start_session(self, task_description: str) -> str:
         """
