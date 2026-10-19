@@ -100,7 +100,7 @@ def looks_like_openclaw_diagnostic_payload(payload: Dict[str, Any]) -> bool:
         "livenessState",
     }
     return bool(set(payload.keys()) & diagnostic_keys) and not bool(
-        {"payloads", "finalAssistantVisibleText", "text"} & set(payload.keys())
+        {"payloads", *_PARTIAL_VISIBLE_TEXT_KEYS} & set(payload.keys())
     )
 
 
@@ -108,11 +108,10 @@ def payload_contains_model_content(payload: Any) -> bool:
     if isinstance(payload, dict):
         if looks_like_openclaw_diagnostic_payload(payload):
             return False
-        final_text = payload.get("finalAssistantVisibleText")
-        if isinstance(final_text, str) and final_text.strip():
-            return True
-        text = payload.get("text")
-        if isinstance(text, str) and text.strip():
+        if any(
+            isinstance(payload.get(key), str) and payload[key].strip()
+            for key in _PARTIAL_VISIBLE_TEXT_KEYS
+        ):
             return True
         payloads = payload.get("payloads")
         if isinstance(payloads, list):

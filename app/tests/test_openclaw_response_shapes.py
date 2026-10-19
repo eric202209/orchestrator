@@ -81,6 +81,38 @@ def test_payloads_support_visible_text_keys_beyond_text():
         assert isinstance(result["output"], str)
 
 
+def test_stderr_recovery_accepts_visible_text_keys_supported_on_stdout():
+    for key in (
+        "finalAssistantVisibleText",
+        "final_assistant_visible_text",
+        "text",
+        "output_text",
+        "content_text",
+    ):
+        stderr = json.dumps({"payloads": [{key: f"{key} value"}]})
+        result, _ = _parse_stdout("", stderr=stderr)
+
+        assert result["status"] == "completed"
+        assert result["output"] == f"{key} value"
+        assert result["output_channel_used"] == "stderr"
+        assert result["stderr_contains_model_content"] is True
+
+
+def test_stderr_recovery_still_rejects_diagnostic_only_json():
+    stderr = json.dumps(
+        {
+            "generatedAt": "2026-10-19T00:00:00Z",
+            "workspaceDir": "/tmp/runtime",
+            "systemPrompt": "diagnostic content only",
+        }
+    )
+    result, _ = _parse_stdout("", stderr=stderr)
+
+    assert result["status"] == "failed"
+    assert result["output"] == ""
+    assert result["stderr_contains_model_content"] is False
+
+
 def test_payloads_skip_non_dict_noise_and_extract_later_visible_text():
     result, _ = _parse_stdout(
         json.dumps(
