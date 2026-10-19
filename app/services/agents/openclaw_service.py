@@ -1852,7 +1852,8 @@ class OpenClawSessionService:
         partial_response_seen = False
         stdout_chunks: List[str] = []
         stderr_chunks: List[str] = []
-        capture_evaluator_response = diagnostic_label == "EVALUATOR_RESPONSE_EVIDENCE"
+        # This one-shot prompt path has no evaluator diagnostic label.
+        capture_evaluator_response = False
         stream_captures = (
             {
                 "stdout": _CapturedStreamDigest(),
@@ -3066,6 +3067,7 @@ class OpenClawSessionService:
         diagnostic_metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Execute task via OpenClaw CLI with real-time log streaming (optimized)"""
+        capture_evaluator_response = diagnostic_label == "EVALUATOR_RESPONSE_EVIDENCE"
 
         # Reuse the stable per-task session ID set in create_openclaw_session so
         # all steps in this task share one AI context window.
