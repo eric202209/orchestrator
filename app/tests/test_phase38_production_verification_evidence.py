@@ -63,7 +63,9 @@ def test_successful_verification_retains_exact_observed_process_result(
     stderr = b""
     observed = _stub_process(monkeypatch, returncode=0, stdout=stdout, stderr=stderr)
 
-    result = execute_verification_command(project_dir=tmp_path, command=command)
+    result = execute_verification_command(
+        project_dir=tmp_path, command=command, include_evidence=True
+    )
 
     evidence = result["verification_evidence"]
     assert result["success"] is True
@@ -82,7 +84,9 @@ def test_nonzero_verification_exit_remains_failed(monkeypatch, tmp_path):
     _stub_process(monkeypatch, returncode=7, stdout=b"failed\n", stderr=b"trace\n")
 
     result = execute_verification_command(
-        project_dir=tmp_path, command="pytest -q tests/test_slugify.py"
+        project_dir=tmp_path,
+        command="pytest -q tests/test_slugify.py",
+        include_evidence=True,
     )
 
     assert result["success"] is False
@@ -106,7 +110,9 @@ def test_timeout_does_not_fabricate_zero_exit_code(monkeypatch, tmp_path):
         fake_timeout,
     )
 
-    result = execute_verification_command(project_dir=tmp_path, command="pytest -q")
+    result = execute_verification_command(
+        project_dir=tmp_path, command="pytest -q", include_evidence=True
+    )
 
     assert result["success"] is False
     assert result["returncode"] is None
@@ -129,7 +135,9 @@ def test_cancellation_propagates_without_success_evidence(monkeypatch, tmp_path)
     )
 
     with pytest.raises(asyncio.CancelledError):
-        execute_verification_command(project_dir=tmp_path, command="pytest -q")
+        execute_verification_command(
+            project_dir=tmp_path, command="pytest -q", include_evidence=True
+        )
 
 
 def test_effective_command_identity_is_retained_after_python_resolution(
@@ -156,7 +164,9 @@ def test_effective_command_identity_is_retained_after_python_resolution(
         fake_run,
     )
 
-    result = execute_verification_command(project_dir=tmp_path, command=command)
+    result = execute_verification_command(
+        project_dir=tmp_path, command=command, include_evidence=True
+    )
 
     evidence = result["verification_evidence"]
     assert evidence["declared_command"] == command
@@ -169,7 +179,9 @@ def test_in_process_portable_verification_does_not_claim_process_exit_code(
 ):
     (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
 
-    result = execute_verification_command(project_dir=tmp_path, command="cat README.md")
+    result = execute_verification_command(
+        project_dir=tmp_path, command="cat README.md", include_evidence=True
+    )
 
     assert result["success"] is True
     assert result["verification_evidence"]["execution_kind"] == "in_process_portable"
@@ -180,7 +192,9 @@ def test_bounded_output_truncation_is_explicit(monkeypatch, tmp_path):
     stdout = b"x" * 5000
     _stub_process(monkeypatch, stdout=stdout)
 
-    result = execute_verification_command(project_dir=tmp_path, command="pytest -q")
+    result = execute_verification_command(
+        project_dir=tmp_path, command="pytest -q", include_evidence=True
+    )
     evidence = result["verification_evidence"]
 
     assert len(evidence["bounded_output"].encode("utf-8")) <= 4096
@@ -283,7 +297,9 @@ def test_sensitive_command_and_output_values_are_redacted_before_persistence(
     _stub_process(monkeypatch, stdout=raw_output)
 
     raw_command = f"pytest -q --api-key {api_key}"
-    result = execute_verification_command(project_dir=tmp_path, command=raw_command)
+    result = execute_verification_command(
+        project_dir=tmp_path, command=raw_command, include_evidence=True
+    )
     evidence = result["verification_evidence"]
     safe_output = evidence["bounded_output"]
     filename = persistence.append_verification_execution_evidence(

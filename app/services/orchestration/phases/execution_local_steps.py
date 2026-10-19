@@ -594,6 +594,7 @@ def _execute_local_shell_commands_step(
             project_dir=project_dir,
             command=verification,
             timeout_seconds=settings.SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS,
+            include_evidence=True,
         )
         if not vresult.get("success"):
             verr = vresult.get("output", "verification failed")
@@ -670,6 +671,7 @@ def _execute_simple_verification_step(
         project_dir=project_dir,
         command=command_to_run,
         timeout_seconds=settings.LOCAL_VERIFICATION_TIMEOUT_SECONDS,
+        include_evidence=True,
     )
     return {
         "status": "completed" if result.get("success") else "failed",

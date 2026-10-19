@@ -356,7 +356,15 @@ def execute_verification_command(
     project_dir: Path,
     command: str,
     timeout_seconds: int | None = None,
+    include_evidence: bool = False,
 ) -> Dict[str, Any]:
+    def result_with_evidence(
+        result: Dict[str, Any], evidence: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        if include_evidence:
+            result["verification_evidence"] = evidence
+        return result
+
     if timeout_seconds is None:
         timeout_seconds = settings.LOCAL_VERIFICATION_TIMEOUT_SECONDS
     raw_command = str(command or "").strip()
@@ -375,13 +383,15 @@ def execute_verification_command(
             output_text="",
             execution_kind="not_started",
         )
-        return {
-            "success": True,
-            "command": raw_command,
-            "returncode": 0,
-            "output": "",
-            "verification_evidence": evidence,
-        }
+        return result_with_evidence(
+            {
+                "success": True,
+                "command": raw_command,
+                "returncode": 0,
+                "output": "",
+            },
+            evidence,
+        )
     try:
         assert_no_workspace_cd_escape(raw_command, project_dir)
     except TaskWorkspaceViolationError as exc:
@@ -400,13 +410,15 @@ def execute_verification_command(
             execution_kind="not_started",
             capture_error="workspace_boundary_rejected",
         )
-        return {
-            "success": False,
-            "command": raw_command,
-            "returncode": 2,
-            "output": str(exc),
-            "verification_evidence": evidence,
-        }
+        return result_with_evidence(
+            {
+                "success": False,
+                "command": raw_command,
+                "returncode": 2,
+                "output": str(exc),
+            },
+            evidence,
+        )
 
     portable_started_at = datetime.now(UTC).isoformat()
     portable_started_monotonic = time.monotonic()
@@ -416,7 +428,7 @@ def execute_verification_command(
         portable_bytes = portable_output.encode("utf-8", errors="replace")
         portable_ended_at = datetime.now(UTC).isoformat()
         portable_duration = max(0.0, time.monotonic() - portable_started_monotonic)
-        portable_result["verification_evidence"] = _verification_evidence_record(
+        evidence = _verification_evidence_record(
             declared_command=raw_command,
             executed_command=raw_command,
             command_execution_status="completed",
@@ -432,7 +444,7 @@ def execute_verification_command(
             output_text=portable_output,
             execution_kind="in_process_portable",
         )
-        return portable_result
+        return result_with_evidence(portable_result, evidence)
 
     python_rewrite = raw_command in {"python", "python3"} or raw_command.startswith(
         ("python ", "python3 ")
@@ -456,13 +468,15 @@ def execute_verification_command(
                 execution_kind="not_started",
                 capture_error="python_resolution_failed",
             )
-            return {
-                "success": False,
-                "command": raw_command,
-                "returncode": 2,
-                "output": str(exc),
-                "verification_evidence": evidence,
-            }
+            return result_with_evidence(
+                {
+                    "success": False,
+                    "command": raw_command,
+                    "returncode": 2,
+                    "output": str(exc),
+                },
+                evidence,
+            )
         # Non-Python commands never needed the interpreter; they keep running
         # without the interpreter PATH prefix.
         resolved_python = None
@@ -529,13 +543,15 @@ def execute_verification_command(
             output_text=output,
             execution_kind="subprocess",
         )
-        return {
-            "success": success,
-            "command": raw_command,
-            "returncode": completed.returncode,
-            "output": output[:4000],
-            "verification_evidence": evidence,
-        }
+        return result_with_evidence(
+            {
+                "success": success,
+                "command": raw_command,
+                "returncode": completed.returncode,
+                "output": output[:4000],
+            },
+            evidence,
+        )
     except subprocess.TimeoutExpired as exc:
         ended_at = datetime.now(UTC).isoformat()
         duration_seconds = (
@@ -575,13 +591,15 @@ def execute_verification_command(
             execution_kind="subprocess",
             capture_error=capture_error,
         )
-        return {
-            "success": False,
-            "command": raw_command,
-            "returncode": None,
-            "output": f"Verification command timed out after {timeout_seconds}s",
-            "verification_evidence": evidence,
-        }
+        return result_with_evidence(
+            {
+                "success": False,
+                "command": raw_command,
+                "returncode": None,
+                "output": f"Verification command timed out after {timeout_seconds}s",
+            },
+            evidence,
+        )
 
 
 _MAX_VERIFICATION_OUTPUT_BYTES = 4096
@@ -931,6 +949,7 @@ def assess_step_execution(
         verification_result = execute_verification_command(
             project_dir=project_dir,
             command=verification_command,
+            include_evidence=True,
         )
         verification_output = verification_result.get("output", "")
         step_result["verification_output"] = verification_output
