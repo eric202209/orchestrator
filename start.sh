@@ -5,7 +5,12 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_PATH="${BASH_SOURCE[0]}"
+SCRIPT_DIR="${SCRIPT_PATH%/*}"
+if [[ "${SCRIPT_DIR}" == "${SCRIPT_PATH}" ]]; then
+    SCRIPT_DIR="."
+fi
+SCRIPT_DIR="$(CDPATH= cd -P -- "${SCRIPT_DIR}" && pwd -P)"
 PROJECT_ROOT="${SCRIPT_DIR}"
 FRONTEND_DIR="${PROJECT_ROOT}/frontend"
 VENV_DIR="${PROJECT_ROOT}/venv"
@@ -15,9 +20,6 @@ QDRANT_HOME="${PROJECT_ROOT}/qdrant"
 QDRANT_BIN_DIR="${QDRANT_HOME}/bin"
 QDRANT_DATA_DIR="${QDRANT_HOME}/data"
 QDRANT_SNAPSHOTS_DIR="${QDRANT_HOME}/snapshots"
-
-echo "🚀 Starting Orchestrator Network..."
-echo ""
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -589,6 +591,155 @@ start_workers() {
     echo ""
 }
 
+# Check worker processes from procfs without any PATH-resolved helper.
+worker_only_check_processes() {
+    local proc_entry proc_dir arg_index
+    local -a process_argv
+    for proc_entry in /proc/[0-9]*/cmdline; do
+        [[ -e "${proc_entry}" ]] || continue
+        proc_dir="${proc_entry%/cmdline}"
+        if [[ ! -r "${proc_entry}" ]]; then
+            [[ -d "${proc_dir}" ]] || continue
+            echo "worker process table cannot be completely observed" >&2
+            return 2
+        fi
+        process_argv=()
+        mapfile -d '' -t process_argv < "${proc_entry}" || {
+            [[ -d "${proc_dir}" ]] || continue
+            echo "worker process command line cannot be observed" >&2
+            return 2
+        }
+        for ((arg_index = 0; arg_index + 2 < ${#process_argv[@]}; arg_index++)); do
+            if [[ "${process_argv[arg_index]}" == "-A" \
+                && "${process_argv[arg_index + 1]}" == "app.celery_app" \
+                && "${process_argv[arg_index + 2]}" == "worker" ]]; then
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+# Start one worker attempt for the guarded Phase 39 refresh path. This entry
+# point deliberately does not source .env, use PATH-based command lookup,
+# touch worker/Beat PID files, inspect logs, stop processes, or start Beat.
+start_worker_only() {
+    if [[ "$#" -ne 1 ]]; then
+        echo "start_worker_only requires exactly one absolute pin path" >&2
+        return 64
+    fi
+
+    local pin_path="$1"
+    if [[ "${pin_path}" != /* || "${pin_path}" == *$'\n'* || "${pin_path}" == *$'\r'* ]]; then
+        echo "worker candidate pin path must be absolute and contain no line breaks" >&2
+        return 64
+    fi
+
+    local env_file="${PROJECT_ROOT}/.env"
+    if [[ -e "${env_file}" || -L "${env_file}" ]]; then
+        if [[ ! -f "${env_file}" || -L "${env_file}" ]]; then
+            echo "worker .env must be a regular file" >&2
+            return 78
+        fi
+        local line key value
+        while IFS= read -r line || [[ -n "${line}" ]]; do
+            line="${line%$'\r'}"
+            [[ -n "${line}" ]] || continue
+            [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+            [[ "${line}" == *=* ]] || continue
+            key="${line%%=*}"
+            value="${line#*=}"
+            key="${key#"${key%%[![:space:]]*}"}"
+            key="${key%"${key##*[![:space:]]}"}"
+            if [[ "${key}" == export[[:space:]]* ]]; then
+                key="${key#export}"
+                key="${key#"${key%%[![:space:]]*}"}"
+                key="${key%"${key##*[![:space:]]}"}"
+            fi
+            case "${key}" in
+                PATH|WORKER_CANDIDATE_PIN_PATH)
+                    echo "worker .env must not set ${key}" >&2
+                    return 78
+                    ;;
+                CELERY_WORKER_CONCURRENCY)
+                    value="${value#"${value%%[![:space:]]*}"}"
+                    value="${value%"${value##*[![:space:]]}"}"
+                    value="${value#\"}"
+                    value="${value%\"}"
+                    value="${value#\'}"
+                    value="${value%\'}"
+                    if [[ "${value}" != "4" ]]; then
+                        echo "worker .env concurrency differs from the approved value" >&2
+                        return 78
+                    fi
+                    ;;
+            esac
+        done < "${env_file}"
+    fi
+
+    local env_bin="/usr/bin/env"
+    local nohup_bin="/usr/bin/nohup"
+    local python_bin="${VENV_DIR}/bin/python3"
+    local celery_bin="${VENV_DIR}/bin/celery"
+    local executable
+    for executable in "${env_bin}" "${nohup_bin}"; do
+        if [[ ! -f "${executable}" || ! -x "${executable}" || -L "${executable}" ]]; then
+            echo "required worker launcher executable is unavailable or unexpected" >&2
+            return 78
+        fi
+    done
+    if [[ ! -x "${python_bin}" || ! "${python_bin}" -ef /usr/bin/python3.12 ]]; then
+        echo "worker interpreter does not match the approved executable" >&2
+        return 78
+    fi
+    if [[ ! -f "${celery_bin}" || ! -x "${celery_bin}" || -L "${celery_bin}" ]]; then
+        echo "worker executable is unavailable or unexpected" >&2
+        return 78
+    fi
+    local celery_shebang
+    IFS= read -r celery_shebang < "${celery_bin}" || {
+        echo "worker executable has no verified interpreter line" >&2
+        return 78
+    }
+    if [[ "${celery_shebang}" != "#!${python_bin}" ]]; then
+        echo "worker executable interpreter differs from the approved interpreter" >&2
+        return 78
+    fi
+    if [[ ! -d "${LOG_DIR}" || -L "${LOG_DIR}" || ! -f "${LOG_DIR}/worker.log" || -L "${LOG_DIR}/worker.log" ]]; then
+        echo "worker log path is unavailable or unexpected" >&2
+        return 78
+    fi
+
+    # Refuse a second worker without reading the stale worker PID file or
+    # relying on pgrep/ps command resolution through the caller's PATH.
+    local process_check_status=0
+    if worker_only_check_processes; then
+        echo "an existing Celery worker is still present" >&2
+        return 78
+    else
+        process_check_status=$?
+        if [[ "${process_check_status}" -ne 1 ]]; then
+            echo "worker process table cannot be safely verified" >&2
+            return 78
+        fi
+    fi
+
+    local fixed_path="${VENV_DIR}/bin:/usr/bin:/bin"
+    local worker_pid
+    /usr/bin/env -i \
+        "PATH=${fixed_path}" \
+        "HOME=/root" \
+        "LANG=C.UTF-8" \
+        "WORKER_CANDIDATE_PIN_PATH=${pin_path}" \
+        "${nohup_bin}" "${celery_bin}" \
+        -A app.celery_app worker \
+        --concurrency=4 \
+        --loglevel=info \
+        >> "${LOG_DIR}/worker.log" 2>&1 &
+    worker_pid=$!
+    printf 'LAUNCH_ATTEMPTED pid=%s\n' "${worker_pid}"
+}
+
 # Function to start frontend
 start_frontend() {
     echo -e "${BLUE}🎨 Starting Frontend (Vite)...${NC}"
@@ -732,6 +883,8 @@ check_health() {
 
 # Main execution
 main() {
+    echo "🚀 Starting Orchestrator Network..."
+    echo ""
     echo "========================================"
     echo "  Orchestrator Network Startup Script"
     echo "========================================"
@@ -798,7 +951,12 @@ main() {
     echo ""
 }
 
-# Run main function unless this file is sourced by a test or helper.
+# The dedicated entry point dispatches before the full-stack startup path.
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main
+    if [[ "${1-}" == "start_worker_only" ]]; then
+        shift
+        start_worker_only "$@"
+    else
+        main
+    fi
 fi
