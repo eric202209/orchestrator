@@ -338,7 +338,12 @@ class RefreshAuthority:
 
     def _check_directory(self, fd: int, *, final: bool) -> None:
         info = os.fstat(fd)
-        if not stat.S_ISDIR(info.st_mode) or info.st_uid != self.required_uid:
+        if not stat.S_ISDIR(info.st_mode):
+            raise RefreshAuthorityError("authority directory type or owner is invalid")
+        if final:
+            if info.st_uid != self.required_uid:
+                raise RefreshAuthorityError("authority directory type or owner is invalid")
+        elif info.st_uid not in {0, self.required_uid}:
             raise RefreshAuthorityError("authority directory type or owner is invalid")
         mode = stat.S_IMODE(info.st_mode)
         if final:

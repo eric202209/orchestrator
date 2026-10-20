@@ -20,6 +20,28 @@ from unittest.mock import patch
 
 from scripts.maintenance.phase39_p0b import operator_tooling as tooling
 
+_PRODUCTION_PIN_OWNER = tooling._pin_owner
+_REFRESH_AUTHORITY_CLASS = tooling.RefreshAuthority
+
+
+def _make_test_authority(path: Path, *, clock=None):
+    return _REFRESH_AUTHORITY_CLASS(
+        path,
+        required_uid=os.geteuid(),
+        euid=os.geteuid,
+        clock=clock,
+    )
+
+
+class PinOwnerTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        owner_patch = patch.object(
+            tooling, "_pin_owner", lambda: (os.geteuid(), os.getegid())
+        )
+        owner_patch.start()
+        self.addCleanup(owner_patch.stop)
+
+
 TEST_SOURCE_ROOT = Path(__file__).resolve().parents[2]
 # The suite uses a deliberately synthetic, non-authoritative approval policy.
 # Production defaults stay unusable until the protected entry point loads a
@@ -209,8 +231,9 @@ def make_installed_receipt(
     }
 
 
-class InstallerTests(unittest.TestCase):
+class InstallerTests(PinOwnerTestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.temp = tempfile.TemporaryDirectory(prefix="p39-installer-test-")
         self.root = Path(self.temp.name)
         self.policy = make_policy(self.root)
@@ -246,6 +269,9 @@ class InstallerTests(unittest.TestCase):
             checkout_verifier=checkout_verifier,
             **kwargs,
         )
+
+    def test_production_pin_owner_defaults_to_root(self) -> None:
+        self.assertEqual(_PRODUCTION_PIN_OWNER(), (0, 0))
 
     def test_dry_run_uses_production_loader_and_never_opens_pin_directory(self) -> None:
         missing_pin_dir = self.root / "must-not-be-opened"
@@ -444,9 +470,13 @@ class InstallerTests(unittest.TestCase):
             self.install()
 
     def test_wrong_pin_directory_owner_is_rejected(self) -> None:
-        os.chown(self.pin_dir, 65534, 65534)
-        with self.assertRaisesRegex(tooling.ToolingError, "root:root"):
-            self.install()
+        with patch.object(
+            tooling,
+            "_pin_owner",
+            return_value=(os.geteuid() + 1, os.getegid()),
+        ):
+            with self.assertRaisesRegex(tooling.ToolingError, "root:root"):
+                self.install()
 
     def test_existing_pin_symlink_is_rejected(self) -> None:
         path = self.pin_dir / tooling.PIN_FILE_NAME
@@ -463,9 +493,16 @@ class InstallerTests(unittest.TestCase):
             self.install()
 
     def test_existing_pin_wrong_owner_is_rejected(self) -> None:
-        os.chown(self.pin_dir / tooling.PIN_FILE_NAME, 65534, 65534)
-        with self.assertRaisesRegex(tooling.ToolingError, "root:root"):
-            self.install()
+        read_at = tooling._read_at_regular
+
+        def wrong_owner_read(directory_fd, name, **kwargs):
+            kwargs["uid"] = os.geteuid() + 1
+            kwargs["gid"] = os.getegid()
+            return read_at(directory_fd, name, **kwargs)
+
+        with patch.object(tooling, "_read_at_regular", side_effect=wrong_owner_read):
+            with self.assertRaisesRegex(tooling.ToolingError, "root:root"):
+                self.install()
 
     def test_unexpected_existing_temp_is_never_deleted(self) -> None:
         temp_path = self.pin_dir / tooling.INSTALL_TEMP_NAME
@@ -646,8 +683,9 @@ class InstallerTests(unittest.TestCase):
             )
 
 
-class InstallReceiptTests(unittest.TestCase):
+class InstallReceiptTests(PinOwnerTestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.temp = tempfile.TemporaryDirectory(prefix="p39-receipt-test-")
         self.root = Path(self.temp.name)
         self.policy = make_policy(self.root)
@@ -883,8 +921,9 @@ class StaticBeatObserver:
         return self.current.get(pid)
 
 
-class RefreshTests(unittest.TestCase):
+class RefreshTests(PinOwnerTestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.temp = tempfile.TemporaryDirectory(prefix="p39-refresh-test-")
         self.root = Path(self.temp.name)
         self.policy = make_policy(self.root)
@@ -898,7 +937,7 @@ class RefreshTests(unittest.TestCase):
             old=self.old, children=[self.child], beat=self.beat, new=self.new
         )
         self.pidfd = FakePidfdOperations(self.observer)
-        self.authority = tooling.RefreshAuthority(
+        self.authority = _make_test_authority(
             self.root / "refresh-authority", clock=lambda: FIXED_NOW
         )
         self.observer.current[self.child.pid] = self.child
@@ -1270,7 +1309,7 @@ class RefreshTests(unittest.TestCase):
         ]
         for label, configure, error in cases:
             with self.subTest(case=label):
-                self.authority = tooling.RefreshAuthority(
+                self.authority = _make_test_authority(
                     self.root / f"pidfd-error-authority-{label.replace(' ', '-')}",
                     clock=lambda: FIXED_NOW,
                 )
@@ -1827,7 +1866,7 @@ class RefreshTests(unittest.TestCase):
 
         def reset_process_fixture():
             nonlocal authority_index
-            self.authority = tooling.RefreshAuthority(
+            self.authority = _make_test_authority(
                 self.root / f"manifest-matrix-authority-{authority_index}",
                 clock=lambda: FIXED_NOW,
             )
@@ -1901,8 +1940,9 @@ class ProcfsTests(unittest.TestCase):
                 tooling.verify_launcher_paths(root)
 
 
-class GateATests(unittest.TestCase):
+class GateATests(PinOwnerTestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.temp = tempfile.TemporaryDirectory(prefix="p39-gatea-test-")
         self.root = Path(self.temp.name)
         self.policy = make_policy(self.root)
@@ -2000,7 +2040,7 @@ class GateATests(unittest.TestCase):
         manifest_bytes = self.manifest_path.read_bytes()
         manifest_info = self.manifest_path.stat()
         self.refresh_id = str(uuid.uuid4())
-        self.authority = tooling.RefreshAuthority(
+        self.authority = _make_test_authority(
             self.root / "refresh-authority", clock=lambda: FIXED_NOW
         )
         old_worker = replace(
@@ -2138,21 +2178,28 @@ class GateATests(unittest.TestCase):
         with patch.object(
             tooling, "DEFAULT_REFRESH_AUTHORITY_ROOT", str(self.authority.root)
         ):
-            return tooling.verify_gate_a(
-                manifest or self.manifest,
-                evidence or self.evidence,
-                refresh_id=self.refresh_id,
-                expected_pin_sha256=self.pin_sha,
-                installation_receipt=self.installation_receipt,
-                refresh_receipt=self.refresh_receipt,
-                manifest_path=self.manifest_path,
-                pin_path=self.pin_path,
-                runtime_root=self.runtime_root,
-                policy=self.policy,
-                now=now,
-                pin_loader=fake_loader,
-                observer=self.beat_observer,
-            )
+            with patch.object(
+                tooling,
+                "RefreshAuthority",
+                lambda path, **kwargs: _make_test_authority(
+                    Path(path), clock=kwargs.get("clock")
+                ),
+            ):
+                return tooling.verify_gate_a(
+                    manifest or self.manifest,
+                    evidence or self.evidence,
+                    refresh_id=self.refresh_id,
+                    expected_pin_sha256=self.pin_sha,
+                    installation_receipt=self.installation_receipt,
+                    refresh_receipt=self.refresh_receipt,
+                    manifest_path=self.manifest_path,
+                    pin_path=self.pin_path,
+                    runtime_root=self.runtime_root,
+                    policy=self.policy,
+                    now=now,
+                    pin_loader=fake_loader,
+                    observer=self.beat_observer,
+                )
 
     def test_complete_evidence_keeps_four_gate_results_distinct(self) -> None:
         result = self.verify()
@@ -2179,7 +2226,7 @@ class GateATests(unittest.TestCase):
         ):
             self.verify()
         self.refresh_id = original_id
-        missing = tooling.RefreshAuthority(self.root / "missing-authority")
+        missing = _make_test_authority(self.root / "missing-authority")
         original_authority = self.authority
         self.authority = missing
         with self.assertRaisesRegex(

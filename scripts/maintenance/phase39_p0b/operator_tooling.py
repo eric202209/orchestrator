@@ -74,6 +74,11 @@ class ToolingError(RuntimeError):
     """A closed, user-safe tooling failure; messages never include pin bytes."""
 
 
+def _pin_owner() -> tuple[int, int]:
+    """Return the production pin owner. Tests replace this at the fixture seam."""
+    return 0, 0
+
+
 class RecoveryRequiredError(ToolingError):
     """A launch was attempted or became ambiguous; never retry automatically."""
 
@@ -409,7 +414,7 @@ def _open_directory_no_symlink(path: str | Path) -> int:
             info.st_ino,
         ):
             raise ToolingError("pin directory changed during no-follow validation")
-        if info.st_uid != 0 or info.st_gid != 0:
+        if (info.st_uid, info.st_gid) != _pin_owner():
             raise ToolingError("pin directory must be root:root")
         if stat.S_IMODE(info.st_mode) != 0o700:
             raise ToolingError("pin directory must have mode 0700")
@@ -431,8 +436,17 @@ def _lock_pin_directory(directory_fd: int, *, exclusive: bool) -> None:
 
 
 def _read_at_regular(
-    directory_fd: int, name: str, *, max_bytes: int, uid: int = 0, gid: int = 0, mode: int = 0o600
+    directory_fd: int,
+    name: str,
+    *,
+    max_bytes: int,
+    uid: int | None = None,
+    gid: int | None = None,
+    mode: int = 0o600,
 ) -> tuple[bytes, os.stat_result]:
+    expected_uid, expected_gid = _pin_owner()
+    uid = expected_uid if uid is None else uid
+    gid = expected_gid if gid is None else gid
     try:
         path_info = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
     except OSError as exc:
@@ -490,7 +504,7 @@ def _write_new_at(directory_fd: int, name: str, payload: bytes) -> tuple[int, in
     try:
         info = os.fstat(fd)
         created = (info.st_dev, info.st_ino)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_gid != 0:
+        if not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid) != _pin_owner():
             raise ToolingError("new pin evidence has incorrect type or owner")
         if stat.S_IMODE(info.st_mode) != 0o600:
             raise ToolingError("new pin evidence must have mode 0600")
@@ -819,8 +833,7 @@ def install_candidate_pin(
         temp_info = os.stat(INSTALL_TEMP_NAME, dir_fd=directory_fd, follow_symlinks=False)
         if (
             not stat.S_ISREG(temp_info.st_mode)
-            or temp_info.st_uid != 0
-            or temp_info.st_gid != 0
+            or (temp_info.st_uid, temp_info.st_gid) != _pin_owner()
             or stat.S_IMODE(temp_info.st_mode) != 0o600
             or (temp_info.st_dev, temp_info.st_ino) != (temp_device, temp_inode)
         ):
@@ -1401,7 +1414,7 @@ def _verify_install_receipt(
             or loaded.get("source_manifest_digest") != policy.source_manifest_digest
         ):
             raise ToolingError("production loader identity does not match the receipt")
-        if not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid) != (0, 0):
+        if not stat.S_ISREG(info.st_mode) or (info.st_uid, info.st_gid) != _pin_owner():
             raise ToolingError("installed pin owner or file type is unsafe")
         if stat.S_IMODE(info.st_mode) != 0o600:
             raise ToolingError("installed pin mode is not 0600")
