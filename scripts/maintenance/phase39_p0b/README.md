@@ -22,11 +22,12 @@ write approvals or pins; or invoke Gate A/B. The package has no postinst,
 prerm, postrm, config, triggers, or conffiles. The guard is reviewed package
 code and is not an artifact authenticator.
 
-An offline package build uses committed tracked paths and records the exact
-commit object. Any tracked worktree delta is separately hashed and makes the
-artifact explicitly non-activatable. A release intended for future activation
-must be rebuilt from a reviewed committed baseline. The builder does not
-create keys or approvals.
+An offline publishable-source build requires an explicit expected HEAD and a
+clean worktree, including no untracked source files. It builds from a Git
+archive, verifies each archive blob and mode against the committed tree, and
+records the exact commit object. Dirty or untracked source is rejected. The
+result remains `NOT_ACTIVATABLE`; the builder does not create keys or
+approvals.
 
 ## Repository trust and installation boundary
 
@@ -90,8 +91,10 @@ repository source from this checkout.
 Build an inert package to a disposable directory with a fixed source epoch:
 
 ```bash
+SOURCE_HEAD="$(git rev-parse HEAD)"
 venv/bin/python3 -m scripts.maintenance.phase39_p0b.release_packaging build \
   --checkout "$PWD" --output-dir /tmp/phase39-p0b-packages \
+  --expected-source-head "$SOURCE_HEAD" \
   --release-id auto
 ```
 

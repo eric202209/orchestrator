@@ -409,14 +409,50 @@ class SignedAptPackagingTests(unittest.TestCase):
         ):
             self._build(self.release_id)
 
-    def test_release_id_cannot_be_reused_for_changed_payload(self) -> None:
+    def test_changed_payload_cannot_claim_committed_source_tree(self) -> None:
         target = self.source / "app/services/orchestration/worker_identity.py"
         target.write_bytes(b"# changed source bytes\n")
         with self.assertRaisesRegex(
             release_packaging.PackagingError,
-            "release_id_not_bound_to_source_and_payload",
+            "source_payload_does_not_match_committed_tree",
         ):
             self._build(self.release_id, "changed-payload")
+
+    def test_nonempty_worktree_delta_cannot_be_marked_publishable(self) -> None:
+        with self.assertRaisesRegex(
+            release_packaging.PackagingError,
+            "dirty_source_candidate_not_publishable",
+        ):
+            release_packaging.build_deb(
+                self.source,
+                self.base / "dirty-package",
+                release_id=self.release_id,
+                source_head=self.source_head,
+                source_tree=self.source_tree,
+                commit_object_b64=self.commit_object_b64,
+                source_delta_sha256=hashlib.sha256(b"tracked edit").hexdigest(),
+                source_date_epoch=1792510000,
+            )
+
+    def test_manifest_flag_cannot_relabel_a_dirty_source_snapshot(self) -> None:
+        root, _ = self._raw_extract(self.package, "dirty-source-manifest")
+        manifest_path = (
+            root
+            / "usr/lib/orchestrator-maintenance/phase39-p0b"
+            / self.release_id
+            / release_packaging.MANIFEST_NAME
+        )
+        manifest = release_packaging.json.loads(manifest_path.read_text())
+        manifest["source"]["snapshot_kind"] = "dirty-worktree"
+        manifest_path.chmod(0o644)
+        manifest_path.write_bytes(release_packaging.canonical_json(manifest))
+        manifest_path.chmod(0o444)
+        altered = self._rebuild_raw(root, "dirty-source-manifest")
+        with self.assertRaisesRegex(
+            release_packaging.PackagingError,
+            "package_source_snapshot_not_publishable",
+        ):
+            release_packaging.verify_package_archive(altered)
 
     def test_altered_package_payload_is_rejected(self) -> None:
         root, _ = self._raw_extract(self.package, "altered-payload")
@@ -685,6 +721,92 @@ class SignedAptPackagingTests(unittest.TestCase):
         self.assertIn(f"Candidate: {self.version}", policy)
         self.assertIn("file:", policy)
         self.assertIn(f"{self.version} 1001", policy)
+
+
+class PublishableSourceSnapshotTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory(prefix="p39-p0b-source-snapshot-")
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        self.repo = self.base / "repo"
+        self.repo.mkdir()
+        self._write("app/main.py", b"# committed app source\n")
+        self._write(
+            "scripts/maintenance/phase39_p0b/entrypoint.sh",
+            b"#!/bin/sh\nexit 0\n",
+            0o755,
+        )
+        self._git("init", "-q")
+        self._git("add", "--all")
+        self._git("commit", "-q", "-m", "clean source fixture")
+        self.head = self._git("rev-parse", "HEAD").decode().strip()
+
+    def _write(self, relative: str, contents: bytes, mode: int = 0o644) -> Path:
+        path = self.repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+        os.chmod(path, mode)
+        return path
+
+    def _git(self, *args: str) -> bytes:
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "HOME": str(self.base),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_AUTHOR_NAME": "P0B Test",
+            "GIT_AUTHOR_EMAIL": "p0b-test@example.invalid",
+            "GIT_COMMITTER_NAME": "P0B Test",
+            "GIT_COMMITTER_EMAIL": "p0b-test@example.invalid",
+            "GIT_AUTHOR_DATE": "@1792510000 +0000",
+            "GIT_COMMITTER_DATE": "@1792510000 +0000",
+        }
+        return _run(["/usr/bin/git", "-C", str(self.repo), *args], env=env).stdout
+
+    def _build(self, *, expected_head: str | None = None) -> Path:
+        return release_packaging.build_from_checkout(
+            self.repo,
+            self.base / "out",
+            expected_source_head=expected_head or self.head,
+            release_id="auto",
+        )
+
+    def test_clean_committed_git_archive_builds_exact_candidate(self) -> None:
+        package = self._build()
+        verified = release_packaging.verify_package_archive(
+            package, expected_source_head=self.head
+        )
+        source = verified["manifest"]["source"]
+        self.assertEqual(source["head"], self.head)
+        self.assertEqual(
+            source["snapshot_kind"], release_packaging.SOURCE_SNAPSHOT_KIND
+        )
+        self.assertEqual(
+            source["tracked_worktree_delta_sha256"],
+            release_packaging.EMPTY_SOURCE_DELTA_SHA256,
+        )
+        self.assertEqual(verified["activation_status"], "NOT_ACTIVATABLE")
+
+    def test_dirty_tracked_source_rejected_for_publishable_build(self) -> None:
+        (self.repo / "app/main.py").write_bytes(b"# uncommitted edit\n")
+        with self.assertRaisesRegex(
+            release_packaging.PackagingError, "publishable_source_worktree_dirty"
+        ):
+            self._build()
+
+    def test_untracked_source_injection_rejected(self) -> None:
+        self._write("app/injected.py", b"# untracked source\n")
+        with self.assertRaisesRegex(
+            release_packaging.PackagingError, "publishable_source_worktree_dirty"
+        ):
+            self._build()
+
+    def test_explicit_source_head_must_match_checkout_commit(self) -> None:
+        with self.assertRaisesRegex(
+            release_packaging.PackagingError,
+            "checkout_head_does_not_match_explicit_source",
+        ):
+            self._build(expected_head="0" * 40)
 
 
 if __name__ == "__main__":

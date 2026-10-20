@@ -29,7 +29,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from . import release_manager
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MANIFEST_NAME = "release-package-manifest.json"
 RELEASE_IDENTITY_NAME = ".orchestrator-release-identity.json"
 PACKAGE_PREFIX = "orchestrator-phase39-p0b-"
@@ -45,6 +45,8 @@ APT_INDEX = "main/binary-arm64/Packages"
 DEPENDS = "bash, libc6 (>= 2.39), python3.12-minimal (>= 3.12.3~)"
 GIT_ID_RE = re.compile(r"[0-9a-f]{40}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+EMPTY_SOURCE_DELTA_SHA256 = hashlib.sha256(b"").hexdigest()
+SOURCE_SNAPSHOT_KIND = "git-archive-committed-clean"
 RELEASE_ID_RE = re.compile(r"r1-[a-f0-9]{16}-[a-f0-9]{16}\Z")
 PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]{1,79}\Z")
 VERSION_RE = re.compile(r"[0-9][A-Za-z0-9.+:~\-]*\Z")
@@ -132,6 +134,20 @@ def _commit_timestamp(commit_object: bytes) -> int:
     raise PackagingError("source_commit_timestamp_invalid")
 
 
+def _release_identity_marker(
+    source_head: str, source_tree: str, commit_object_b64: str
+) -> bytes:
+    return canonical_json(
+        {
+            "schema_version": 2,
+            "kind": SOURCE_SNAPSHOT_KIND,
+            "candidate_head": source_head,
+            "candidate_tree": source_tree,
+            "commit_object": commit_object_b64,
+        }
+    )
+
+
 def _read_regular(path: Path) -> tuple[bytes, os.stat_result]:
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
@@ -216,6 +232,52 @@ def _tracked_file_inputs(
         executable = bool(git_mode == 0o100755) if git_mode is not None else bool(info.st_mode & 0o111)
         result.append((rel, data, 0o555 if executable else 0o444))
     return result
+
+
+def _git_tree_from_files(files: Sequence[tuple[str, bytes, int]]) -> str:
+    """Recompute a Git tree object from the exact source bytes and modes."""
+    tree: dict[str, Any] = {}
+    for relative, contents, normalized_mode in files:
+        parts = _safe_relpath(relative).parts
+        node = tree
+        for part in parts[:-1]:
+            child = node.setdefault(part, {})
+            if not isinstance(child, dict):
+                raise PackagingError("source_path_file_directory_collision")
+            node = child
+        name = parts[-1]
+        if name in node:
+            raise PackagingError("source_path_duplicate_or_directory_collision")
+        blob = hashlib.sha1(
+            b"blob " + str(len(contents)).encode("ascii") + b"\0" + contents
+        ).digest()
+        node[name] = (b"100755" if normalized_mode == 0o555 else b"100644", blob)
+
+    def object_id(kind: bytes, payload: bytes) -> bytes:
+        return hashlib.sha1(
+            kind + b" " + str(len(payload)).encode("ascii") + b"\0" + payload
+        ).digest()
+
+    def write_tree(directory: Mapping[str, Any]) -> bytes:
+        entries: list[tuple[bytes, bytes]] = []
+        for name, item in directory.items():
+            encoded_name = os.fsencode(name)
+            if isinstance(item, dict):
+                mode = b"40000"
+                digest = write_tree(item)
+                sort_name = encoded_name + b"/"
+            else:
+                mode, digest = item
+                sort_name = encoded_name
+            entries.append(
+                (sort_name, mode + b" " + encoded_name + b"\0" + digest)
+            )
+        entries.sort(key=lambda row: row[0])
+        return object_id(b"tree", b"".join(payload for _sort, payload in entries))
+
+    if not files:
+        raise PackagingError("empty_source_payload")
+    return write_tree(tree).hex()
 
 
 def derive_release_id(
@@ -357,6 +419,7 @@ def build_deb(
     source_delta_sha256: str,
     source_date_epoch: int,
     tracked_modes: Mapping[str, int] | None = None,
+    source_snapshot_kind: str = SOURCE_SNAPSHOT_KIND,
 ) -> Path:
     """Build one deterministic candidate .deb without installing it."""
     if type(source_date_epoch) is not int or source_date_epoch < 0:
@@ -364,9 +427,15 @@ def build_deb(
     commit_object = _validate_source_identity(
         source_head, source_tree, commit_object_b64, source_delta_sha256
     )
+    if source_delta_sha256 != EMPTY_SOURCE_DELTA_SHA256:
+        raise PackagingError("dirty_source_candidate_not_publishable")
+    if source_snapshot_kind != SOURCE_SNAPSHOT_KIND:
+        raise PackagingError("publishable_git_archive_snapshot_required")
     if source_date_epoch != _commit_timestamp(commit_object):
         raise PackagingError("source_date_epoch_must_match_commit_timestamp")
     source_files = _tracked_file_inputs(Path(source_root), tracked_modes)
+    if _git_tree_from_files(source_files) != source_tree:
+        raise PackagingError("source_payload_does_not_match_committed_tree")
     payload_entries = [
         {
             "path": rel,
@@ -386,14 +455,8 @@ def build_deb(
     if not VERSION_RE.fullmatch(version):
         raise PackagingError("package_version_invalid")
     preinst = _preinst_script(release_id)
-    release_identity = canonical_json(
-        {
-            "schema_version": 1,
-            "kind": "git-archive-release",
-            "candidate_head": source_head,
-            "candidate_tree": source_tree,
-            "commit_object": commit_object_b64,
-        }
+    release_identity = _release_identity_marker(
+        source_head, source_tree, commit_object_b64
     )
     manifest = {
         "manifest_kind": "orchestrator-phase39-p0b-deb",
@@ -410,6 +473,7 @@ def build_deb(
             "tree": source_tree,
             "commit_object_b64": commit_object_b64,
             "tracked_worktree_delta_sha256": source_delta_sha256,
+            "snapshot_kind": source_snapshot_kind,
         },
         "platform": {
             "distribution": "Ubuntu",
@@ -686,25 +750,25 @@ def _verify_extracted_payload(
             raise PackagingError("package_platform_policy_invalid")
         source = manifest["source"]
         if not isinstance(source, dict) or set(source) != {
-            "head", "tree", "commit_object_b64", "tracked_worktree_delta_sha256"
+            "head", "tree", "commit_object_b64", "tracked_worktree_delta_sha256",
+            "snapshot_kind",
         }:
             raise PackagingError("package_source_identity_schema_invalid")
         _validate_source_identity(
             source["head"], source["tree"], source["commit_object_b64"],
             source["tracked_worktree_delta_sha256"],
         )
+        if (
+            source["snapshot_kind"] != SOURCE_SNAPSHOT_KIND
+            or source["tracked_worktree_delta_sha256"] != EMPTY_SOURCE_DELTA_SHA256
+        ):
+            raise PackagingError("package_source_snapshot_not_publishable")
         if manifest["source_date_epoch"] != _commit_timestamp(
             base64.b64decode(source["commit_object_b64"], validate=True)
         ):
             raise PackagingError("package_source_date_epoch_mismatch")
-        expected_marker = canonical_json(
-            {
-                "schema_version": 1,
-                "kind": "git-archive-release",
-                "candidate_head": source["head"],
-                "candidate_tree": source["tree"],
-                "commit_object": source["commit_object_b64"],
-            }
+        expected_marker = _release_identity_marker(
+            source["head"], source["tree"], source["commit_object_b64"]
         )
         marker_path = release / RELEASE_IDENTITY_NAME
         try:
@@ -919,6 +983,15 @@ def verify_installed_package_release(
         source.get("head"), source.get("tree"), source.get("commit_object_b64"),
         source.get("tracked_worktree_delta_sha256"),
     )
+    if (
+        set(source) != {
+            "head", "tree", "commit_object_b64", "tracked_worktree_delta_sha256",
+            "snapshot_kind",
+        }
+        or source.get("snapshot_kind") != SOURCE_SNAPSHOT_KIND
+        or source.get("tracked_worktree_delta_sha256") != EMPTY_SOURCE_DELTA_SHA256
+    ):
+        raise PackagingError("installed_release_source_snapshot_not_publishable")
     if manifest["source_date_epoch"] != _commit_timestamp(
         base64.b64decode(source["commit_object_b64"], validate=True)
     ):
@@ -940,14 +1013,8 @@ def verify_installed_package_release(
         if not SHA256_RE.fullmatch(entry["sha256"]) or type(entry["size"]) is not int or entry["size"] < 0 or entry["mode"] not in {0o444, 0o555} or entry["nlink"] != 1:
             raise PackagingError("installed_release_payload_entry_invalid")
         expected_files[rel] = entry
-    expected_marker = canonical_json(
-        {
-            "schema_version": 1,
-            "kind": "git-archive-release",
-            "candidate_head": source["head"],
-            "candidate_tree": source["tree"],
-            "commit_object": source["commit_object_b64"],
-        }
+    expected_marker = _release_identity_marker(
+        source["head"], source["tree"], source["commit_object_b64"]
     )
     marker_path = root / RELEASE_IDENTITY_NAME
     try:
@@ -1476,47 +1543,152 @@ def _git_output(repo: Path, *args: str) -> bytes:
     return result.stdout
 
 
+def _read_committed_source_modes(
+    repo: Path, source_head: str
+) -> dict[str, tuple[int, str]]:
+    entries = _git_output(
+        repo, "ls-tree", "-r", "-z", "--full-tree", source_head
+    ).split(b"\0")
+    modes: dict[str, tuple[int, str]] = {}
+    for entry in entries:
+        if not entry:
+            continue
+        try:
+            metadata, raw_path = entry.split(b"\t", 1)
+            mode_raw, kind, object_id_raw = metadata.split(b" ", 2)
+        except ValueError as exc:
+            raise PackagingError("committed_source_tree_entry_invalid") from exc
+        if kind != b"blob" or mode_raw not in {b"100644", b"100755"}:
+            raise PackagingError("committed_source_has_symlink_or_submodule")
+        if not re.fullmatch(rb"[0-9a-f]{40}", object_id_raw):
+            raise PackagingError("committed_source_blob_identity_invalid")
+        try:
+            path = os.fsdecode(raw_path)
+            _safe_relpath(path)
+        except (UnicodeError, PackagingError) as exc:
+            raise PackagingError("committed_source_path_invalid") from exc
+        if path in modes:
+            raise PackagingError("committed_source_path_duplicate")
+        modes[path] = (int(mode_raw, 8), object_id_raw.decode("ascii"))
+    if not modes:
+        raise PackagingError("empty_source_payload")
+    return modes
+
+
+def _materialize_git_archive(
+    repo: Path,
+    source_head: str,
+    expected_modes: Mapping[str, tuple[int, str]],
+    destination: Path,
+    *,
+    source_date_epoch: int,
+) -> dict[str, int]:
+    archive_bytes = _git_output(repo, "archive", "--format=tar", source_head)
+    destination.mkdir(mode=0o700)
+    found: dict[str, int] = {}
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:")
+    except (tarfile.TarError, OSError) as exc:
+        raise PackagingError("committed_source_archive_invalid") from exc
+    with archive:
+        for member in archive:
+            raw_name = member.name[:-1] if member.isdir() and member.name.endswith("/") else member.name
+            try:
+                relative = str(_safe_relpath(raw_name))
+            except PackagingError as exc:
+                raise PackagingError("committed_source_archive_path_invalid") from exc
+            target = destination.joinpath(*PurePosixPath(relative).parts)
+            if member.isdir():
+                if relative in expected_modes:
+                    raise PackagingError("committed_source_archive_type_mismatch")
+                target.mkdir(parents=True, exist_ok=True, mode=0o700)
+                continue
+            if not member.isfile() or relative in found:
+                raise PackagingError("committed_source_archive_special_or_duplicate")
+            expected = expected_modes.get(relative)
+            if expected is None:
+                raise PackagingError("committed_source_archive_has_untracked_path")
+            git_mode, expected_blob = expected
+            normalized_mode = 0o755 if git_mode == 0o100755 else 0o644
+            archive_mode = stat.S_IMODE(member.mode)
+            if archive_mode & 0o7000 or bool(archive_mode & 0o111) != bool(
+                git_mode & 0o111
+            ):
+                raise PackagingError(
+                    "committed_source_archive_mode_mismatch:"
+                    f"{relative}:{archive_mode:o}:{normalized_mode:o}"
+                )
+            stream = archive.extractfile(member)
+            if stream is None:
+                raise PackagingError("committed_source_archive_file_unreadable")
+            data = stream.read()
+            blob_id = hashlib.sha1(
+                b"blob " + str(len(data)).encode("ascii") + b"\0" + data
+            ).hexdigest()
+            if blob_id != expected_blob:
+                raise PackagingError("committed_source_archive_blob_mismatch")
+            _write_file(target, data, normalized_mode, source_date_epoch)
+            found[relative] = git_mode
+    if found != {path: mode for path, (mode, _blob) in expected_modes.items()}:
+        raise PackagingError("committed_source_archive_inventory_mismatch")
+    return found
+
+
 def build_from_checkout(
     checkout: str | Path,
     output_dir: str | Path,
     *,
+    expected_source_head: str,
     release_id: str,
     source_date_epoch: int | None = None,
 ) -> Path:
-    """Build from committed tracked paths and bind any tracked worktree delta."""
+    """Build only from a clean, explicitly identified immutable Git snapshot."""
     repo = Path(checkout).resolve(strict=True)
     head = _git_output(repo, "rev-parse", "HEAD").decode().strip()
+    if not isinstance(expected_source_head, str) or not GIT_ID_RE.fullmatch(
+        expected_source_head
+    ):
+        raise PackagingError("explicit_source_head_required")
+    if head != expected_source_head:
+        raise PackagingError("checkout_head_does_not_match_explicit_source")
     tree = _git_output(repo, "rev-parse", "HEAD^{tree}").decode().strip()
     commit = _git_output(repo, "cat-file", "commit", "HEAD")
     if source_date_epoch is None:
         source_date_epoch = _commit_timestamp(commit)
     commit_b64 = base64.b64encode(commit).decode("ascii")
-    delta = _git_output(repo, "diff", "--binary", "HEAD", "--")
-    source_delta = sha256_bytes(delta)
-    entries = _git_output(repo, "ls-tree", "-r", "-z", "--full-tree", "HEAD").split(b"\0")
-    modes: dict[str, int] = {}
-    for entry in entries:
-        if not entry:
-            continue
-        metadata, raw_path = entry.split(b"\t", 1)
-        mode_raw, kind, _object_id = metadata.split(b" ", 2)
-        if kind != b"blob" or mode_raw not in {b"100644", b"100755"}:
-            raise PackagingError("committed_source_has_symlink_or_submodule")
-        path = os.fsdecode(raw_path)
-        modes[path] = int(mode_raw, 8)
-    if release_id == "auto":
-        release_id = derive_release_id(repo, source_head=head, tracked_modes=modes)
-    return build_deb(
-        repo,
-        output_dir,
-        release_id=release_id,
-        source_head=head,
-        source_tree=tree,
-        commit_object_b64=commit_b64,
-        source_delta_sha256=source_delta,
-        source_date_epoch=source_date_epoch,
-        tracked_modes=modes,
+    status = _git_output(
+        repo, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"
     )
+    if status:
+        raise PackagingError("publishable_source_worktree_dirty")
+    expected_modes = _read_committed_source_modes(repo, head)
+    source_delta = EMPTY_SOURCE_DELTA_SHA256
+    with tempfile.TemporaryDirectory(prefix="phase39-p0b-git-archive-") as temp:
+        snapshot = Path(temp) / "source"
+        modes = _materialize_git_archive(
+            repo,
+            head,
+            expected_modes,
+            snapshot,
+            source_date_epoch=source_date_epoch,
+        )
+        if _git_output(
+            repo, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none"
+        ):
+            raise PackagingError("publishable_source_worktree_changed_during_build")
+        if release_id == "auto":
+            release_id = derive_release_id(snapshot, source_head=head, tracked_modes=modes)
+        return build_deb(
+            snapshot,
+            output_dir,
+            release_id=release_id,
+            source_head=head,
+            source_tree=tree,
+            commit_object_b64=commit_b64,
+            source_delta_sha256=source_delta,
+            source_date_epoch=source_date_epoch,
+            tracked_modes=modes,
+        )
 
 
 def _cli() -> int:
@@ -1525,6 +1697,7 @@ def _cli() -> int:
     build = commands.add_parser("build")
     build.add_argument("--checkout", required=True)
     build.add_argument("--output-dir", required=True)
+    build.add_argument("--expected-source-head", required=True)
     build.add_argument("--release-id", default="auto")
     build.add_argument("--source-date-epoch", type=int)
     verify = commands.add_parser("verify-package")
@@ -1540,6 +1713,7 @@ def _cli() -> int:
         if args.command == "build":
             result = build_from_checkout(
                 args.checkout, args.output_dir,
+                expected_source_head=args.expected_source_head,
                 release_id=args.release_id,
                 source_date_epoch=args.source_date_epoch,
             )
