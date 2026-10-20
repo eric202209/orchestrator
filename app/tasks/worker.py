@@ -461,6 +461,61 @@ def preload_worker_evaluator_provenance(sender=None, **kwargs):
     )
 
 
+def worker_configuration_fingerprint(worker_app, worker_runtime):
+    """Return the Worker configuration identity recorded at boot.
+
+    ``worker_runtime`` is the WorkController carrying effective concurrency.
+    Offline pin authoring calls this with an explicit expected runtime.
+    """
+    return _collect_worker_configuration(
+        settings,
+        getattr(worker_app, "conf", {}),
+        worker_runtime=worker_runtime,
+        operational_values={
+            "task.soft_time_limit_seconds": ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
+            "task.time_limit_seconds": ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
+            "retry.max_retries": {
+                "execute_orchestration_task": BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+                "scheduled_task_execution": 1,
+            },
+            "retry.countdown_seconds": {
+                "capacity": 15,
+                "scheduled_task_execution": 5,
+            },
+            "retry.redelivery_policy": {
+                "acks_late": True,
+                "reject_on_worker_lost": True,
+                "acks_on_failure_or_timeout": True,
+            },
+            "task.decorator_time_limits": {
+                "execute_orchestration_task": {
+                    "soft": ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
+                    "hard": ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
+                }
+            },
+            "policy.timeout_policy": {
+                "planning_synthesis": getattr(
+                    settings, "PLANNING_SYNTHESIS_TIMEOUT_SECONDS", None
+                ),
+                "replan_synthesis": getattr(
+                    settings, "REPLAN_SYNTHESIS_TIMEOUT_SECONDS", None
+                ),
+                "planning_repair": PLANNING_REPAIR_TIMEOUT_SECONDS,
+                "debug": DEBUG_TIMEOUT_SECONDS,
+                "summary": SUMMARY_TIMEOUT_SECONDS,
+                "completion_verification": COMPLETION_VERIFICATION_TIMEOUT_SECONDS,
+                "completion_repair": COMPLETION_REPAIR_TIMEOUT_SECONDS,
+            },
+            "d37.binding.route_behavior": {
+                "binding": "ephemeral-runtime",
+                "selected_model": _SUPPORTED_LOCAL_MODEL_REF,
+                "fallbacks": [],
+            },
+        },
+        task_registry=getattr(worker_app, "tasks", None),
+    )
+
+
 @worker_ready.connect
 def on_worker_ready(sender, **kwargs):
     """On cold boot, immediately recover sessions orphaned by a previous worker crash.
@@ -470,54 +525,11 @@ def on_worker_ready(sender, **kwargs):
     """
     try:
         worker_app = getattr(sender, "app", celery_app)
-        configuration_fingerprint = _collect_worker_configuration(
-            settings,
-            getattr(worker_app, "conf", {}),
+        configuration_fingerprint = worker_configuration_fingerprint(
+            worker_app,
             # worker_ready's sender is the Consumer; the effective concurrency
             # lives on its WorkController.
-            worker_runtime=getattr(sender, "controller", None),
-            operational_values={
-                "task.soft_time_limit_seconds": ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
-                "task.time_limit_seconds": ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
-                "retry.max_retries": {
-                    "execute_orchestration_task": BACKEND_CAPACITY_RETRY_MAX_RETRIES,
-                    "scheduled_task_execution": 1,
-                },
-                "retry.countdown_seconds": {
-                    "capacity": 15,
-                    "scheduled_task_execution": 5,
-                },
-                "retry.redelivery_policy": {
-                    "acks_late": True,
-                    "reject_on_worker_lost": True,
-                    "acks_on_failure_or_timeout": True,
-                },
-                "task.decorator_time_limits": {
-                    "execute_orchestration_task": {
-                        "soft": ORCHESTRATION_TASK_SOFT_TIME_LIMIT_SECONDS,
-                        "hard": ORCHESTRATION_TASK_TIME_LIMIT_SECONDS,
-                    }
-                },
-                "policy.timeout_policy": {
-                    "planning_synthesis": getattr(
-                        settings, "PLANNING_SYNTHESIS_TIMEOUT_SECONDS", None
-                    ),
-                    "replan_synthesis": getattr(
-                        settings, "REPLAN_SYNTHESIS_TIMEOUT_SECONDS", None
-                    ),
-                    "planning_repair": PLANNING_REPAIR_TIMEOUT_SECONDS,
-                    "debug": DEBUG_TIMEOUT_SECONDS,
-                    "summary": SUMMARY_TIMEOUT_SECONDS,
-                    "completion_verification": COMPLETION_VERIFICATION_TIMEOUT_SECONDS,
-                    "completion_repair": COMPLETION_REPAIR_TIMEOUT_SECONDS,
-                },
-                "d37.binding.route_behavior": {
-                    "binding": "ephemeral-runtime",
-                    "selected_model": _SUPPORTED_LOCAL_MODEL_REF,
-                    "fallbacks": [],
-                },
-            },
-            task_registry=getattr(worker_app, "tasks", None),
+            getattr(sender, "controller", None),
         )
         identity_paths = _resolve_worker_identity_paths(
             source_root=settings.WORKER_SOURCE_ROOT,

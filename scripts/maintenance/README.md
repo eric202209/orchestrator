@@ -39,6 +39,9 @@ harness layout remains stable.
 - `phase18f_seed_real_session_evidence.py`, `phase18i_machine_a_limited_validation.py` -
   Phase 18F/18I evidence-generation harnesses (see
   `docs/roadmap/done/workflow/` for their reports).
+- `worker_pin_worksheet.py` - Phase 39B offline Worker candidate-pin
+  worksheet from the checkout and an explicit launcher context; never
+  approves or installs a pin. Imported by `app/tests/`.
 - `workspace_collision_audit.py` - Phase 23B read-only Project workspace
   collision audit; imported by `app/tests/`.
 - `sandbox_branch_cleanup.py` - Phase 22B-1X1 managed sandbox branch

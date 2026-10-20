@@ -1588,6 +1588,27 @@ def inspect_worker_provenance_boundary(
     )
 
 
+def worker_source_launcher_identity(
+    source_root: str | Path, *, executable: str, argv: Sequence[str]
+) -> dict[str, Any]:
+    """Return the launcher identity a builder folds into its source digest.
+
+    With no explicit launcher, ``build_candidate_source_manifest`` uses this
+    with the builder's own ``sys.executable``/``sys.argv``.  The Python-level
+    argv starts at the entry script (``venv/bin/celery``), not the interpreter
+    shown in ``/proc`` cmdline, and ``cwd`` is the source root, not the
+    process directory.  Offline pin authoring passes the expected Worker's
+    values explicitly.
+    """
+
+    return {
+        "launcher": "celery-worker",
+        "executable": str(Path(executable).resolve()),
+        "cwd": str(source_root),
+        "argv": [str(item) for item in argv] or [str(executable)],
+    }
+
+
 def build_candidate_source_manifest(
     source_root: str | Path,
     *,
@@ -1624,12 +1645,9 @@ def build_candidate_source_manifest(
         for path in (_module_source_path(root, name),)
     )
     if launcher_identity is None:
-        launcher_identity = {
-            "launcher": "celery-worker",
-            "executable": str(Path(sys.executable).resolve()),
-            "cwd": str(root),
-            "argv": [str(item) for item in sys.argv] or [str(sys.executable)],
-        }
+        launcher_identity = worker_source_launcher_identity(
+            root, executable=sys.executable, argv=sys.argv
+        )
     launcher = _validate_launcher_identity(launcher_identity)
     manifest = CandidateSourceManifest(
         schema_version=SCHEMA_VERSION,
@@ -3765,5 +3783,6 @@ __all__ = [
     "sha256_file",
     "verify_candidate_source_manifest",
     "verify_worker_identity",
+    "worker_source_launcher_identity",
     "write_candidate_source_manifest",
 ]
