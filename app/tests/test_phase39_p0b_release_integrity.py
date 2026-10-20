@@ -25,8 +25,7 @@ NOW = dt.datetime(2026, 10, 20, 13, 0, tzinfo=dt.timezone.utc)
 
 class ReleaseFixture(unittest.TestCase):
     def setUp(self) -> None:
-        if os.geteuid() != 0:
-            self.skipTest("root-owned release fixture requires root test process")
+        self.owner_uid = os.geteuid()
         self.temp = tempfile.TemporaryDirectory(prefix="phase39-p0b-release-")
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name)
@@ -36,7 +35,7 @@ class ReleaseFixture(unittest.TestCase):
             "launcher": "start.sh:start_worker_only",
             "executable": "/usr/bin/python3.12",
             "script": "start.sh",
-            "cwd": "/usr/local/lib/orchestrator-maintenance/phase39-p0b/r-fixture",
+            "cwd": "/usr/lib/orchestrator-maintenance/phase39-p0b/r-fixture",
             "argv": [
                 "<release>/venv/bin/python3",
                 "<release>/venv/bin/celery",
@@ -84,7 +83,7 @@ class ReleaseFixture(unittest.TestCase):
         )
         self._write(
             "venv/bin/celery",
-            b"#!/usr/local/lib/orchestrator-maintenance/phase39-p0b/r-fixture/venv/bin/python3\n",
+            b"#!/usr/lib/orchestrator-maintenance/phase39-p0b/r-fixture/venv/bin/python3\n",
             executable=True,
         )
         self._write(
@@ -141,7 +140,7 @@ class ReleaseFixture(unittest.TestCase):
         self.manifest_path = self.base / "release-manifest.json"
         release_manager.write_source_manifest(self.manifest, self.manifest_path)
         os.chmod(self.manifest_path, 0o644)
-        self.parent = self.base / "usr/local/lib/orchestrator-maintenance/phase39-p0b"
+        self.parent = self.base / "usr/lib/orchestrator-maintenance/phase39-p0b"
         self.parent.mkdir(parents=True, mode=0o755)
         for current, dirs, _ in os.walk(self.base):
             for name in dirs:
@@ -268,6 +267,8 @@ class ReleaseFixture(unittest.TestCase):
             expected_source_head=self.source_head,
             expected_source_tree=self.source_tree,
             expected_launcher_identity=self.launcher,
+            uid=self.owner_uid,
+            effective_uid=self.owner_uid,
             **kwargs,
         )
 
@@ -282,6 +283,7 @@ class ReleaseFixture(unittest.TestCase):
             expected_source_head=self.source_head,
             expected_source_tree=self.source_tree,
             expected_launcher_identity=self.launcher,
+            uid=self.owner_uid,
         )
 
 
@@ -307,20 +309,37 @@ class ProtectedReleaseTests(ReleaseFixture):
                 expected_source_head=self.source_head,
                 expected_source_tree=self.source_tree,
                 expected_launcher_identity=self.launcher,
+                uid=self.owner_uid,
+                effective_uid=self.owner_uid,
             )
 
     def test_production_install_destination_is_fixed(self) -> None:
         self.assertEqual(
             release_manager.validate_protected_installation_parent(
-                "/usr/local/lib/orchestrator-maintenance/phase39-p0b"
+                "/usr/lib/orchestrator-maintenance/phase39-p0b"
             ),
-            Path("/usr/local/lib/orchestrator-maintenance/phase39-p0b"),
+            Path("/usr/lib/orchestrator-maintenance/phase39-p0b"),
         )
         with self.assertRaisesRegex(
             release_manager.ReleaseError,
             "installation_parent_must_be_fixed_protected_release_root",
         ):
             release_manager.validate_protected_installation_parent(self.parent)
+        with self.assertRaisesRegex(
+            release_manager.ReleaseError,
+            "apt_dpkg_is_the_only_production_installation_authority",
+        ):
+            release_manager.install_release(
+                self.payload,
+                self.manifest_path,
+                release_manager.PROTECTED_INSTALLATION_PARENT,
+                expected_manifest_sha256=self.manifest_sha,
+                expected_source_head=self.source_head,
+                expected_source_tree=self.source_tree,
+                expected_launcher_identity=self.launcher,
+                uid=self.owner_uid,
+                effective_uid=self.owner_uid,
+            )
 
     def test_incomplete_runtime_dependency_inventory_is_rejected(self) -> None:
         incomplete = [
@@ -371,7 +390,7 @@ class ProtectedReleaseTests(ReleaseFixture):
         with self.assertRaisesRegex(
             release_manager.ReleaseError, "system_dependency_file_unprotected"
         ):
-            release_manager._verify_system_dependency(dependency, uid=0)
+            release_manager._verify_system_dependency(dependency, uid=self.owner_uid)
 
     def test_source_path_replacement_after_open_cannot_substitute_release_bytes(
         self,
@@ -471,8 +490,10 @@ class ProtectedReleaseTests(ReleaseFixture):
     def test_symlink_substitution_is_rejected(self) -> None:
         self.install()
         target = self.release / "scripts/maintenance/phase39_p0b/worker_pidfd.py"
+        os.chmod(target.parent, 0o755)
         target.unlink()
         target.symlink_to("protected_refresh_authority.py")
+        os.chmod(target.parent, 0o555)
         with self.assertRaises(release_manager.ReleaseError):
             self.require_valid()
 
@@ -483,8 +504,10 @@ class ProtectedReleaseTests(ReleaseFixture):
             self.release
             / "scripts/maintenance/phase39_p0b/protected_refresh_authority.py"
         )
+        os.chmod(target.parent, 0o755)
         target.unlink()
         os.link(source, target)
+        os.chmod(target.parent, 0o555)
         with self.assertRaisesRegex(
             release_manager.ReleaseError,
             "file_type_or_link_count_invalid|release_file_unprotected_or_changed",
@@ -532,6 +555,8 @@ class ProtectedReleaseTests(ReleaseFixture):
                 expected_source_head=self.source_head,
                 expected_source_tree=self.source_tree,
                 expected_launcher_identity=self.launcher,
+                uid=self.owner_uid,
+                effective_uid=self.owner_uid,
             )
 
     def test_changed_release_file_hash_is_rejected(self) -> None:
@@ -556,6 +581,7 @@ class ProtectedReleaseTests(ReleaseFixture):
                 expected_source_head="a" * 40,
                 expected_source_tree=self.source_tree,
                 expected_launcher_identity=self.launcher,
+                uid=self.owner_uid,
             )
 
     def test_wrong_launcher_identity_is_rejected(self) -> None:
@@ -570,6 +596,7 @@ class ProtectedReleaseTests(ReleaseFixture):
                 expected_source_head=self.source_head,
                 expected_source_tree=self.source_tree,
                 expected_launcher_identity=changed,
+                uid=self.owner_uid,
             )
 
     def test_historical_approval_is_rejected(self) -> None:
@@ -693,6 +720,7 @@ class ProtectedReleaseTests(ReleaseFixture):
                 expected_source_tree=self.source_tree,
                 expected_launcher_identity=self.launcher,
                 action=lambda _: actions.append("privileged-action"),
+                uid=self.owner_uid,
             )
         self.assertEqual(actions, [])
 

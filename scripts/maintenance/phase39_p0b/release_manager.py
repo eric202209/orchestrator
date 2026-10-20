@@ -1,4 +1,4 @@
-"""Build and install immutable, versioned Phase 39 P0B release candidates.
+"""Verify release manifests and build isolated release fixtures.
 
 This module is stdlib-only.  A manifest digest is an integrity value, not an
 authenticator: installation requires an expected digest supplied by a
@@ -23,6 +23,7 @@ from typing import Any, Mapping, Sequence
 
 SCHEMA_VERSION = 1
 MANIFEST_NAME = "release-manifest.json"
+PACKAGE_MANIFEST_NAME = "release-package-manifest.json"
 STATE_NAME = "release-state.json"
 LOCK_PREFIX = ".phase39-p0b-install-"
 MUTABLE_RUNTIME = frozenset({"logs/worker.log"})
@@ -66,7 +67,7 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_ID_RE = re.compile(r"[0-9a-f]{40}\Z")
 RELEASE_ID_RE = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}\Z")
 PROTECTED_INSTALLATION_PARENT = Path(
-    "/usr/local/lib/orchestrator-maintenance/phase39-p0b"
+    "/usr/lib/orchestrator-maintenance/phase39-p0b"
 )
 
 
@@ -153,7 +154,7 @@ def _walk_release_files(root: Path, *, required_uid: int | None = None) -> list[
             item = directory / name
             rel = item.relative_to(root).as_posix()
             _safe_relpath(rel)
-            if rel in {MANIFEST_NAME, STATE_NAME, RELEASE_IDENTITY_NAME} or rel in MUTABLE_RUNTIME:
+            if rel in {MANIFEST_NAME, PACKAGE_MANIFEST_NAME, STATE_NAME, RELEASE_IDENTITY_NAME} or rel in MUTABLE_RUNTIME:
                 raise ReleaseError(f"reserved_release_path:{rel}")
             digest, info = _hash_regular_file(item)
             if required_uid is not None and (
@@ -182,7 +183,7 @@ def _file_table_digest(files: Sequence[Mapping[str, Any]]) -> str:
 def _git_tree_id(root: Path) -> str:
     """Recompute the committed Git tree, excluding documented release data."""
     excluded_top = {
-        "venv", ".env", "logs", MANIFEST_NAME, STATE_NAME, RELEASE_IDENTITY_NAME,
+        "venv", ".env", "logs", MANIFEST_NAME, PACKAGE_MANIFEST_NAME, STATE_NAME, RELEASE_IDENTITY_NAME,
     }
 
     def git_object_id(kind: bytes, payload: bytes) -> bytes:
@@ -483,10 +484,29 @@ def validate_parent_directories(path: str | Path, *, uid: int = 0) -> tuple[Path
         raise ReleaseError("protected_path_not_canonical")
     resolved = Path("/")
     checked = [resolved]
-    _check_dir(resolved, uid=uid)
-    for part in target.parts[1:]:
-        resolved = resolved / part
-        _check_dir(resolved, uid=uid)
+    parts = target.parts[1:]
+    for index, part in enumerate((None, *parts)):
+        if part is not None:
+            resolved = resolved / part
+        final = index == len(parts)
+        try:
+            info = resolved.lstat()
+        except OSError as exc:
+            raise ReleaseError(f"directory_missing:{resolved}") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise ReleaseError(f"directory_type_or_owner_invalid:{resolved}")
+        if info.st_uid == uid:
+            mode = stat.S_IMODE(info.st_mode)
+            if mode & 0o022:
+                sticky_exception = uid == 0 and info.st_uid == 0 and bool(mode & stat.S_ISVTX)
+                if not sticky_exception:
+                    raise ReleaseError(f"directory_writable_by_untrusted_user:{resolved}")
+        elif uid != 0 and info.st_uid == 0 and not final:
+            mode = stat.S_IMODE(info.st_mode)
+            if mode & 0o022 and not bool(mode & stat.S_ISVTX):
+                raise ReleaseError(f"directory_writable_by_untrusted_user:{resolved}")
+        else:
+            raise ReleaseError(f"directory_type_or_owner_invalid:{resolved}")
         checked.append(resolved)
     return tuple(checked)
 
@@ -744,6 +764,7 @@ def _remove_tree(path: Path) -> None:
     if path.is_symlink() or not path.is_dir():
         path.unlink()
         return
+    os.chmod(path, 0o700)
     for child in path.iterdir():
         _remove_tree(child)
     path.rmdir()
@@ -762,11 +783,13 @@ def install_release(
     effective_uid: int | None = None,
     fault_hook: Any = None,
 ) -> dict[str, Any]:
-    """Atomically install an inert release candidate below a protected parent."""
+    """Install a temporary test fixture; production installation is APT/dpkg only."""
     actual_euid = os.geteuid() if effective_uid is None else effective_uid
     if actual_euid != uid:
         raise ReleaseError("release_install_requires_root")
     parent = Path(installation_parent)
+    if parent == PROTECTED_INSTALLATION_PARENT:
+        raise ReleaseError("apt_dpkg_is_the_only_production_installation_authority")
     validate_parent_directories(parent, uid=uid)
     _check_dir(parent, uid=uid)
     manifest, digest = _read_manifest(Path(manifest_path), expected_manifest_sha256)
@@ -872,7 +895,7 @@ def _cli() -> int:
     build.add_argument("--dependencies-json", required=True)
     build.add_argument("--configuration-fingerprint")
     build.add_argument("--output", required=True)
-    install = subs.add_parser("install")
+    install = subs.add_parser("install", help=argparse.SUPPRESS)
     install.add_argument("--source-root", required=True)
     install.add_argument("--manifest", required=True)
     install.add_argument("--installation-parent", required=True)
@@ -906,18 +929,7 @@ def _cli() -> int:
             print(json.dumps({"stage": "SOURCE_BUILD", "approval_state": "NOT_APPROVED", "manifest_sha256": digest}, sort_keys=True))
             return 0
         if args.command == "install":
-            installation_parent = validate_protected_installation_parent(
-                args.installation_parent
-            )
-            result = install_release(
-                args.source_root, args.manifest, installation_parent,
-                expected_manifest_sha256=args.expected_manifest_sha256,
-                expected_source_head=args.source_head,
-                expected_source_tree=args.source_tree,
-                expected_launcher_identity=launcher,
-            )
-            print(json.dumps(result, sort_keys=True))
-            return 0
+            raise ReleaseError("apt_dpkg_is_the_only_production_installation_authority")
         result = verify_installed_release(
             args.release_root,
             expected_manifest_sha256=args.expected_manifest_sha256,

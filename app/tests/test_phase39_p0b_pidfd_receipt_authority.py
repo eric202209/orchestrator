@@ -166,14 +166,16 @@ def append_completed(
         )
 
 
-@unittest.skipUnless(os.geteuid() == 0, "root-owned authority fixtures require root")
 class ProtectedRefreshAuthorityTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.owner_uid = os.geteuid()
         self.temp = tempfile.TemporaryDirectory(prefix="p39-authority-test-")
         self.root = Path(self.temp.name)
         self.authority_root = self.root / "authority"
         self.authority = authority_module.RefreshAuthority(
-            self.authority_root, clock=lambda: NOW
+            self.authority_root,
+            required_uid=self.owner_uid,
+            clock=lambda: NOW,
         )
         self.refresh_id = str(uuid.uuid4())
         self.receipt = base_receipt(self.root, self.refresh_id)
@@ -271,13 +273,17 @@ class ProtectedRefreshAuthorityTests(unittest.TestCase):
 
     def test_symlink_directory_and_journal_are_rejected(self) -> None:
         actual = self.root / "actual-authority"
-        actual_authority = authority_module.RefreshAuthority(actual, clock=lambda: NOW)
+        actual_authority = authority_module.RefreshAuthority(
+            actual, required_uid=self.owner_uid, clock=lambda: NOW
+        )
         with actual_authority.locked(exclusive=True, create=True) as directory_fd:
             actual_authority.begin(directory_fd, self.refresh_id, self.receipt)
         linked = self.root / "linked-authority"
         linked.symlink_to(actual, target_is_directory=True)
         with self.assertRaises(authority_module.RefreshAuthorityError):
-            authority_module.RefreshAuthority(linked).load(self.refresh_id)
+            authority_module.RefreshAuthority(linked, required_uid=self.owner_uid).load(
+                self.refresh_id
+            )
 
         record_path = actual / f"{self.refresh_id}.jsonl"
         target = self.root / "target.jsonl"
@@ -314,6 +320,7 @@ class ProtectedRefreshAuthorityTests(unittest.TestCase):
         fsync_fds: list[int] = []
         authority = authority_module.RefreshAuthority(
             self.authority_root,
+            required_uid=self.owner_uid,
             clock=lambda: NOW,
             fsync=lambda fd: fsync_fds.append(fd),
         )

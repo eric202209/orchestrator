@@ -69,6 +69,7 @@ RELEASE_UNTRACKED_TOP_LEVEL = frozenset(
         "venv",
         RELEASE_IDENTITY_FILE_NAME,
         "release-manifest.json",
+        "release-package-manifest.json",
         "release-state.json",
         "logs",
         ".env",

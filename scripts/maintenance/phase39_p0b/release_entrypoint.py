@@ -178,6 +178,22 @@ def _release_root() -> Path:
     return root
 
 
+def validate_package_activation_manifest(
+    manifest: Mapping[str, Any], *, release_id: str
+) -> None:
+    """Reject an R1 candidate before any operator action can be selected."""
+    if (
+        manifest.get("manifest_kind") != "orchestrator-phase39-p0b-deb"
+        or type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version") != 1
+        or manifest.get("activation_status") != "ACTIVATABLE"
+    ):
+        raise EntryPointError("release_package_not_activatable")
+    package = manifest.get("package")
+    if not isinstance(package, dict) or package.get("release_id") != release_id:
+        raise EntryPointError("release_package_identity_mismatch")
+
+
 def _approval_paths(release_id: str, approval_root: Path = APPROVAL_ROOT) -> tuple[Path, Path]:
     if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,95}", release_id):
         raise EntryPointError("release_id_invalid")
@@ -240,6 +256,7 @@ def invoke_after_release_verification(
     expected_source_tree: str,
     expected_launcher_identity: Mapping[str, Any],
     action: Any,
+    uid: int = 0,
 ) -> Any:
     """Call a privileged action only after the whole release is reverified."""
     verified = releases.verify_installed_release(
@@ -248,6 +265,7 @@ def invoke_after_release_verification(
         expected_source_head=expected_source_head,
         expected_source_tree=expected_source_tree,
         expected_launcher_identity=expected_launcher_identity,
+        uid=uid,
     )
     return action(verified)
 
@@ -271,6 +289,21 @@ def execute(
     args = parser.parse_args(argv)
 
     root = _release_root()
+    if root.parent != releases.PROTECTED_INSTALLATION_PARENT:
+        raise EntryPointError("release_root_not_in_fixed_apt_installation_path")
+    package_manifest_raw, _ = _read_protected_file(
+        root / releases.PACKAGE_MANIFEST_NAME
+    )
+    try:
+        package_manifest = json.loads(package_manifest_raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise EntryPointError("release_package_manifest_invalid") from exc
+    if (
+        not isinstance(package_manifest, dict)
+        or releases.canonical_json(package_manifest) != package_manifest_raw
+    ):
+        raise EntryPointError("release_package_manifest_not_canonical")
+    validate_package_activation_manifest(package_manifest, release_id=root.name)
     manifest_path = root / releases.MANIFEST_NAME
     manifest_raw, _ = _read_protected_file(manifest_path)
     try:
