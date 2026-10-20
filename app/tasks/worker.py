@@ -2496,6 +2496,7 @@ def execute_orchestration_task(
         )
 
         from app.services.orchestration.planning.planner_contract_registry import (
+            compiled_plan_log_summary,
             planner_grounding_evidence,
         )
 
@@ -2915,7 +2916,9 @@ def execute_orchestration_task(
                     .get("task1_bootstrap_contract", {})
                     .get("rejected_alternatives", [])
                 ),
-                "compiled_plan": orchestration_state.plan or [],
+                "compiled_plan_summary": compiled_plan_log_summary(
+                    orchestration_state.plan
+                ),
                 "execution_start_reached": planning_phase_result.get("status")
                 == "completed",
             }
@@ -2978,7 +2981,9 @@ def execute_orchestration_task(
                         "project_dir": str(orchestration_state.project_dir),
                     },
                 ),
-                "compiled_plan": orchestration_state.plan or [],
+                "compiled_plan_summary": compiled_plan_log_summary(
+                    orchestration_state.plan
+                ),
             },
         )
 

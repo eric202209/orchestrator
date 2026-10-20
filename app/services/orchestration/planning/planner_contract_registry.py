@@ -8,6 +8,7 @@ absence.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -210,6 +211,49 @@ def planner_grounding_evidence(
             if contract
             else "legacy_runtime_inference"
         ),
+    }
+
+
+MAX_PLAN_SUMMARY_STEP_NUMBERS = 64
+
+
+def _list_length(value: Any) -> int:
+    return len(value) if isinstance(value, (list, tuple)) else 0
+
+
+def compiled_plan_log_summary(plan: Any) -> dict[str, Any]:
+    """Return bounded, content-free metadata describing a compiled plan.
+
+    Phase 39 P0A: planner evidence LogEntry rows must not persist step text,
+    commands, or model-generated source carried in ``ops``.  The canonical
+    plan stays in the orchestration state; operational logs keep counts and
+    a digest only.
+    """
+
+    steps = list(plan) if isinstance(plan, (list, tuple)) else []
+    serialized = json.dumps(
+        steps, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    step_dicts = [step for step in steps if isinstance(step, dict)]
+    return {
+        "content_omitted": True,
+        "step_count": len(steps),
+        "step_numbers": [
+            (
+                step.get("step_number")
+                if isinstance(step.get("step_number"), int)
+                and not isinstance(step.get("step_number"), bool)
+                else None
+            )
+            for step in step_dicts[:MAX_PLAN_SUMMARY_STEP_NUMBERS]
+        ],
+        "command_count": sum(_list_length(step.get("commands")) for step in step_dicts),
+        "ops_count": sum(_list_length(step.get("ops")) for step in step_dicts),
+        "expected_file_count": sum(
+            _list_length(step.get("expected_files")) for step in step_dicts
+        ),
+        "serialized_bytes": len(serialized),
+        "sha256": hashlib.sha256(serialized).hexdigest(),
     }
 
 
