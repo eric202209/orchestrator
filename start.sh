@@ -688,12 +688,23 @@ start_worker_only() {
             return 78
         fi
     done
-    if [[ ! -x "${python_bin}" || ! "${python_bin}" -ef /usr/bin/python3.12 ]]; then
-        echo "worker interpreter does not match the approved executable" >&2
+    if [[ ! -f "${python_bin}" || ! -x "${python_bin}" || -L "${python_bin}" ]]; then
+        echo "worker interpreter is unavailable or symlinked" >&2
+        return 78
+    fi
+    local python_links celery_links
+    python_links="$(/usr/bin/stat -c '%h' -- "${python_bin}" 2>/dev/null || true)"
+    if [[ "${python_links}" != "1" ]] || ! /usr/bin/cmp -s -- "${python_bin}" /usr/bin/python3.12; then
+        echo "worker interpreter does not match the approved Python bytes" >&2
         return 78
     fi
     if [[ ! -f "${celery_bin}" || ! -x "${celery_bin}" || -L "${celery_bin}" ]]; then
         echo "worker executable is unavailable or unexpected" >&2
+        return 78
+    fi
+    celery_links="$(/usr/bin/stat -c '%h' -- "${celery_bin}" 2>/dev/null || true)"
+    if [[ "${celery_links}" != "1" ]]; then
+        echo "worker executable has an unexpected hardlink count" >&2
         return 78
     fi
     local celery_shebang

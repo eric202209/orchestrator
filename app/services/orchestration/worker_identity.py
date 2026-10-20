@@ -64,7 +64,16 @@ ROADMAP_DOC_PREFIX = "docs/roadmap/"
 RELEASE_IDENTITY_FILE_NAME = ".orchestrator-release-identity.json"
 RELEASE_IDENTITY_SCHEMA_VERSION = 1
 RELEASE_IDENTITY_KIND = "git-archive-release"
-RELEASE_UNTRACKED_TOP_LEVEL = frozenset({"venv", RELEASE_IDENTITY_FILE_NAME})
+RELEASE_UNTRACKED_TOP_LEVEL = frozenset(
+    {
+        "venv",
+        RELEASE_IDENTITY_FILE_NAME,
+        "release-manifest.json",
+        "release-state.json",
+        "logs",
+        ".env",
+    }
+)
 RELEASE_UNTRACKED_DIRECTORY = "__pycache__"
 _GIT_SHA1_OBJECT_ID = re.compile(r"[0-9a-f]{40}")
 
@@ -848,7 +857,13 @@ def _git_object_id(kind: bytes, data: bytes) -> bytes:
 
 
 def _writable_by_process(path: Path) -> bool:
-    return os.access(path, os.W_OK)
+    # Protected release files are immutable, including for the privileged
+    # operator process.  `os.access(W_OK)` reports true for uid 0 even when
+    # DAC write bits are absent, so inspect the actual mode bits instead.
+    try:
+        return bool(path.lstat().st_mode & 0o222)
+    except OSError:
+        return True
 
 
 def _release_tree_id(directory: Path, *, top_level: bool) -> bytes | None:
