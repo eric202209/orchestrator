@@ -129,7 +129,7 @@ class RuntimeWheelhousePolicyTests(unittest.TestCase):
     def test_wrong_wheel_filename(self) -> None:
         package = self._package()
         package["filename"] = "different-1.0-py3-none-any.whl"
-        self._rejects("runtime_wheel_missing", self._lock(package))
+        self._rejects("runtime_wheel_filename_name_mismatch", self._lock(package))
 
     def test_altered_wheel(self) -> None:
         with (self.wheelhouse / self.filename).open("ab") as stream:
