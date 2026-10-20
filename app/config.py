@@ -268,6 +268,10 @@ class Settings(BaseSettings):
     # Explicit repository root used by Worker boot identity evidence. This is
     # intentionally derived from this config module, never from process cwd.
     WORKER_SOURCE_ROOT: str = str(BASE_DIR)
+    # Phase 39B: absolute path of the operator-approved candidate pin read once
+    # at Worker boot. Empty means no pin, so boot identity stays inconclusive.
+    # Must live outside WORKER_SOURCE_ROOT and RUNTIME_ROOT/tasks.
+    WORKER_CANDIDATE_PIN_PATH: str = ""
     # RTO1: explicit OpenClaw template identity. Empty means no normal
     # OpenClaw invocation is eligible; selection must never fall back to the
     # ProjectRoot agent, main, or a generic workspace.

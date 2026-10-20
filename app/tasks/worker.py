@@ -254,6 +254,8 @@ from app.services.orchestration.worker_identity import (
     capture_process_identity as _capture_process_identity,
     collect_worker_configuration as _collect_worker_configuration,
     create_worker_boot_identity as _create_worker_boot_identity,
+    load_candidate_identity_pin as _load_candidate_identity_pin,
+    preload_affected_modules_for_worker as _preload_affected_modules_for_worker,
     preload_evaluator_module_for_worker as _preload_evaluator_module_for_worker,
     resolve_worker_identity_paths as _resolve_worker_identity_paths,
 )
@@ -451,6 +453,12 @@ def preload_worker_evaluator_provenance(sender=None, **kwargs):
             "Worker evaluator provenance inconclusive; worker startup continues: %s",
             type(exc).__name__,
         )
+    preloaded = _preload_affected_modules_for_worker()
+    logger.info(
+        "Worker affected-module preload: preloaded=%d failed=%s",
+        len(preloaded["preloaded"]),
+        preloaded["failed"],
+    )
 
 
 @worker_ready.connect
@@ -515,16 +523,26 @@ def on_worker_ready(sender, **kwargs):
             source_root=settings.WORKER_SOURCE_ROOT,
             runtime_root=settings.RUNTIME_ROOT,
         )
+        # The pin comes only from operator-controlled startup configuration,
+        # read once in the Worker master; task payloads cannot supply it.
+        candidate_pin_load = _load_candidate_identity_pin(
+            getattr(settings, "WORKER_CANDIDATE_PIN_PATH", ""),
+            source_root=identity_paths.source_root,
+            runtime_root=settings.RUNTIME_ROOT,
+        )
         manifest_path, boot_manifest = _create_worker_boot_identity(
             source_root=identity_paths.source_root,
             identity_dir=identity_paths.identity_dir,
             sender=sender,
             configuration_fingerprint=configuration_fingerprint,
+            candidate_pin_load=candidate_pin_load,
         )
         logger.info(
-            "Worker boot identity manifest created: record_id=%s status=%s path=%s",
+            "Worker boot identity manifest created: record_id=%s status=%s "
+            "pin_status=%s path=%s",
             boot_manifest.record_id,
             boot_manifest.identity_status,
+            boot_manifest.candidate_pin_status,
             manifest_path,
         )
     except (

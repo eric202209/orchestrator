@@ -125,6 +125,53 @@ class InvocationProvenanceReference:
         }
 
 
+_REFERENCE_KEYS = frozenset(
+    {
+        "schema_version",
+        "invocation_attempt_id",
+        "projection_journal_reference",
+        "worker_boot_manifest_id",
+        "worker_boot_manifest_digest",
+        "attempt_number",
+        "classification",
+    }
+)
+
+
+def validate_invocation_reference(value: Any) -> dict[str, Any] | None:
+    """Return a canonical compact reference, or None when it is not exact.
+
+    Unknown or missing nested fields reject the whole reference rather than
+    being silently dropped, so a stored reference is never partially trusted.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != _REFERENCE_KEYS:
+        return None
+    if value.get("schema_version") != INVOCATION_PROJECTION_SCHEMA_VERSION:
+        return None
+    attempt_id = value.get("invocation_attempt_id")
+    if not isinstance(attempt_id, str) or not re.fullmatch(r"[a-f0-9]{32}", attempt_id):
+        return None
+    journal_reference = value.get("projection_journal_reference")
+    if journal_reference is not None and journal_reference != attempt_id:
+        return None
+    manifest_id = value.get("worker_boot_manifest_id")
+    if manifest_id is not None and _identifier(manifest_id) != manifest_id:
+        return None
+    manifest_digest = value.get("worker_boot_manifest_digest")
+    if manifest_digest is not None and _sha256(manifest_digest) is None:
+        return None
+    attempt_number = value.get("attempt_number")
+    if attempt_number is not None and _positive_int(attempt_number) is None:
+        return None
+    classification = value.get("classification")
+    if classification not in _CLASSIFICATIONS:
+        return None
+    if classification == CORRELATED and journal_reference is None:
+        return None
+    return {key: value[key] for key in sorted(_REFERENCE_KEYS)}
+
+
 def bind_invocation_reference(reference: InvocationProvenanceReference) -> Token:
     return _INVOCATION_REFERENCE.set(reference)
 
@@ -802,4 +849,5 @@ __all__ = [
     "current_invocation_reference",
     "persist_invocation_projection",
     "reset_invocation_reference",
+    "validate_invocation_reference",
 ]

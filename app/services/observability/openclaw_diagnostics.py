@@ -141,6 +141,8 @@ class OpenClawDiagnosticMetadataV2(TypedDict, total=False):
     correlation_id: str
     pollution_classification: PollutionClassification
     pollution_entry_count: int
+    # Phase 39B compact correlation reference only; validated as a closed schema.
+    invocation_provenance: dict[str, Any]
 
 
 _DIAGNOSTIC_CATEGORIES = frozenset(
@@ -646,6 +648,15 @@ def normalize_openclaw_diagnostic_metadata(
     correlation_id = value.get("correlation_id")
     if type(correlation_id) is str and _UUID.fullmatch(correlation_id):
         normalized["correlation_id"] = correlation_id
+
+    if "invocation_provenance" in value:
+        from app.services.orchestration.invocation_provenance import (
+            validate_invocation_reference,
+        )
+
+        reference = validate_invocation_reference(value.get("invocation_provenance"))
+        if reference is not None:
+            normalized["invocation_provenance"] = reference
 
     return normalized
 

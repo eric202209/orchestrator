@@ -1134,6 +1134,211 @@ class CandidateIdentityPin:
         return _canonical_launcher_identity(self.launcher_identity)
 
 
+CANDIDATE_PIN_SCHEMA_VERSION = 1
+CANDIDATE_PIN_MAX_BYTES = 16 * 1024
+PIN_ABSENT = "PIN_ABSENT"
+PIN_INVALID = "PIN_INVALID"
+PIN_INCOMPLETE = "PIN_INCOMPLETE"
+PIN_MATCHED = "PIN_MATCHED"
+PIN_MISMATCHED = "PIN_MISMATCHED"
+PIN_LOADED = "PIN_LOADED"
+_PIN_REQUIRED_FIELDS = frozenset(
+    {
+        "pin_schema_version",
+        "candidate_head",
+        "candidate_tree",
+        "source_root",
+        "source_manifest_digest",
+        "launcher_identity",
+        "worker_node_identity",
+        "approval",
+    }
+)
+_PIN_OPTIONAL_FIELDS = frozenset(
+    {
+        "configuration_schema_version",
+        "configuration_fingerprint",
+        "configuration_policy_id",
+    }
+)
+_PIN_APPROVAL_FIELDS = frozenset(
+    {"operator_identity", "approval_id", "approved_at", "expires_at"}
+)
+_PIN_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}")
+_PIN_REVISION = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_PIN_SHA256 = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True)
+class CandidatePinLoad:
+    """Result of reading the operator-provisioned boot pin artifact.
+
+    ``identity`` is a bounded projection for the boot manifest; it never
+    contains the launcher argv, credentials or environment values.
+    """
+
+    status: str
+    pin: CandidateIdentityPin | None = None
+    reasons: tuple[str, ...] = ()
+    identity: Mapping[str, Any] | None = None
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_candidate_pin(value: Any, now: datetime) -> CandidateIdentityPin:
+    if not isinstance(value, Mapping):
+        raise CandidateManifestError("candidate_pin_not_object")
+    keys = set(value)
+    if not _PIN_REQUIRED_FIELDS <= keys:
+        raise CandidateManifestError("candidate_pin_missing_fields")
+    if keys - _PIN_REQUIRED_FIELDS - _PIN_OPTIONAL_FIELDS:
+        raise CandidateManifestError("candidate_pin_unknown_fields")
+    if value["pin_schema_version"] != CANDIDATE_PIN_SCHEMA_VERSION:
+        raise CandidateManifestError("candidate_pin_unsupported_schema")
+    for field_name in ("candidate_head", "candidate_tree"):
+        if not isinstance(value[field_name], str) or not _PIN_REVISION.fullmatch(
+            value[field_name]
+        ):
+            raise CandidateManifestError("candidate_pin_revision_invalid")
+    if not isinstance(
+        value["source_manifest_digest"], str
+    ) or not _PIN_SHA256.fullmatch(value["source_manifest_digest"]):
+        raise CandidateManifestError("candidate_pin_source_digest_invalid")
+    source_root = value["source_root"]
+    if (
+        not isinstance(source_root, str)
+        or len(source_root) > 4096
+        or not Path(source_root).is_absolute()
+    ):
+        raise CandidateManifestError("candidate_pin_source_root_invalid")
+    try:
+        if not isinstance(value["launcher_identity"], Mapping):
+            raise CandidateManifestError("launcher identity must be an object")
+        _validate_launcher_identity(value["launcher_identity"])
+    except CandidateManifestError as exc:
+        # Launcher messages may echo file content; persist only a fixed code.
+        raise CandidateManifestError("candidate_pin_launcher_invalid") from exc
+    node = value["worker_node_identity"]
+    if not isinstance(node, str) or not _PIN_IDENTIFIER.fullmatch(node):
+        raise CandidateManifestError("candidate_pin_worker_node_invalid")
+    approval = value["approval"]
+    if not isinstance(approval, Mapping) or set(approval) != _PIN_APPROVAL_FIELDS:
+        raise CandidateManifestError("candidate_pin_approval_invalid")
+    for field_name in ("operator_identity", "approval_id"):
+        if not isinstance(approval[field_name], str) or not _PIN_IDENTIFIER.fullmatch(
+            approval[field_name]
+        ):
+            raise CandidateManifestError("candidate_pin_approval_invalid")
+    try:
+        approved_at = _parse_timestamp(str(approval["approved_at"]))
+        expires_at = _parse_timestamp(str(approval["expires_at"]))
+    except (TypeError, ValueError) as exc:
+        raise CandidateManifestError("candidate_pin_approval_invalid") from exc
+    if not approved_at < expires_at or approved_at > now:
+        raise CandidateManifestError("candidate_pin_approval_invalid")
+    if expires_at <= now:
+        raise CandidateManifestError("candidate_pin_approval_expired")
+    schema_version = value.get("configuration_schema_version")
+    if schema_version is not None and type(schema_version) is not int:
+        raise CandidateManifestError("candidate_pin_configuration_invalid")
+    for field_name in ("configuration_fingerprint", "configuration_policy_id"):
+        item = value.get(field_name)
+        if item is not None and (not isinstance(item, str) or len(item) > 128):
+            raise CandidateManifestError("candidate_pin_configuration_invalid")
+    return CandidateIdentityPin(
+        candidate_head=value["candidate_head"],
+        candidate_tree=value["candidate_tree"],
+        source_root=source_root,
+        source_manifest_digest=value["source_manifest_digest"],
+        launcher_identity=dict(value["launcher_identity"]),
+        worker_node_identity=node,
+        configuration_schema_version=schema_version,
+        configuration_fingerprint=value.get("configuration_fingerprint"),
+        configuration_policy_id=value.get("configuration_policy_id"),
+    )
+
+
+def load_candidate_identity_pin(
+    pin_path: str | Path | None,
+    *,
+    source_root: str | Path,
+    runtime_root: str | Path | None = None,
+    now: datetime | None = None,
+) -> CandidatePinLoad:
+    """Read the operator-provisioned candidate pin used at Worker boot.
+
+    The pin is an independent expectation: it is only ever read from an
+    operator-controlled file, never derived from the running checkout.  Any
+    defect yields ``PIN_INVALID`` (identity inconclusive), never a pin.
+    """
+
+    if pin_path is None or not str(pin_path).strip():
+        return CandidatePinLoad(PIN_ABSENT, reasons=("candidate_pin_unavailable",))
+    path = Path(str(pin_path).strip()).expanduser()
+    if not path.is_absolute():
+        return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_path_invalid",))
+    resolved = path.resolve(strict=False)
+    protected_roots = [Path(source_root).expanduser().resolve(strict=False)]
+    if runtime_root is not None and str(runtime_root).strip():
+        protected_roots.append(
+            Path(str(runtime_root)).expanduser().resolve(strict=False) / "tasks"
+        )
+    if any(_is_within(resolved, root) for root in protected_roots):
+        return CandidatePinLoad(
+            PIN_INVALID, reasons=("candidate_pin_path_not_independent",)
+        )
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_missing",))
+    except OSError:
+        return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_unreadable",))
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_not_file",))
+        if info.st_mode & 0o022 or info.st_uid not in {0, os.geteuid()}:
+            return CandidatePinLoad(
+                PIN_INVALID, reasons=("candidate_pin_permissions_unsafe",)
+            )
+        if info.st_size > CANDIDATE_PIN_MAX_BYTES:
+            return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_too_large",))
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            raw = handle.read(CANDIDATE_PIN_MAX_BYTES + 1)
+    except OSError:
+        return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_unreadable",))
+    finally:
+        os.close(descriptor)
+    if len(raw) > CANDIDATE_PIN_MAX_BYTES:
+        return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_too_large",))
+    try:
+        value = json.loads(raw.decode("utf-8"))
+        pin = _parse_candidate_pin(value, now or _utc_now())
+    except CandidateManifestError as exc:
+        return CandidatePinLoad(PIN_INVALID, reasons=(str(exc),))
+    except (UnicodeDecodeError, ValueError):
+        return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_malformed",))
+    approval = value["approval"]
+    identity = {
+        "pin_schema_version": CANDIDATE_PIN_SCHEMA_VERSION,
+        "pin_sha256": hashlib.sha256(raw).hexdigest(),
+        "candidate_head": pin.candidate_head,
+        "candidate_tree": pin.candidate_tree,
+        "source_manifest_digest": pin.source_manifest_digest,
+        "operator_identity": approval["operator_identity"],
+        "approval_id": approval["approval_id"],
+        "approved_at": _timestamp(_parse_timestamp(approval["approved_at"])),
+        "expires_at": _timestamp(_parse_timestamp(approval["expires_at"])),
+    }
+    return CandidatePinLoad(PIN_LOADED, pin=pin, identity=identity)
+
+
 @dataclass(frozen=True)
 class CandidateManifestVerification:
     classification: str
@@ -1742,6 +1947,31 @@ def _process_startup_identity(process: ProcessIdentity | None) -> str | None:
     if process is None:
         return None
     return f"{process.linux_boot_id}:{process.pid}:{process.start_ticks}"
+
+
+def preload_affected_modules_for_worker(
+    modules: Sequence[str] = DEFAULT_AFFECTED_MODULES,
+) -> dict[str, Any]:
+    """Import lazily-used affected modules in the Worker master before forking.
+
+    Boot provenance can only vouch for modules loaded when it is captured, so
+    the master imports them once; pool children inherit the same objects.  A
+    failed import is reported by module name only and leaves the module
+    unloaded, which keeps the boot record identity-inconclusive.
+    """
+
+    preloaded: list[str] = []
+    failed: list[str] = []
+    for module_name in modules:
+        if module_name in sys.modules:
+            continue
+        try:
+            importlib.import_module(module_name)
+        except Exception:  # noqa: BLE001 - provenance must not block worker boot
+            failed.append(module_name)
+        else:
+            preloaded.append(module_name)
+    return {"preloaded": preloaded, "failed": failed}
 
 
 def preload_evaluator_module_for_worker(
@@ -2662,9 +2892,16 @@ class WorkerBootIdentityManifest:
     identity_scope: str = IDENTITY_SCOPE
     invocation_identity: str = INVOCATION_IDENTITY
     invocation_identity_reason: str = INVOCATION_IDENTITY_REASON
+    # Optional for manifests written before operator pins were consumed at boot.
+    candidate_pin_status: str | None = None
+    candidate_pin_identity: Mapping[str, Any] | None = None
+    identity_status_reasons: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
+        result["identity_status_reasons"] = list(self.identity_status_reasons)
+        if self.candidate_pin_identity is not None:
+            result["candidate_pin_identity"] = dict(self.candidate_pin_identity)
         result["worker_argv"] = list(self.worker_argv)
         result["expected_task_registrations"] = list(self.expected_task_registrations)
         result["registered_task_registrations"] = list(
@@ -2745,6 +2982,19 @@ class WorkerBootIdentityManifest:
             invocation_identity_reason=str(
                 value.get("invocation_identity_reason", INVOCATION_IDENTITY_REASON)
             ),
+            candidate_pin_status=(
+                str(value["candidate_pin_status"])
+                if value.get("candidate_pin_status") is not None
+                else None
+            ),
+            candidate_pin_identity=(
+                dict(value["candidate_pin_identity"])
+                if isinstance(value.get("candidate_pin_identity"), Mapping)
+                else None
+            ),
+            identity_status_reasons=tuple(
+                str(item) for item in value.get("identity_status_reasons") or ()
+            ),
         )
 
 
@@ -2818,6 +3068,7 @@ def create_worker_boot_identity(
     identity_dir: str | Path | None = None,
     candidate_manifest: CandidateSourceManifest | None = None,
     candidate_pin: CandidateIdentityPin | None = None,
+    candidate_pin_load: CandidatePinLoad | None = None,
     sender: Any | None = None,
     worker_node_identity: str | None = None,
     registered_tasks: Iterable[str] | None = None,
@@ -2834,17 +3085,14 @@ def create_worker_boot_identity(
     evidence that cannot be captured aborts the write entirely.
     """
 
+    if candidate_pin_load is not None:
+        candidate_pin = candidate_pin_load.pin
     root = _safe_source_root(source_root)
     candidate = candidate_manifest or build_candidate_source_manifest(root)
-    candidate_check = verify_candidate_source_manifest(
-        candidate,
-        expected_head=candidate_pin.candidate_head if candidate_pin else None,
-        expected_tree=candidate_pin.candidate_tree if candidate_pin else None,
-        expected_source_root=candidate_pin.source_root if candidate_pin else None,
-        expected_source_manifest_digest=(
-            candidate_pin.source_manifest_digest if candidate_pin else None
-        ),
-    )
+    # Observed checkout integrity is checked without pin expectations; a
+    # contradiction with an operator pin is recorded below as a mismatch
+    # instead of suppressing the boot record.
+    candidate_check = verify_candidate_source_manifest(candidate)
     if candidate_check.classification != IDENTITY_VERIFIED:
         raise WorkerIdentityError(
             "candidate source manifest is not verified: "
@@ -2897,11 +3145,60 @@ def create_worker_boot_identity(
     # approve its own checkout.  Without an external pin it is explicitly
     # identity-inconclusive, never verified.
     status = IDENTITY_INCONCLUSIVE if candidate_pin is None else IDENTITY_VERIFIED
-    if candidate_pin is not None:
-        if _configuration_pin_reasons(candidate_pin):
+    status_reasons: list[str] = []
+    pin_status = (
+        candidate_pin_load.status
+        if candidate_pin_load is not None and candidate_pin is None
+        else PIN_ABSENT
+    )
+    if candidate_pin is None:
+        status_reasons.extend(
+            candidate_pin_load.reasons
+            if candidate_pin_load is not None and candidate_pin_load.reasons
+            else ("candidate_pin_unavailable",)
+        )
+    else:
+        configuration_reasons = _configuration_pin_reasons(candidate_pin)
+        status_reasons.extend(configuration_reasons)
+        if configuration_reasons:
             status = IDENTITY_INCONCLUSIVE
-        status_reasons = _launcher_process_reasons(
-            candidate_pin.launcher_identity, process, "boot_launcher_"
+        mismatch_reasons = [
+            reason
+            for observed, expected, reason in (
+                (
+                    candidate.candidate_head,
+                    candidate_pin.candidate_head,
+                    "boot_pinned_candidate_head_mismatch",
+                ),
+                (
+                    candidate.candidate_tree,
+                    candidate_pin.candidate_tree,
+                    "boot_pinned_candidate_tree_mismatch",
+                ),
+                (
+                    candidate.source_root,
+                    candidate_pin.source_root,
+                    "boot_pinned_source_root_mismatch",
+                ),
+                (
+                    candidate.source_manifest_digest,
+                    candidate_pin.source_manifest_digest,
+                    "boot_pinned_source_manifest_mismatch",
+                ),
+            )
+            if observed != expected
+        ]
+        if not configuration_reasons:
+            if fingerprint != candidate_pin.configuration_fingerprint:
+                mismatch_reasons.append("approved_configuration_boot_digest_mismatch")
+            if projection_schema != candidate_pin.configuration_schema_version:
+                mismatch_reasons.append("approved_configuration_boot_schema_mismatch")
+            if projection_policy != candidate_pin.configuration_policy_id:
+                mismatch_reasons.append("approved_configuration_boot_policy_mismatch")
+        mismatch_reasons.extend(
+            _launcher_process_reasons(
+                candidate_pin.launcher_identity, process, "boot_launcher_"
+            )
         )
         if process_node := (
             worker_node_identity
@@ -2909,13 +3206,21 @@ def create_worker_boot_identity(
             or f"celery@{socket.gethostname()}"
         ):
             if process_node != candidate_pin.worker_node_identity:
-                status_reasons.append("boot_worker_node_identity_mismatch")
-        if status_reasons:
+                mismatch_reasons.append("boot_worker_node_identity_mismatch")
+        status_reasons.extend(mismatch_reasons)
+        if mismatch_reasons:
             status = IDENTITY_MISMATCH
+            pin_status = PIN_MISMATCHED
+        elif configuration_reasons:
+            pin_status = PIN_INCOMPLETE
+        else:
+            pin_status = PIN_MATCHED
     if not registration.valid:
         status = IDENTITY_MISMATCH
+        status_reasons.append("registration_drift")
     if any(not item.get("loaded") for item in provenance):
         status = IDENTITY_INCONCLUSIVE if status == IDENTITY_VERIFIED else status
+        status_reasons.append("affected_module_not_loaded_at_boot")
     evaluator_provenance = next(
         (
             item
@@ -2930,6 +3235,7 @@ def create_worker_boot_identity(
         != LOADED_MODULE_IDENTITY_VERIFIED
     ):
         status = IDENTITY_INCONCLUSIVE if status == IDENTITY_VERIFIED else status
+        status_reasons.append("evaluator_identity_unverified")
     observed_at = boot_timestamp or now()
     record_id = f"{process.linux_boot_id}-{process.pid}-{process.start_ticks}"
     manifest = WorkerBootIdentityManifest(
@@ -2963,6 +3269,13 @@ def create_worker_boot_identity(
         identity_scope=IDENTITY_SCOPE,
         invocation_identity=INVOCATION_IDENTITY,
         invocation_identity_reason=INVOCATION_IDENTITY_REASON,
+        candidate_pin_status=pin_status,
+        candidate_pin_identity=(
+            candidate_pin_load.identity
+            if candidate_pin_load is not None and candidate_pin is not None
+            else None
+        ),
+        identity_status_reasons=tuple(dict.fromkeys(status_reasons))[:32],
     )
     if identity_dir is None or not str(identity_dir).strip():
         raise WorkerIdentityPathError("identity directory is required")

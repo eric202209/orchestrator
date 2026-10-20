@@ -102,6 +102,7 @@ from app.services.observability.openclaw_diagnostics import (
     build_openclaw_diagnostic_metadata,
     event_for_diagnostic_label,
     event_for_invocation_kind,
+    normalize_openclaw_diagnostic_metadata,
     openclaw_diagnostic_message,
 )
 from app.services.observability.planning_provider_evidence import (
@@ -4230,6 +4231,18 @@ class OpenClawSessionService:
         try:
             metadata = build_openclaw_diagnostic_metadata(
                 event, diagnostics, failure_category=failure_category
+            )
+            # Diagnostics bypass record_live_log, so attach the bound compact
+            # invocation reference here; the v2 normalizer revalidates it.
+            from app.services.orchestration.invocation_provenance import (
+                attach_invocation_provenance,
+            )
+
+            metadata = (
+                normalize_openclaw_diagnostic_metadata(
+                    attach_invocation_provenance(metadata)
+                )
+                or metadata
             )
             message = openclaw_diagnostic_message(metadata["diagnostic_event"])
             serialized_metadata = json.dumps(metadata, sort_keys=True)
