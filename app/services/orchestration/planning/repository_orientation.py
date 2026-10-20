@@ -23,13 +23,13 @@ from typing import Iterable
 ORIENTATION_BYTE_BUDGET = 3072
 # Keep the adversarial candidate visible as the tracked product set grows; the
 # byte budget remains the hard upper bound on the advisory block.
-ORIENTATION_PATH_LIMIT = 45
+ORIENTATION_PATH_LIMIT = 46
 ORIENTATION_MIN_LITERAL_CHARS = 4
 ORIENTATION_MAX_LITERALS = 24
 ORIENTATION_GIT_TIMEOUT_SECONDS = 15
 
 # OI-A bounded one-hop reverse-import facts (Discovery orientation only).  They
-# live inside the bounded 45-path / 3,072-byte envelope: at most
+# live inside the bounded 46-path / 3,072-byte envelope: at most
 # IMPORT_NEIGHBOR_RESERVED_SLOTS entries and IMPORT_NEIGHBOR_BYTE_BUDGET bytes,
 # so lexical orientation keeps at least the remaining slots and bytes.  An
 # anchor whose non-test static fan-in exceeds IMPORT_NEIGHBOR_FANIN_CAP adds

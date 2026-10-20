@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+import pwd
 import shutil
 import stat
 import subprocess
@@ -524,11 +525,26 @@ class ProtectedReleaseTests(ReleaseFixture):
         child_code = (
             "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('replacement')"
         )
+        # CI commonly runs as a non-root account whose UID/GID is not 1000.
+        # Keep that execution identity; only drop privileges when the test
+        # process is root, using the platform's configured nobody account.
+        preexec_fn = None
+        if os.geteuid() == 0:
+            try:
+                unprivileged = pwd.getpwnam("nobody")
+            except KeyError:
+                self.skipTest("root execution needs a configured nobody account")
+
+            def drop_privileges() -> None:
+                os.setgid(unprivileged.pw_gid)
+                os.setuid(unprivileged.pw_uid)
+
+            preexec_fn = drop_privileges
         completed = subprocess.run(
             ["/usr/bin/python3.12", "-I", "-c", child_code, str(target)],
             cwd="/",
             env={"HOME": "/tmp", "PATH": "/usr/bin:/bin"},
-            preexec_fn=lambda: (os.setgid(1000), os.setuid(1000)),
+            preexec_fn=preexec_fn,
             capture_output=True,
             text=True,
             check=False,
