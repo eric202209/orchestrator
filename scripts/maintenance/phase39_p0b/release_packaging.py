@@ -48,12 +48,37 @@ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 EMPTY_SOURCE_DELTA_SHA256 = hashlib.sha256(b"").hexdigest()
 SOURCE_SNAPSHOT_KIND = "git-archive-committed-clean"
 RELEASE_ID_RE = re.compile(r"r1-[a-f0-9]{16}-[a-f0-9]{16}\Z")
+WORKER_RELEASE_ID_RE = re.compile(r"wr2-[a-f0-9]{64}\Z")
 PACKAGE_RE = re.compile(r"[a-z0-9][a-z0-9+.-]{1,79}\Z")
 VERSION_RE = re.compile(r"[0-9][A-Za-z0-9.+:~\-]*\Z")
 DPKG_DEB = Path("/usr/bin/dpkg-deb")
 DPKG_SCANPACKAGES = Path("/usr/bin/dpkg-scanpackages")
 GPG = Path("/usr/bin/gpg")
 GPGV = Path("/usr/bin/gpgv")
+WORKER_RELEASE_MANIFEST = "release.json"
+WORKER_RELEASE_SIGNATURE = "release.json.sig"
+WORKER_RELEASE_KIND = "worker-release/v2"
+WORKER_RELEASE_SCHEMA_VERSION = 2
+WORKER_RELEASE_STATE_ROLES = frozenset(
+    {
+        "database",
+        "runtime",
+        "workspace",
+        "checkpoints",
+        "candidate_content",
+        "worker_logs",
+        "openclaw_state",
+        "redis_data",
+        "qdrant_data",
+    }
+)
+WORKER_RELEASE_PROVENANCE_ROLES = {
+    "runtime_lock": "runtime_lock_digest",
+    "wheel_inventory": "wheel_inventory_digest",
+    "native_extension_inventory": "native_extension_inventory_digest",
+    "elf_closure": "elf_closure_digest",
+    "import_origin_inventory": "import_origin_inventory_digest",
+}
 
 
 class PackagingError(RuntimeError):
@@ -64,6 +89,891 @@ def canonical_json(value: Any) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
     ).encode("utf-8")
+
+
+def _worker_canonical_json(value: Any) -> bytes:
+    """Encode the worker-release identity using its closed canonical rules."""
+
+    def reject_floats(item: Any) -> None:
+        if isinstance(item, float):
+            raise PackagingError("worker_manifest_float_forbidden")
+        if isinstance(item, Mapping):
+            if any(not isinstance(key, str) for key in item):
+                raise PackagingError("worker_manifest_object_key_invalid")
+            for child in item.values():
+                reject_floats(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                reject_floats(child)
+        elif item is not None and not isinstance(item, (str, int, bool)):
+            raise PackagingError("worker_manifest_value_type_invalid")
+
+    reject_floats(value)
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise PackagingError("worker_manifest_canonical_encoding_invalid") from exc
+
+
+def _worker_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise PackagingError("worker_manifest_duplicate_json_key")
+        result[key] = value
+    return result
+
+
+def _worker_parse_manifest(raw: bytes) -> dict[str, Any]:
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_worker_json_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
+                PackagingError("worker_manifest_nonstandard_number")
+            ),
+        )
+    except PackagingError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PackagingError("worker_manifest_json_invalid") from exc
+    if not isinstance(value, dict):
+        raise PackagingError("worker_manifest_root_not_object")
+    canonical = _worker_canonical_json(value)
+    if canonical != raw:
+        raise PackagingError("worker_manifest_bytes_not_canonical")
+    return value
+
+
+def _worker_exact_fields(
+    value: Any, fields: set[str], *, label: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise PackagingError(f"worker_manifest_{label}_not_object")
+    missing = fields - set(value)
+    unknown = set(value) - fields
+    if missing:
+        raise PackagingError(f"worker_manifest_{label}_missing_fields")
+    if unknown:
+        raise PackagingError(f"worker_manifest_{label}_unknown_fields")
+    return value
+
+
+def _worker_digest(value: Any, *, label: str) -> str:
+    if not isinstance(value, str) or not SHA256_RE.fullmatch(value):
+        raise PackagingError(f"worker_manifest_{label}_digest_invalid")
+    return value
+
+
+def _worker_identity_core(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in manifest.items()
+        if key not in {"execution_artifact_digest", "release_id"}
+    }
+
+
+def build_worker_release_manifest(core: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a v2 manifest with deterministic inventory/artifact identities.
+
+    This is an offline manifest finalizer, not a release builder or signer.
+    """
+
+    manifest = dict(core)
+    if "execution_artifact_digest" in manifest or "release_id" in manifest:
+        raise PackagingError("worker_manifest_self_identity_input_forbidden")
+    entries = manifest.get("payload_inventory")
+    if not isinstance(entries, list):
+        raise PackagingError("worker_manifest_payload_inventory_invalid")
+    manifest["payload_inventory_digest"] = sha256_bytes(
+        _worker_canonical_json(entries)
+    )
+    digest = sha256_bytes(_worker_canonical_json(manifest))
+    manifest["execution_artifact_digest"] = digest
+    manifest["release_id"] = "wr2-" + digest
+    _validate_worker_release_manifest(manifest)
+    return manifest
+
+
+def _validate_worker_release_manifest(manifest: Mapping[str, Any]) -> None:
+    fields = {
+        "manifest_kind",
+        "schema_version",
+        "source",
+        "payload_inventory",
+        "payload_inventory_digest",
+        "platform_target",
+        "python_runtime",
+        "runtime_lock_digest",
+        "wheel_inventory_digest",
+        "native_extension_inventory_digest",
+        "elf_closure_digest",
+        "import_origin_inventory_digest",
+        "launcher",
+        "interpreter",
+        "celery_entrypoint",
+        "configuration",
+        "state_path_roles",
+        "build_provenance",
+        "execution_artifact_digest",
+        "release_id",
+    }
+    value = _worker_exact_fields(dict(manifest), fields, label="root")
+    if value["manifest_kind"] != WORKER_RELEASE_KIND:
+        raise PackagingError("worker_manifest_kind_unsupported")
+    if (
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != WORKER_RELEASE_SCHEMA_VERSION
+    ):
+        raise PackagingError("worker_manifest_schema_unsupported")
+
+    source = _worker_exact_fields(
+        value["source"], {"head", "tree", "source_manifest_digest"}, label="source"
+    )
+    if not isinstance(source["head"], str) or not GIT_ID_RE.fullmatch(source["head"]):
+        raise PackagingError("worker_manifest_source_head_invalid")
+    if not isinstance(source["tree"], str) or not GIT_ID_RE.fullmatch(source["tree"]):
+        raise PackagingError("worker_manifest_source_tree_invalid")
+    _worker_digest(source["source_manifest_digest"], label="source_manifest")
+
+    platform = _worker_exact_fields(
+        value["platform_target"],
+        {"distribution", "release", "architecture", "libc_baseline"},
+        label="platform_target",
+    )
+    if not all(isinstance(item, str) and item for item in platform.values()):
+        raise PackagingError("worker_manifest_platform_target_invalid")
+    runtime = _worker_exact_fields(
+        value["python_runtime"],
+        {"implementation", "version", "abi", "soabi"},
+        label="python_runtime",
+    )
+    if not all(isinstance(item, str) and item for item in runtime.values()):
+        raise PackagingError("worker_manifest_python_runtime_invalid")
+
+    for field in (
+        "payload_inventory_digest",
+        "runtime_lock_digest",
+        "wheel_inventory_digest",
+        "native_extension_inventory_digest",
+        "elf_closure_digest",
+        "import_origin_inventory_digest",
+        "execution_artifact_digest",
+    ):
+        _worker_digest(value[field], label=field)
+    if not isinstance(value["release_id"], str) or not WORKER_RELEASE_ID_RE.fullmatch(
+        value["release_id"]
+    ):
+        raise PackagingError("worker_manifest_release_id_invalid")
+
+    for name in ("launcher", "celery_entrypoint"):
+        item = _worker_exact_fields(value[name], {"path", "sha256"}, label=name)
+        _safe_worker_path(item["path"])
+        _worker_digest(item["sha256"], label=name)
+    interpreter = _worker_exact_fields(
+        value["interpreter"],
+        {"path", "sha256", "link_policy", "symlink_chain"},
+        label="interpreter",
+    )
+    _safe_worker_path(interpreter["path"])
+    _worker_digest(interpreter["sha256"], label="interpreter")
+    if (
+        interpreter["link_policy"] != "copied-regular-file"
+        or interpreter["symlink_chain"] != []
+    ):
+        raise PackagingError("worker_manifest_interpreter_link_policy_unsupported")
+    executable_paths = {
+        value["launcher"]["path"],
+        value["interpreter"]["path"],
+        value["celery_entrypoint"]["path"],
+    }
+    if len(executable_paths) != 3:
+        raise PackagingError("worker_manifest_executable_paths_not_distinct")
+
+    configuration = _worker_exact_fields(
+        value["configuration"], {"policy_id", "profile_reference"}, label="configuration"
+    )
+    if not isinstance(configuration["policy_id"], str) or not configuration[
+        "policy_id"
+    ]:
+        raise PackagingError("worker_manifest_configuration_policy_invalid")
+    profile = _worker_exact_fields(
+        configuration["profile_reference"], {"path", "sha256"}, label="profile_reference"
+    )
+    profile_path = profile["path"]
+    if (
+        not isinstance(profile_path, str)
+        or not profile_path.startswith("/opt/orchestrator/worker-config/")
+        or ".." in PurePosixPath(profile_path).parts
+        or PurePosixPath(profile_path).as_posix() != profile_path
+        or not profile_path.endswith("/profile.json")
+    ):
+        raise PackagingError("worker_manifest_profile_reference_invalid")
+    _worker_digest(profile["sha256"], label="configuration_profile")
+
+    roles = value["state_path_roles"]
+    if not isinstance(roles, dict) or set(roles) != WORKER_RELEASE_STATE_ROLES:
+        raise PackagingError("worker_manifest_state_roles_invalid")
+    if any(item != f"state-role:{key}" for key, item in roles.items()):
+        raise PackagingError("worker_manifest_state_role_reference_invalid")
+
+    provenance = _worker_exact_fields(
+        value["build_provenance"],
+        {"builder_id", "recipe_digest", "toolchain_digest", "built_at_utc", "references"},
+        label="build_provenance",
+    )
+    for field in ("builder_id", "built_at_utc"):
+        if not isinstance(provenance[field], str) or not provenance[field]:
+            raise PackagingError(f"worker_manifest_{field}_invalid")
+    try:
+        built_at = dt.datetime.fromisoformat(
+            provenance["built_at_utc"].replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise PackagingError("worker_manifest_build_time_invalid") from exc
+    if built_at.tzinfo is None or built_at.utcoffset() != dt.timedelta(0):
+        raise PackagingError("worker_manifest_build_time_invalid")
+    _worker_digest(provenance["recipe_digest"], label="recipe")
+    _worker_digest(provenance["toolchain_digest"], label="toolchain")
+    references = provenance["references"]
+    required_reference_roles = set(WORKER_RELEASE_PROVENANCE_ROLES) | {
+        "source_manifest"
+    }
+    if not isinstance(references, dict) or set(references) != required_reference_roles:
+        raise PackagingError("worker_manifest_provenance_references_invalid")
+    for role in required_reference_roles:
+        reference = _worker_exact_fields(
+            references[role], {"path", "sha256"}, label=f"provenance_{role}"
+        )
+        _safe_worker_path(reference["path"])
+        _worker_digest(reference["sha256"], label=f"provenance_{role}")
+    for role, digest_field in WORKER_RELEASE_PROVENANCE_ROLES.items():
+        if references[role]["sha256"] != value[digest_field]:
+            raise PackagingError("worker_manifest_provenance_digest_mismatch")
+
+    inventory = value["payload_inventory"]
+    if not isinstance(inventory, list) or not inventory:
+        raise PackagingError("worker_manifest_payload_inventory_empty")
+    seen: set[str] = set()
+    previous: bytes | None = None
+    for entry in inventory:
+        if not isinstance(entry, dict):
+            raise PackagingError("worker_manifest_inventory_entry_invalid")
+        kind = entry.get("type")
+        fields_by_kind = {
+            "file": {"path", "type", "mode", "size", "sha256"},
+            "directory": {"path", "type", "mode", "size", "sha256"},
+            "symlink": {"path", "type", "mode", "size", "sha256", "target"},
+        }
+        if kind not in fields_by_kind:
+            raise PackagingError("worker_manifest_inventory_type_unsupported")
+        _worker_exact_fields(entry, fields_by_kind[kind], label="inventory_entry")
+        path = _safe_worker_path(entry["path"])
+        path_text = path.as_posix()
+        if path_text in seen:
+            raise PackagingError("worker_manifest_duplicate_inventory_path")
+        seen.add(path_text)
+        encoded_path = path_text.encode("utf-8")
+        if previous is not None and encoded_path <= previous:
+            raise PackagingError("worker_manifest_inventory_not_bytewise_sorted")
+        previous = encoded_path
+        if type(entry["mode"]) is not int or not 0 <= entry["mode"] <= 0o777:
+            raise PackagingError("worker_manifest_inventory_mode_invalid")
+        if kind != "symlink" and entry["mode"] & 0o222:
+            raise PackagingError("worker_manifest_inventory_writable_mode")
+        if type(entry["size"]) is not int or entry["size"] < 0:
+            raise PackagingError("worker_manifest_inventory_size_invalid")
+        _worker_digest(entry["sha256"], label="payload_entry")
+        if kind == "directory" and (
+            entry["size"] != 0 or entry["sha256"] != sha256_bytes(b"")
+        ):
+            raise PackagingError("worker_manifest_directory_identity_invalid")
+        if kind == "symlink":
+            target = entry["target"]
+            if not isinstance(target, str) or not target or "\\" in target or "\x00" in target:
+                raise PackagingError("worker_manifest_symlink_target_invalid")
+            target_bytes = target.encode("utf-8")
+            if entry["size"] != len(target_bytes) or entry["sha256"] != sha256_bytes(
+                target_bytes
+            ):
+                raise PackagingError("worker_manifest_symlink_identity_invalid")
+        elif "target" in entry:
+            raise PackagingError("worker_manifest_unexpected_symlink_target")
+
+    by_path = {entry["path"]: entry for entry in inventory}
+    for entry in inventory:
+        parts = PurePosixPath(entry["path"]).parts
+        for end in range(1, len(parts)):
+            parent = "/".join(parts[:end])
+            if parent not in by_path or by_path[parent]["type"] != "directory":
+                raise PackagingError("worker_manifest_inventory_parent_invalid")
+
+    if value["payload_inventory_digest"] != sha256_bytes(
+        _worker_canonical_json(inventory)
+    ):
+        raise PackagingError("worker_manifest_payload_inventory_digest_mismatch")
+    digest = sha256_bytes(_worker_canonical_json(_worker_identity_core(value)))
+    if value["execution_artifact_digest"] != digest:
+        raise PackagingError("worker_manifest_execution_artifact_digest_mismatch")
+    if value["release_id"] != "wr2-" + digest:
+        raise PackagingError("worker_manifest_release_id_digest_mismatch")
+
+
+def _safe_worker_path(value: Any) -> PurePosixPath:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\\" in value
+        or "\x00" in value
+    ):
+        raise PackagingError("worker_manifest_path_invalid")
+    path = PurePosixPath(value)
+    if (
+        path.is_absolute()
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.as_posix() != value
+    ):
+        raise PackagingError("worker_manifest_path_unsafe")
+    return path
+
+
+def _worker_open_release_root(path: str | Path) -> tuple[int, str]:
+    raw = os.fspath(path)
+    if not isinstance(raw, str) or not os.path.isabs(raw):
+        raise PackagingError("worker_release_path_must_be_absolute")
+    if PurePosixPath(raw).as_posix() != raw.rstrip("/"):
+        raise PackagingError("worker_release_path_not_normalized")
+    parts = raw.split("/")
+    if any(part in {".", ".."} for part in parts):
+        raise PackagingError("worker_release_path_traversal")
+    fd = os.open("/", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for component in (part for part in parts if part):
+            next_fd = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=fd,
+            )
+            os.close(fd)
+            fd = next_fd
+        info = os.fstat(fd)
+        if not stat.S_ISDIR(info.st_mode):
+            raise PackagingError("worker_release_root_not_directory")
+        if stat.S_IMODE(info.st_mode) & 0o222:
+            raise PackagingError("worker_release_root_writable")
+        return fd, raw.rstrip("/") or "/"
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _worker_read_regular_at(root_fd: int, path: PurePosixPath) -> tuple[bytes, os.stat_result]:
+    parent_fd = os.dup(root_fd)
+    try:
+        for component in path.parts[:-1]:
+            child_fd = os.open(
+                component,
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+            os.close(parent_fd)
+            parent_fd = child_fd
+        file_fd = os.open(
+            path.parts[-1],
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            dir_fd=parent_fd,
+        )
+        try:
+            before = os.fstat(file_fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+                raise PackagingError("worker_release_metadata_file_invalid")
+            if stat.S_IMODE(before.st_mode) & 0o222:
+                raise PackagingError("worker_release_metadata_file_writable")
+            chunks: list[bytes] = []
+            while True:
+                block = os.read(file_fd, 1024 * 1024)
+                if not block:
+                    break
+                chunks.append(block)
+            after = os.fstat(file_fd)
+            if _worker_stat_identity(before) != _worker_stat_identity(after):
+                raise PackagingError("worker_release_metadata_changed_during_read")
+            return b"".join(chunks), after
+        finally:
+            os.close(file_fd)
+    except PackagingError:
+        raise
+    except OSError as exc:
+        raise PackagingError("worker_release_metadata_unavailable") from exc
+    finally:
+        os.close(parent_fd)
+
+
+def _worker_stat_identity(info: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        info.st_nlink,
+    )
+
+
+def _worker_inventory_release(root_fd: int) -> list[dict[str, Any]]:
+    empty_digest = sha256_bytes(b"")
+    entries: list[dict[str, Any]] = []
+    root_before = os.fstat(root_fd)
+    root_device = root_before.st_dev
+
+    def visit(directory_fd: int, parent: str) -> None:
+        try:
+            with os.scandir(directory_fd) as iterator:
+                names = sorted((entry.name for entry in iterator), key=lambda name: name.encode("utf-8"))
+        except (OSError, UnicodeEncodeError) as exc:
+            raise PackagingError("worker_release_directory_scan_failed") from exc
+        for name in names:
+            if not parent and name in {WORKER_RELEASE_MANIFEST, WORKER_RELEASE_SIGNATURE}:
+                continue
+            if name in {".", ".."} or "/" in name or "\\" in name or "\x00" in name:
+                raise PackagingError("worker_release_entry_name_invalid")
+            relative = f"{parent}/{name}" if parent else name
+            _safe_worker_path(relative)
+            try:
+                before = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise PackagingError("worker_release_entry_stat_failed") from exc
+            if before.st_dev != root_device:
+                raise PackagingError("worker_release_mount_boundary_rejected")
+            mode = stat.S_IMODE(before.st_mode)
+            if stat.S_ISDIR(before.st_mode):
+                if mode & 0o222:
+                    raise PackagingError("worker_release_directory_writable")
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    dir_fd=directory_fd,
+                )
+                try:
+                    opened = os.fstat(child_fd)
+                    if _worker_stat_identity(opened) != _worker_stat_identity(before):
+                        raise PackagingError("worker_release_directory_changed_during_scan")
+                    entries.append(
+                        {
+                            "path": relative,
+                            "type": "directory",
+                            "mode": mode,
+                            "size": 0,
+                            "sha256": empty_digest,
+                        }
+                    )
+                    visit(child_fd, relative)
+                    after = os.fstat(child_fd)
+                    if _worker_stat_identity(opened) != _worker_stat_identity(after):
+                        raise PackagingError("worker_release_directory_changed_during_scan")
+                finally:
+                    os.close(child_fd)
+            elif stat.S_ISREG(before.st_mode):
+                if before.st_nlink != 1:
+                    raise PackagingError("worker_release_hard_link_rejected")
+                if mode & 0o222:
+                    raise PackagingError("worker_release_file_writable")
+                try:
+                    file_fd = os.open(
+                        name,
+                        os.O_RDONLY
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_CLOEXEC", 0),
+                        dir_fd=directory_fd,
+                    )
+                except OSError as exc:
+                    raise PackagingError("worker_release_file_open_failed") from exc
+                try:
+                    opened = os.fstat(file_fd)
+                    if (
+                        _worker_stat_identity(opened) != _worker_stat_identity(before)
+                        or not stat.S_ISREG(opened.st_mode)
+                        or opened.st_nlink != 1
+                    ):
+                        raise PackagingError("worker_release_file_changed_during_scan")
+                    digest = hashlib.sha256()
+                    size = 0
+                    while True:
+                        block = os.read(file_fd, 1024 * 1024)
+                        if not block:
+                            break
+                        digest.update(block)
+                        size += len(block)
+                    after = os.fstat(file_fd)
+                    if _worker_stat_identity(opened) != _worker_stat_identity(after):
+                        raise PackagingError("worker_release_file_changed_during_scan")
+                    entries.append(
+                        {
+                            "path": relative,
+                            "type": "file",
+                            "mode": mode,
+                            "size": size,
+                            "sha256": digest.hexdigest(),
+                        }
+                    )
+                finally:
+                    os.close(file_fd)
+            elif stat.S_ISLNK(before.st_mode):
+                try:
+                    target = os.readlink(name, dir_fd=directory_fd)
+                    after = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+                except OSError as exc:
+                    raise PackagingError("worker_release_symlink_unreadable") from exc
+                if _worker_stat_identity(before) != _worker_stat_identity(after):
+                    raise PackagingError("worker_release_symlink_changed_during_scan")
+                target_bytes = target.encode("utf-8")
+                entries.append(
+                    {
+                        "path": relative,
+                        "type": "symlink",
+                        "mode": mode,
+                        "size": len(target_bytes),
+                        "sha256": sha256_bytes(target_bytes),
+                        "target": target,
+                    }
+                )
+            else:
+                raise PackagingError("worker_release_special_file_rejected")
+
+    visit(root_fd, "")
+    if _worker_stat_identity(root_before) != _worker_stat_identity(os.fstat(root_fd)):
+        raise PackagingError("worker_release_root_changed_during_scan")
+    entries.sort(key=lambda item: item["path"].encode("utf-8"))
+    return entries
+
+
+def _worker_resolved_symlinks(inventory: list[Mapping[str, Any]]) -> None:
+    by_path = {str(entry["path"]): entry for entry in inventory}
+
+    def target_path(link_path: str, target: str) -> str:
+        if target.startswith("/") or "\\" in target or "\x00" in target:
+            raise PackagingError("worker_release_symlink_escape")
+        stack = link_path.split("/")[:-1]
+        for part in target.split("/"):
+            if part in {"", "."}:
+                continue
+            if part == "..":
+                if not stack:
+                    raise PackagingError("worker_release_symlink_escape")
+                stack.pop()
+            else:
+                stack.append(part)
+        if not stack:
+            raise PackagingError("worker_release_symlink_target_invalid")
+        return "/".join(stack)
+
+    resolved: dict[str, str] = {}
+
+    def resolve(path: str, trail: set[str]) -> str:
+        if path in resolved:
+            return resolved[path]
+        if path in trail:
+            raise PackagingError("worker_release_symlink_loop")
+        entry = by_path.get(path)
+        if entry is None:
+            raise PackagingError("worker_release_symlink_broken")
+        if entry["type"] != "symlink":
+            resolved[path] = path
+            return path
+        destination = target_path(path, str(entry["target"]))
+        result = resolve(destination, trail | {path})
+        resolved[path] = result
+        return result
+
+    for path, entry in by_path.items():
+        if entry["type"] == "symlink":
+            resolve(path, set())
+
+
+def _worker_validate_source_manifest(
+    raw: bytes,
+    *,
+    source_head: str,
+    source_tree: str,
+    file_digest: str,
+    identity_digest: str,
+) -> dict[str, Any]:
+    if sha256_bytes(raw) != file_digest:
+        raise PackagingError("worker_release_source_manifest_digest_mismatch")
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_worker_json_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
+                PackagingError("worker_source_manifest_nonstandard_number")
+            ),
+        )
+    except PackagingError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PackagingError("worker_release_source_manifest_invalid") from exc
+    if not isinstance(value, dict):
+        raise PackagingError("worker_release_source_manifest_invalid")
+    try:
+        if raw != json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        ).encode("utf-8"):
+            raise PackagingError("worker_release_source_manifest_not_canonical")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise PackagingError("worker_release_source_manifest_invalid") from exc
+    required = {
+        "schema_version",
+        "candidate_head",
+        "candidate_tree",
+        "source_root",
+        "dirty_source_policy",
+        "affected_modules",
+        "resolved_modules",
+        "launcher_identity",
+        "source_manifest_digest",
+    }
+    if set(value) != required:
+        raise PackagingError("worker_release_source_manifest_schema_invalid")
+    if (
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+        or value["candidate_head"] != source_head
+        or value["candidate_tree"] != source_tree
+        or value["dirty_source_policy"]
+        != "tracked-and-untracked-source-must-be-clean"
+    ):
+        raise PackagingError("worker_release_source_manifest_source_mismatch")
+    internal_digest = value["source_manifest_digest"]
+    payload = {key: item for key, item in value.items() if key != "source_manifest_digest"}
+    try:
+        expected_internal = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise PackagingError("worker_release_source_manifest_invalid") from exc
+    if (
+        internal_digest != expected_internal
+        or internal_digest != identity_digest
+        or not isinstance(internal_digest, str)
+        or not SHA256_RE.fullmatch(internal_digest)
+    ):
+        raise PackagingError("worker_release_source_manifest_internal_digest_mismatch")
+    if not isinstance(value["resolved_modules"], list) or not isinstance(
+        value["affected_modules"], list
+    ):
+        raise PackagingError("worker_release_source_manifest_modules_invalid")
+    if (
+        not all(isinstance(item, str) and item for item in value["affected_modules"])
+        or len(value["affected_modules"]) != len(set(value["affected_modules"]))
+    ):
+        raise PackagingError("worker_release_source_manifest_modules_invalid")
+    resolved_names = [
+        item.get("module_name") if isinstance(item, dict) else None
+        for item in value["resolved_modules"]
+    ]
+    if resolved_names != value["affected_modules"]:
+        raise PackagingError("worker_release_source_manifest_modules_mismatch")
+    for module in value["resolved_modules"]:
+        if (
+            not isinstance(module, dict)
+            or set(module) != {"module_name", "expected_source_path", "source_sha256"}
+            or not isinstance(module["module_name"], str)
+            or not isinstance(module["expected_source_path"], str)
+            or not SHA256_RE.fullmatch(str(module["source_sha256"]))
+        ):
+            raise PackagingError("worker_release_source_manifest_module_invalid")
+    launcher = value["launcher_identity"]
+    if (
+        not isinstance(launcher, dict)
+        or not {"executable", "cwd", "argv"} <= set(launcher)
+        or set(launcher) - {"executable", "cwd", "argv", "launcher"}
+        or not isinstance(launcher.get("executable"), str)
+        or not launcher["executable"]
+        or not isinstance(launcher.get("cwd"), str)
+        or not launcher["cwd"]
+        or not isinstance(launcher.get("argv"), list)
+        or not launcher["argv"]
+        or not all(isinstance(item, str) and item for item in launcher["argv"])
+    ):
+        raise PackagingError("worker_release_source_manifest_launcher_invalid")
+    return value
+
+
+def verify_worker_release_integrity(
+    release_path: str | Path,
+    *,
+    expected_source_head: str | None = None,
+    expected_source_tree: str | None = None,
+) -> dict[str, Any]:
+    """Verify v2 manifest and payload bytes without executing or installing them."""
+
+    root_fd, absolute_path = _worker_open_release_root(release_path)
+    try:
+        raw, _manifest_stat = _worker_read_regular_at(
+            root_fd, PurePosixPath(WORKER_RELEASE_MANIFEST)
+        )
+        manifest = _worker_parse_manifest(raw)
+        _validate_worker_release_manifest(manifest)
+        if os.path.basename(absolute_path) != manifest["release_id"]:
+            raise PackagingError("worker_release_directory_id_mismatch")
+        source = manifest["source"]
+        if expected_source_head is not None and source["head"] != expected_source_head:
+            raise PackagingError("worker_release_expected_source_head_mismatch")
+        if expected_source_tree is not None and source["tree"] != expected_source_tree:
+            raise PackagingError("worker_release_expected_source_tree_mismatch")
+
+        actual_inventory = _worker_inventory_release(root_fd)
+        _worker_resolved_symlinks(actual_inventory)
+        if actual_inventory != manifest["payload_inventory"]:
+            raise PackagingError("worker_release_payload_inventory_mismatch")
+        by_path = {item["path"]: item for item in actual_inventory}
+        for name in ("launcher", "interpreter", "celery_entrypoint"):
+            reference = manifest[name]
+            entry = by_path.get(reference["path"])
+            if (
+                entry is None
+                or entry["type"] != "file"
+                or entry["sha256"] != reference["sha256"]
+                or entry["mode"] & 0o111 == 0
+            ):
+                raise PackagingError(f"worker_release_{name}_identity_mismatch")
+        for role, reference in manifest["build_provenance"]["references"].items():
+            entry = by_path.get(reference["path"])
+            if (
+                entry is None
+                or entry["type"] != "file"
+                or entry["sha256"] != reference["sha256"]
+            ):
+                raise PackagingError(f"worker_release_provenance_reference_mismatch:{role}")
+        source_reference = manifest["build_provenance"]["references"]["source_manifest"]
+        source_raw, _ = _worker_read_regular_at(
+            root_fd, _safe_worker_path(source_reference["path"])
+        )
+        source_manifest = _worker_validate_source_manifest(
+            source_raw,
+            source_head=source["head"],
+            source_tree=source["tree"],
+            file_digest=source_reference["sha256"],
+            identity_digest=source["source_manifest_digest"],
+        )
+        source_root = source_manifest["source_root"]
+        if (
+            not isinstance(source_root, str)
+            or not os.path.isabs(source_root)
+            or ".." in PurePosixPath(source_root).parts
+        ):
+            raise PackagingError("worker_release_source_root_invalid")
+        module_names: set[str] = set()
+        for module in source_manifest["resolved_modules"]:
+            module_name = module["module_name"]
+            if module_name in module_names:
+                raise PackagingError("worker_release_source_module_duplicate")
+            module_names.add(module_name)
+            module_path = module["expected_source_path"]
+            if not os.path.isabs(module_path) or ".." in PurePosixPath(module_path).parts:
+                raise PackagingError("worker_release_source_module_path_invalid")
+            try:
+                source_relative = PurePosixPath(module_path).relative_to(
+                    PurePosixPath(source_root)
+                )
+            except ValueError as exc:
+                raise PackagingError("worker_release_source_module_outside_root") from exc
+            payload_path = PurePosixPath("source").joinpath(source_relative).as_posix()
+            source_entry = by_path.get(payload_path)
+            if (
+                source_entry is None
+                or source_entry["type"] != "file"
+                or source_entry["sha256"] != module["source_sha256"]
+            ):
+                raise PackagingError("worker_release_source_module_digest_mismatch")
+
+        signature_status = "MISSING"
+        try:
+            signature_stat = os.stat(
+                WORKER_RELEASE_SIGNATURE, dir_fd=root_fd, follow_symlinks=False
+            )
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise PackagingError("worker_release_signature_stat_failed") from exc
+        else:
+            if not stat.S_ISREG(signature_stat.st_mode) or signature_stat.st_nlink != 1:
+                raise PackagingError("worker_release_signature_file_invalid")
+            if stat.S_IMODE(signature_stat.st_mode) & 0o222:
+                raise PackagingError("worker_release_signature_file_writable")
+            signature_status = "PRESENT_UNVERIFIED"
+        activation_eligible = False
+        if signature_status == "MISSING":
+            status = "INTEGRITY_VERIFIED_UNSIGNED_REJECTED"
+        else:
+            status = "INTEGRITY_VERIFIED_SIGNATURE_CONTRACT_UNSUPPORTED"
+        return {
+            "status": status,
+            "integrity_verified": True,
+            "release_id": manifest["release_id"],
+            "execution_artifact_digest": manifest["execution_artifact_digest"],
+            "source_head": source["head"],
+            "source_tree": source["tree"],
+            "signature_status": signature_status,
+            "activation_eligible": activation_eligible,
+            "runtime_closure_complete": False,
+            "storage_boundary_verified": False,
+            "release_path": absolute_path,
+        }
+    finally:
+        os.close(root_fd)
+
+
+def verify_worker_release(
+    release_path: str | Path,
+    *,
+    expected_source_head: str | None = None,
+    expected_source_tree: str | None = None,
+) -> dict[str, Any]:
+    """Structured fail-closed verifier for a worker-release/v2 candidate."""
+
+    try:
+        return verify_worker_release_integrity(
+            release_path,
+            expected_source_head=expected_source_head,
+            expected_source_tree=expected_source_tree,
+        )
+    except (PackagingError, OSError, ValueError, RecursionError) as exc:
+        return {
+            "status": "REJECTED",
+            "integrity_verified": False,
+            "activation_eligible": False,
+            "runtime_closure_complete": False,
+            "storage_boundary_verified": False,
+            "error": str(exc),
+        }
 
 
 def sha256_bytes(value: bytes) -> str:
@@ -1702,6 +2612,10 @@ def _cli() -> int:
     build.add_argument("--source-date-epoch", type=int)
     verify = commands.add_parser("verify-package")
     verify.add_argument("--package", required=True)
+    worker_release = commands.add_parser("verify-worker-release")
+    worker_release.add_argument("--release", required=True)
+    worker_release.add_argument("--expected-source-head")
+    worker_release.add_argument("--expected-source-tree")
     repo = commands.add_parser("verify-repository")
     repo.add_argument("--repository", required=True)
     repo.add_argument("--keyring", required=True)
@@ -1724,6 +2638,14 @@ def _cli() -> int:
             verified.pop("manifest")
             print(json.dumps(verified, sort_keys=True))
             return 0
+        if args.command == "verify-worker-release":
+            result = verify_worker_release(
+                args.release,
+                expected_source_head=args.expected_source_head,
+                expected_source_tree=args.expected_source_tree,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return 0 if result.get("activation_eligible") is True else 2
         now = dt.datetime.fromisoformat(args.now.replace("Z", "+00:00")) if args.now else None
         result = verify_repository(
             args.repository,
