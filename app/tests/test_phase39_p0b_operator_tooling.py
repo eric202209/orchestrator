@@ -925,6 +925,14 @@ class StaticBeatObserver:
 class RefreshTests(PinOwnerTestCase):
     def setUp(self) -> None:
         super().setUp()
+        approved_python = Path(sys.executable).resolve(strict=True)
+        self._approved_python_patch = patch.multiple(
+            tooling,
+            _APPROVED_SYSTEM_PYTHON=approved_python,
+            _APPROVED_SYSTEM_PYTHON_UID=os.stat(approved_python).st_uid,
+        )
+        self._approved_python_patch.start()
+        self.addCleanup(self._approved_python_patch.stop)
         self.temp = tempfile.TemporaryDirectory(prefix="p39-refresh-test-")
         self.root = Path(self.temp.name)
         self.policy = make_policy(self.root)
@@ -1415,6 +1423,10 @@ class RefreshTests(PinOwnerTestCase):
         (root / "logs").mkdir()
         (root / "checkpoints").mkdir()
         (root / "venv/bin").mkdir(parents=True)
+        system_bin = root / "system-bin"
+        system_bin.mkdir()
+        (system_bin / "env").symlink_to("/usr/bin/env")
+        (system_bin / "nohup").symlink_to("/usr/bin/nohup")
         (root / "logs/worker.log").write_text("", encoding="utf-8")
         shutil.copyfile(sys.executable, root / "venv/bin/python3")
         os.chmod(root / "venv/bin/python3", 0o755)
@@ -1430,6 +1442,11 @@ class RefreshTests(PinOwnerTestCase):
             + "worker_only_check_processes() { return 1; }"
             + source[process_check_end:]
         )
+        source = source.replace(
+            "/usr/bin/python3.12", str(tooling._APPROVED_SYSTEM_PYTHON)
+        )
+        source = source.replace("/usr/bin/env", str(system_bin / "env"))
+        source = source.replace("/usr/bin/nohup", str(system_bin / "nohup"))
         start.write_text(source, encoding="utf-8")
         celery_log = root / "logs/worker.log"
         fake_celery = root / "venv/bin/celery"
@@ -1452,6 +1469,59 @@ class RefreshTests(PinOwnerTestCase):
             time.sleep(0.01)
         self.assertTrue(path.exists(), "fake worker did not record its argv")
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def test_fixed_worker_executable_accepts_trusted_system_symlink(self) -> None:
+        root, _celery_log, _beat_pid = self._make_isolated_start_fixture()
+        original_lstat = os.lstat
+        original_readlink = os.readlink
+        symlink_path = "/usr/bin/nohup"
+
+        def lstat_with_system_symlink(path, *args, **kwargs):
+            if os.fsdecode(path) == symlink_path:
+                info = original_lstat(path)
+                fields = list(info)
+                fields[0] = stat.S_IFLNK | 0o777
+                return os.stat_result(fields)
+            return original_lstat(path, *args, **kwargs)
+
+        def readlink_with_system_symlink(path, *args, **kwargs):
+            if os.fsdecode(path) == symlink_path:
+                return "/usr/bin/env"
+            return original_readlink(path, *args, **kwargs)
+
+        with patch.object(tooling.os, "lstat", side_effect=lstat_with_system_symlink):
+            with patch.object(
+                tooling.os, "readlink", side_effect=readlink_with_system_symlink
+            ):
+                tooling._verify_worker_only_executables(root)
+
+    def test_fixed_worker_executable_rejects_untrusted_symlink_target(self) -> None:
+        target = self.root / "untrusted-worker-tool"
+        shutil.copyfile(sys.executable, target)
+        os.chmod(target, 0o755)
+        original_lstat = os.lstat
+        original_readlink = os.readlink
+        symlink_path = "/usr/bin/nohup"
+
+        def lstat_with_system_symlink(path, *args, **kwargs):
+            if os.fsdecode(path) == symlink_path:
+                info = original_lstat(path)
+                fields = list(info)
+                fields[0] = stat.S_IFLNK | 0o777
+                return os.stat_result(fields)
+            return original_lstat(path, *args, **kwargs)
+
+        def readlink_with_untrusted_target(path, *args, **kwargs):
+            if os.fsdecode(path) == symlink_path:
+                return str(target)
+            return original_readlink(path, *args, **kwargs)
+
+        with patch.object(tooling.os, "lstat", side_effect=lstat_with_system_symlink):
+            with patch.object(
+                tooling.os, "readlink", side_effect=readlink_with_untrusted_target
+            ):
+                with self.assertRaisesRegex(tooling.ToolingError, "unexpected"):
+                    tooling._verify_fixed_worker_executable(symlink_path)
 
     def test_actual_start_worker_only_bash_fixture_launches_exactly_one_worker(
         self,

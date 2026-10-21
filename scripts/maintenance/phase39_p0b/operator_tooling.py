@@ -1113,38 +1113,102 @@ def _same_pid_set(actual: Sequence[int], expected: Sequence[int], label: str) ->
         raise ToolingError(f"unexpected process match set {label}")
 
 
+_APPROVED_SYSTEM_PYTHON = Path("/usr/bin/python3.12")
+_APPROVED_SYSTEM_PYTHON_UID = 0
+_WORKER_ONLY_FIXED_EXECUTABLES = (
+    "/usr/bin/bash",
+    "/usr/bin/env",
+    "/usr/bin/nohup",
+    "/usr/bin/cmp",
+    "/usr/bin/stat",
+    "/usr/bin/readlink",
+)
+
+
+def _verify_trusted_directory_chain(path: Path, owner_uid: int) -> bool:
+    current = path
+    while True:
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return False
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != owner_uid
+            or info.st_mode & 0o022
+        ):
+            return False
+        if current == current.parent:
+            return True
+        current = current.parent
+
+
+def _verify_fixed_worker_executable(path_text: str) -> None:
+    path = Path(path_text)
+    try:
+        info = os.lstat(path)
+    except OSError as exc:
+        raise ToolingError(
+            f"required fixed worker launcher executable is unavailable: {path}"
+        ) from exc
+    if stat.S_ISREG(info.st_mode):
+        if not os.access(path, os.X_OK):
+            raise ToolingError(
+                f"required fixed worker launcher executable is unexpected: {path}"
+            )
+        return
+    # Permit package-managed links only when both ends stay in root-owned paths.
+    if not stat.S_ISLNK(info.st_mode) or info.st_uid != 0:
+        raise ToolingError(
+            f"required fixed worker launcher executable is unexpected: {path}"
+        )
+    try:
+        resolved = path.resolve(strict=True)
+        target_info = os.stat(resolved)
+        parent_info = os.lstat(path.parent)
+    except (OSError, RuntimeError) as exc:
+        raise ToolingError(
+            f"required fixed worker launcher executable is unavailable: {path}"
+        ) from exc
+    if (
+        not stat.S_ISDIR(parent_info.st_mode)
+        or parent_info.st_uid != 0
+        or parent_info.st_mode & 0o022
+        or not _verify_trusted_directory_chain(path.parent, 0)
+        or not stat.S_ISREG(target_info.st_mode)
+        or target_info.st_uid != 0
+        or target_info.st_mode & 0o022
+        or not os.access(resolved, os.X_OK)
+        or not _verify_trusted_directory_chain(resolved.parent, 0)
+    ):
+        raise ToolingError(
+            f"required fixed worker launcher executable is unexpected: {path}"
+        )
+
+
 def _verify_worker_only_executables(source_root: str | Path) -> None:
     root = Path(source_root)
-    for path_text in (
-        "/usr/bin/bash",
-        "/usr/bin/env",
-        "/usr/bin/nohup",
-        "/usr/bin/cmp",
-        "/usr/bin/stat",
-    ):
-        path = Path(path_text)
-        try:
-            info = os.lstat(path)
-        except OSError as exc:
-            raise ToolingError("required fixed worker launcher executable is unavailable") from exc
-        if not stat.S_ISREG(info.st_mode) or not os.access(path, os.X_OK):
-            raise ToolingError("required fixed worker launcher executable is unexpected")
+    for path_text in _WORKER_ONLY_FIXED_EXECUTABLES:
+        _verify_fixed_worker_executable(path_text)
 
     python_bin = root / "venv/bin/python3"
     celery_bin = root / "venv/bin/celery"
     try:
         python_info = os.lstat(python_bin)
-        base_python_info = os.lstat("/usr/bin/python3.12")
+        base_python_info = os.lstat(_APPROVED_SYSTEM_PYTHON)
         if (
             not stat.S_ISREG(python_info.st_mode)
             or python_info.st_nlink != 1
             or not os.access(python_bin, os.X_OK)
             or not stat.S_ISREG(base_python_info.st_mode)
-            or base_python_info.st_uid != 0
+            or base_python_info.st_uid != _APPROVED_SYSTEM_PYTHON_UID
             or base_python_info.st_mode & 0o022
         ):
             raise ToolingError("worker interpreter is unavailable")
-        with python_bin.open("rb") as candidate, open("/usr/bin/python3.12", "rb") as approved:
+        with (
+            python_bin.open("rb") as candidate,
+            _APPROVED_SYSTEM_PYTHON.open("rb") as approved,
+        ):
             if hashlib.file_digest(candidate, "sha256").digest() != hashlib.file_digest(approved, "sha256").digest():
                 raise ToolingError("worker interpreter differs from the approved executable bytes")
         celery_info = os.lstat(celery_bin)

@@ -623,6 +623,47 @@ worker_only_check_processes() {
 # Start one worker attempt for the guarded Phase 39 refresh path. This entry
 # point deliberately does not source .env, use PATH-based command lookup,
 # touch worker/Beat PID files, inspect logs, stop processes, or start Beat.
+worker_only_verify_fixed_executable() {
+    local executable="$1"
+    local link_owner parent_metadata parent_owner parent_mode parent_kind parent_mode_value
+    local resolved target_metadata target_owner target_mode target_kind target_mode_value
+    local target_directory directory_metadata directory_owner directory_mode directory_kind directory_mode_value
+
+    [[ -f "${executable}" && -x "${executable}" ]] || return 1
+    [[ -L "${executable}" ]] || return 0
+
+    # Follow only system-managed links to non-writable, root-owned binaries.
+    link_owner="$(/usr/bin/stat -c '%u' -- "${executable}" 2>/dev/null)" || return 1
+    parent_metadata="$(/usr/bin/stat -c '%u %a %F' -- "${executable%/*}" 2>/dev/null)" || return 1
+    read -r parent_owner parent_mode parent_kind <<< "${parent_metadata}"
+    [[ "${parent_kind}" == "directory" && "${parent_owner}" == "${link_owner}" ]] || return 1
+    [[ "${parent_mode}" =~ ^[0-7]{3,4}$ ]] || return 1
+    parent_mode_value=$((8#${parent_mode}))
+    (( (parent_mode_value & 022) == 0 )) || return 1
+
+    resolved="$(/usr/bin/readlink -f -- "${executable}" 2>/dev/null)" || return 1
+    [[ "${resolved}" == /* && -f "${resolved}" && -x "${resolved}" ]] || return 1
+    target_metadata="$(/usr/bin/stat -c '%u %a %F' -- "${resolved}" 2>/dev/null)" || return 1
+    read -r target_owner target_mode target_kind <<< "${target_metadata}"
+    [[ "${target_kind}" == "regular file" && "${target_owner}" == "0" ]] || return 1
+    [[ "${target_mode}" =~ ^[0-7]{3,4}$ ]] || return 1
+    target_mode_value=$((8#${target_mode}))
+    (( (target_mode_value & 022) == 0 )) || return 1
+
+    target_directory="${resolved%/*}"
+    while :; do
+        directory_metadata="$(/usr/bin/stat -c '%u %a %F' -- "${target_directory}" 2>/dev/null)" || return 1
+        read -r directory_owner directory_mode directory_kind <<< "${directory_metadata}"
+        [[ "${directory_kind}" == "directory" && "${directory_owner}" == "0" ]] || return 1
+        [[ "${directory_mode}" =~ ^[0-7]{3,4}$ ]] || return 1
+        directory_mode_value=$((8#${directory_mode}))
+        (( (directory_mode_value & 022) == 0 )) || return 1
+        [[ "${target_directory}" == "/" ]] && break
+        target_directory="${target_directory%/*}"
+        [[ -n "${target_directory}" ]] || target_directory="/"
+    done
+}
+
 start_worker_only() {
     if [[ "$#" -ne 1 ]]; then
         echo "start_worker_only requires exactly one absolute pin path" >&2
@@ -683,7 +724,7 @@ start_worker_only() {
     local celery_bin="${VENV_DIR}/bin/celery"
     local executable
     for executable in "${env_bin}" "${nohup_bin}"; do
-        if [[ ! -f "${executable}" || ! -x "${executable}" || -L "${executable}" ]]; then
+        if ! worker_only_verify_fixed_executable "${executable}"; then
             echo "required worker launcher executable is unavailable or unexpected" >&2
             return 78
         fi
@@ -737,7 +778,7 @@ start_worker_only() {
 
     local fixed_path="${VENV_DIR}/bin:/usr/bin:/bin"
     local worker_pid
-    /usr/bin/env -i \
+    "${env_bin}" -i \
         "PATH=${fixed_path}" \
         "HOME=/root" \
         "LANG=C.UTF-8" \
