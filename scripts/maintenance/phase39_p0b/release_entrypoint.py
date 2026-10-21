@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import datetime as dt
 import hashlib
 import importlib
@@ -12,6 +14,7 @@ import re
 import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -28,8 +31,15 @@ APPROVED_PIN_DIR = Path("/root/.orchestrator/worker-pin")
 APPROVED_PIN_PATH = APPROVED_PIN_DIR / "candidate-pin.json"
 STALE_APPROVAL_IDS = frozenset({"P39-P0B-GATEB-001", "P39-P0B-GATEB-002"})
 APPROVAL_SCHEMA_VERSION = 1
+WORKER_APPROVAL_ENVELOPE_KIND = "orchestrator-worker-release-approval/v2"
+WORKER_APPROVAL_SUBJECT_KIND = "orchestrator-phase39-p0b-worker-release-promotion-approval"
+WORKER_APPROVAL_PURPOSE = "worker-release-promotion"
+WORKER_APPROVAL_ACTION = "promote-worker-release"
+WORKER_APPROVAL_SCHEMA_VERSION = 2
+WORKER_APPROVAL_MAX_BYTES = 128 * 1024
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 GIT_ID_RE = re.compile(r"[0-9a-f]{40}\Z")
+WORKER_APPROVAL_ID_RE = re.compile(r"P39-P0B-WR2-[A-Z0-9][A-Z0-9-]{4,62}\Z")
 
 
 class EntryPointError(RuntimeError):
@@ -168,6 +178,246 @@ def validate_operator_approval(
     ):
         raise EntryPointError("approval_identity_policy_invalid")
     return dict(approval)
+
+
+def _worker_approval_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise EntryPointError("worker_approval_duplicate_json_field")
+        result[key] = value
+    return result
+
+
+def _parse_worker_approval_json(raw: bytes, *, label: str) -> dict[str, Any]:
+    if not raw or len(raw) > WORKER_APPROVAL_MAX_BYTES:
+        raise EntryPointError(f"worker_approval_{label}_size_invalid")
+    try:
+        value = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_worker_approval_object,
+            parse_constant=lambda _value: (_ for _ in ()).throw(
+                EntryPointError("worker_approval_nonstandard_number")
+            ),
+        )
+    except EntryPointError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EntryPointError(f"worker_approval_{label}_json_invalid") from exc
+    if not isinstance(value, dict):
+        raise EntryPointError(f"worker_approval_{label}_root_invalid")
+    from scripts.maintenance.phase39_p0b import release_packaging
+
+    try:
+        canonical = release_packaging._worker_canonical_json(value)
+    except release_packaging.PackagingError as exc:
+        raise EntryPointError(f"worker_approval_{label}_value_invalid") from exc
+    if canonical != raw:
+        raise EntryPointError(f"worker_approval_{label}_noncanonical")
+    return value
+
+
+def _validate_worker_release_v2_subject(
+    subject: Mapping[str, Any],
+    *,
+    manifest: Mapping[str, Any],
+    manifest_raw: bytes,
+    now: dt.datetime | None,
+) -> dict[str, Any]:
+    required = {
+        "approval_kind",
+        "schema_version",
+        "approval_id",
+        "operator_identity",
+        "purpose",
+        "action",
+        "valid_from",
+        "valid_until",
+        "manifest_kind",
+        "manifest_schema_version",
+        "release_id",
+        "execution_artifact_digest",
+        "release_manifest_sha256",
+        "source_head",
+        "source_tree",
+        "source_manifest_digest",
+        "payload_inventory_digest",
+        "platform_target",
+        "configuration_policy_id",
+        "configuration_profile_reference",
+    }
+    if set(subject) != required:
+        raise EntryPointError("worker_approval_subject_fields_incomplete_or_unknown")
+    if (
+        subject["approval_kind"] != WORKER_APPROVAL_SUBJECT_KIND
+        or type(subject["schema_version"]) is not int
+        or subject["schema_version"] != WORKER_APPROVAL_SCHEMA_VERSION
+        or subject["manifest_kind"] != "worker-release/v2"
+        or type(subject["manifest_schema_version"]) is not int
+        or subject["manifest_schema_version"] != 2
+    ):
+        raise EntryPointError("worker_approval_subject_schema_unsupported")
+    if (
+        subject["purpose"] != WORKER_APPROVAL_PURPOSE
+        or subject["action"] != WORKER_APPROVAL_ACTION
+    ):
+        raise EntryPointError("worker_approval_purpose_or_action_mismatch")
+    approval_id = subject["approval_id"]
+    if not isinstance(approval_id, str) or not WORKER_APPROVAL_ID_RE.fullmatch(approval_id):
+        raise EntryPointError("worker_approval_id_invalid")
+    operator_identity = subject["operator_identity"]
+    if (
+        not isinstance(operator_identity, str)
+        or not operator_identity.strip()
+        or len(operator_identity) > 256
+    ):
+        raise EntryPointError("worker_approval_operator_identity_invalid")
+    start = _parse_utc(subject["valid_from"], "valid_from")
+    end = _parse_utc(subject["valid_until"], "valid_until")
+    if end <= start:
+        raise EntryPointError("worker_approval_validity_window_invalid")
+    instant = now or dt.datetime.now(dt.timezone.utc)
+    if instant.tzinfo is None or instant.utcoffset() != dt.timedelta(0):
+        raise EntryPointError("worker_approval_verification_time_not_utc")
+    instant = instant.astimezone(dt.timezone.utc)
+    if instant < start:
+        raise EntryPointError("worker_approval_not_yet_valid")
+    if instant >= end:
+        raise EntryPointError("worker_approval_expired")
+
+    for field in (
+        "source_head",
+        "source_tree",
+    ):
+        if not isinstance(subject[field], str) or not GIT_ID_RE.fullmatch(subject[field]):
+            raise EntryPointError(f"worker_approval_{field}_invalid")
+    for field in (
+        "execution_artifact_digest",
+        "release_manifest_sha256",
+        "source_manifest_digest",
+        "payload_inventory_digest",
+    ):
+        if not isinstance(subject[field], str) or not SHA256_RE.fullmatch(subject[field]):
+            raise EntryPointError(f"worker_approval_{field}_invalid")
+
+    source = manifest["source"]
+    configuration = manifest["configuration"]
+    bindings = {
+        "manifest_kind": manifest["manifest_kind"],
+        "manifest_schema_version": manifest["schema_version"],
+        "release_id": manifest["release_id"],
+        "execution_artifact_digest": manifest["execution_artifact_digest"],
+        "release_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+        "source_head": source["head"],
+        "source_tree": source["tree"],
+        "source_manifest_digest": source["source_manifest_digest"],
+        "payload_inventory_digest": manifest["payload_inventory_digest"],
+        "platform_target": manifest["platform_target"],
+        "configuration_policy_id": configuration["policy_id"],
+        "configuration_profile_reference": configuration["profile_reference"],
+    }
+    if any(subject[field] != expected for field, expected in bindings.items()):
+        raise EntryPointError("worker_approval_release_binding_mismatch")
+    return dict(subject)
+
+
+def verify_worker_release_v2_approval(
+    manifest: Mapping[str, Any],
+    *,
+    manifest_raw: bytes,
+    envelope_raw: bytes,
+    now: dt.datetime | None = None,
+) -> dict[str, Any]:
+    """Verify a v2 promotion approval using the existing fixed Ed25519 anchor.
+
+    This proves the signature and its bounded promotion subject. It does not
+    consume a durable one-time operation claim or authorize activation.
+    """
+    from scripts.maintenance.phase39_p0b import release_packaging
+
+    release_packaging._validate_worker_release_manifest(manifest)
+    if release_packaging._worker_canonical_json(manifest) != manifest_raw:
+        raise EntryPointError("worker_approval_manifest_not_canonical")
+    envelope = _parse_worker_approval_json(envelope_raw, label="envelope")
+    envelope_fields = {
+        "envelope_kind",
+        "schema_version",
+        "key_id",
+        "signed_subject",
+        "signature",
+    }
+    if set(envelope) != envelope_fields:
+        raise EntryPointError("worker_approval_envelope_fields_incomplete_or_unknown")
+    if (
+        envelope["envelope_kind"] != WORKER_APPROVAL_ENVELOPE_KIND
+        or type(envelope["schema_version"]) is not int
+        or envelope["schema_version"] != WORKER_APPROVAL_SCHEMA_VERSION
+    ):
+        raise EntryPointError("worker_approval_envelope_schema_unsupported")
+    key_id = envelope["key_id"]
+    if not isinstance(key_id, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", key_id):
+        raise EntryPointError("worker_approval_key_id_invalid")
+    encoded_subject = envelope["signed_subject"]
+    encoded_signature = envelope["signature"]
+    if not isinstance(encoded_subject, str) or not isinstance(encoded_signature, str):
+        raise EntryPointError("worker_approval_envelope_encoding_invalid")
+    try:
+        subject_raw = base64.b64decode(encoded_subject, validate=True)
+        signature = base64.b64decode(encoded_signature, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise EntryPointError("worker_approval_envelope_encoding_invalid") from exc
+    if (
+        base64.b64encode(subject_raw).decode("ascii") != encoded_subject
+        or base64.b64encode(signature).decode("ascii") != encoded_signature
+        or len(signature) != 64
+    ):
+        raise EntryPointError("worker_approval_envelope_encoding_invalid")
+    subject = _parse_worker_approval_json(subject_raw, label="subject")
+    approval = _validate_worker_release_v2_subject(
+        subject,
+        manifest=manifest,
+        manifest_raw=manifest_raw,
+        now=now,
+    )
+
+    trusted_key, _key_info = _read_protected_file(TRUSTED_KEY)
+    expected_key_id = "sha256:" + hashlib.sha256(trusted_key).hexdigest()
+    if key_id != expected_key_id:
+        raise EntryPointError("worker_approval_unknown_key_id")
+
+    # Keep the verifier and trust anchor unchanged; private temporary copies
+    # avoid passing attacker-controlled paths to OpenSSL.
+    with tempfile.TemporaryDirectory(prefix="p39-worker-approval-") as directory:
+        temporary = Path(directory)
+        subject_path = temporary / "subject.json"
+        signature_path = temporary / "subject.sig"
+        key_path = temporary / "trusted.pub"
+        for path, content in (
+            (subject_path, subject_raw),
+            (signature_path, signature),
+            (key_path, trusted_key),
+        ):
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "wb", closefd=False) as stream:
+                    stream.write(content)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        _verify_signature(subject_path, signature_path, key_path)
+
+    return {
+        "signature_verified": True,
+        "promotion_approval_verified": True,
+        "approval_id": approval["approval_id"],
+        "operator_identity": approval["operator_identity"],
+        "approval_valid_from": approval["valid_from"],
+        "approval_valid_until": approval["valid_until"],
+        "approval_purpose": WORKER_APPROVAL_PURPOSE,
+        "approval_action": WORKER_APPROVAL_ACTION,
+        "key_id": key_id,
+        "durable_one_time_claim_consumed": False,
+    }
 
 
 def _release_root() -> Path:

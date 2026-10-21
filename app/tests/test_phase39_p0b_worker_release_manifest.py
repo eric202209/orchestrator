@@ -355,10 +355,9 @@ class WorkerReleaseManifestTests(unittest.TestCase):
         signed = WorkerReleaseFixture(signed=True)
         self.addCleanup(signed.close)
         result = packaging.verify_worker_release(signed.release)
-        self.assertEqual(
-            result["status"], "INTEGRITY_VERIFIED_SIGNATURE_CONTRACT_UNSUPPORTED"
-        )
-        self.assertEqual(result["signature_status"], "PRESENT_UNVERIFIED")
+        self.assertEqual(result["status"], "INTEGRITY_VERIFIED_SIGNATURE_REJECTED")
+        self.assertEqual(result["signature_status"], "INVALID")
+        self.assertFalse(result["signature_verified"])
         self.assertFalse(result["activation_eligible"])
 
     def test_unsigned_candidate_rejected_for_activation(self) -> None:

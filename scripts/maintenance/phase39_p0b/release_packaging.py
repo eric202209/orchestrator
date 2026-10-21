@@ -477,7 +477,12 @@ def _worker_open_release_root(path: str | Path) -> tuple[int, str]:
         raise
 
 
-def _worker_read_regular_at(root_fd: int, path: PurePosixPath) -> tuple[bytes, os.stat_result]:
+def _worker_read_regular_at(
+    root_fd: int,
+    path: PurePosixPath,
+    *,
+    max_bytes: int | None = None,
+) -> tuple[bytes, os.stat_result]:
     parent_fd = os.dup(root_fd)
     try:
         for component in path.parts[:-1]:
@@ -503,10 +508,14 @@ def _worker_read_regular_at(root_fd: int, path: PurePosixPath) -> tuple[bytes, o
             if stat.S_IMODE(before.st_mode) & 0o222:
                 raise PackagingError("worker_release_metadata_file_writable")
             chunks: list[bytes] = []
+            total = 0
             while True:
                 block = os.read(file_fd, 1024 * 1024)
                 if not block:
                     break
+                total += len(block)
+                if max_bytes is not None and total > max_bytes:
+                    raise PackagingError("worker_release_metadata_file_too_large")
                 chunks.append(block)
             after = os.fstat(file_fd)
             if _worker_stat_identity(before) != _worker_stat_identity(after):
@@ -915,12 +924,18 @@ def verify_worker_release_integrity(
                 raise PackagingError("worker_release_source_module_digest_mismatch")
 
         signature_status = "MISSING"
+        signature_result: dict[str, Any] = {
+            "signature_verified": False,
+            "promotion_approval_verified": False,
+            "approval_purpose": None,
+            "durable_one_time_claim_consumed": False,
+        }
         try:
             signature_stat = os.stat(
                 WORKER_RELEASE_SIGNATURE, dir_fd=root_fd, follow_symlinks=False
             )
         except FileNotFoundError:
-            pass
+            envelope_raw = None
         except OSError as exc:
             raise PackagingError("worker_release_signature_stat_failed") from exc
         else:
@@ -928,12 +943,50 @@ def verify_worker_release_integrity(
                 raise PackagingError("worker_release_signature_file_invalid")
             if stat.S_IMODE(signature_stat.st_mode) & 0o222:
                 raise PackagingError("worker_release_signature_file_writable")
-            signature_status = "PRESENT_UNVERIFIED"
-        activation_eligible = False
+            envelope_raw, _signature_stat = _worker_read_regular_at(
+                root_fd,
+                PurePosixPath(WORKER_RELEASE_SIGNATURE),
+                max_bytes=128 * 1024,
+            )
+        if envelope_raw is not None:
+            from . import release_entrypoint
+
+            try:
+                signature_result = release_entrypoint.verify_worker_release_v2_approval(
+                    manifest,
+                    manifest_raw=raw,
+                    envelope_raw=envelope_raw,
+                )
+            except release_entrypoint.EntryPointError as exc:
+                return {
+                    "status": "INTEGRITY_VERIFIED_SIGNATURE_REJECTED",
+                    "integrity_verified": True,
+                    "release_id": manifest["release_id"],
+                    "execution_artifact_digest": manifest[
+                        "execution_artifact_digest"
+                    ],
+                    "source_head": source["head"],
+                    "source_tree": source["tree"],
+                    "signature_status": "INVALID",
+                    "signature_verified": False,
+                    "promotion_approval_verified": False,
+                    "approval_purpose": None,
+                    "durable_one_time_claim_consumed": False,
+                    "activation_eligible": False,
+                    "runtime_closure_complete": False,
+                    "mount_boundary_verified": False,
+                    "storage_boundary_verified": False,
+                    "worker_identity_verified": False,
+                    "quiescence_verified": False,
+                    "release_path": absolute_path,
+                    "error": str(exc),
+                }
+            signature_status = "VERIFIED"
         if signature_status == "MISSING":
             status = "INTEGRITY_VERIFIED_UNSIGNED_REJECTED"
         else:
-            status = "INTEGRITY_VERIFIED_SIGNATURE_CONTRACT_UNSUPPORTED"
+            status = "INTEGRITY_AND_PROMOTION_APPROVAL_VERIFIED"
+        activation_eligible = False
         return {
             "status": status,
             "integrity_verified": True,
@@ -943,8 +996,12 @@ def verify_worker_release_integrity(
             "source_tree": source["tree"],
             "signature_status": signature_status,
             "activation_eligible": activation_eligible,
+            **signature_result,
             "runtime_closure_complete": False,
+            "mount_boundary_verified": False,
             "storage_boundary_verified": False,
+            "worker_identity_verified": False,
+            "quiescence_verified": False,
             "release_path": absolute_path,
         }
     finally:
@@ -969,9 +1026,17 @@ def verify_worker_release(
         return {
             "status": "REJECTED",
             "integrity_verified": False,
+            "signature_status": "NOT_CHECKED",
+            "signature_verified": False,
+            "promotion_approval_verified": False,
+            "approval_purpose": None,
+            "durable_one_time_claim_consumed": False,
             "activation_eligible": False,
             "runtime_closure_complete": False,
+            "mount_boundary_verified": False,
             "storage_boundary_verified": False,
+            "worker_identity_verified": False,
+            "quiescence_verified": False,
             "error": str(exc),
         }
 
