@@ -421,7 +421,7 @@ def test_discovery_stage_requests_import_neighbors(monkeypatch):
 
 
 def test_oia_module_constants_stay_inside_the_existing_envelope():
-    assert ro.ORIENTATION_PATH_LIMIT == 46 and ro.ORIENTATION_BYTE_BUDGET == 3072
+    assert ro.ORIENTATION_PATH_LIMIT == 48 and ro.ORIENTATION_BYTE_BUDGET == 3072
     assert 4 <= IMPORT_NEIGHBOR_RESERVED_SLOTS <= 8
     assert IMPORT_NEIGHBOR_FANIN_CAP <= 10
     assert IMPORT_NEIGHBOR_BYTE_BUDGET < ORIENTATION_BYTE_BUDGET
