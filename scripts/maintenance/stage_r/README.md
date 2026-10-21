@@ -1,15 +1,16 @@
 # Stage R Gate 1 and Gate 2 tooling
 
 These scripts prepare checks for one later, operator-approved pinned Stage R
-run. They do not start services or authorize a dogfood task. All Git, `/proc`,
-SQLite, Redis, pin, worksheet, and manifest operations performed by the tools
-are reads. The scripts never call `celery inspect`: Celery remote-control
-inspection publishes control messages to Redis, so active/reserved/scheduled
-task counts must come from a fresh snapshot collected through a separately
-approved read-only source. Without that evidence the result is
-`INCONCLUSIVE`.
+run. They do not start services or authorize a dogfood task. The Gate 1 and
+Gate 2 checkers' Git, `/proc`, SQLite, Redis, pin, worksheet, and manifest
+operations are reads. Those checkers never call `celery inspect`; standalone
+`celery inspect` commands remain prohibited for the read-only gate because
+Celery publishes control and reply traffic through Redis. A narrow,
+separately approved exception is documented below for
+`task_snapshot_adapter.py` only. Without a fresh, complete task snapshot, the
+task-state check is `INCONCLUSIVE`.
 
-Both tools print JSON with stable check IDs and reason codes. Check status is
+The Gate checkers print JSON with stable check IDs and reason codes. Check status is
 `PASS`, `FAIL`, or `INCONCLUSIVE`. Overall status precedence is FAIL, then
 INCONCLUSIVE, then PASS. Exit codes are 0, 1, and 2 respectively. Reports
 include digest values and changed field names, never pin bodies, approval
@@ -39,6 +40,80 @@ Before Gate 1, the operator must have:
 
 The tools do not read ProductRoot. The operator supplies its approved and
 observed identity digests. Do not pass a ProductRoot path to either tool.
+
+## Bounded Celery task snapshot exception
+
+`task_snapshot_adapter.py` collects `active`, `reserved`, and `scheduled`
+through Celery 5.6.3's `app.control.inspect(timeout=5.0)` API. It makes each
+call once; it does not retry. Celery publishes remote-control messages and
+worker replies through Redis. This is read-only with respect to application
+task state and reservations, but it is **not** broker-write-free. The normal
+`celery inspect` prohibition above remains in effect; only this adapter has a
+narrow exception, and it may run only after the operator separately approves
+those Redis control/reply writes. The required
+`--approve-redis-control-reply-writes` argument records that approval at the
+invocation boundary. It does not authorize a restart, Gate 1, Gate 2, or
+dogfood.
+
+Before invocation, obtain every `--expected-worker-node` value from the
+approved worksheet/pin for this exact runtime. Supply a
+`--broker-topology-evidence-ref` that identifies operator evidence establishing
+that the expected node set is the complete set of workers sharing the broker.
+The adapter does not inspect the broker topology. Its complete local `/proc`
+census must match the expected worker masters before and after collection, and
+every Celery reply must have the exact expected worker set. Local process
+inspection cannot detect a remote or off-boundary worker sharing the broker;
+without external broker-topology evidence, the adapter returns
+`INCONCLUSIVE` and writes no snapshot.
+
+The snapshot uses the existing parser schema only:
+`snapshot_schema_version: 1`, timezone-aware UTC `captured_at`, and list fields
+`active`, `reserved`, and `scheduled`. The parser accepts ages from five
+seconds in the future through 120 seconds old; use the capture within 120
+seconds. Nonempty rows contain only a worker node and SHA-256 digests of the
+task ID and task name. Arguments, keyword arguments, ETA, priority, and raw
+task payloads are not persisted. Active inspection uses
+Celery's `safe=True`; reserved and scheduled replies can still carry raw task
+fields in memory and are sanitized before output.
+
+Use a new output directory on a filesystem that supports Linux atomic
+no-replace directory rename. The adapter creates the directory with mode
+`0700`, both files with mode `0600`, and publishes the complete directory
+atomically. It refuses an existing output path, symlink, incomplete census,
+missing/extra/duplicate worker reply, malformed response, timeout, missing
+category, or collection over 20 seconds. Failure prints only a stable
+sanitized reason, exits 2, emits no snapshot, and does not retry. Keep the
+snapshot and its separate evidence note together under the operator's
+restricted evidence retention policy. The note records call timing/coverage,
+the topology reference and its limitations, process census, collection
+window, non-atomicity, and snapshot SHA-256. The preflight parser does not
+validate that note.
+
+The three calls are not atomic. Tasks can transition between categories;
+schedule the capture inside an approved short no-submission window. Use the
+bounded command below only after the explicit operator approval described
+above. Set `EXPECTED_NODE` from the approved worksheet/pin,
+`TOPOLOGY_REF` to the non-secret evidence reference, and `EVIDENCE` to an
+operator-controlled directory. No automatic retry is performed.
+
+```bash
+set -euo pipefail
+: "${EXPECTED_NODE:?set from the approved worksheet/pin}"
+: "${TOPOLOGY_REF:?set to the non-secret topology evidence reference}"
+: "${EVIDENCE:?set to the operator-controlled evidence directory}"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+OUT="$EVIDENCE/task-snapshot-$STAMP"
+timeout --signal=TERM --kill-after=2s 25s \
+  "$PWD/venv/bin/python3" scripts/maintenance/stage_r/task_snapshot_adapter.py \
+  --expected-worker-node "$EXPECTED_NODE" \
+  --broker-topology-evidence-ref "$TOPOLOGY_REF" \
+  --approve-redis-control-reply-writes \
+  --output-dir "$OUT"
+```
+
+The emitted Stage R input is `$OUT/task-snapshot.json`; retain
+`$OUT/task-snapshot-evidence.json` beside it. The approval flag is an explicit
+operator acknowledgement, not a grant of any restart or gate authorization.
 
 ## Required host-side evidence backup
 
@@ -111,10 +186,10 @@ Prepare JSON files outside ProductRoot:
   review its `current_runtime` output offline, then place that object under a
   `runtime` key in this file. That capture is inconclusive until separately
   approved; it is not a Gate 1 pass.
-- `task-snapshot.json`: schema version 1, a UTC `captured_at`, and arrays
-  `active`, `reserved`, and `scheduled`. Each array must be empty. The
-  snapshot is valid for 120 seconds. Do not create it with `celery inspect`
-  for this read-only gate; that sends control messages through Redis.
+- `task-snapshot.json`: exact schema and collection requirements described in
+  [Bounded Celery task snapshot exception](#bounded-celery-task-snapshot-exception).
+  Each task array must be empty for quiescence. The parser accepts up to 120
+  seconds of age and five seconds in the future.
 - `protected-approved.json` and `protected-observed.json`: matching maps from
   stable field names to 64-character SHA-256 digests. Include
   `product_root_identity_sha256`; the checker compares supplied values only.
