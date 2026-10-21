@@ -1,0 +1,46 @@
+# Proposed Worker-only direct dependency input for WP2B1 review.
+# Derived from requirements.txt without changing any retained constraints.
+# This is not a resolved lock and does not authorize acquisition.
+
+# REQUIRED_WORKER: shared Worker services use FastAPI HTTPException.
+fastapi>=0.109.0,<0.137.0
+# REQUIRED_WORKER: Worker database/session/state imports.
+sqlalchemy>=2.0.25
+# REQUIRED_WORKER: settings, schemas, and shared service models.
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+# REQUIRED_WORKER: imported by orchestration context assembly.
+typing-extensions>=4.9.0
+# REQUIRED_WORKER: app.auth and session auth import jose; extra retained.
+python-jose[cryptography]>=3.3.0
+# REQUIRED_WORKER: app.auth imports bcrypt directly; passlib is not imported.
+# This replaces passlib[bcrypt]>=1.7.4 from the mixed root source because that
+# source comment explicitly says direct bcrypt avoids passlib bugs. No version
+# bound for bcrypt is inferred; future resolution must select and review one.
+bcrypt
+# REQUIRED_WORKER: provider adapters and GitHub integration import httpx.
+httpx>=0.26.0
+# REQUIRED_WORKER: app.auth imports nacl.
+pynacl>=1.5.0
+# REQUIRED_WORKER: Worker-reachable Pydantic schemas use EmailStr.
+email-validator>=2.3.0
+# REQUIRED_WORKER: Worker execution validation imports jsonschema.
+jsonschema==4.26.0
+
+# REQUIRED_WORKER: Celery app and registered task modules.
+celery[redis]>=5.3.0
+# REQUIRED_WORKER: Worker backend concurrency and health paths.
+redis>=4.5.0
+
+# CONDITIONAL: loaded only when Langfuse tracing is enabled and configured.
+langfuse>=4.3.1
+# REQUIRED_WORKER: imported at module load by Worker-reachable knowledge service.
+qdrant-client>=1.9.0
+openai>=1.0.0
+# CONDITIONAL: workflow templates are disabled if PyYAML is absent.
+PyYAML>=6.0
+
+# CONDITIONAL / SOURCE GAP: celery_app.py requests tzdata to avoid relying on
+# potentially invalid system zoneinfo. No root constraint exists; the operator
+# must review an approved bound before any acquisition. No version is inferred.
+tzdata
