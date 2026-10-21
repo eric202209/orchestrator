@@ -413,8 +413,17 @@ def verify_worker_release_v2_approval(
         "operator_identity": approval["operator_identity"],
         "approval_valid_from": approval["valid_from"],
         "approval_valid_until": approval["valid_until"],
+        "approval_envelope_kind": envelope["envelope_kind"],
+        "approval_envelope_schema_version": envelope["schema_version"],
+        "approval_subject_kind": approval["approval_kind"],
+        "approval_subject_schema_version": approval["schema_version"],
         "approval_purpose": WORKER_APPROVAL_PURPOSE,
         "approval_action": WORKER_APPROVAL_ACTION,
+        "canonical_manifest_sha256": approval["release_manifest_sha256"],
+        "configuration_policy_id": approval["configuration_policy_id"],
+        "configuration_profile_reference": approval[
+            "configuration_profile_reference"
+        ],
         "key_id": key_id,
         "durable_one_time_claim_consumed": False,
     }
