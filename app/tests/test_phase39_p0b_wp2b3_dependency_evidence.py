@@ -13,9 +13,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.tests.test_phase39_p0b_runtime_lock_contract import (
-    RuntimeLockContractTests,
-)
 from scripts.maintenance.phase39_p0b.runtime_lock_contract import (
     RuntimeLockError,
     _parse_requirement,
@@ -211,6 +208,10 @@ print(json.dumps({
             )
 
     def test_incomplete_transitive_closure_is_rejected(self) -> None:
+        from app.tests.test_phase39_p0b_runtime_lock_contract import (
+            RuntimeLockContractTests,
+        )
+
         fixture = RuntimeLockContractTests()
         fixture.setUp()
         try:
