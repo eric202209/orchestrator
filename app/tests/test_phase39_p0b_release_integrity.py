@@ -9,6 +9,7 @@ import pwd
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -77,9 +78,11 @@ class ReleaseFixture(unittest.TestCase):
             b"#!/bin/bash\n",
             executable=True,
         )
+        # The fixture identity above models the protected target. Use the
+        # runner's real interpreter image for executable fixture bytes.
         self._write(
             "venv/bin/python3",
-            Path("/usr/bin/python3.12").read_bytes(),
+            Path(sys.executable).read_bytes(),
             executable=True,
         )
         self._write(
@@ -541,7 +544,7 @@ class ProtectedReleaseTests(ReleaseFixture):
 
             preexec_fn = drop_privileges
         completed = subprocess.run(
-            ["/usr/bin/python3.12", "-I", "-c", child_code, str(target)],
+            [sys.executable, "-I", "-c", child_code, str(target)],
             cwd="/",
             env={"HOME": "/tmp", "PATH": "/usr/bin:/bin"},
             preexec_fn=preexec_fn,
@@ -818,7 +821,7 @@ class ProtectedReleaseTests(ReleaseFixture):
         )
         result = subprocess.run(
             [
-                "/usr/bin/python3.12",
+                sys.executable,
                 "-I",
                 "-S",
                 "-c",

@@ -10,6 +10,7 @@ import signal
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -1415,7 +1416,7 @@ class RefreshTests(PinOwnerTestCase):
         (root / "checkpoints").mkdir()
         (root / "venv/bin").mkdir(parents=True)
         (root / "logs/worker.log").write_text("", encoding="utf-8")
-        shutil.copyfile("/usr/bin/python3.12", root / "venv/bin/python3")
+        shutil.copyfile(sys.executable, root / "venv/bin/python3")
         os.chmod(root / "venv/bin/python3", 0o755)
         start = root / "start.sh"
         shutil.copyfile(Path(tooling.APPROVED_SOURCE_ROOT) / "start.sh", start)
