@@ -925,16 +925,21 @@ class StaticBeatObserver:
 class RefreshTests(PinOwnerTestCase):
     def setUp(self) -> None:
         super().setUp()
-        approved_python = Path(sys.executable).resolve(strict=True)
+        self.temp = tempfile.TemporaryDirectory(prefix="p39-refresh-test-")
+        self.root = Path(self.temp.name)
+        # Use a private, controlled copy for the test's approved interpreter.
+        # Hosted toolcache ownership and write bits vary between CI runners;
+        # production still requires the fixed root-owned system interpreter.
+        approved_python = self.root / "approved-system-python"
+        shutil.copyfile(sys.executable, approved_python)
+        os.chmod(approved_python, 0o755)
         self._approved_python_patch = patch.multiple(
             tooling,
             _APPROVED_SYSTEM_PYTHON=approved_python,
-            _APPROVED_SYSTEM_PYTHON_UID=os.stat(approved_python).st_uid,
+            _APPROVED_SYSTEM_PYTHON_UID=os.geteuid(),
         )
         self._approved_python_patch.start()
         self.addCleanup(self._approved_python_patch.stop)
-        self.temp = tempfile.TemporaryDirectory(prefix="p39-refresh-test-")
-        self.root = Path(self.temp.name)
         self.policy = make_policy(self.root)
         self.runtime_root = self.root / "runtime"
         self.pin_path = self.root / "pin.json"
