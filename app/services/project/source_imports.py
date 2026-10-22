@@ -446,9 +446,14 @@ def extract_python_test_contract(project_dir: Path) -> Optional[PythonTestContra
                     public_calls.append(call)
                     target = imported_symbols.get(name)
                     if target and target.endswith(".py"):
-                        source_targets.setdefault(target, []).append(
-                            f"{rel_test} calls {call}"
+                        # A symbol from a not-yet-created module stays a
+                        # creation target; source_targets holds existing files.
+                        bucket = (
+                            missing_source_targets
+                            if target in missing_source_targets
+                            else source_targets
                         )
+                        bucket.setdefault(target, []).append(f"{rel_test} calls {call}")
             elif isinstance(node, ast.Assert):
                 rendered = _render_assertion(node, text)
                 if rendered:
