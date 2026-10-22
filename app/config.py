@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     # Absolute path derived from config.py location — CWD-independent.
     DATABASE_URL: str = DEFAULT_DATABASE_URL
 
+    # Phase 39 one-shot authorization remains explicitly disabled until a
+    # separately reviewed implementation connects a complete binding and a
+    # supervisor-backed execution path.
+    ONE_SHOT_EXECUTION_ENABLED: bool = False
+
     @field_validator("DATABASE_URL")
     @classmethod
     def normalize_database_url(cls, value: str) -> str:

@@ -18,6 +18,7 @@ from sqlalchemy import (
     Index,
     CheckConstraint,
     text,
+    inspect as sa_inspect,
 )
 from sqlalchemy.orm import relationship, declarative_base
 from sqlalchemy.sql import func
@@ -4866,3 +4867,261 @@ class KnowledgeUsageLog(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     knowledge_item = relationship("KnowledgeItem", back_populates="usage_logs")
+
+
+class OneShotExecutionAuthorization(Base):
+    """Immutable F1 authorization bound to one existing legacy TaskExecution."""
+
+    __tablename__ = "one_shot_execution_authorizations"
+
+    authorization_uuid = Column(String(36), primary_key=True)
+    identity_schema_version = Column(String(64), nullable=False)
+    policy_version = Column(String(64), nullable=False)
+    project_id = Column(
+        Integer,
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    session_id = Column(
+        Integer,
+        ForeignKey("sessions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    session_instance_id = Column(String(36), nullable=False)
+    task_id = Column(
+        Integer,
+        ForeignKey("tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_revision_identity = Column(String(255), nullable=False)
+    source_snapshot_digest = Column(String(64), nullable=False)
+    candidate_uuid = Column(String(36), nullable=False)
+    candidate_initial_digest = Column(String(64), nullable=False)
+    execution_profile_id = Column(String(128), nullable=False)
+    execution_profile_version = Column(String(64), nullable=False)
+    operation_scope_id = Column(String(128), nullable=False)
+    operation_scope_version = Column(String(64), nullable=False)
+    operation_scope_digest = Column(String(64), nullable=False)
+    operator_approval_id = Column(String(255), nullable=False)
+    operator_identity = Column(String(255), nullable=False)
+    operator_approval_decision = Column(String(16), nullable=False)
+    operator_approved_at = Column(DateTime(timezone=True), nullable=False)
+    issued_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    identity_sha256 = Column(String(64), nullable=False)
+    state = Column(String(16), nullable=False)
+    state_changed_at = Column(DateTime(timezone=True), nullable=True)
+    revoked_by = Column(String(255), nullable=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "task_execution_id",
+            name="uq_one_shot_auth_task_execution",
+        ),
+        UniqueConstraint(
+            "session_id",
+            "session_instance_id",
+            "task_id",
+            name="uq_one_shot_auth_session_generation_task",
+        ),
+        CheckConstraint(
+            "state IN ('AUTHORIZED', 'CLAIMED', 'REVOKED', 'EXPIRED')",
+            name="ck_one_shot_auth_state",
+        ),
+        CheckConstraint(
+            "operator_approval_decision = 'APPROVED'",
+            name="ck_one_shot_auth_approved",
+        ),
+        CheckConstraint(
+            "expires_at > issued_at",
+            name="ck_one_shot_auth_expiry_after_issue",
+        ),
+        CheckConstraint(
+            "length(source_snapshot_digest) = 64 AND "
+            "source_snapshot_digest = lower(source_snapshot_digest)",
+            name="ck_one_shot_auth_source_digest",
+        ),
+        CheckConstraint(
+            "length(candidate_initial_digest) = 64 AND "
+            "candidate_initial_digest = lower(candidate_initial_digest)",
+            name="ck_one_shot_auth_candidate_digest",
+        ),
+        CheckConstraint(
+            "length(operation_scope_digest) = 64 AND "
+            "operation_scope_digest = lower(operation_scope_digest)",
+            name="ck_one_shot_auth_scope_digest",
+        ),
+        CheckConstraint(
+            "length(identity_sha256) = 64 AND identity_sha256 = lower(identity_sha256)",
+            name="ck_one_shot_auth_identity_digest",
+        ),
+        CheckConstraint(
+            "(state = 'AUTHORIZED' AND state_changed_at IS NULL AND revoked_by IS NULL) OR "
+            "(state = 'REVOKED' AND state_changed_at IS NOT NULL AND revoked_by IS NOT NULL) OR "
+            "(state = 'EXPIRED' AND state_changed_at IS NOT NULL AND revoked_by IS NULL) OR "
+            "(state = 'CLAIMED' AND state_changed_at IS NOT NULL)",
+            name="ck_one_shot_auth_terminal_shape",
+        ),
+        Index(
+            "ix_one_shot_auth_state_expiry",
+            "state",
+            "expires_at",
+        ),
+        Index(
+            "ix_one_shot_auth_project_session",
+            "project_id",
+            "session_id",
+        ),
+        Index("ix_one_shot_auth_candidate", "candidate_uuid"),
+    )
+
+
+class ExecutorLaunchIntent(Base):
+    """Durable F1 intent that is deliberately not dispatchable in this slice."""
+
+    __tablename__ = "executor_launch_intents"
+
+    intent_uuid = Column(String(36), primary_key=True)
+    authorization_uuid = Column(
+        String(36),
+        ForeignKey(
+            "one_shot_execution_authorizations.authorization_uuid",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    project_id = Column(
+        Integer,
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    session_id = Column(
+        Integer,
+        ForeignKey("sessions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    session_instance_id = Column(String(36), nullable=False)
+    task_id = Column(
+        Integer,
+        ForeignKey("tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    attempt_idempotency_key = Column(String(64), nullable=False)
+    request_payload_sha256 = Column(String(64), nullable=False)
+    state = Column(String(32), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "authorization_uuid",
+            name="uq_executor_launch_intents_authorization",
+        ),
+        UniqueConstraint(
+            "attempt_idempotency_key",
+            name="uq_executor_launch_intents_idempotency_key",
+        ),
+        UniqueConstraint(
+            "task_execution_id",
+            name="uq_executor_launch_intents_task_execution",
+        ),
+        CheckConstraint(
+            "state = 'NOT_DISPATCHABLE'",
+            name="ck_executor_launch_intents_state",
+        ),
+        CheckConstraint(
+            "length(attempt_idempotency_key) = 64 AND "
+            "attempt_idempotency_key = lower(attempt_idempotency_key)",
+            name="ck_executor_launch_intents_idempotency_key",
+        ),
+        CheckConstraint(
+            "length(request_payload_sha256) = 64 AND "
+            "request_payload_sha256 = lower(request_payload_sha256)",
+            name="ck_executor_launch_intents_payload_digest",
+        ),
+        Index(
+            "ix_executor_launch_intents_state_created",
+            "state",
+            "created_at",
+        ),
+    )
+
+
+_ONE_SHOT_AUTH_IDENTITY_FIELDS = (
+    "authorization_uuid",
+    "identity_schema_version",
+    "policy_version",
+    "project_id",
+    "session_id",
+    "session_instance_id",
+    "task_id",
+    "task_execution_id",
+    "source_revision_identity",
+    "source_snapshot_digest",
+    "candidate_uuid",
+    "candidate_initial_digest",
+    "execution_profile_id",
+    "execution_profile_version",
+    "operation_scope_id",
+    "operation_scope_version",
+    "operation_scope_digest",
+    "operator_approval_id",
+    "operator_identity",
+    "operator_approval_decision",
+    "operator_approved_at",
+    "issued_at",
+    "expires_at",
+    "identity_sha256",
+    "created_at",
+)
+
+
+@event.listens_for(OneShotExecutionAuthorization, "before_update")
+def _guard_one_shot_authorization_update(mapper, connection, target):
+    state = sa_inspect(target)
+    changed = {
+        prop.key
+        for prop in state.mapper.column_attrs
+        if state.attrs[prop.key].history.has_changes()
+    }
+    if changed & set(_ONE_SHOT_AUTH_IDENTITY_FIELDS):
+        raise RuntimeError("OneShotExecutionAuthorization identity is immutable")
+    if not changed or not changed <= {"state", "state_changed_at", "revoked_by"}:
+        raise RuntimeError("OneShotExecutionAuthorization update is not allowed")
+
+    prior_states = state.attrs.state.history.deleted
+    if not prior_states or prior_states[0] != "AUTHORIZED":
+        raise RuntimeError("OneShotExecutionAuthorization state is terminal")
+    if target.state not in {"REVOKED", "EXPIRED"}:
+        raise RuntimeError("OneShotExecutionAuthorization transition is not allowed")
+    if target.state_changed_at is None:
+        raise RuntimeError("OneShotExecutionAuthorization transition needs a timestamp")
+    if target.state == "REVOKED" and not target.revoked_by:
+        raise RuntimeError("Revocation must identify its operator")
+    if target.state == "EXPIRED" and target.revoked_by is not None:
+        raise RuntimeError("Expiry cannot claim a revoking operator")
+
+
+@event.listens_for(OneShotExecutionAuthorization, "before_delete")
+def _guard_one_shot_authorization_delete(mapper, connection, target):
+    raise RuntimeError("OneShotExecutionAuthorization evidence is retained")
+
+
+@event.listens_for(ExecutorLaunchIntent, "before_update")
+def _guard_executor_launch_intent_update(mapper, connection, target):
+    raise RuntimeError("ExecutorLaunchIntent is immutable in F1a")
+
+
+@event.listens_for(ExecutorLaunchIntent, "before_delete")
+def _guard_executor_launch_intent_delete(mapper, connection, target):
+    raise RuntimeError("ExecutorLaunchIntent evidence is retained")

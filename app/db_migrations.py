@@ -26,6 +26,7 @@ class Migration:
     version: str
     description: str
     upgrade: MigrationFn
+    verify: MigrationFn | None = None
 
 
 def _has_column(engine: Engine, table_name: str, column_name: str) -> bool:
@@ -4833,6 +4834,315 @@ def _migration_056_session_lifecycle_authority(engine: Engine) -> None:
             )
 
 
+def _verify_057_one_shot_execution_authorization(engine: Engine) -> None:
+    """Verify the complete additive F1a schema, including SQLite guards."""
+
+    from app.models import ExecutorLaunchIntent, OneShotExecutionAuthorization
+
+    inspector = inspect(engine)
+    required_tables = {
+        OneShotExecutionAuthorization.__tablename__,
+        ExecutorLaunchIntent.__tablename__,
+    }
+    tables = _table_names(engine)
+    if not required_tables <= tables:
+        raise RuntimeError("057 one-shot schema is missing a required table")
+
+    expected_columns = {
+        OneShotExecutionAuthorization.__tablename__: {
+            column.name for column in OneShotExecutionAuthorization.__table__.columns
+        },
+        ExecutorLaunchIntent.__tablename__: {
+            column.name for column in ExecutorLaunchIntent.__table__.columns
+        },
+    }
+    for table_name, expected in expected_columns.items():
+        actual = {column["name"] for column in inspector.get_columns(table_name)}
+        if not expected <= actual:
+            raise RuntimeError(
+                f"057 one-shot schema has incomplete {table_name} columns"
+            )
+        nullable = {
+            column["name"]: bool(column.get("nullable", True))
+            for column in inspector.get_columns(table_name)
+        }
+        for column in expected:
+            if column not in {"state_changed_at", "revoked_by"} and nullable[column]:
+                raise RuntimeError(
+                    f"057 one-shot schema has nullable required column {table_name}.{column}"
+                )
+
+    expected_unique = {
+        OneShotExecutionAuthorization.__tablename__: {
+            "uq_one_shot_auth_task_execution": ("task_execution_id",),
+            "uq_one_shot_auth_session_generation_task": (
+                "session_id",
+                "session_instance_id",
+                "task_id",
+            ),
+        },
+        ExecutorLaunchIntent.__tablename__: {
+            "uq_executor_launch_intents_authorization": ("authorization_uuid",),
+            "uq_executor_launch_intents_idempotency_key": ("attempt_idempotency_key",),
+            "uq_executor_launch_intents_task_execution": ("task_execution_id",),
+        },
+    }
+    for table_name, constraints in expected_unique.items():
+        actual = {
+            constraint.get("name"): tuple(constraint.get("column_names") or ())
+            for constraint in inspector.get_unique_constraints(table_name)
+        }
+        if any(actual.get(name) != columns for name, columns in constraints.items()):
+            raise RuntimeError(
+                f"057 one-shot schema has incomplete uniqueness on {table_name}"
+            )
+
+    expected_checks = {
+        OneShotExecutionAuthorization.__tablename__: {
+            "ck_one_shot_auth_state",
+            "ck_one_shot_auth_approved",
+            "ck_one_shot_auth_expiry_after_issue",
+            "ck_one_shot_auth_source_digest",
+            "ck_one_shot_auth_candidate_digest",
+            "ck_one_shot_auth_scope_digest",
+            "ck_one_shot_auth_identity_digest",
+            "ck_one_shot_auth_terminal_shape",
+        },
+        ExecutorLaunchIntent.__tablename__: {
+            "ck_executor_launch_intents_state",
+            "ck_executor_launch_intents_idempotency_key",
+            "ck_executor_launch_intents_payload_digest",
+        },
+    }
+    for table_name, names in expected_checks.items():
+        actual = {
+            constraint.get("name")
+            for constraint in inspector.get_check_constraints(table_name)
+        }
+        if not names <= actual:
+            raise RuntimeError(
+                f"057 one-shot schema has missing checks on {table_name}"
+            )
+
+    expected_foreign_keys = {
+        OneShotExecutionAuthorization.__tablename__: {
+            ("project_id", "projects", "id"),
+            ("session_id", "sessions", "id"),
+            ("task_id", "tasks", "id"),
+            ("task_execution_id", "task_executions", "id"),
+        },
+        ExecutorLaunchIntent.__tablename__: {
+            (
+                "authorization_uuid",
+                "one_shot_execution_authorizations",
+                "authorization_uuid",
+            ),
+            ("project_id", "projects", "id"),
+            ("session_id", "sessions", "id"),
+            ("task_id", "tasks", "id"),
+            ("task_execution_id", "task_executions", "id"),
+        },
+    }
+    for table_name, expected in expected_foreign_keys.items():
+        foreign_keys = inspector.get_foreign_keys(table_name)
+        actual = set()
+        for foreign_key in foreign_keys:
+            actual.add(
+                (
+                    (foreign_key.get("constrained_columns") or [None])[0],
+                    foreign_key.get("referred_table"),
+                    (foreign_key.get("referred_columns") or [None])[0],
+                )
+            )
+            ondelete = (foreign_key.get("options") or {}).get("ondelete")
+            if ondelete is None or ondelete.upper() != "RESTRICT":
+                raise RuntimeError(
+                    f"057 one-shot schema has a non-restrictive foreign key on {table_name}"
+                )
+        if not expected <= actual:
+            raise RuntimeError(
+                f"057 one-shot schema has incomplete foreign keys on {table_name}"
+            )
+
+    expected_indexes = {
+        OneShotExecutionAuthorization.__tablename__: {
+            "ix_one_shot_auth_state_expiry",
+            "ix_one_shot_auth_project_session",
+            "ix_one_shot_auth_candidate",
+        },
+        ExecutorLaunchIntent.__tablename__: {
+            "ix_executor_launch_intents_state_created",
+        },
+    }
+    for table_name, names in expected_indexes.items():
+        actual = {index["name"] for index in inspector.get_indexes(table_name)}
+        if not names <= actual:
+            raise RuntimeError(
+                f"057 one-shot schema has missing indexes on {table_name}"
+            )
+
+    if engine.dialect.name == "sqlite":
+        with engine.connect() as connection:
+            rows = connection.exec_driver_sql(
+                "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+                "AND name IN (?, ?, ?, ?)",
+                (
+                    "trg_one_shot_auth_immutable_state_guard",
+                    "trg_one_shot_auth_no_delete",
+                    "trg_executor_launch_intent_immutable",
+                    "trg_executor_launch_intent_no_delete",
+                ),
+            ).fetchall()
+        definitions = {row[0]: (row[1] or "").lower() for row in rows}
+        auth_trigger = definitions.get("trg_one_shot_auth_immutable_state_guard", "")
+        auth_delete_trigger = definitions.get("trg_one_shot_auth_no_delete", "")
+        intent_trigger = definitions.get("trg_executor_launch_intent_immutable", "")
+        intent_delete_trigger = definitions.get(
+            "trg_executor_launch_intent_no_delete", ""
+        )
+        if (
+            "raise(abort" not in auth_trigger
+            or "old.state = 'authorized'" not in auth_trigger
+        ):
+            raise RuntimeError(
+                "057 one-shot authorization immutable-state trigger is missing or invalid"
+            )
+        for column in (
+            "authorization_uuid",
+            "identity_schema_version",
+            "policy_version",
+            "project_id",
+            "session_id",
+            "session_instance_id",
+            "task_id",
+            "task_execution_id",
+            "source_revision_identity",
+            "source_snapshot_digest",
+            "candidate_uuid",
+            "candidate_initial_digest",
+            "execution_profile_id",
+            "execution_profile_version",
+            "operation_scope_id",
+            "operation_scope_version",
+            "operation_scope_digest",
+            "operator_approval_id",
+            "operator_identity",
+            "operator_approval_decision",
+            "operator_approved_at",
+            "issued_at",
+            "expires_at",
+            "identity_sha256",
+            "created_at",
+        ):
+            if (
+                f"new.{column}" not in auth_trigger
+                or f"old.{column}" not in auth_trigger
+            ):
+                raise RuntimeError(
+                    "057 one-shot authorization trigger does not guard identity"
+                )
+        if "raise(abort" not in intent_trigger:
+            raise RuntimeError(
+                "057 launch-intent immutable trigger is missing or invalid"
+            )
+        if (
+            "raise(abort" not in auth_delete_trigger
+            or "raise(abort" not in intent_delete_trigger
+        ):
+            raise RuntimeError(
+                "057 one-shot evidence-retention trigger is missing or invalid"
+            )
+
+
+def _migration_057_one_shot_execution_authorization(engine: Engine) -> None:
+    """Create additive F1a tables and database-level SQLite immutability guards."""
+
+    from app.models import ExecutorLaunchIntent, OneShotExecutionAuthorization
+
+    with engine.begin() as connection:
+        OneShotExecutionAuthorization.__table__.create(connection, checkfirst=True)
+        ExecutorLaunchIntent.__table__.create(connection, checkfirst=True)
+        if engine.dialect.name == "sqlite":
+            connection.exec_driver_sql(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_one_shot_auth_immutable_state_guard
+                BEFORE UPDATE ON one_shot_execution_authorizations
+                WHEN
+                    NEW.authorization_uuid IS NOT OLD.authorization_uuid OR
+                    NEW.identity_schema_version IS NOT OLD.identity_schema_version OR
+                    NEW.policy_version IS NOT OLD.policy_version OR
+                    NEW.project_id IS NOT OLD.project_id OR
+                    NEW.session_id IS NOT OLD.session_id OR
+                    NEW.session_instance_id IS NOT OLD.session_instance_id OR
+                    NEW.task_id IS NOT OLD.task_id OR
+                    NEW.task_execution_id IS NOT OLD.task_execution_id OR
+                    NEW.source_revision_identity IS NOT OLD.source_revision_identity OR
+                    NEW.source_snapshot_digest IS NOT OLD.source_snapshot_digest OR
+                    NEW.candidate_uuid IS NOT OLD.candidate_uuid OR
+                    NEW.candidate_initial_digest IS NOT OLD.candidate_initial_digest OR
+                    NEW.execution_profile_id IS NOT OLD.execution_profile_id OR
+                    NEW.execution_profile_version IS NOT OLD.execution_profile_version OR
+                    NEW.operation_scope_id IS NOT OLD.operation_scope_id OR
+                    NEW.operation_scope_version IS NOT OLD.operation_scope_version OR
+                    NEW.operation_scope_digest IS NOT OLD.operation_scope_digest OR
+                    NEW.operator_approval_id IS NOT OLD.operator_approval_id OR
+                    NEW.operator_identity IS NOT OLD.operator_identity OR
+                    NEW.operator_approval_decision IS NOT OLD.operator_approval_decision OR
+                    NEW.operator_approved_at IS NOT OLD.operator_approved_at OR
+                    NEW.issued_at IS NOT OLD.issued_at OR
+                    NEW.expires_at IS NOT OLD.expires_at OR
+                    NEW.identity_sha256 IS NOT OLD.identity_sha256 OR
+                    NEW.created_at IS NOT OLD.created_at OR
+                    NOT (
+                        (
+                            NEW.state = OLD.state AND
+                            NEW.state_changed_at IS OLD.state_changed_at AND
+                            NEW.revoked_by IS OLD.revoked_by
+                        ) OR (
+                            OLD.state = 'AUTHORIZED' AND
+                            NEW.state IN ('REVOKED', 'EXPIRED') AND
+                            NEW.state_changed_at IS NOT NULL AND
+                            (
+                                (NEW.state = 'REVOKED' AND NEW.revoked_by IS NOT NULL) OR
+                                (NEW.state = 'EXPIRED' AND NEW.revoked_by IS NULL)
+                            )
+                        )
+                    )
+                BEGIN
+                    SELECT RAISE(ABORT, 'one-shot authorization identity/state is immutable');
+                END
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_one_shot_auth_no_delete
+                BEFORE DELETE ON one_shot_execution_authorizations
+                BEGIN
+                    SELECT RAISE(ABORT, 'one-shot authorization evidence is retained');
+                END
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_executor_launch_intent_immutable
+                BEFORE UPDATE ON executor_launch_intents
+                BEGIN
+                    SELECT RAISE(ABORT, 'executor launch intent is immutable in F1a');
+                END
+                """
+            )
+            connection.exec_driver_sql(
+                """
+                CREATE TRIGGER IF NOT EXISTS trg_executor_launch_intent_no_delete
+                BEFORE DELETE ON executor_launch_intents
+                BEGIN
+                    SELECT RAISE(ABORT, 'executor launch intent evidence is retained');
+                END
+                """
+            )
+    _verify_057_one_shot_execution_authorization(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -5126,6 +5436,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         description="Add additive Session continuation and lifecycle timestamps",
         upgrade=_migration_056_session_lifecycle_authority,
     ),
+    Migration(
+        version="057_one_shot_execution_authorization",
+        description=(
+            "Add disabled-by-default one-shot authorization and non-dispatchable intent"
+        ),
+        upgrade=_migration_057_one_shot_execution_authorization,
+        verify=_verify_057_one_shot_execution_authorization,
+    ),
 )
 
 
@@ -5135,6 +5453,10 @@ def run_schema_migrations(
     applied_versions = _get_applied_versions(engine)
     for migration in migrations:
         if migration.version in applied_versions:
+            if migration.verify is not None:
+                migration.verify(engine)
             continue
         migration.upgrade(engine)
+        if migration.verify is not None:
+            migration.verify(engine)
         _record_migration(engine, migration)
