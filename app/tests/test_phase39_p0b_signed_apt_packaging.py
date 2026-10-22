@@ -20,7 +20,7 @@ from scripts.maintenance.phase39_p0b import (
 
 
 UTC = dt.timezone.utc
-NOW = dt.datetime(2026, 10, 20, 15, 0, tzinfo=UTC)
+NOW = dt.datetime.now(UTC).replace(microsecond=0)
 EMPTY_DELTA = hashlib.sha256(b"").hexdigest()
 
 
