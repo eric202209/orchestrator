@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services.orchestration.planning import repository_orientation
 from app.tests.prototypes.planning_grounding import protocol as P
 from app.tests.prototypes.planning_grounding.harness import (
     derive_orientation,
@@ -136,7 +137,7 @@ def test_task_names_no_expected_locator():
 
 
 @pytest.mark.unit
-def test_vocabulary_drift_is_materially_harder_than_pgp2():
+def test_vocabulary_drift_is_materially_harder_than_pgp2(monkeypatch):
     """Orientation must not hand the model the implementation."""
 
     orientation = derive_orientation(REPO_ROOT, TRIAL_TASK_TEXT)
@@ -144,11 +145,20 @@ def test_vocabulary_drift_is_materially_harder_than_pgp2():
     assert (
         EXPECTED_PATH not in orientation.paths
     ), "orientation surfaced the implementation path; drift is too weak"
-    # The plausible wrong competitor *is* surfaced. That is the adversarial
-    # setup: the visible candidate is not the implementation.
-    assert PLAUSIBLE_WRONG_PATH in orientation.paths
     assert orientation.truncated
     assert orientation.entries_total > len(orientation.paths)
+
+    # The plausible wrong competitor outranks the implementation in the
+    # deterministic candidate order. Whether it also lands inside the shown
+    # window depends on how many unrelated tracked files match earlier task
+    # literals (e.g. "back" matches every *backup*/*backend* path), so the
+    # adversarial ordering is asserted on the untruncated order instead.
+    monkeypatch.setattr(repository_orientation, "ORIENTATION_PATH_LIMIT", 10**6)
+    monkeypatch.setattr(repository_orientation, "ORIENTATION_BYTE_BUDGET", 10**9)
+    ordered = derive_orientation(REPO_ROOT, TRIAL_TASK_TEXT).paths
+    assert PLAUSIBLE_WRONG_PATH in ordered
+    assert EXPECTED_PATH in ordered
+    assert ordered.index(PLAUSIBLE_WRONG_PATH) < ordered.index(EXPECTED_PATH)
 
 
 @pytest.mark.unit
