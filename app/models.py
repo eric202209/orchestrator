@@ -4983,7 +4983,7 @@ class OneShotExecutionAuthorization(Base):
 
 
 class ExecutorLaunchIntent(Base):
-    """Durable F1 intent that is deliberately not dispatchable in this slice."""
+    """Durable F1 intent; only the F1b atomic claim may mark it READY."""
 
     __tablename__ = "executor_launch_intents"
 
@@ -5036,7 +5036,7 @@ class ExecutorLaunchIntent(Base):
             name="uq_executor_launch_intents_task_execution",
         ),
         CheckConstraint(
-            "state = 'NOT_DISPATCHABLE'",
+            "state IN ('NOT_DISPATCHABLE', 'READY')",
             name="ck_executor_launch_intents_state",
         ),
         CheckConstraint(
@@ -5053,6 +5053,66 @@ class ExecutorLaunchIntent(Base):
             "ix_executor_launch_intents_state_created",
             "state",
             "created_at",
+        ),
+    )
+
+
+class OneShotAuthorizationClaim(Base):
+    """Insert-only F1b receipt identifying the claimant that committed a claim."""
+
+    __tablename__ = "one_shot_authorization_claims"
+
+    claim_uuid = Column(String(36), primary_key=True)
+    authorization_uuid = Column(
+        String(36),
+        ForeignKey(
+            "one_shot_execution_authorizations.authorization_uuid",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    intent_uuid = Column(
+        String(36),
+        ForeignKey("executor_launch_intents.intent_uuid", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    identity_sha256 = Column(String(64), nullable=False)
+    attempt_idempotency_key = Column(String(64), nullable=False)
+    request_payload_sha256 = Column(String(64), nullable=False)
+    claimed_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "authorization_uuid",
+            name="uq_one_shot_claims_authorization",
+        ),
+        UniqueConstraint("intent_uuid", name="uq_one_shot_claims_intent"),
+        UniqueConstraint(
+            "task_execution_id",
+            name="uq_one_shot_claims_task_execution",
+        ),
+        UniqueConstraint(
+            "attempt_idempotency_key",
+            name="uq_one_shot_claims_idempotency_key",
+        ),
+        CheckConstraint(
+            "length(identity_sha256) = 64 AND identity_sha256 = lower(identity_sha256)",
+            name="ck_one_shot_claims_identity_digest",
+        ),
+        CheckConstraint(
+            "length(attempt_idempotency_key) = 64 AND "
+            "attempt_idempotency_key = lower(attempt_idempotency_key)",
+            name="ck_one_shot_claims_idempotency_key",
+        ),
+        CheckConstraint(
+            "length(request_payload_sha256) = 64 AND "
+            "request_payload_sha256 = lower(request_payload_sha256)",
+            name="ck_one_shot_claims_payload_digest",
         ),
     )
 
@@ -5125,3 +5185,13 @@ def _guard_executor_launch_intent_update(mapper, connection, target):
 @event.listens_for(ExecutorLaunchIntent, "before_delete")
 def _guard_executor_launch_intent_delete(mapper, connection, target):
     raise RuntimeError("ExecutorLaunchIntent evidence is retained")
+
+
+@event.listens_for(OneShotAuthorizationClaim, "before_update")
+def _guard_one_shot_claim_update(mapper, connection, target):
+    raise RuntimeError("OneShotAuthorizationClaim is immutable")
+
+
+@event.listens_for(OneShotAuthorizationClaim, "before_delete")
+def _guard_one_shot_claim_delete(mapper, connection, target):
+    raise RuntimeError("OneShotAuthorizationClaim evidence is retained")

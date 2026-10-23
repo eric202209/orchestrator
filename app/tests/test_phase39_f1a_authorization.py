@@ -8,10 +8,11 @@ from datetime import datetime, timedelta, timezone
 import importlib
 from pathlib import Path
 import re
+import sqlite3
 import uuid
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.schema import CreateTable
 from sqlalchemy.orm import sessionmaker
@@ -36,6 +37,7 @@ from app.services.execution.one_shot_authorization import (
     AmbiguousExecutionMapping,
     AuthorizationAlreadyExists,
     AuthorizationAssociationMismatch,
+    AuthorizationIntegrityError,
     AuthorizationStateConflict,
     InvalidAuthorizationIdentity,
     OneShotAuthorizationIdentity,
@@ -49,11 +51,30 @@ from app.services.execution.one_shot_authorization import (
 )
 
 
+MIGRATION_057 = next(
+    migration
+    for migration in MIGRATIONS
+    if migration.version == "057_one_shot_execution_authorization"
+)
+
+
+def _sqlite_engine(path: Path):
+    """Temporary SQLite engine with production's foreign-key enforcement."""
+
+    engine = create_engine(f"sqlite:///{path}")
+
+    @event.listens_for(engine, "connect")
+    def _enforce_foreign_keys(dbapi_connection, _):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    return engine
+
+
 @pytest.fixture
 def f1a_database(tmp_path: Path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'f1a.db'}")
+    engine = _sqlite_engine(tmp_path / "f1a.db")
     Base.metadata.create_all(bind=engine)
-    run_schema_migrations(engine, (MIGRATIONS[-1],))
+    run_schema_migrations(engine, (MIGRATION_057,))
     factory = sessionmaker(autoflush=False, bind=engine)
     try:
         yield engine, factory
@@ -253,14 +274,21 @@ def test_cross_project_identity_is_rejected(f1a_database, monkeypatch):
         db.close()
 
 
-def test_runtime_lease_mapping_is_rejected(f1a_database, monkeypatch):
+def test_runtime_lease_mapping_is_rejected(f1a_database, tmp_path, monkeypatch):
     _enable(monkeypatch)
     _, factory = f1a_database
     db = factory()
     try:
         project, session, task, execution = _graph(db)
-        execution.runtime_lease_id = 91
-        db.commit()
+        # A real Phase 29 lease needs ~10 parent tables; only this fixture
+        # write uses a raw connection without FK enforcement. Issuance itself
+        # still runs on the FK-enforced engine.
+        with sqlite3.connect(tmp_path / "f1a.db") as raw:
+            raw.execute(
+                "UPDATE task_executions SET runtime_lease_id = 91 WHERE id = ?",
+                (execution.id,),
+            )
+        db.expire_all()
         with pytest.raises(AmbiguousExecutionMapping):
             issue_one_shot_authorization(
                 db, _identity(project, session, task, execution)
@@ -372,7 +400,97 @@ def test_failed_intent_insert_rolls_back_authorization_insert(
         monkeypatch.setattr(module, "_intent_identity", colliding_intent)
         with pytest.raises(AuthorizationAlreadyExists):
             issue_one_shot_authorization(db, second_identity)
+        db.rollback()
         assert _counts(db) == (1, 1)
+        assert (
+            db.get(OneShotExecutionAuthorization, second_identity.authorization_uuid)
+            is None
+        )
+    finally:
+        db.close()
+
+
+def test_f1a_test_connections_enforce_foreign_keys(f1a_database):
+    _, factory = f1a_database
+    db = factory()
+    try:
+        assert db.connection().exec_driver_sql("PRAGMA foreign_keys").scalar() == 1
+    finally:
+        db.close()
+
+
+def test_issuance_inserts_parent_before_intent_and_commits_both(
+    f1a_database, monkeypatch, tmp_path
+):
+    _enable(monkeypatch)
+    engine, factory = f1a_database
+    db = factory()
+    inserts: list[str] = []
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _record(conn, cursor, statement, parameters, context, executemany):
+        if statement.startswith("INSERT INTO"):
+            inserts.append(statement.split()[2])
+
+    try:
+        identity = _identity(*_graph(db))
+        inserts.clear()
+        result = issue_one_shot_authorization(db, identity)
+    finally:
+        event.remove(engine, "before_cursor_execute", _record)
+        db.close()
+
+    assert inserts == ["one_shot_execution_authorizations", "executor_launch_intents"]
+    with sqlite3.connect(tmp_path / "f1a.db") as raw:
+        assert raw.execute(
+            "SELECT state FROM one_shot_execution_authorizations "
+            "WHERE authorization_uuid = ?",
+            (result.authorization_uuid,),
+        ).fetchall() == [("AUTHORIZED",)]
+        assert raw.execute(
+            "SELECT state FROM executor_launch_intents WHERE authorization_uuid = ?",
+            (result.authorization_uuid,),
+        ).fetchall() == [("NOT_DISPATCHABLE",)]
+
+
+def test_missing_reference_is_classified_as_association_mismatch(
+    f1a_database, monkeypatch
+):
+    _enable(monkeypatch)
+    _, factory = f1a_database
+    db = factory()
+    module = importlib.import_module("app.services.execution.one_shot_authorization")
+    try:
+        project, session, task, execution = _graph(db)
+        monkeypatch.setattr(module, "_verify_existing_associations", lambda *_: None)
+        identity = _identity(
+            project, session, task, type("Missing", (), {"id": 987654})()
+        )
+        with pytest.raises(AuthorizationAssociationMismatch):
+            issue_one_shot_authorization(db, identity)
+        assert _counts(db) == (0, 0)
+    finally:
+        db.close()
+
+
+def test_check_violation_is_classified_as_integrity_error(f1a_database, monkeypatch):
+    _enable(monkeypatch)
+    _, factory = f1a_database
+    db = factory()
+    module = importlib.import_module("app.services.execution.one_shot_authorization")
+    try:
+        identity = _identity(*_graph(db))
+        original = module._intent_identity
+
+        def uppercase_key(identity, identity_sha):
+            intent_uuid, key, request_sha = original(identity, identity_sha)
+            return intent_uuid, key.upper(), request_sha
+
+        monkeypatch.setattr(module, "_intent_identity", uppercase_key)
+        with pytest.raises(AuthorizationIntegrityError) as raised:
+            issue_one_shot_authorization(db, identity)
+        assert not isinstance(raised.value, AuthorizationAlreadyExists)
+        assert _counts(db) == (0, 0)
     finally:
         db.close()
 
@@ -571,7 +689,7 @@ def test_fresh_create_all_then_migration_verifies_complete_schema(f1a_database):
 
 
 def test_existing_schema_migration_adds_new_tables(tmp_path: Path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'existing-schema.db'}")
+    engine = _sqlite_engine(tmp_path / "existing-schema.db")
     new_tables = {
         "one_shot_execution_authorizations",
         "executor_launch_intents",
@@ -581,7 +699,7 @@ def test_existing_schema_migration_adds_new_tables(tmp_path: Path):
     ]
     Base.metadata.create_all(engine, tables=existing_tables)
     try:
-        run_schema_migrations(engine, (MIGRATIONS[-1],))
+        run_schema_migrations(engine, (MIGRATION_057,))
         assert new_tables <= set(inspect(engine).get_table_names())
     finally:
         engine.dispose()
@@ -589,8 +707,8 @@ def test_existing_schema_migration_adds_new_tables(tmp_path: Path):
 
 def test_repeated_migration_is_idempotent_and_reverifies_constraints(f1a_database):
     engine, _ = f1a_database
-    run_schema_migrations(engine, (MIGRATIONS[-1],))
-    run_schema_migrations(engine, (MIGRATIONS[-1],))
+    run_schema_migrations(engine, (MIGRATION_057,))
+    run_schema_migrations(engine, (MIGRATION_057,))
     with engine.begin() as connection:
         applied = connection.exec_driver_sql(
             "SELECT COUNT(*) FROM schema_migrations WHERE version = ?",
@@ -599,11 +717,11 @@ def test_repeated_migration_is_idempotent_and_reverifies_constraints(f1a_databas
         connection.exec_driver_sql("DROP INDEX ix_one_shot_auth_candidate")
     assert applied == 1
     with pytest.raises(RuntimeError, match="missing indexes"):
-        run_schema_migrations(engine, (MIGRATIONS[-1],))
+        run_schema_migrations(engine, (MIGRATION_057,))
 
 
 def test_partial_schema_is_rejected_without_recording_success(tmp_path: Path):
-    engine = create_engine(f"sqlite:///{tmp_path / 'partial-schema.db'}")
+    engine = _sqlite_engine(tmp_path / "partial-schema.db")
     with engine.begin() as connection:
         connection.exec_driver_sql(
             "CREATE TABLE one_shot_execution_authorizations "
@@ -611,7 +729,7 @@ def test_partial_schema_is_rejected_without_recording_success(tmp_path: Path):
         )
     try:
         with pytest.raises((RuntimeError, SQLAlchemyError)):
-            run_schema_migrations(engine, (MIGRATIONS[-1],))
+            run_schema_migrations(engine, (MIGRATION_057,))
         with engine.begin() as connection:
             applied = connection.exec_driver_sql(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = ?",
@@ -625,7 +743,7 @@ def test_partial_schema_is_rejected_without_recording_success(tmp_path: Path):
 def test_missing_check_constraint_is_rejected_without_recording_success(
     tmp_path: Path,
 ):
-    engine = create_engine(f"sqlite:///{tmp_path / 'missing-check.db'}")
+    engine = _sqlite_engine(tmp_path / "missing-check.db")
     new_tables = {
         "one_shot_execution_authorizations",
         "executor_launch_intents",
@@ -650,7 +768,7 @@ def test_missing_check_constraint_is_rejected_without_recording_success(
         index.create(engine, checkfirst=True)
     try:
         with pytest.raises(RuntimeError, match="missing checks"):
-            run_schema_migrations(engine, (MIGRATIONS[-1],))
+            run_schema_migrations(engine, (MIGRATION_057,))
         with engine.begin() as connection:
             applied = connection.exec_driver_sql(
                 "SELECT COUNT(*) FROM schema_migrations WHERE version = ?",

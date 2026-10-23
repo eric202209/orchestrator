@@ -38,6 +38,9 @@ LAUNCH_REQUEST_SCHEMA_VERSION = "executor-launch-request/v1"
 MIGRATION_VERSION = "057_one_shot_execution_authorization"
 
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_SQLITE_CONSTRAINT_UNIQUE = 2067
+_SQLITE_CONSTRAINT_PRIMARYKEY = 1555
+_SQLITE_CONSTRAINT_FOREIGNKEY = 787
 _IDENTITY_FIELDS = (
     "identity_schema_version",
     "policy_version",
@@ -114,6 +117,10 @@ class AuthorizationStateConflict(OneShotAuthorizationError):
 
 class AuthorizationSchemaUnavailable(OneShotAuthorizationError):
     pass
+
+
+class AuthorizationIntegrityError(OneShotAuthorizationError):
+    """A database guard other than uniqueness or a reference refused issuance."""
 
 
 @dataclass(frozen=True)
@@ -488,11 +495,24 @@ def issue_one_shot_authorization(
         with Session(bind=bind, autoflush=False, expire_on_commit=False) as issue_db:
             with issue_db.begin():
                 _verify_existing_associations(issue_db, identity)
-                issue_db.add_all([authorization, intent])
+                # No relationship() orders these mappers, so flush the parent
+                # first; under PRAGMA foreign_keys=ON the intent FK needs it.
+                issue_db.add(authorization)
+                issue_db.flush()
+                issue_db.add(intent)
                 issue_db.flush()
     except IntegrityError as exc:
-        raise AuthorizationAlreadyExists(
-            "an authorization or launch intent already exists for this identity"
+        code = getattr(exc.orig, "sqlite_errorcode", None)
+        if code in (_SQLITE_CONSTRAINT_UNIQUE, _SQLITE_CONSTRAINT_PRIMARYKEY):
+            raise AuthorizationAlreadyExists(
+                "an authorization or launch intent already exists for this identity"
+            ) from exc
+        if code == _SQLITE_CONSTRAINT_FOREIGNKEY:
+            raise AuthorizationAssociationMismatch(
+                "a referenced Project, Session, Task, or TaskExecution is missing"
+            ) from exc
+        raise AuthorizationIntegrityError(
+            "authorization issuance violated a database integrity guard"
         ) from exc
     return _result(authorization, intent)
 

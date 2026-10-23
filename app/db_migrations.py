@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Callable, Iterable
 import hashlib
 import json
+import re
 import unicodedata
 import uuid
 
@@ -5143,6 +5144,553 @@ def _migration_057_one_shot_execution_authorization(engine: Engine) -> None:
     _verify_057_one_shot_execution_authorization(engine)
 
 
+_ONE_SHOT_AUTH_GUARDED_COLUMNS = (
+    "authorization_uuid",
+    "identity_schema_version",
+    "policy_version",
+    "project_id",
+    "session_id",
+    "session_instance_id",
+    "task_id",
+    "task_execution_id",
+    "source_revision_identity",
+    "source_snapshot_digest",
+    "candidate_uuid",
+    "candidate_initial_digest",
+    "execution_profile_id",
+    "execution_profile_version",
+    "operation_scope_id",
+    "operation_scope_version",
+    "operation_scope_digest",
+    "operator_approval_id",
+    "operator_identity",
+    "operator_approval_decision",
+    "operator_approved_at",
+    "issued_at",
+    "expires_at",
+    "identity_sha256",
+    "created_at",
+)
+_LAUNCH_INTENT_GUARDED_COLUMNS = (
+    "intent_uuid",
+    "authorization_uuid",
+    "project_id",
+    "session_id",
+    "session_instance_id",
+    "task_id",
+    "task_execution_id",
+    "attempt_idempotency_key",
+    "request_payload_sha256",
+    "created_at",
+)
+
+
+# SQLAlchemy's fixed-width SQLite DATETIME text; exact lexical order holds.
+_SQLITE_DATETIME_GLOB = (
+    "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9] "
+    "[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]"
+)
+
+
+def _identity_changed_sql(columns: tuple[str, ...]) -> str:
+    return " OR\n".join(f"NEW.{column} IS NOT OLD.{column}" for column in columns)
+
+
+def _058_trigger_statements() -> tuple[str, ...]:
+    """F1b guards: CLAIMED/READY are the only new, irreversible transitions."""
+
+    return (
+        "DROP TRIGGER IF EXISTS trg_one_shot_auth_immutable_state_guard",
+        f"""
+        CREATE TRIGGER trg_one_shot_auth_immutable_state_guard
+        BEFORE UPDATE ON one_shot_execution_authorizations
+        WHEN
+            {_identity_changed_sql(_ONE_SHOT_AUTH_GUARDED_COLUMNS)} OR
+            NOT (
+                (
+                    NEW.state = OLD.state AND
+                    NEW.state_changed_at IS OLD.state_changed_at AND
+                    NEW.revoked_by IS OLD.revoked_by
+                ) OR (
+                    OLD.state = 'AUTHORIZED' AND
+                    NEW.state IN ('REVOKED', 'EXPIRED', 'CLAIMED') AND
+                    NEW.state_changed_at IS NOT NULL AND
+                    (
+                        (NEW.state = 'REVOKED' AND NEW.revoked_by IS NOT NULL) OR
+                        (NEW.state = 'EXPIRED' AND NEW.revoked_by IS NULL) OR
+                        (
+                            NEW.state = 'CLAIMED' AND
+                            NEW.revoked_by IS NULL AND
+                            NEW.state_changed_at GLOB '{_SQLITE_DATETIME_GLOB}' AND
+                            OLD.expires_at GLOB '{_SQLITE_DATETIME_GLOB}' AND
+                            NEW.state_changed_at < OLD.expires_at
+                        )
+                    )
+                )
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'one-shot authorization identity/state is immutable');
+        END
+        """,
+        "DROP TRIGGER IF EXISTS trg_executor_launch_intent_immutable",
+        f"""
+        CREATE TRIGGER trg_executor_launch_intent_immutable
+        BEFORE UPDATE ON executor_launch_intents
+        WHEN
+            {_identity_changed_sql(_LAUNCH_INTENT_GUARDED_COLUMNS)} OR
+            NOT (OLD.state = 'NOT_DISPATCHABLE' AND NEW.state = 'READY') OR
+            NOT EXISTS (
+                SELECT 1 FROM one_shot_execution_authorizations AS auth
+                WHERE auth.authorization_uuid = NEW.authorization_uuid
+                  AND auth.state = 'CLAIMED'
+                  AND auth.task_execution_id = NEW.task_execution_id
+                  AND auth.session_instance_id = NEW.session_instance_id
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'executor launch intent identity/state is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_executor_launch_intent_no_delete
+        BEFORE DELETE ON executor_launch_intents
+        BEGIN
+            SELECT RAISE(ABORT, 'executor launch intent evidence is retained');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_one_shot_claim_requires_ready
+        BEFORE INSERT ON one_shot_authorization_claims
+        WHEN NOT EXISTS (
+            SELECT 1 FROM one_shot_execution_authorizations AS auth
+            JOIN executor_launch_intents AS li
+              ON li.authorization_uuid = auth.authorization_uuid
+            WHERE auth.authorization_uuid = NEW.authorization_uuid
+              AND auth.state = 'CLAIMED'
+              AND auth.identity_sha256 = NEW.identity_sha256
+              AND auth.task_execution_id = NEW.task_execution_id
+              AND li.intent_uuid = NEW.intent_uuid
+              AND li.state = 'READY'
+              AND li.task_execution_id = NEW.task_execution_id
+              AND li.attempt_idempotency_key = NEW.attempt_idempotency_key
+              AND li.request_payload_sha256 = NEW.request_payload_sha256
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'one-shot claim receipt requires CLAIMED and READY');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_one_shot_claim_immutable
+        BEFORE UPDATE ON one_shot_authorization_claims
+        BEGIN
+            SELECT RAISE(ABORT, 'one-shot claim receipt is immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_one_shot_claim_no_delete
+        BEFORE DELETE ON one_shot_authorization_claims
+        BEGIN
+            SELECT RAISE(ABORT, 'one-shot claim receipt evidence is retained');
+        END
+        """,
+    )
+
+
+def _rebuild_058_launch_intents(connection, intent_sql: str) -> None:
+    """Widen the 057 intent state CHECK, keeping the rest of the stored DDL.
+
+    SQLite cannot alter a CHECK constraint in place. No table references the
+    intents table except the (still empty) 058 claim receipts, so the copy,
+    drop, and rename run inside the caller's single write transaction.
+    """
+
+    prefix = "CREATE TABLE executor_launch_intents ("
+    old_check = "CHECK (state = 'NOT_DISPATCHABLE')"
+    if not intent_sql.startswith(prefix) or intent_sql.count(old_check) != 1:
+        raise RuntimeError("058 found an unexpected executor launch intent DDL")
+    staging = "executor_launch_intents_058_staging"
+    ddl = intent_sql.replace(
+        old_check, "CHECK (state IN ('NOT_DISPATCHABLE', 'READY'))"
+    )
+    index_sql = [
+        row[0]
+        for row in connection.exec_driver_sql(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' "
+            "AND tbl_name = 'executor_launch_intents' AND sql IS NOT NULL"
+        )
+    ]
+    columns = ", ".join(
+        row[1]
+        for row in connection.exec_driver_sql(
+            "PRAGMA table_info(executor_launch_intents)"
+        )
+    )
+    connection.exec_driver_sql(f"CREATE TABLE {staging} (" + ddl[len(prefix) :])
+    connection.exec_driver_sql(
+        f"INSERT INTO {staging} ({columns}) "
+        f"SELECT {columns} FROM executor_launch_intents"
+    )
+    connection.exec_driver_sql("DROP TABLE executor_launch_intents")
+    connection.exec_driver_sql(
+        f"ALTER TABLE {staging} RENAME TO executor_launch_intents"
+    )
+    for statement in index_sql:
+        connection.exec_driver_sql(statement)
+
+
+# F-05: the exact one-shot schema 058 guarantees. These definitions are frozen
+# here (not compiled from the models) so that a later model or SQLAlchemy DDL
+# change cannot silently redefine what an already-applied 058 must look like.
+# Any later migration that changes these objects must update this verifier.
+_058_EXPECTED_TABLES = (
+    """
+    CREATE TABLE one_shot_execution_authorizations (
+        authorization_uuid VARCHAR(36) NOT NULL,
+        identity_schema_version VARCHAR(64) NOT NULL,
+        policy_version VARCHAR(64) NOT NULL,
+        project_id INTEGER NOT NULL,
+        session_id INTEGER NOT NULL,
+        session_instance_id VARCHAR(36) NOT NULL,
+        task_id INTEGER NOT NULL,
+        task_execution_id INTEGER NOT NULL,
+        source_revision_identity VARCHAR(255) NOT NULL,
+        source_snapshot_digest VARCHAR(64) NOT NULL,
+        candidate_uuid VARCHAR(36) NOT NULL,
+        candidate_initial_digest VARCHAR(64) NOT NULL,
+        execution_profile_id VARCHAR(128) NOT NULL,
+        execution_profile_version VARCHAR(64) NOT NULL,
+        operation_scope_id VARCHAR(128) NOT NULL,
+        operation_scope_version VARCHAR(64) NOT NULL,
+        operation_scope_digest VARCHAR(64) NOT NULL,
+        operator_approval_id VARCHAR(255) NOT NULL,
+        operator_identity VARCHAR(255) NOT NULL,
+        operator_approval_decision VARCHAR(16) NOT NULL,
+        operator_approved_at DATETIME NOT NULL,
+        issued_at DATETIME NOT NULL,
+        expires_at DATETIME NOT NULL,
+        identity_sha256 VARCHAR(64) NOT NULL,
+        state VARCHAR(16) NOT NULL,
+        state_changed_at DATETIME,
+        revoked_by VARCHAR(255),
+        created_at DATETIME NOT NULL,
+        PRIMARY KEY (authorization_uuid),
+        CONSTRAINT uq_one_shot_auth_task_execution UNIQUE (task_execution_id),
+        CONSTRAINT uq_one_shot_auth_session_generation_task UNIQUE (session_id, session_instance_id, task_id),
+        CONSTRAINT ck_one_shot_auth_state CHECK (state IN ('AUTHORIZED', 'CLAIMED', 'REVOKED', 'EXPIRED')),
+        CONSTRAINT ck_one_shot_auth_approved CHECK (operator_approval_decision = 'APPROVED'),
+        CONSTRAINT ck_one_shot_auth_expiry_after_issue CHECK (expires_at > issued_at),
+        CONSTRAINT ck_one_shot_auth_source_digest CHECK (length(source_snapshot_digest) = 64 AND source_snapshot_digest = lower(source_snapshot_digest)),
+        CONSTRAINT ck_one_shot_auth_candidate_digest CHECK (length(candidate_initial_digest) = 64 AND candidate_initial_digest = lower(candidate_initial_digest)),
+        CONSTRAINT ck_one_shot_auth_scope_digest CHECK (length(operation_scope_digest) = 64 AND operation_scope_digest = lower(operation_scope_digest)),
+        CONSTRAINT ck_one_shot_auth_identity_digest CHECK (length(identity_sha256) = 64 AND identity_sha256 = lower(identity_sha256)),
+        CONSTRAINT ck_one_shot_auth_terminal_shape CHECK ((state = 'AUTHORIZED' AND state_changed_at IS NULL AND revoked_by IS NULL) OR (state = 'REVOKED' AND state_changed_at IS NOT NULL AND revoked_by IS NOT NULL) OR (state = 'EXPIRED' AND state_changed_at IS NOT NULL AND revoked_by IS NULL) OR (state = 'CLAIMED' AND state_changed_at IS NOT NULL)),
+        FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+        FOREIGN KEY(session_id) REFERENCES sessions (id) ON DELETE RESTRICT,
+        FOREIGN KEY(task_id) REFERENCES tasks (id) ON DELETE RESTRICT,
+        FOREIGN KEY(task_execution_id) REFERENCES task_executions (id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE executor_launch_intents (
+        intent_uuid VARCHAR(36) NOT NULL,
+        authorization_uuid VARCHAR(36) NOT NULL,
+        project_id INTEGER NOT NULL,
+        session_id INTEGER NOT NULL,
+        session_instance_id VARCHAR(36) NOT NULL,
+        task_id INTEGER NOT NULL,
+        task_execution_id INTEGER NOT NULL,
+        attempt_idempotency_key VARCHAR(64) NOT NULL,
+        request_payload_sha256 VARCHAR(64) NOT NULL,
+        state VARCHAR(32) NOT NULL,
+        created_at DATETIME NOT NULL,
+        PRIMARY KEY (intent_uuid),
+        CONSTRAINT uq_executor_launch_intents_authorization UNIQUE (authorization_uuid),
+        CONSTRAINT uq_executor_launch_intents_idempotency_key UNIQUE (attempt_idempotency_key),
+        CONSTRAINT uq_executor_launch_intents_task_execution UNIQUE (task_execution_id),
+        CONSTRAINT ck_executor_launch_intents_state CHECK (state IN ('NOT_DISPATCHABLE', 'READY')),
+        CONSTRAINT ck_executor_launch_intents_idempotency_key CHECK (length(attempt_idempotency_key) = 64 AND attempt_idempotency_key = lower(attempt_idempotency_key)),
+        CONSTRAINT ck_executor_launch_intents_payload_digest CHECK (length(request_payload_sha256) = 64 AND request_payload_sha256 = lower(request_payload_sha256)),
+        FOREIGN KEY(authorization_uuid) REFERENCES one_shot_execution_authorizations (authorization_uuid) ON DELETE RESTRICT,
+        FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+        FOREIGN KEY(session_id) REFERENCES sessions (id) ON DELETE RESTRICT,
+        FOREIGN KEY(task_id) REFERENCES tasks (id) ON DELETE RESTRICT,
+        FOREIGN KEY(task_execution_id) REFERENCES task_executions (id) ON DELETE RESTRICT
+    )
+    """,
+    """
+    CREATE TABLE one_shot_authorization_claims (
+        claim_uuid VARCHAR(36) NOT NULL,
+        authorization_uuid VARCHAR(36) NOT NULL,
+        intent_uuid VARCHAR(36) NOT NULL,
+        task_execution_id INTEGER NOT NULL,
+        identity_sha256 VARCHAR(64) NOT NULL,
+        attempt_idempotency_key VARCHAR(64) NOT NULL,
+        request_payload_sha256 VARCHAR(64) NOT NULL,
+        claimed_at DATETIME NOT NULL,
+        PRIMARY KEY (claim_uuid),
+        CONSTRAINT uq_one_shot_claims_authorization UNIQUE (authorization_uuid),
+        CONSTRAINT uq_one_shot_claims_intent UNIQUE (intent_uuid),
+        CONSTRAINT uq_one_shot_claims_task_execution UNIQUE (task_execution_id),
+        CONSTRAINT uq_one_shot_claims_idempotency_key UNIQUE (attempt_idempotency_key),
+        CONSTRAINT ck_one_shot_claims_identity_digest CHECK (length(identity_sha256) = 64 AND identity_sha256 = lower(identity_sha256)),
+        CONSTRAINT ck_one_shot_claims_idempotency_key CHECK (length(attempt_idempotency_key) = 64 AND attempt_idempotency_key = lower(attempt_idempotency_key)),
+        CONSTRAINT ck_one_shot_claims_payload_digest CHECK (length(request_payload_sha256) = 64 AND request_payload_sha256 = lower(request_payload_sha256)),
+        FOREIGN KEY(authorization_uuid) REFERENCES one_shot_execution_authorizations (authorization_uuid) ON DELETE RESTRICT,
+        FOREIGN KEY(intent_uuid) REFERENCES executor_launch_intents (intent_uuid) ON DELETE RESTRICT,
+        FOREIGN KEY(task_execution_id) REFERENCES task_executions (id) ON DELETE RESTRICT
+    )
+    """,
+)
+_058_EXPECTED_INDEXES = (
+    "CREATE INDEX ix_one_shot_auth_state_expiry ON one_shot_execution_authorizations (state, expires_at)",
+    "CREATE INDEX ix_one_shot_auth_project_session ON one_shot_execution_authorizations (project_id, session_id)",
+    "CREATE INDEX ix_one_shot_auth_candidate ON one_shot_execution_authorizations (candidate_uuid)",
+    "CREATE INDEX ix_executor_launch_intents_state_created ON executor_launch_intents (state, created_at)",
+)
+# Created by 057 and never replaced by 058 (057's own SQL is inlined there).
+_057_AUTH_NO_DELETE_TRIGGER = """
+    CREATE TRIGGER trg_one_shot_auth_no_delete
+    BEFORE DELETE ON one_shot_execution_authorizations
+    BEGIN
+        SELECT RAISE(ABORT, 'one-shot authorization evidence is retained');
+    END
+"""
+# UNIQUE/PRIMARY KEY autoindexes, which are fully determined by the table DDL.
+_058_EXPECTED_AUTOINDEXES = {
+    "one_shot_execution_authorizations": 3,
+    "executor_launch_intents": 4,
+    "one_shot_authorization_claims": 5,
+}
+
+# Every character outside SQLite's SQL whitespace falls into exactly one token,
+# so comparing token lists ignores only whitespace between tokens. String
+# literals and quoted identifiers stay distinct, whole tokens.
+_SQL_TOKEN = re.compile(
+    r"""
+    '(?:[^']|'')*'
+    | "(?:[^"]|"")*"
+    | `(?:[^`]|``)*`
+    | \[[^\]]*\]
+    | --[^\n]*
+    | /\*.*?\*/
+    | [A-Za-z_][A-Za-z0-9_$]*
+    | [0-9]+(?:\.[0-9]*)?
+    | <=|>=|<>|!=|==|\|\||<<|>>
+    | [^ \t\n\f\r]
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+
+def _sql_tokens(sql: str) -> list[str]:
+    return _SQL_TOKEN.findall(sql)
+
+
+def _058_stored_tokens(statement: str) -> list[str]:
+    """Tokens of a CREATE statement as SQLite stores it in sqlite_master."""
+
+    tokens = _sql_tokens(statement)
+    if tokens[2:5] == ["IF", "NOT", "EXISTS"]:
+        del tokens[2:5]
+    return tokens
+
+
+def _058_expected_schema() -> dict[tuple[str, str], tuple[str, list[str] | None]]:
+    statements = (
+        *_058_EXPECTED_TABLES,
+        *_058_EXPECTED_INDEXES,
+        _057_AUTH_NO_DELETE_TRIGGER,
+        *(
+            statement
+            for statement in _058_trigger_statements()
+            if statement.lstrip().startswith("CREATE")
+        ),
+    )
+    expected: dict[tuple[str, str], tuple[str, list[str] | None]] = {}
+    for statement in statements:
+        tokens = _058_stored_tokens(statement)
+        kind, name = tokens[1].lower(), tokens[2]
+        table = name if kind == "table" else tokens[tokens.index("ON") + 1]
+        expected[(kind, name)] = (table, tokens)
+    for table, count in _058_EXPECTED_AUTOINDEXES.items():
+        for number in range(1, count + 1):
+            expected[("index", f"sqlite_autoindex_{table}_{number}")] = (table, None)
+    return expected
+
+
+def _verify_058_exact_sqlite_schema(engine: Engine) -> None:
+    """Require every one-shot table, index, and trigger to match exactly.
+
+    The only accepted variations are whitespace between tokens (057 and 058
+    create the same trigger with different indentation) and the double-quoted
+    table name SQLite writes when 058's rebuild renames the staging table.
+    """
+
+    expected = _058_expected_schema()
+    protected = set(_058_EXPECTED_AUTOINDEXES)
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "WHERE type IN ('table', 'index', 'trigger', 'view')"
+        ).fetchall()
+    actual = {
+        (row[0], row[1]): (row[2], row[3])
+        for row in rows
+        if row[2] in protected or (row[0], row[1]) in expected
+    }
+    for (kind, name), (table, tokens) in expected.items():
+        stored_table, sql = actual.get((kind, name), (None, None))
+        stored = None if sql is None else _sql_tokens(sql)
+        if (
+            kind == "table"
+            and stored is not None
+            and len(stored) > 2
+            and stored[2] == f'"{name}"'
+        ):
+            stored[2] = name
+        if stored_table != table or stored != tokens:
+            raise RuntimeError(
+                f"058 one-shot claim {kind} is missing or invalid: {name}"
+            )
+    unexpected = sorted(set(actual) - set(expected))
+    if unexpected:
+        kind, name = unexpected[0]
+        raise RuntimeError(
+            f"058 one-shot claim schema has an unexpected {kind}: {name}"
+        )
+
+
+def _verify_058_one_shot_atomic_claim(engine: Engine) -> None:
+    """Verify the F1b claim receipt table, widened intent state, and guards."""
+
+    from app.models import ExecutorLaunchIntent, OneShotAuthorizationClaim
+
+    _verify_057_one_shot_execution_authorization(engine)
+    inspector = inspect(engine)
+    table_name = OneShotAuthorizationClaim.__tablename__
+    if table_name not in _table_names(engine):
+        raise RuntimeError("058 one-shot claim schema is missing a required table")
+
+    columns = inspector.get_columns(table_name)
+    expected = {column.name for column in OneShotAuthorizationClaim.__table__.columns}
+    if not expected <= {column["name"] for column in columns}:
+        raise RuntimeError("058 one-shot claim schema has incomplete columns")
+    if any(column["nullable"] for column in columns if column["name"] in expected):
+        raise RuntimeError("058 one-shot claim schema has a nullable column")
+
+    expected_unique = {
+        "uq_one_shot_claims_authorization": ("authorization_uuid",),
+        "uq_one_shot_claims_intent": ("intent_uuid",),
+        "uq_one_shot_claims_task_execution": ("task_execution_id",),
+        "uq_one_shot_claims_idempotency_key": ("attempt_idempotency_key",),
+    }
+    actual_unique = {
+        constraint.get("name"): tuple(constraint.get("column_names") or ())
+        for constraint in inspector.get_unique_constraints(table_name)
+    }
+    if any(actual_unique.get(name) != cols for name, cols in expected_unique.items()):
+        raise RuntimeError("058 one-shot claim schema has incomplete uniqueness")
+
+    checks = {
+        constraint.get("name"): str(constraint.get("sqltext") or "")
+        for constraint in inspector.get_check_constraints(table_name)
+    }
+    if not {
+        "ck_one_shot_claims_identity_digest",
+        "ck_one_shot_claims_idempotency_key",
+        "ck_one_shot_claims_payload_digest",
+    } <= set(checks):
+        raise RuntimeError("058 one-shot claim schema has missing checks")
+
+    expected_foreign_keys = {
+        (
+            "authorization_uuid",
+            "one_shot_execution_authorizations",
+            "authorization_uuid",
+        ),
+        ("intent_uuid", "executor_launch_intents", "intent_uuid"),
+        ("task_execution_id", "task_executions", "id"),
+    }
+    actual_foreign_keys = set()
+    for foreign_key in inspector.get_foreign_keys(table_name):
+        ondelete = (foreign_key.get("options") or {}).get("ondelete")
+        if ondelete is None or ondelete.upper() != "RESTRICT":
+            raise RuntimeError("058 one-shot claim schema has a non-restrictive FK")
+        actual_foreign_keys.add(
+            (
+                (foreign_key.get("constrained_columns") or [None])[0],
+                foreign_key.get("referred_table"),
+                (foreign_key.get("referred_columns") or [None])[0],
+            )
+        )
+    if not expected_foreign_keys <= actual_foreign_keys:
+        raise RuntimeError("058 one-shot claim schema has incomplete foreign keys")
+
+    intent_state_check = {
+        constraint.get("name"): str(constraint.get("sqltext") or "")
+        for constraint in inspector.get_check_constraints(
+            ExecutorLaunchIntent.__tablename__
+        )
+    }.get("ck_executor_launch_intents_state", "")
+    if "'READY'" not in intent_state_check:
+        raise RuntimeError("058 launch-intent state check does not permit READY")
+
+    if engine.dialect.name != "sqlite":
+        return
+    _verify_058_exact_sqlite_schema(engine)
+
+
+def _migration_058_one_shot_atomic_claim(engine: Engine) -> None:
+    """Permit AUTHORIZED→CLAIMED / NOT_DISPATCHABLE→READY and add claim receipts."""
+
+    from app.models import (
+        ExecutorLaunchIntent,
+        OneShotAuthorizationClaim,
+        OneShotExecutionAuthorization,
+    )
+
+    if not {
+        OneShotExecutionAuthorization.__tablename__,
+        ExecutorLaunchIntent.__tablename__,
+    } <= _table_names(engine):
+        raise RuntimeError("058 requires the 057 one-shot authorization schema")
+    if engine.dialect.name != "sqlite":
+        with engine.begin() as connection:
+            OneShotAuthorizationClaim.__table__.create(connection, checkfirst=True)
+        _verify_058_one_shot_atomic_claim(engine)
+        return
+
+    # pysqlite does not open a transaction for DDL, so the rebuild and guard
+    # replacement run inside one explicit write transaction on this connection.
+    with engine.connect() as connection:
+        connection.execution_options(isolation_level="AUTOCOMMIT")
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            intent_sql = connection.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (ExecutorLaunchIntent.__tablename__,),
+            ).scalar_one()
+            if "'ready'" not in intent_sql.lower():
+                _rebuild_058_launch_intents(connection, intent_sql)
+            OneShotAuthorizationClaim.__table__.create(connection, checkfirst=True)
+            for statement in _058_trigger_statements():
+                connection.exec_driver_sql(statement)
+            if connection.exec_driver_sql(
+                "PRAGMA foreign_key_check(executor_launch_intents)"
+            ).first():
+                raise RuntimeError("058 launch-intent rebuild violates a foreign key")
+            connection.exec_driver_sql("COMMIT")
+        except BaseException:
+            try:
+                if connection.connection.dbapi_connection.in_transaction:
+                    connection.exec_driver_sql("ROLLBACK")
+            except Exception:
+                # Closing the DBAPI connection discards any open transaction;
+                # keep the original migration error as the one raised.
+                connection.invalidate()
+            raise
+    _verify_058_one_shot_atomic_claim(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -5443,6 +5991,14 @@ MIGRATIONS: tuple[Migration, ...] = (
         ),
         upgrade=_migration_057_one_shot_execution_authorization,
         verify=_verify_057_one_shot_execution_authorization,
+    ),
+    Migration(
+        version="058_one_shot_atomic_claim",
+        description=(
+            "Permit the atomic one-shot claim to READY and retain claim receipts"
+        ),
+        upgrade=_migration_058_one_shot_atomic_claim,
+        verify=_verify_058_one_shot_atomic_claim,
     ),
 )
 
