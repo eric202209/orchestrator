@@ -112,7 +112,7 @@ require_port_available() {
 
 owned_processes_running() {
     local service result
-    for service in backend worker worker-candidate beat frontend qdrant redis; do
+    for service in backend worker beat frontend qdrant redis; do
         if process_helper status --root "${PROJECT_ROOT}" --service "${service}"; then
             return 0
         else
@@ -127,8 +127,9 @@ owned_processes_running() {
 
 require_no_owned_service() {
     local service="$1"
+    local message="${2:-Verified project-owned ${service} process is already running.}"
     if process_helper status --root "${PROJECT_ROOT}" --service "${service}"; then
-        echo -e "${RED}❌ Verified project-owned ${service} process is already running.${NC}" >&2
+        echo -e "${RED}❌ ${message}${NC}" >&2
         return 1
     else
         local result=$?
@@ -480,7 +481,8 @@ start_workers() {
         return 1
     fi
 
-    require_no_owned_service beat
+    require_no_owned_service beat \
+        "Refusing to preserve a potentially mixed-version scheduler."
     setsid nohup "${VENV_DIR}/bin/celery" \
         -A app.celery_app beat \
         --loglevel=info \
@@ -701,7 +703,6 @@ start_worker_only() {
         --loglevel=info \
         >> "${LOG_DIR}/worker.log" 2>&1 &
     worker_pid=$!
-    record_service_process worker-candidate "${worker_pid}"
     printf 'LAUNCH_ATTEMPTED pid=%s\n' "${worker_pid}"
 }
 
@@ -855,7 +856,7 @@ main() {
                 return 1
             fi
         else
-            echo -e "${RED}Verified project-owned processes are running in non-interactive mode.${NC}"
+            echo -e "${RED}Existing processes detected in non-interactive mode. Verified project-owned processes are running.${NC}"
             echo -e "${YELLOW}Run ./stop_all.sh first; refusing a mixed-version start.${NC}"
             return 1
         fi

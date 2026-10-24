@@ -290,7 +290,62 @@ def test_a2_reports_missing_configured_database_as_required_target(tmp_path):
         tmp_path, "DATABASE_URL=sqlite:///state/missing.db\n"
     )
     domains = bp.default_domains(production, runtime)
+    sqlite_domain = next(domain for domain in domains if domain.name == "sqlite")
 
-    plan = build_plan(domains, None, None)
+    plan = build_plan([sqlite_domain], None, None)
 
     assert "sqlite" in plan["missing_required_domains"]
+
+
+def test_measure_permission_error_is_reported_and_blocks_required_domain(
+    tmp_path, monkeypatch
+):
+    inaccessible = tmp_path / "inaccessible"
+    inaccessible.mkdir()
+    original_lstat = Path.lstat
+
+    def deny_path(path):
+        if path == inaccessible:
+            raise PermissionError(13, "permission denied", str(path))
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", deny_path)
+    plan = build_plan(
+        [Domain("locked", (inaccessible,), "tar", "none")], None, None
+    )
+
+    assert plan["unmeasurable_required_domains"] == ["locked"]
+    assert plan["missing_required_domains"] == []
+    assert plan["domains"][0]["paths"][0]["error"] == "permission_denied"
+
+
+def test_a2_cli_exits_blocked_when_required_source_is_unreadable(
+    tmp_path, monkeypatch, capsys
+):
+    production = tmp_path / "production"
+    production.mkdir()
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    database = production / "orchestrator.db"
+    database.write_bytes(b"fixture")
+    original_lstat = Path.lstat
+    domain = Domain("sqlite", (database,), "sqlite backup API", "none")
+    monkeypatch.setattr(bp, "default_domains", lambda *_args: [domain])
+    monkeypatch.setattr(
+        bp,
+        "resolve_production_database",
+        lambda *_args: (database, f"sqlite:///{database}"),
+    )
+
+    def deny_database(path):
+        if path == database:
+            raise PermissionError(13, "permission denied", str(path))
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", deny_database)
+
+    assert bp.main(
+        ["--production-root", str(production), "--production-runtime-root", str(runtime)]
+    ) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["unmeasurable_required_domains"] == ["sqlite"]

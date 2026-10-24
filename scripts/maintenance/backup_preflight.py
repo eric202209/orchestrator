@@ -294,17 +294,36 @@ def measure(path: Path, exclude: tuple[Path, ...] = ()) -> dict:
         st = path.lstat()
     except FileNotFoundError:
         return {"path": str(path), "exists": False, "bytes": 0, "device": None}
+    except OSError as exc:
+        error = "permission_denied" if isinstance(exc, PermissionError) else "metadata_error"
+        return {
+            "path": str(path),
+            "exists": None,
+            "bytes": 0,
+            "device": None,
+            "error": error,
+        }
     total = st.st_size
+    walk_errors: list[OSError] = []
     if path.is_dir() and not path.is_symlink():
         skip = {str(p) for p in exclude}
-        for root, dirs, files in os.walk(path, followlinks=False):
+        for root, dirs, files in os.walk(
+            path, followlinks=False, onerror=walk_errors.append
+        ):
             dirs[:] = [d for d in dirs if os.path.join(root, d) not in skip]
             for name in dirs + files:
                 try:
                     total += os.lstat(os.path.join(root, name)).st_size
-                except OSError:
-                    continue
-    return {"path": str(path), "exists": True, "bytes": total, "device": st.st_dev}
+                except OSError as exc:
+                    walk_errors.append(exc)
+    result = {"path": str(path), "exists": True, "bytes": total, "device": st.st_dev}
+    if walk_errors:
+        result["error"] = (
+            "permission_denied"
+            if any(isinstance(exc, PermissionError) for exc in walk_errors)
+            else "metadata_error"
+        )
+    return result
 
 
 def _is_within(child: Path, parent: Path) -> bool:
@@ -427,6 +446,7 @@ def build_plan(
     required_bytes = 0
     devices: set[int] = set()
     missing_required: list[str] = []
+    unmeasurable_required: list[str] = []
     all_paths: list[Path] = []
     excluded: list[Path] = []
     for domain in domains:
@@ -436,8 +456,11 @@ def build_plan(
         devices.update(m["device"] for m in measured if m["device"] is not None)
         all_paths.extend(domain.paths)
         excluded.extend(domain.exclude)
-        if domain.required and not any(m["exists"] for m in measured):
-            missing_required.append(domain.name)
+        if domain.required:
+            if any(m.get("error") for m in measured):
+                unmeasurable_required.append(domain.name)
+            elif not any(m["exists"] for m in measured):
+                missing_required.append(domain.name)
         report_domains.append(
             {
                 "name": domain.name,
@@ -448,7 +471,11 @@ def build_plan(
                 "bytes": size,
                 # Paths and sizes only; contents are never read.
                 "paths": [
-                    {k: m[k] for k in ("path", "exists", "bytes")} for m in measured
+                    {
+                        **{k: m[k] for k in ("path", "exists", "bytes")},
+                        **({"error": m["error"]} if m.get("error") else {}),
+                    }
+                    for m in measured
                 ],
             }
         )
@@ -458,6 +485,7 @@ def build_plan(
         "domains": report_domains,
         "total_bytes": required_bytes,
         "missing_required_domains": missing_required,
+        "unmeasurable_required_domains": unmeasurable_required,
     }
     if destination is not None:
         plan["destination"] = check_destination(
@@ -528,7 +556,9 @@ def main(argv: list[str] | None = None) -> int:
             }
 
     print(json.dumps(plan, indent=2))
-    blocked = bool(plan["missing_required_domains"])
+    blocked = bool(
+        plan["missing_required_domains"] or plan["unmeasurable_required_domains"]
+    )
     for key in ("destination", "restore"):
         if key in plan and not plan[key]["accepted"]:
             blocked = True

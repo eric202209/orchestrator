@@ -26,7 +26,6 @@ SCHEMA_VERSION = 1
 SERVICES = (
     "backend",
     "worker",
-    "worker-candidate",
     "beat",
     "frontend",
     "qdrant",
@@ -35,7 +34,6 @@ SERVICES = (
 LEGACY_PID_FILES = {
     "backend": "backend.pid",
     "worker": "worker.pid",
-    "worker-candidate": "worker-candidate.pid",
     "beat": "beat.pid",
     "frontend": "frontend.pid",
     "qdrant": "qdrant.pid",
@@ -139,7 +137,7 @@ def _service_argv_matches(service: str, snapshot: ProcSnapshot, root: Path) -> b
     args = snapshot.argv
     if service == "backend":
         return "app.main:app" in args and any("uvicorn" in arg for arg in args)
-    if service in {"worker", "worker-candidate"}:
+    if service == "worker":
         return (
             "app.celery_app" in args
             and "worker" in args
