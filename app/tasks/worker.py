@@ -260,7 +260,6 @@ from app.services.orchestration.worker_identity import (
     resolve_worker_identity_paths as _resolve_worker_identity_paths,
 )
 from app.services.execution.one_shot_dispatch import (
-    UnavailableSupervisor as _UnavailableOneShotSupervisor,
     WorkerIdentityAttestation as _OneShotWorkerIdentityAttestation,
 )
 from app.services.execution.one_shot_routing import (
@@ -268,6 +267,9 @@ from app.services.execution.one_shot_routing import (
     is_one_shot_delivery as _is_one_shot_delivery,
     requested_authorization_uuid as _requested_one_shot_authorization_uuid,
     route_one_shot_delivery as _route_one_shot_delivery,
+)
+from app.services.execution.one_shot_supervisor_client import (
+    configured_supervisor as _configured_one_shot_supervisor,
 )
 from app.services.orchestration.invocation_provenance import (
     INCONCLUSIVE as _INVOCATION_INCONCLUSIVE,
@@ -684,8 +686,10 @@ def _one_shot_worker_identity_attestation() -> Optional[Any]:
 
 
 def _one_shot_supervisor() -> Any:
-    # No trusted Supervisor is deployed; this adapter refuses admission.
-    return _UnavailableOneShotSupervisor()
+    # Unconfigured: UnavailableSupervisor. Partial or invalid: refuses.
+    return _configured_one_shot_supervisor(
+        settings.ONE_SHOT_SUPERVISOR_SOCKET, settings.ONE_SHOT_SUPERVISOR_UID
+    )
 
 
 def _route_one_shot_if_requested(

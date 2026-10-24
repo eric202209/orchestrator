@@ -740,9 +740,29 @@ def _importers(root: Path, module_name: str) -> set[str]:
 def test_dispatch_boundary_is_reached_only_through_worker_routing():
     root = Path(__file__).resolve().parents[1]
     # F1c-2: the only chain is worker.py -> one_shot_routing -> dispatch.
+    # F2: the Supervisor adapter imports only the protocol types.
     assert _importers(root, "one_shot_dispatch") == {
         "services/execution/one_shot_routing.py",
+        "services/execution/one_shot_supervisor_client.py",
         "tasks/worker.py",
+    }
+    adapter = root / "services/execution/one_shot_supervisor_client.py"
+    adapter_names = {
+        alias.name
+        for node in ast.walk(ast.parse(adapter.read_text(encoding="utf-8")))
+        if isinstance(node, ast.ImportFrom)
+        and node.module
+        and "one_shot" in node.module
+        for alias in node.names
+    }
+    assert adapter_names == {
+        "AttemptStatus",
+        "ExecutorStartRequest",
+        "SupervisorAdmission",
+        "SupervisorAdmissionStatus",
+        "SupervisorReceipt",
+        "SupervisorTransportError",
+        "UnavailableSupervisor",
     }
     # worker_identity names it only as a string in the reviewed boundary.
     assert _importers(root, "one_shot_routing") == {"tasks/worker.py"}

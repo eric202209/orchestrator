@@ -1616,9 +1616,19 @@ def test_claim_module_has_no_external_launch_imports_or_callers(f1b, monkeypatch
         )
     ]
     assert sorted(callers) == [
+        "services/execution/one_shot_supervisor_client.py",
         "services/orchestration/worker_identity.py",
         "tasks/worker.py",
     ]
+    # F2: the Supervisor adapter uses dispatch protocol types, never the claim.
+    adapter_source = (
+        app_root / "services/execution/one_shot_supervisor_client.py"
+    ).read_text(encoding="utf-8")
+    assert not re.search(
+        r"one_shot_claim|claim_one_shot_authorization|reconcile_one_shot_claim|"
+        r"dispatch_one_shot_intent|one_shot_routing",
+        adapter_source,
+    )
     # worker_identity only names the modules in its reviewed identity boundary.
     identity_source = ast.parse(
         (app_root / "services/orchestration/worker_identity.py").read_text(

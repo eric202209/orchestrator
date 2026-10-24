@@ -157,6 +157,8 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.execution.one_shot_dispatch",
     "app.services.execution.one_shot_claim",
     "app.services.execution.one_shot_authorization",
+    # F2: the Worker's trusted Supervisor adapter.
+    "app.services.execution.one_shot_supervisor_client",
     "app.tasks.worker_support.workspace",
     "app.services.orchestration.events.event_types",
     "app.services.orchestration.error_handler",
