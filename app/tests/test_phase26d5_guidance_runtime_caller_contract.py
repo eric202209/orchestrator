@@ -53,6 +53,10 @@ class _DB:
             return _Query(self._task)
         return _Query(None)
 
+    def scalar(self, statement):
+        # Phase 39 one-shot routing classifies the Task by execution_profile.
+        return self._task.execution_profile
+
     def add(self, *args, **kwargs):
         return None
 
