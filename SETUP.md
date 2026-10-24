@@ -3,7 +3,7 @@
 Three paths depending on your machine:
 
 - [Linux / Ubuntu (with OpenClaw)](#linux--ubuntu-with-openclaw) — native processes, `start.sh`
-- [Windows WSL2 (Ollama, no OpenClaw)](#windows-Nvidia-gpu--ollama-no-openclaw) — `./wsl-start.sh --ollama`
+- [Windows WSL2 (Ollama, no OpenClaw)](#windows-nvidia-gpu--ollama-no-openclaw) — `./wsl-start.sh --ollama`
 - [Windows WSL2 (llama.cpp, no OpenClaw)](#windows-llamacpp-no-openclaw) — `./wsl-start.sh`
 
 ---
@@ -13,10 +13,10 @@ Three paths depending on your machine:
 ### Prerequisites
 
 - Python 3.12
-- Node.js 18+ and `pnpm`
-- Redis (`sudo apt install redis-server`)
+- Node.js 20.19+ (20.x), 22.12+ (22.x), or 24+ and `pnpm`
+- Redis tools (`sudo apt install redis-server`); `start.sh` starts its own Redis process, so port `6379` must be free
 - OpenClaw installed and reachable (default port `8000`)
-- Qdrant — started via Docker (see step 3)
+- A Linux Qdrant executable at `qdrant/bin/qdrant` if you want local vector retrieval; `start.sh` starts this executable itself
 
 ### Steps
 
@@ -35,21 +35,40 @@ cp .env.example .env
 
 Minimum required values:
 
+```bash
+python3 -c "import secrets; print(secrets.token_hex(32))"
+```
+
+Paste the generated value into `.env`:
+
 ```ini
-SECRET_KEY=<generate: python3 -c "import secrets; print(secrets.token_hex(32))">
+SECRET_KEY=<paste-generated-value>
 AGENT_BACKEND=local_openclaw
 OPENCLAW_GATEWAY_URL=http://127.0.0.1:8000
 CELERY_BROKER_URL=redis://localhost:6379/0
 CELERY_RESULT_BACKEND=redis://localhost:6379/1
+ADMIN_EMAILS=you@example.com
 ```
 
-**3. Start Qdrant (vector store)**
+**3. Install the optional local Qdrant executable**
+
+Download the Linux release for your architecture from [Qdrant releases](https://github.com/qdrant/qdrant/releases), extract the executable, and place it at `qdrant/bin/qdrant`:
 
 ```bash
-docker compose up -d
+mkdir -p qdrant/bin
+install -m 0755 /path/to/extracted/qdrant qdrant/bin/qdrant
 ```
 
-This starts only the Qdrant container (`docker-compose.yml` is qdrant-only on Linux).
+Replace `/path/to/extracted/qdrant` with the executable from the release archive.
+The native launcher owns port `6333`; do not start the Linux Qdrant Docker
+compose service at the same time. If the executable is absent, startup can
+continue with knowledge retrieval degraded. Keep port `6333` free for the
+launcher even when Qdrant is not installed.
+
+The Debian Redis package may also start a system service on port `6379`. Check
+the port owner before startup; only stop that service if it is dedicated to
+this installation and has no other consumers. `start.sh` does not adopt an
+external Redis process.
 
 **4. Start the full stack**
 
@@ -57,7 +76,10 @@ This starts only the Qdrant container (`docker-compose.yml` is qdrant-only on Li
 ./start.sh
 ```
 
-`start.sh` handles venv creation, Python/Node deps, DB init, Redis, FastAPI, Celery worker, and Vite frontend.
+`start.sh` creates missing Python and frontend environments, initializes the
+database, then starts Redis, Qdrant (if installed), FastAPI, a Celery worker,
+Celery Beat, and Vite. It does not reinstall packages in an existing
+environment when dependency manifests change; see [advanced upgrade checks](#rebuilding-after-python-source-changes).
 
 **5. Open the dashboard**
 
@@ -74,17 +96,14 @@ Open the dashboard, go to the register page, and create your account.
 
 ### Workspace paths
 
-The Settings `workspace_root` value must be the path visible to the running backend process.
+The Settings `workspace_root` value must be the path visible to the running
+backend and worker.
 
-- Linux native: use the real Linux projects path, e.g. `/home/yourname/projects`.
-- OpenClaw may run inside one of the container, and Orchestrator itself runs 
-  as a normal project under the OpenClaw workspace. When you login to Dashboard, 
-  at Settings page, set `workspace_root` to the projects root e.g.
-  (`~/.openclaw/workspace/vault/projects`), not to Docker `/app/projects` and
-  not to the Orchestrator repo directory.
-- Each device should set `WORKSPACE_ROOT` in `.env` to its own host-visible
-  projects directory. This is model/backend neutral and applies to OpenClaw,
-  Ollama, and llama.cpp deployments:
+- For native Linux, use the actual Linux projects directory, such as
+  `/home/yourname/projects`. A path under an OpenClaw workspace is only valid
+  when that directory is visible to the Orchestrator worker.
+- Set `WORKSPACE_ROOT` in `.env` to that host-visible directory. This applies
+  to OpenClaw, Ollama, and llama.cpp deployments:
 
 ```text
 WORKSPACE_ROOT=/home/yourname/projects
@@ -109,15 +128,19 @@ Model Family: local
 Adaptation Profile: OpenClaw Default
 ```
 
-Orchestrator also has a separate planning-speed model. Defaults are in `app/config.py`; override in `.env` only if needed:
+Orchestrator can also use a separate planning-repair endpoint. Configure a URL
+reachable from the native Linux process; `ai-gateway` is a Docker-network
+hostname and is not a general native-Linux default. If no repair endpoint is
+available, set `PLANNING_REPAIR_ENABLED=false`:
 
 ```ini
-PLANNING_REPAIR_ENABLED=true
-PLANNING_REPAIR_BASE_URL=http://ai-gateway:8000/v1
-PLANNING_REPAIR_MODEL=qwen-local
+# Optional: enable only when you have a reachable planning-repair endpoint.
+PLANNING_REPAIR_ENABLED=false
 ```
 
-Only switch to `AGENT_BACKEND=openai_responses_api` if you want Orchestrator to bypass OpenClaw and call OpenAI directly.
+Set `AGENT_BACKEND=openai_responses_api` to route planning and repair directly
+through OpenAI. This backend does not provide full step-by-step shell/tool
+execution; use `local_openclaw` for that runtime behavior.
 
 ### Provider and lane routing
 
@@ -151,30 +174,31 @@ settings and does not have a `PLANNING_REPAIR_BACKEND` variable:
 
 ```ini
 PLANNING_REPAIR_ENABLED=true
-PLANNING_REPAIR_BASE_URL=http://host.docker.internal:11434/v1
-PLANNING_REPAIR_MODEL=qwen3:8b-hybrid
+PLANNING_REPAIR_BASE_URL=http://127.0.0.1:11434/v1
+PLANNING_REPAIR_MODEL=qwen3:8b-q4_K_M
 PLANNING_REPAIR_API_KEY=
 PLANNING_REPAIR_DISABLE_THINKING=true
 ```
 
-**`local_openclaw` timeout tuning:** The default `PLANNING_REPAIR_TIMEOUT_SECONDS=90` is
-sized for hosted APIs. On local hardware (vLLM / ai-gateway) the model runs at
-roughly 10 tok/s, so a full static-site plan (~900 tokens) takes ~155 s. Set
-`PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS=240` in your `.env` when using
-`AGENT_BACKEND=local_openclaw`; leave it at `0` for all other backends.
+**`local_openclaw` timeout tuning:** `PLANNING_DIRECT_LOCAL_OPENCLAW_TIMEOUT_SECONDS`
+defaults to `240` seconds and applies when the effective planning backend is
+`local_openclaw`. Set it to `0` to disable this override and fall back to
+`PLANNING_REPAIR_TIMEOUT_SECONDS` (default `90`). Other planning backends do not
+use this local OpenClaw override.
 
 > **Important:** This value is read from `.env` only if the variable is **not**
 > already exported in the shell that starts the Celery worker. If you change it
-> after the worker is running, kill the worker and relaunch from a fresh shell:
+> after startup, stop and restart the processes owned by this checkout:
 >
 > ```bash
-> pkill -f "celery.*app.celery_app worker"
-> # confirm the variable is absent in your current shell, then:
-> source venv/bin/activate && nohup celery -A app.celery_app worker --loglevel=info >> logs/worker.log 2>&1 &
-> # verify:
-> tr '\0' '\n' < /proc/$(pgrep -f "celery.*app.celery_app worker" | head -1)/environ \
->   | grep PLANNING_DIRECT_LOCAL_OPENCLAW   # should return nothing
+> ./stop_all.sh
+> ./start.sh
 > ```
+
+`stop_all.sh` signals only processes whose saved identity matches this
+checkout. If it refuses because identity cannot be verified, follow the
+read-only process troubleshooting in `OPERATIONS.md`; do not signal a process
+by command-line pattern.
 
 Bounded debug repair can use its own direct endpoint. Lane-specific values are
 optional; blank values fall back to the planning-repair endpoint/model/key:
@@ -201,8 +225,8 @@ For local Qwen through Ollama:
 
 ```ini
 AGENT_BACKEND=direct_ollama
-OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_AGENT_MODEL=qwen3:8b-hybrid
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_AGENT_MODEL=qwen3:8b-q4_K_M
 OLLAMA_NUM_CTX=4096
 ```
 
@@ -211,7 +235,7 @@ For llama.cpp or LM Studio as an OpenAI-compatible endpoint:
 ```ini
 AGENT_BACKEND=openai_responses_api
 AGENT_MODEL=local
-OPENAI_BASE_URL=http://host.docker.internal:8001/v1
+OPENAI_BASE_URL=http://127.0.0.1:8001/v1
 OPENAI_API_KEY=dummy
 ```
 
@@ -220,6 +244,10 @@ OPENAI_API_KEY=dummy
 ```bash
 ./stop_all.sh
 ```
+
+This stops only services recorded as belonging to this checkout. It sends
+SIGTERM and does not escalate to SIGKILL if a process cannot be verified or
+does not exit before the timeout.
 
 ### Knowledge Layer (optional)
 
@@ -251,222 +279,6 @@ so ingest targets the active container runtime rather than a host-side database:
 ./wsl-start.sh --ingest-knowledge            # llama.cpp Windows device
 ```
 
-## 10J Operational Observability
-
-Three endpoints were added in Phase 10J to make pilot evidence queryable without SQL.
-All require admin authentication (`Authorization: Bearer $ADMIN_TOKEN`).
-
-### `GET /api/v1/ops/audit-events`
-
-Returns structured `LogEntry` rows — permission events, token usage, symbol verification
-failures, and other bracketed log entries.
-
-```bash
-# Latest 20 events across all sessions
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "http://localhost:8080/api/v1/ops/audit-events?limit=20&order=desc" \
-  | python3 -m json.tool
-
-# Permission events for a specific session
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "http://localhost:8080/api/v1/ops/audit-events?event_type=PERMISSION_APPROVED&session_id=42"
-
-# Symbol verification failures
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "http://localhost:8080/api/v1/ops/audit-events?event_type=COMPLETION_SYMBOL_VERIFICATION_FAILED"
-
-# All events for a project scoped by project_id
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "http://localhost:8080/api/v1/ops/audit-events?project_id=1&order=asc&limit=500"
-```
-
-Response shape:
-```json
-{
-  "total": 12,
-  "limit": 20,
-  "offset": 0,
-  "items": [
-    {
-      "id": 88,
-      "event_type": "PERMISSION_APPROVED",
-      "message": "[PERMISSION_APPROVED]",
-      "level": "INFO",
-      "session_id": 42,
-      "task_id": 7,
-      "session_instance_id": "uuid-string",
-      "created_at": "2026-06-18T14:47:00+00:00",
-      "metadata": { "permission_id": 3, "action": "approved" }
-    }
-  ]
-}
-```
-
-Supported `event_type` values: `PERMISSION_APPROVED`, `PERMISSION_DENIED`,
-`TOKEN_USAGE_RECORDED`, `COMPLETION_SYMBOL_VERIFICATION_FAILED`, `OPERATOR_GUIDANCE`,
-`CHECKPOINT`, `SECURITY`, `ORCHESTRATION`.
-
-Query params: `event_type`, `session_id`, `task_id`, `project_id`, `level` (INFO/WARN/ERROR),
-`since` (ISO 8601), `until` (ISO 8601), `limit` (1–500), `offset`, `order` (asc/desc).
-
----
-
-### `GET /api/v1/ops/queue-latency`
-
-Returns aggregate queue latency statistics from `TaskExecution.queue_latency_seconds`.
-NULL rows (pre-10J executions or `local_openclaw` without dispatch) are excluded from
-all calculations.
-
-```bash
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
-  "http://localhost:8080/api/v1/ops/queue-latency?days=7" \
-  | python3 -m json.tool
-```
-
-Response shape:
-```json
-{
-  "computed_at": "2026-06-18T15:00:00+00:00",
-  "window_days": 7,
-  "executions_with_latency": 5,
-  "avg_queue_latency_seconds": 1.842,
-  "max_queue_latency_seconds": 8.400
-}
-```
-
-`avg_queue_latency_seconds` and `max_queue_latency_seconds` are `null` when no executions
-have latency data in the window.
-
----
-
-### Token Fields on `TaskExecution`
-
-Phase 10J-c added three nullable columns to every `TaskExecution` row:
-
-| Column | Type | Description |
-|---|---|---|
-| `tokens_in` | Integer (nullable) | Input tokens reported by the provider |
-| `tokens_out` | Integer (nullable) | Output tokens reported by the provider |
-| `token_source` | String (nullable) | Source label, e.g. `openai_usage` |
-
-These are populated when the backend reports token usage (OpenAI Responses API and
-compatible endpoints). `local_openclaw` and `direct_ollama` may not report tokens; rows
-for those executions will have NULL token fields.
-
-A `[TOKEN_USAGE_RECORDED]` log entry is written when token data is captured. Query via
-`GET /ops/audit-events?event_type=TOKEN_USAGE_RECORDED` to list all executions with token
-data; the `metadata` field on each row contains `tokens_in`, `tokens_out`, and
-`token_source`.
-
----
-
-## Evidence Capture After a Run
-
-Use these commands from the host (outside the Docker container), pointing at the
-host-side `orchestrator.db` file. IDs are shown in the dashboard or returned by
-the sessions/tasks API.
-
-```bash
-# Full evidence bundle (recommended starting point)
-PYTHONPATH=. python scripts/session_and_replay/capture_task_evidence_bundle.py \
-  --db orchestrator.db \
-  --session-id <session_id> \
-  --task-id <task_id> \
-  --task-execution-id <task_execution_id>
-
-# Replay reducer only (no database needed, just the workspace .agent/events/ dir)
-PYTHONPATH=. python scripts/session_and_replay/capture_replay_report.py \
-  --project-dir <workspace_path> \
-  --session-id <session_id> \
-  --task-id <task_id>
-```
-
-The evidence bundle lands in `docs/roadmap/reports/evidence-bundles/`. Open
-`run_replay_bundle.txt` for a quick human-readable overview, or
-`run_replay_bundle.json` for the canonical machine-readable manifest.
-
-## Rebuilding After Python Source Changes
-
-Any change to Python source is **not active** until the Docker image is rebuilt.
-Running `./wsl-start.sh` without `--build` uses the cached image.
-
-```bash
-export ORCHESTRATOR_GIT_SHA=$(git rev-parse HEAD)
-export ORCHESTRATOR_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
-
-./wsl-start.sh --ollama --build          # compact Ollama laptop
-./wsl-start.sh --build --backend-only    # llama.cpp Windows device
-```
-
-After rebuild, confirm the running image matches the repo commit:
-
-```bash
-curl -fsS \
-  -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN" \
-  http://127.0.0.1:8080/api/v1/ops/build-identity
-# stale_container_check must be "ok"
-```
-
-## Alpha Operator Verification Path
-
-Use this path after setup to verify the current alpha baseline. The goal is not
-new functionality; it is proving the install can run, recover, and report state
-without manual database cleanup.
-
-1. Clone the repo and create `.env` from `.env.example`.
-2. Start the real platform entrypoint:
-   - Linux: `./start.sh`
-   - Windows WSL2 / Ollama: `./wsl-start.sh --ollama`
-   - Windows WSL2 / llama.cpp: `./wsl-start.sh --backend-only`
-3. Confirm service health:
-
-```bash
-curl -fsS http://127.0.0.1:8080/health
-```
-
-For Docker/WSL validation, also capture build identity before relying on the
-running service:
-
-```bash
-curl -fsS \
-  -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN" \
-  http://127.0.0.1:8080/api/v1/ops/build-identity
-```
-
-4. Run backend tests:
-
-```bash
-PYTHONPATH=. venv/bin/python -m pytest app/tests -q
-```
-
-5. Run a small smoke:
-   - 1 project
-   - 3 tasks: `docs-update`, `python-bug-fix`, `verification-only`
-6. Confirm:
-   - session reaches `completed`
-   - all tasks reach `done/promoted`
-   - no running `TaskExecution` remains
-   - change sets are captured
-   - `/api/v1/ops/backends*` diagnostics are healthy
-   - no manual database cleanup was needed
-
-### Alpha Operational Caveats
-
-- `local_openclaw` defaults to `LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS=1`.
-- `backend_capacity_limit` may appear during concurrent smoke runs; this is an
-  operational capacity signal and should retry before becoming actionable.
-- Qdrant positive-path retrieval is not the primary alpha proof; SQLite fallback
-  is the proven retrieval path.
-- Windows paths should be short, local, and plain ASCII. Avoid synced folders,
-  deep paths, and non-ASCII workspace paths for active execution.
-- Local runtime speed depends on GPU availability, backend process health, and
-  gateway responsiveness.
-- Test stubs (`stub_success`, `stub_capacity`) are for automated tests only and
-  require `ENABLE_TEST_RUNTIME_BACKENDS=True`.
-
----
-
 ## Windows (Nvidia GPU + Ollama, no OpenClaw)
 
 Uses `docker-compose.windows.yml` for the backend stack from WSL2. Ollama runs natively on Windows for GPU access.
@@ -493,16 +305,16 @@ Windows host
 
 - [Docker Desktop for Windows](https://docs.docker.com/desktop/install/windows-install/) (WSL2 backend)
 - [Ollama for Windows](https://ollama.com/download/windows) with NVIDIA GPU support
-  - CUDA drivers ≥ 528 required
-  - Verify GPU: `ollama run qwen3:8b-hybrid` should run on GPU, not CPU
-- Node.js 18+ and `pnpm` (optional, for dashboard)
+  - Install a current NVIDIA driver with CUDA support; confirm acceleration with `ollama ps`
+  - Verify the model is available: `ollama run qwen3:8b-q4_K_M`
+- Node.js 20.19+ (20.x), 22.12+ (22.x), or 24+ and `pnpm` (optional, for dashboard)
 
 ### Hardware recommendations
 
 | VRAM | Recommended model | `OLLAMA_NUM_CTX` |
 |---|---|---|
-| 6 GB | `qwen3:8b-hybrid` | 4096 |
-| 8 GB | `qwen3:8b-hybrid` | 4096 or 8192 |
+| 6 GB | `qwen3:8b-q4_K_M` | 4096 |
+| 8 GB | `qwen3:8b-q4_K_M` | 4096 or 8192 |
 | 12 GB+ | `qwen3:14b-q4_K_M` | 8192 |
 
 ### Steps
@@ -527,11 +339,14 @@ Restart Ollama after setting this. Verify:
 curl http://localhost:11434/api/tags
 ```
 
+`OLLAMA_HOST=0.0.0.0` allows Docker Desktop to reach the Windows service. Use
+Windows Firewall to limit port `11434` to the local/WSL network; do not expose
+it to untrusted networks.
+
 **3. Pull the required models**
 
 ```powershell
 ollama pull qwen3:8b-q4_K_M
-ollama create qwen3:8b-hybrid -f Modelfile
 ollama pull nomic-embed-text
 ```
 
@@ -540,19 +355,33 @@ ollama pull nomic-embed-text
 ```bash
 mkdir -p data logs checkpoints knowledge
 touch orchestrator.db
+touch orchestrator.db-wal orchestrator.db-shm
 ```
 
 **4. Create `.env`**
 
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set the values for this profile:
+
+Generate a distinct signing key in WSL and paste it into `.env`:
+
+```bash
+python3 -c "import secrets; print(secrets.token_hex(32))"
+```
+
 ```ini
-SECRET_KEY=<generate: python3 -c "import secrets; print(secrets.token_hex(32))">
+SECRET_KEY=<paste-generated-value>
 DATABASE_URL=sqlite:////app/orchestrator.db
+ADMIN_EMAILS=you@example.com
 
 AGENT_BACKEND=direct_ollama
-AGENT_MODEL=qwen3:8b-hybrid
+AGENT_MODEL=qwen3:8b-q4_K_M
 
 OLLAMA_BASE_URL=http://host.docker.internal:11434
-OLLAMA_AGENT_MODEL=qwen3:8b-hybrid
+OLLAMA_AGENT_MODEL=qwen3:8b-q4_K_M
 OLLAMA_NUM_CTX=4096
 OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 EMBEDDING_PROVIDER=ollama
@@ -560,7 +389,7 @@ EMBEDDING_DIM=0
 
 PLANNING_REPAIR_ENABLED=true
 PLANNING_REPAIR_BASE_URL=http://host.docker.internal:11434/v1
-PLANNING_REPAIR_MODEL=qwen3:8b-hybrid
+PLANNING_REPAIR_MODEL=qwen3:8b-q4_K_M
 PLANNING_REPAIR_API_KEY=
 PLANNING_REPAIR_DISABLE_THINKING=true
 
@@ -590,15 +419,14 @@ RUNTIME_PROFILE=compact_local
 export ORCHESTRATOR_GIT_SHA=$(git rev-parse HEAD)
 export ORCHESTRATOR_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
-./wsl-start.sh --ollama --build
+./wsl-start.sh --ollama --build --no-frontend
 ```
 
-For backend-only validation, add `--no-frontend`.
 For validation records, capture authenticated `/api/v1/ops/build-identity`
 after startup and require `stale_container_check` to be `ok` when commit
 freshness matters.
-The helper uses WSL-local frontend tooling only; if `pnpm` is not installed in
-WSL, it starts the backend and prints the manual dashboard command.
+This command intentionally leaves the frontend off; start it in the foreground
+in step 7 if you want the dashboard.
 
 To ingest local `knowledge/` into the active Docker runtime during startup,
 use:
@@ -615,6 +443,8 @@ use:
 | Health | http://localhost:8080/health |
 
 **7. Optional: run the dashboard (in WSL2)**
+
+Run it in a foreground terminal so `Ctrl+C` stops this Vite process:
 
 ```bash
 cd frontend
@@ -646,14 +476,17 @@ API responses include both the stored relative `workspace_path` and the runtime
 docker compose -f docker-compose.windows.yml down
 ```
 
-Add `-v` to also remove the Qdrant data volume.
+This stops the containers and preserves the host database and Qdrant volume.
+Do not add `-v` unless you intentionally want to delete the Qdrant data volume.
+The Windows Ollama app remains running; stop the optional foreground dashboard
+with `Ctrl+C` in its terminal.
 
 ### Troubleshooting (Windows Ollama)
 
 | Symptom | Fix |
 |---|---|
 | Ollama not reachable from containers | Confirm `OLLAMA_HOST=0.0.0.0` is set; restart Ollama |
-| Model runs on CPU | Verify CUDA drivers ≥ 528; check `ollama ps` |
+| Model runs on CPU | Install a current NVIDIA driver with CUDA support, restart Ollama, then check `ollama ps` |
 | OOM during generation | Lower `OLLAMA_NUM_CTX=4096` in `.env` |
 | `host.docker.internal` not resolving | Already in `docker-compose.windows.yml` via `extra_hosts`; verify Docker Desktop WSL2 integration is enabled |
 
@@ -661,7 +494,7 @@ Add `-v` to also remove the Qdrant data volume.
 
 ## Windows (llama.cpp, no OpenClaw)
 
-Uses `docker-compose.windows.yml` for the backend stack. llama.cpp runs natively on Windows with the Vulkan backend for AMD GPU access. Ollama is optional for embeddings; the Phase 10G third-machine path intentionally leaves it uninstalled and accepts degraded knowledge retrieval.
+Uses `docker-compose.windows.yml` for the backend stack. llama.cpp runs natively on Windows with the Vulkan backend for AMD GPU access. Ollama is optional for embeddings; without it, knowledge retrieval is degraded.
 
 > **This path does not use Ollama for LLM inference.** llama.cpp exposes an OpenAI-compatible endpoint that the orchestrator treats as its agent backend.
 > This is a compatibility/stability path for GGUF/Vulkan users, not the default
@@ -690,7 +523,9 @@ Windows host
 | RAM | 16 GB | 48 GB |
 | OS | Windows 10/11 | Windows 11 |
 
-### Known unsupported configurations
+### Constraints for GPU stability tests
+
+These limits apply to the optional stability tests below, not to normal setup.
 
 - Do not mount workspace from Windows NTFS into Docker (use WSL2 ext4)
 - Do not set context > 8192 during stability testing
@@ -698,35 +533,6 @@ Windows host
 - Do not update AMD drivers between test stages
 - Do not mix ROCm and Vulkan builds of llama.cpp
 - Do not run Discord overlay, Steam overlay, MSI Afterburner OSD, or OBS during Vulkan inference
-
----
-
-### Pre-deployment: Windows host configuration
-
-**1. Pin AMD driver version**
-
-Do not use "latest". Verify the current known-good Adrenalin version against recent RX 7000 series + Vulkan reports on r/LocalLLaMA before installing. Do not update drivers between test stages.
-
-**2. Disable sleep(Options) and GPU suspend**
-
-```powershell
-# Run as Administrator
-powercfg /change standby-timeout-ac 0
-powercfg /change monitor-timeout-ac 0
-```
-
-In AMD Adrenalin software, also disable GPU power-saving features and Anti-Lag.
-
-**3. Disable overlay software**
-
-Disable the following before any stability testing:
-- Discord in-game overlay
-- Steam overlay
-- MSI Afterburner / RivaTuner OSD
-- AMD Radeon overlay
-- OBS GPU capture hooks
-
----
 
 ### Step 1 — Get llama.cpp (pre-built Vulkan binary)
 
@@ -786,6 +592,10 @@ D:\llama.cpp\<version-folder>\llama-server.exe `
 | `--host 0.0.0.0` | Required for WSL2 container access |
 | `--jinja` | Chat template rendering for instruction-tuned models |
 
+Binding to `0.0.0.0` allows WSL2 containers to reach the Windows model
+server. Restrict Windows Firewall access to the local/WSL network; do not
+expose port `8001` to untrusted networks.
+
 Profile guidance:
 
 | Hardware tier | Recommended backend/profile | Context |
@@ -802,31 +612,21 @@ curl http://localhost:8001/v1/models
 
 ---
 
-### Step 4 — Run independent llama-server soak test
-
-> Run this before setting up Docker. If llama-server itself is unstable, all subsequent orchestrator debug sessions produce false signals.
+### Step 4 — Confirm the model endpoint
 
 ```powershell
-while ($true) {
-  try {
-    $body = '{"model":"local","messages":[{"role":"user","content":"Explain what a distributed system is in 3 sentences."}],"max_tokens":150}'
-    $result = Invoke-RestMethod -Uri "http://localhost:8001/v1/chat/completions" -Method POST -ContentType "application/json" -Body $body
-    Write-Host "$(Get-Date -Format 'HH:mm:ss') - OK - $($result.choices[0].message.content.Substring(0, [Math]::Min(60, $result.choices[0].message.content.Length)))..."
-  } catch {
-    Write-Host "$(Get-Date -Format 'HH:mm:ss') - ERROR: $_"
-  }
-  Start-Sleep -Seconds 10
-}
+curl http://localhost:8001/v1/models
 ```
 
-Run for 30–60 minutes. Pass condition: no crashes, no VRAM growth, every request returns a valid completion.
+Confirm the selected model is listed before continuing. Optional soak and
+compatibility checks are in [Advanced Operations and Verification](#advanced-operations-and-verification).
 
 ---
 
 ### Step 5 — Set up Ollama for embeddings only
 
 Ollama is used only for `nomic-embed-text` embeddings, not for LLM inference.
-Skip this step for the Phase 10G third-machine no-Ollama test. In that path,
+Skip this step if you do not use Ollama for embeddings. In that path,
 keep `EMBEDDING_PROVIDER=ollama` so `OPENAI_API_KEY=dummy` is not treated as an
 OpenAI embeddings signal; the backend should warn/degrade rather than exit.
 
@@ -881,6 +681,7 @@ git clone https://github.com/henrycode03/orchestrator.git ~/orchestrator
 cd ~/orchestrator
 mkdir -p data logs checkpoints knowledge ~/projects
 touch orchestrator.db
+touch orchestrator.db-wal orchestrator.db-shm
 ```
 
 > Keep all working files inside WSL2's ext4 filesystem. Do not bind-mount from Windows paths. The NTFS↔WSL boundary causes file watcher failures, chmod issues, and git corruption in long sessions.
@@ -890,9 +691,11 @@ Fix line-ending detection (prevents false git diffs on shell scripts):
 ```bash
 git config core.autocrlf false
 git config core.filemode false
-git rm --cached -r .
-git reset --hard HEAD
 ```
+
+These settings apply to this checkout. Do not reset the index or working tree
+to fix line endings; reclone into a clean WSL2 ext4 directory if the initial
+checkout has line-ending damage.
 
 ---
 
@@ -932,16 +735,16 @@ PLANNING_REPAIR_BASE_URL=http://host.docker.internal:8001/v1
 PLANNING_REPAIR_MODEL=local
 PLANNING_REPAIR_API_KEY=dummy
 PLANNING_REPAIR_DISABLE_THINKING=True
-PLANNING_REPAIR_TIMEOUT_SECONDS=90
-PLANNING_SYNTHESIS_TIMEOUT_SECONDS=180
-REPLAN_SYNTHESIS_TIMEOUT_SECONDS=45
+PLANNING_REPAIR_TIMEOUT_SECONDS=45
+PLANNING_SYNTHESIS_TIMEOUT_SECONDS=90
+REPLAN_SYNTHESIS_TIMEOUT_SECONDS=30
 
 # Internal Docker network
 CELERY_BROKER_URL=redis://redis:6379/0
 CELERY_RESULT_BACKEND=redis://redis:6379/1
 QDRANT_URL=http://qdrant:6333
 
-# Embeddings intentionally unavailable for the third-machine no-Ollama test.
+# Embeddings are unavailable when Ollama is not installed.
 # Keep provider=ollama so OPENAI_API_KEY=dummy is not treated as OpenAI embeddings.
 EMBEDDING_PROVIDER=ollama
 OLLAMA_BASE_URL=http://host.docker.internal:11434
@@ -952,7 +755,6 @@ EMBEDDING_DIM=0
 RUNTIME_PROFILE=low_resource
 WORKSPACE_REVIEW_POLICY=hold_nontrivial
 DEMO_MODE=False
-JUDGE_AGENT_ENABLED=False
 INLINE_PLANNING=False
 
 # Projects path (WSL2 ext4 path, not Windows path)
@@ -962,9 +764,9 @@ WORKSPACE_ROOT=/home/yourname/projects
 OPENCLAW_GATEWAY_URL=
 OPENCLAW_API_KEY=
 LANGFUSE_ENABLED=False
-MOBILE_GATEWAY_API_KEY=change-me-shared-secret
+MOBILE_GATEWAY_API_KEY=
 MOBILE_BASE_URL=http://127.0.0.1:8080/api/v1
-ADMIN_EMAILS=
+ADMIN_EMAILS=you@example.com
 GITHUB_TOKEN=
 GITHUB_USERNAME=
 GITHUB_WEBHOOK_SECRET=
@@ -986,8 +788,9 @@ services.
 ```bash
 cd ~/orchestrator
 LLAMA_CTX=4096 \
-LLAMA_MODEL_PATH="D:\\AI\\models\\Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf" \
-LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
+LLAMA_MODEL_PATH="D:\\models\\qwen3-4b-q4_k_m.gguf" \
+LLAMA_EXE="D:\\llama.cpp\\<version-folder>\\llama-server.exe" \
+LLAMA_EXE_WIN="/mnt/d/llama.cpp/<version-folder>/llama-server.exe" \
 ./wsl-start.sh --check --backend-only
 ```
 
@@ -995,8 +798,8 @@ LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
 present. For a previously validated 12-16 GB VRAM llama.cpp machine
 intentionally running `medium`, set `RUNTIME_PROFILE=medium` and
 `LLAMA_CTX=6144` in `.env`, or pass them as command-line overrides.
-It also expects Ollama to be absent by default for the third-machine path. For
-current-machine validation where Ollama is intentionally installed, add
+The default llama.cpp preflight expects Ollama to be absent. If Ollama is
+intentionally installed on that machine, add
 `EXPECTED_OLLAMA_ABSENT=false`.
 
 Start the backend stack through plain `wsl-start.sh`. `--ollama` is reserved
@@ -1007,8 +810,9 @@ export ORCHESTRATOR_GIT_SHA=$(git rev-parse HEAD)
 export ORCHESTRATOR_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
 LLAMA_CTX=4096 \
-LLAMA_MODEL_PATH="D:\\AI\\models\\Qwen2.5-Coder-7B-Instruct-Q5_K_M.gguf" \
-LLAMA_EXE_WIN="/mnt/d/AI/llama.cpp/llama-server.exe" \
+LLAMA_MODEL_PATH="D:\\models\\qwen3-4b-q4_k_m.gguf" \
+LLAMA_EXE="D:\\llama.cpp\\<version-folder>\\llama-server.exe" \
+LLAMA_EXE_WIN="/mnt/d/llama.cpp/<version-folder>/llama-server.exe" \
 ./wsl-start.sh --backend-only
 ```
 
@@ -1028,13 +832,14 @@ First build takes several minutes. Verify all containers are up:
 ```bash
 docker compose -f docker-compose.windows.yml ps
 curl http://localhost:8080/health
-curl -H "Authorization: Bearer $ORCHESTRATOR_API_TOKEN" \
+# Replace ADMIN_TOKEN with an admin bearer token held in your shell.
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
   http://localhost:8080/api/v1/ops/build-identity
 ```
 
 Expected health response:
 ```json
-{"status":"healthy","checks":{"api":"ok","database":"ok","redis":"ok"}}
+{"status":"healthy","checks":{"api":"ok","database":"ok","redis":"ok","backend":"ok"},"details":{"version":"...","runtime_profile":"...","agent_backend":"...","database_pool":{}}}
 ```
 
 ---
@@ -1077,58 +882,16 @@ path to `~/projects/...` for host-side setup scripts.
 
 ---
 
-### API compatibility testing phases
-
-`llama-server` is not a complete OpenAI API implementation. Test in phases:
-
-| Phase | What to test | Pass condition |
-|---|---|---|
-| A | `POST /v1/chat/completions` — plain text | Valid JSON, correct structure |
-| B | Structured JSON output | Model returns parseable JSON |
-| C | Tool calling / function schemas | Schema accepted, response matches format |
-| D | Full agent orchestration | Multi-step session completes without dropped context |
-
-Do not move to the next phase until the current one passes.
-
----
-
-### Stability testing progression
-
-| Stage | Duration | Pass conditions |
-|---|---|---|
-| 1 | 30 min | No VRAM growth, no container restart, no dropped completions |
-| 2 | 2 hours | Memory plateau held, no session corruption, `docker stats` flat |
-| 3 | Recovery test | Kill and restart llama-server mid-session; orchestrator recovers without workspace corruption |
-| 4 | Overnight | Checkpoint files valid, workspace consistent, no memory growth trend |
-
----
-
-### What to monitor
-
-Focus on memory growth, not GPU utilization percentage.
-
-```powershell
-# Windows: Task Manager > GPU > GPU Memory (Dedicated) and (Shared)
-# Growing Shared GPU memory = VRAM fragmentation
-```
-
-```bash
-# WSL2
-watch -n 5 free -h
-docker stats
-```
-
----
-
 ### Stopping
 
 ```bash
 docker compose -f docker-compose.windows.yml down
 ```
 
-Add `-v` to also remove the Qdrant data volume.
-
-Kill llama-server: `Ctrl+C` in the PowerShell window running it.
+This preserves the host database and Qdrant volume. Do not add `-v` unless you
+intentionally want to delete the Qdrant data volume. Stop llama-server with
+`Ctrl+C` in the PowerShell window it owns; stop the optional Vite dashboard
+with `Ctrl+C` in its foreground WSL terminal.
 
 ---
 
@@ -1151,6 +914,312 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 
 ---
 
+## Advanced Operations and Verification
+
+These procedures are optional follow-up guidance, not steps in the three first-time installation profiles. Run execution and stress checks only against a development or disposable installation.
+
+### Optional Windows host settings for extended llama.cpp testing
+
+These changes are not required to install Orchestrator. Use them only when
+running long Vulkan stability tests. Record the AMD Adrenalin driver version
+and avoid driver updates during a test run.
+
+For an unattended overnight test, disable sleep and display timeout on AC
+power. Run PowerShell as Administrator:
+
+```powershell
+powercfg /change standby-timeout-ac 0
+powercfg /change monitor-timeout-ac 0
+```
+
+During GPU stability tests, disable power-saving features and overlays that
+intercept Vulkan rendering, including Discord, Steam, MSI Afterburner/RivaTuner,
+the AMD overlay, and OBS GPU capture hooks.
+
+### Operational Observability
+
+These endpoints make operational evidence queryable without SQL. They require
+admin authentication (`Authorization: Bearer $ADMIN_TOKEN`).
+
+#### `GET /api/v1/ops/audit-events`
+
+Returns structured `LogEntry` rows — permission events, token usage, symbol verification
+failures, and other bracketed log entries.
+
+```bash
+# Latest 20 events across all sessions
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/audit-events?limit=20&order=desc" \
+  | python3 -m json.tool
+
+# Permission events for a specific session
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/audit-events?event_type=PERMISSION_APPROVED&session_id=42"
+
+# Symbol verification failures
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/audit-events?event_type=COMPLETION_SYMBOL_VERIFICATION_FAILED"
+
+# All events for a project scoped by project_id
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/audit-events?project_id=1&order=asc&limit=500"
+```
+
+Response shape:
+```json
+{
+  "total": 12,
+  "limit": 20,
+  "offset": 0,
+  "items": [
+    {
+      "id": 88,
+      "event_type": "PERMISSION_APPROVED",
+      "message": "[PERMISSION_APPROVED]",
+      "level": "INFO",
+      "session_id": 42,
+      "task_id": 7,
+      "session_instance_id": "uuid-string",
+      "created_at": "2026-06-18T14:47:00+00:00",
+      "metadata": { "permission_id": 3, "action": "approved" }
+    }
+  ]
+}
+```
+
+Common `event_type` values: `PERMISSION_APPROVED`, `PERMISSION_DENIED`,
+`TOKEN_USAGE_RECORDED`, `COMPLETION_SYMBOL_VERIFICATION_FAILED`, `OPERATOR_GUIDANCE`,
+`CHECKPOINT`, `SECURITY`, `ORCHESTRATION`.
+
+Query params: `event_type`, `session_id`, `task_id`, `project_id`, `level` (INFO/WARN/ERROR),
+`since` (ISO 8601), `until` (ISO 8601), `limit` (1–500), `offset`, `order` (asc/desc).
+
+---
+
+#### `GET /api/v1/ops/queue-latency`
+
+Returns aggregate queue latency statistics from `TaskExecution.queue_latency_seconds`.
+Executions without recorded queue latency (including `local_openclaw` executions
+without dispatch) are excluded from the calculations.
+
+```bash
+curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+  "http://localhost:8080/api/v1/ops/queue-latency?days=7" \
+  | python3 -m json.tool
+```
+
+Response shape:
+```json
+{
+  "computed_at": "2026-06-18T15:00:00+00:00",
+  "window_days": 7,
+  "executions_with_latency": 5,
+  "avg_queue_latency_seconds": 1.842,
+  "max_queue_latency_seconds": 8.400,
+  "p95_queue_latency_seconds": null,
+  "p99_queue_latency_seconds": null
+}
+```
+
+`avg_queue_latency_seconds` and `max_queue_latency_seconds` are `null` when no executions
+have latency data in the window.
+
+---
+
+#### Token Fields on `TaskExecution`
+
+Each `TaskExecution` may include these nullable token-usage columns:
+
+| Column | Type | Description |
+|---|---|---|
+| `tokens_in` | Integer (nullable) | Input tokens reported by the provider |
+| `tokens_out` | Integer (nullable) | Output tokens reported by the provider |
+| `token_source` | String (nullable) | Source label, e.g. `openai_usage` |
+
+These are populated when the backend reports token usage (OpenAI Responses API and
+compatible endpoints). `local_openclaw` and `direct_ollama` may not report tokens; rows
+for those executions will have NULL token fields.
+
+A `[TOKEN_USAGE_RECORDED]` log entry is written when token data is captured. Query via
+`GET /api/v1/ops/audit-events?event_type=TOKEN_USAGE_RECORDED` to list executions with
+token data; the `metadata` field on each row contains `tokens_in`, `tokens_out`, and
+`token_source`.
+
+---
+
+#### Evidence Capture After a Run
+
+Use the host checkout's Python environment with project dependencies installed,
+outside the Docker container, and point it at the host-side `orchestrator.db`
+file. Native `start.sh` creates `venv/`; WSL Compose does not create a host
+Python environment. IDs are shown in the dashboard or returned by the
+sessions/tasks API.
+
+```bash
+# Full evidence bundle (recommended starting point)
+PYTHONPATH=. venv/bin/python scripts/session_and_replay/capture_task_evidence_bundle.py \
+  --db orchestrator.db \
+  --session-id <session_id> \
+  --task-id <task_id> \
+  --task-execution-id <task_execution_id>
+
+# Replay reducer only (no database needed, just the workspace .agent/events/ dir)
+PYTHONPATH=. venv/bin/python scripts/session_and_replay/capture_replay_report.py \
+  --project-dir <workspace_path> \
+  --session-id <session_id> \
+  --task-id <task_id> \
+  --output /path/to/replay-report.json
+```
+
+The evidence bundle lands in `docs/roadmap/reports/evidence-bundles/`. Open
+`run_replay_bundle.txt` for a quick human-readable overview, or
+`run_replay_bundle.json` for the canonical machine-readable manifest.
+
+#### Rebuilding After Python Source Changes
+
+Native `start.sh` uses the checked-out Python source, but it does not refresh
+packages in an existing virtual environment. If dependency manifests changed,
+install those dependencies explicitly before restarting. WSL runs Python from
+Docker images: the Ollama launcher accepts `--build`; the default llama.cpp
+launcher does not.
+
+```bash
+export ORCHESTRATOR_GIT_SHA=$(git rev-parse HEAD)
+export ORCHESTRATOR_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+export ORCHESTRATOR_IMAGE_TAG=orchestrator:$(git rev-parse --short HEAD)
+
+./wsl-start.sh --ollama --build --force-recreate --no-frontend
+```
+
+For the default llama.cpp profile, rebuild and recreate the Compose services
+directly from the intended WSL checkout:
+
+```bash
+docker compose -f docker-compose.windows.yml build
+docker compose -f docker-compose.windows.yml up -d --force-recreate
+```
+
+To refresh native Python and frontend dependencies, then restart the current
+checkout:
+
+```bash
+venv/bin/pip install -r requirements.txt
+(cd frontend && pnpm install)
+./stop_all.sh
+./start.sh
+```
+
+After rebuild, confirm the running image matches the repo commit:
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:8080/api/v1/ops/build-identity
+# stale_container_check must be "ok"
+```
+
+#### Development Smoke Check
+
+Use this optional check on a development or disposable installation after setup.
+It confirms that the installation runs, reports state, and completes a small
+workflow without manual database cleanup; it is not production certification.
+
+1. Clone the repo and create `.env` from `.env.example`.
+2. Start the real platform entrypoint:
+   - Linux: `./start.sh`
+   - Windows WSL2 / Ollama: `./wsl-start.sh --ollama`
+   - Windows WSL2 / llama.cpp: `./wsl-start.sh --backend-only`
+3. Confirm service health:
+
+```bash
+curl -fsS http://127.0.0.1:8080/health
+```
+
+For Docker/WSL validation, also capture build identity before relying on the
+running service:
+
+```bash
+curl -fsS \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  http://127.0.0.1:8080/api/v1/ops/build-identity
+```
+
+4. On a native checkout with the project virtualenv and test dependencies installed,
+   run the backend tests. WSL Compose does not create a host Python environment:
+
+```bash
+PYTHONPATH=. venv/bin/python -m pytest app/tests -q
+```
+
+5. Run a small smoke:
+   - 1 project
+   - 3 tasks: `docs-update`, `python-bug-fix`, `verification-only`
+6. Confirm:
+   - session and tasks reach terminal states appropriate to the configured review policy
+   - no running `TaskExecution` remains after work has settled
+   - change sets are captured
+   - `/api/v1/ops/backends*` diagnostics are healthy
+   - no manual database cleanup was needed
+
+#### Operational Caveats
+
+- `local_openclaw` defaults to `LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS=1`.
+- `backend_capacity_limit` may appear during concurrent smoke runs; this is an
+  operational capacity signal and should retry before becoming actionable.
+- If Qdrant is unavailable, confirm the expected degraded knowledge behavior;
+  otherwise verify that indexed knowledge is reachable for the selected profile.
+- Windows paths should be short, local, and plain ASCII. Avoid synced folders,
+  deep paths, and non-ASCII workspace paths for active execution.
+- Local runtime speed depends on GPU availability, backend process health, and
+  gateway responsiveness.
+- Test stubs (`stub_success`, `stub_capacity`) are for automated tests only and
+  require `ENABLE_TEST_RUNTIME_BACKENDS=True`.
+
+---
+
+### API compatibility testing phases
+
+`llama-server` is not a complete OpenAI API implementation. Test in phases:
+
+| Phase | What to test | Pass condition |
+|---|---|---|
+| A | `POST /v1/chat/completions` — plain text | Valid JSON, correct structure |
+| B | Structured JSON output | Model returns parseable JSON |
+| C | Tool calling / function schemas | Schema accepted, response matches format |
+| D | Full agent orchestration | Multi-step session completes without dropped context |
+
+Do not move to the next phase until the current one passes.
+
+---
+
+### Stability testing progression
+
+| Stage | Duration | Pass conditions |
+|---|---|---|
+| 1 | 30 min | No VRAM growth, no container restart, no dropped completions |
+| 2 | 2 hours | Memory plateau held, no session corruption, `docker stats` flat |
+| 3 | Recovery test | Stop and restart llama-server from its PowerShell window during a disposable session; Orchestrator recovers without workspace corruption |
+| 4 | Overnight | Checkpoint files valid, workspace consistent, no memory growth trend |
+
+---
+
+### What to monitor
+
+Focus on memory growth, not GPU utilization percentage.
+
+```powershell
+# Windows: Task Manager > GPU > GPU Memory (Dedicated) and (Shared)
+# Growing Shared GPU memory = VRAM fragmentation
+```
+
+```bash
+# WSL2
+watch -n 5 free -h
+docker stats
+```
+
+---
+
 ## Environment Variables Reference
 
 | Variable | Default | Description |
@@ -1169,21 +1238,26 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base URL for `openai_responses_api`; point to OpenAI, llama.cpp, LM Studio, or another compatible endpoint. |
 | `OPENAI_API_KEY` | — | Required for `openai_responses_api`. Set to a dummy value only for local endpoints that do not require auth. |
 | `OPENCLAW_GATEWAY_URL` | `http://127.0.0.1:8000` | OpenClaw gateway (Linux only). |
-| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama API base URL. |
+| `DATABASE_URL` | Project-local `orchestrator.db` | SQLite database URL; WSL Compose sets the container path to `/app/orchestrator.db`. |
+| `DB_POOL_SIZE` | `10` | SQLAlchemy pool size for each API or Worker process. |
+| `DB_MAX_OVERFLOW` | `20` | Additional SQLAlchemy connections per API or Worker process under load. |
+| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama API base URL for WSL containers; native Linux installs can use `http://127.0.0.1:11434`. |
 | `OLLAMA_AGENT_MODEL` | — | Model used by `direct_ollama`; set this to a model already pulled on the host. |
 | `OLLAMA_NUM_CTX` | `4096` | Context window tokens sent to Ollama. |
 | `OLLAMA_PLANNING_TIMEOUT_SECONDS` | `0` | Optional planning-only Ollama timeout override. |
 | `OLLAMA_EMBEDDING_MODEL` | `nomic-embed-text` | Embedding model for knowledge retrieval. |
 | `EMBEDDING_PROVIDER` | `auto` | `auto` / `ollama` / `openai`. |
 | `EMBEDDING_DIM` | `0` | `0` = auto (768 for Ollama, 1536 for OpenAI). |
-| `QDRANT_URL` | `http://localhost:6333` | Qdrant vector store URL. |
-| `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis broker for Celery. |
-| `WORKSPACE_ROOT` | `~/projects` | Host-visible project workspace root for native/host-run backend and worker. Set this per device in `.env`. |
+| `QDRANT_URL` | `http://localhost:6333` | Qdrant vector store URL; WSL Compose uses `http://qdrant:6333`. |
+| `CELERY_BROKER_URL` | `redis://localhost:6379/0` | Redis broker for Celery; WSL Compose uses `redis://redis:6379/0`. |
+| `CELERY_RESULT_BACKEND` | `redis://localhost:6379/1` | Celery result backend. WSL Compose uses `redis://redis:6379/1`. |
+| `CELERY_WORKER_CONCURRENCY` | `4` native; `1` in Windows Compose | Native `start.sh` worker concurrency. Compose currently fixes its worker at 1. |
+| `WORKSPACE_ROOT` | Unset; native fallback is `~/.openclaw/workspace/vault/projects/` | Host-visible project workspace root. Set it explicitly for WSL2 Compose bind mounts and when you want a non-default native workspace. |
 | `HOST_WORKSPACE_ROOT` | — | Optional host-only override used when persisted Settings still contain a container path such as `/app/projects`. |
 | `OPENCLAW_WORKSPACE` | — | Legacy fallback for older OpenClaw-oriented installs. Prefer `WORKSPACE_ROOT` for new installs, including Ollama and llama.cpp lanes. |
 | `WORKSPACE_REVIEW_POLICY` | `hold_nontrivial` | `auto_publish_all` / `hold_nontrivial` / `hold_all`. |
 | `PLANNING_REPAIR_ENABLED` | `true` | Enable second-pass plan repair. |
-| `PLANNING_REPAIR_BASE_URL` | `http://ai-gateway:8000/v1` | OpenAI-compatible chat-completions endpoint for direct planning repair. |
+| `PLANNING_REPAIR_BASE_URL` | `http://ai-gateway:8000/v1` | OpenAI-compatible chat-completions endpoint. The default hostname is for the Docker network; native installs must set a URL reachable from the host or disable planning repair. |
 | `PLANNING_REPAIR_MODEL` | `qwen-local` | Direct planning-repair model name. |
 | `PLANNING_REPAIR_API_KEY` | — | Optional bearer token for the planning-repair endpoint. |
 | `PLANNING_REPAIR_DISABLE_THINKING` | `true` | Sends no-thinking flags to compatible local chat endpoints. |
@@ -1191,6 +1265,9 @@ Kill llama-server: `Ctrl+C` in the PowerShell window running it.
 | `DEBUG_REPAIR_BASE_URL` | — | Optional direct debug-repair endpoint. Blank falls back to `PLANNING_REPAIR_BASE_URL`. |
 | `DEBUG_REPAIR_API_KEY` | — | Optional direct debug-repair key. Blank falls back to `PLANNING_REPAIR_API_KEY`. |
 | `DEBUG_REPAIR_DISABLE_THINKING` | `true` | Sends no-thinking flags to compatible direct debug-repair chat endpoints. |
-| `RUNTIME_PROFILE` | `standard` | `standard`, `medium`, or `low_resource`. Use `low_resource` for 8 GB llama.cpp or constrained local backends; use `medium` only after a 12-16 GB VRAM llama.cpp setup is stable. |
+| `RUNTIME_PROFILE` | `standard` native; `medium` in Windows Compose if unset | `standard`, `medium`, `low_resource`, or `compact_local`. WSL profiles should set this in `.env` and validate before raising resource limits. |
 | `MOBILE_GATEWAY_API_KEY` | — | Shared key for `/api/v1/mobile/*`. |
+| `MOBILE_BASE_URL` | `http://localhost:8080/api/v1` | Base URL used to construct mobile API links; override it when clients cannot reach the local default. |
+| `ADMIN_EMAILS` | — | Comma-separated email addresses granted admin access; set the operator account address to enable admin-only diagnostics. |
 | `LANGFUSE_ENABLED` | `false` | Enable Langfuse tracing. |
+| `ONE_SHOT_EXECUTION_ENABLED` | `false` | Protected-execution gate. Keep disabled; the real isolated OCI Executor is not implemented. |

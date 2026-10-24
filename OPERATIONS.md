@@ -5,205 +5,309 @@ and the WF-B browser-session workflow. For installation, see `SETUP.md`.
 
 ## Startup
 
-Linux/Ubuntu (native, with OpenClaw):
+Run native services from the development checkout:
 
 ```bash
 ./start.sh
 ```
 
-Starts Redis, Qdrant, the FastAPI backend (uvicorn), Celery workers, and the
-React dev server, in that order. If existing `uvicorn`/`vite`/`celery`
-processes are detected, it interactively asks whether to stop and restart
-them (non-interactive/CI runs leave them running and warn).
+The native launcher starts Redis, local Qdrant when `qdrant/bin/qdrant` is
+present, FastAPI, one Celery worker, Celery Beat, and Vite. Without the local
+Qdrant executable, the app can start with knowledge retrieval degraded. The
+launcher checks its own saved process identities first. If verified processes
+from this checkout are running, an interactive terminal offers to stop and
+restart them. Declining cancels startup. A non-interactive start refuses to
+replace a running topology and prints `./stop_all.sh` as the next step.
 
-Windows/WSL2 (Docker, llama.cpp — no OpenClaw):
+A saved identity that cannot be verified causes startup to refuse rather than
+offer a restart. A process without a matching record, or one owned by another
+checkout, is never adopted or signaled by this launcher. An occupied service
+port causes startup to fail without signaling its owner. Celery Worker and
+Beat do not reserve service ports, so confirm their owner through the owning
+checkout or service supervisor before starting another topology; the current
+checkout cannot safely restart an unverified process.
 
-```bash
-./wsl-start.sh
-```
-
-Windows/WSL2 (Docker, Ollama — no OpenClaw, compact laptop profile):
-
-```bash
-./wsl-start.sh --ollama
-```
-
-Use `--check` on either wsl variant to validate setup without starting
-services.
-
-## Shutdown
-
-Native (`start.sh`): re-run `./start.sh` and answer `y` at the "Existing
-processes detected" prompt, or manually:
+WSL2 profiles run the API, Worker, Redis, and Qdrant through Compose:
 
 ```bash
-pkill -f "uvicorn app.main:app"
-pkill -f "celery"
-pkill -f "vite"
+./wsl-start.sh --ollama --backend-only  # Windows-host Ollama
+./wsl-start.sh --backend-only           # Windows llama.cpp
 ```
 
-Docker/WSL: `docker compose -f docker-compose.windows.yml down` (adjust
-compose file to the profile in use).
+Both helpers also accept `--check` for validation without starting services.
+The llama.cpp helper starts its configured Windows `llama-server.exe` when it
+cannot reach the server. The Ollama helper checks the Windows Ollama endpoint.
 
-WF-B browser-session container (separate from the Orchestrator runtime — see
-"Browser-Session / WF-B" below):
+## Native Process Identity and Shutdown
+
+Use the checkout's own stop helper:
 
 ```bash
-docker compose -f docker-compose.browser-session.yml down
+./stop_all.sh
 ```
 
-## Backup Surface
+It stops only services with identity records under this checkout's `run/`
+directory. Before sending SIGTERM, the helper checks the recorded PID start
+time, executable, full argument list, working directory, and canonical source
+root. It rechecks identity after opening a Linux pidfd, which protects against
+PID reuse. It waits up to 30 seconds by default and does not escalate to
+SIGKILL. `PROJECT_PROCESS_STOP_TIMEOUT` changes the wait limit.
 
-Back up these paths. Everything else is regenerable from source + these:
+Services without identity records are skipped; legacy PID files without a
+matching identity record cause a fail-closed error. A record that points to a
+live process with invalid, stale, unreadable, or foreign-checkout identity is
+also rejected without signaling. A record for a process that is confirmed gone
+is retired without a signal. A process that does not exit after SIGTERM causes
+a failure; there is no forced-kill fallback. The sweep may already have
+stopped earlier verified services before it encounters an identity error. Do
+not remove identity records or signal a PID by command-line pattern as a
+workaround.
 
-| Path | Contents | Notes |
-|---|---|---|
-| `orchestrator.db` | SQLite control state (sessions, tasks, plans, checkpoints, audit) | This database is the authoritative source of truth for all control state. Orchestration event journals under `.agent/events/` (see below) are diagnostic evidence, not control state — losing them does not corrupt orchestration behavior |
-| `qdrant/data` | Vector index for knowledge retrieval | Rebuildable from `orchestrator.db` `KnowledgeItem` records via the ingest script, but back up to avoid a slow rebuild |
-| `knowledge/` | Source knowledge documents | Ingest source |
-| `.env` | Local configuration and secrets | Never commit; back up outside the repo |
-
-**Never back up** (excluded on purpose):
-- the WF-B browser-session Docker volume (`browser-session-profile`) —
-  contains a live, authenticated ChatGPT session; treat it as durable
-  credential material, not application data, and exclude it from any backup
-  that leaves the machine
-- `logs/`, `checkpoints/`, `run/`, `qdrant/bin`/`qdrant/snapshots` (runtime
-  state, regenerable)
-- `.agent/events/` journals under project workspaces — **steady-state
-  policy**: diagnostic evidence, not backup-critical (see "Evidence
-  Collection" below). **Dogfood-window exception (Phase 22, added Phase
-  21B):** journals ARE included in the nightly backup for the duration of
-  the Developer Dogfood program, because they are the evidentiary corpus
-  the program's metrics depend on, not incidental diagnostic residue.
-  Outside a formal dogfood window, this exception does not apply.
-
-**Dogfood nightly backup (Phase 21B/B2):**
+For read-only inspection of one service identity, run this from the checkout:
 
 ```bash
-PYTHONPATH=. venv/bin/python scripts/maintenance/dogfood_backup.py
+python3 scripts/maintenance/project_process.py status \
+  --root "$PWD" --service worker
 ```
 
-Online-backs-up `orchestrator.db` (via the sqlite3 backup API — safe
-under WAL, no downtime) plus every registered project's `.agent/events`
-journals, into `/root/.openclaw/workspace/vault/backups/orchestrator/<run-id>/`,
-verifies `PRAGMA integrity_check` on the copy, and prunes runs older than
-14 days (`--retention-days` to override). Known limitation: this
-container has a single overlay filesystem — there is no physically
-separate second disk to write to, so "second location" means a directory
-tree outside the live repo on the same host, not off-host redundancy.
-Acceptable for a single-operator dogfood window per the roadmap review's
-single-host stance; revisit before Private Beta.
+Use `backend`, `worker`, `beat`, `frontend`, `qdrant`, or `redis` as the
+service. A process from another checkout is not owned by this checkout's
+helper. If a separate development checkout owns it, use that checkout's own
+procedure; production has its own approved lifecycle.
 
-**Dogfood restore drill (rehearse before trusting the backup):**
+The native launcher also checks its service ports and does not signal a
+process merely because it occupies one. Defaults are Redis `6379`, Qdrant
+`6333`, API `8080` (`BACKEND_PORT` can change it), and Vite `3000`. Inspect a
+conflict read-only with `ss -ltnp`; determine its checkout or supervisor
+before deciding what to do. An unverified owner remains untouched.
+
+## WSL2 and Docker Lifecycle
+
+Run Compose commands from the intended checkout and use the matching file:
 
 ```bash
-PYTHONPATH=. venv/bin/python scripts/maintenance/dogfood_restore.py \
-  --target-dir /path/to/a/scratch/directory
+docker compose -f docker-compose.windows.yml ps
+docker compose -f docker-compose.windows.yml logs --tail=100
+docker compose -f docker-compose.windows.yml down
 ```
 
-Restores the latest run (or `--run-id <id>`) into the given target
-directory — never the live repo, unless you deliberately intend to
-overwrite it — and verifies integrity, core-table presence, and journal
-archive completeness. Exits non-zero (and prints which check failed) if
-anything is wrong. A restore drill was executed 2026-07-08 (run
-`20260708-141436`): `PRAGMA integrity_check` passed, all core tables
-present, journal archive complete (0/0 journals — no projects registered
-yet at drill time). Rehearse again after real dogfood data accumulates,
-since an empty-journal drill only proves the mechanism, not that a
-journal-bearing restore behaves identically (it will — the archive step
-is content-agnostic — but rehearsing after real data exists resolves any
-doubt with evidence instead of code-reading).
+`down` stops this Compose project and preserves its host-bound SQLite database
+and named Qdrant volume. Adding `-v` deletes the Qdrant volume. Compose does
+not stop the Windows Ollama or llama.cpp process, nor a Vite server running in
+WSL. For predictable frontend shutdown, start Orchestrator with
+`--backend-only`/`--no-frontend` and run Vite in a foreground terminal; stop
+that terminal with Ctrl+C. The WSL helpers' optional detached Vite process is
+not recorded with the native checkout identity format, so do not signal a PID
+based only on `/tmp/frontend.pid` or `logs/frontend.pid`.
 
-## Restore
+A Docker port conflict causes Compose startup to fail; it does not terminate
+the host process holding the port. Published ports are `8080`, `6379`, and
+`6333`; optional Vite uses `3000`. The model services use Windows-host ports
+`11434` (Ollama) and `8001` (llama.cpp). `wsl --shutdown` stops every running
+WSL distribution and can interrupt other projects; it is not the normal
+Orchestrator shutdown command.
 
-1. Stop all services (see Shutdown).
-2. Restore `orchestrator.db`, `qdrant/data`, `knowledge/`, and `.env` from
-   backup into the repository root. During a dogfood window, also restore
-   project workspace `.agent/events/` journals from the dogfood backup's
-   `journals.tar.gz` (see above) if workspace damage requires it.
-3. Run `./start.sh` (or the appropriate `wsl-start.sh` variant) — it will
-   detect the existing venv/frontend deps and skip re-provisioning them.
-4. Run the post-install smoke checklist below to confirm the restore.
+## Development and Production Separation
 
-## Post-Install / Post-Restore Smoke Checklist
+Use this checkout for development. The existing GX10 production checkout is
+`/root/.openclaw/workspace/vault/orchestrator-production`, with its separate
+runtime root at `/root/.openclaw/workspace/vault/orchestrator-production-runtime`.
+These paths describe the existing deployment only; new installations choose
+their own layout. Do not run development startup or shutdown commands against
+production, and do not infer a universal production deployment procedure from
+these development helpers.
+
+`scripts/maintenance/dogfood_deploy.sh` is a specialized native dogfood
+routine. It refuses the exact production checkout, requires a clean committed
+worktree, stops only verified processes from its own checkout, starts the
+native stack non-interactively, and runs its admission check. It is not a
+production release workflow and does not apply to the WSL Docker profiles.
+
+The process manager's OS identity records say which local process belongs to a
+checkout; they are not the protected Worker execution attestation. The
+one-shot execution gate defaults to disabled. The real isolated OCI
+Executor is not implemented or production-ready. For the existing GX10
+runtime, Worker identity remains `IDENTITY_INCONCLUSIVE / PIN_ABSENT` and
+one-shot execution remains disabled.
+
+## Backup Surface and Consistency
+
+Choose a backup destination outside the live checkout and runtime, preferably
+on a separate device or backup service. Keep `.env` and any workspace data
+that must be recoverable in access-controlled storage. Do not commit secrets.
+
+| Data | Recommended capture |
+|---|---|
+| `orchestrator.db` | SQLite Online Backup API while running, or a cold copy after all writers are stopped |
+| Qdrant collections | Create and download Qdrant snapshots; keep the snapshot files outside live Qdrant storage |
+| `knowledge/` | Copy source documents if they are not otherwise versioned |
+| `.env` | Encrypted or otherwise access-controlled copy; never place it in a public backup |
+| Project workspaces | Back up separately when they contain user work that must be recovered |
+| `.agent/events/` journals | Include only when the deployment's evidence-retention policy requires them |
+
+Do not include the Planner Relay browser-session profile in routine application
+backups. It contains a logged-in browser session and must be handled as
+credential material if an operator explicitly needs to migrate it.
+
+Do not copy only `orchestrator.db` while the API or Worker is writing in WAL
+mode. Use SQLite's Online Backup API for a live database. For a cold file copy,
+stop native services with this checkout's `./stop_all.sh`, or stop only the
+matching WSL Compose project with `docker compose -f docker-compose.windows.yml down`;
+use the production deployment's own approved lifecycle for production. Capture
+the cold copy only after shutdown completes cleanly, including any present
+`-wal` and `-shm` sidecars as one set. Never delete live sidecars to make a
+copy appear clean. Verify every captured database with `PRAGMA integrity_check`
+(`ok`) and an empty `PRAGMA foreign_key_check` result.
+
+SQLite and Qdrant do not share an atomic snapshot boundary. If the backup must
+represent one consistent application point, quiesce ingestion and other writes
+while capturing both systems and record the capture times.
+
+### Qdrant Snapshots
+
+The local and WSL deployments are single-node Qdrant instances. List the
+collections, create one snapshot per collection, then download each snapshot
+using the name returned by Qdrant:
 
 ```bash
-curl -s http://localhost:8080/api/v1/ops/health | python3 -m json.tool
+curl -fsS http://127.0.0.1:6333/collections | python3 -m json.tool
+BACKUP_DIR=/path/to/backup
+mkdir -p "$BACKUP_DIR"
+COLLECTION='<collection-name>'
+curl -fsS -X POST \
+  "http://127.0.0.1:6333/collections/$COLLECTION/snapshots" \
+  | python3 -m json.tool
+SNAPSHOT='<snapshot-name-returned-above>'
+curl -fsS \
+  "http://127.0.0.1:6333/collections/$COLLECTION/snapshots/$SNAPSHOT" \
+  -o "$BACKUP_DIR/$SNAPSHOT"
+sha256sum "$BACKUP_DIR/$SNAPSHOT"
 ```
 
-Expect `overall_status` healthy/degraded per component (`db`, `redis`,
-`qdrant`, `celery`). A missing or `unhealthy` component points at a service
-that did not start — check `logs/backend.log`, `logs/worker.log`,
-`logs/qdrant.log`.
+Repeat for every collection. Add the configured Qdrant authentication header
+if the deployment enables API authentication. Collection snapshots omit
+aliases. Test restoration in a separate Qdrant instance before relying on a
+snapshot; Qdrant documents restore compatibility for the same minor version
+or the next minor version in its [snapshot guide](https://qdrant.tech/documentation/operations/snapshots/).
+
+### Existing Dogfood Backup Helper
+
+`scripts/maintenance/dogfood_backup.py` is a manual dogfood helper, not a
+scheduled or general-purpose deployment backup. It uses SQLite's online
+backup API and archives the registered project event journals; it does not
+capture Qdrant, `.env`, or whole project workspaces. Its default backup root
+is `/root/.openclaw/workspace/vault/backups/orchestrator`, a deployment-specific
+path. The supported `--db`, `--backup-root`, and `--retention-days` options
+allow explicit paths, and its retention step prunes older runs. Review those
+values before using it for an existing dogfood deployment.
 
 ```bash
-curl -s http://localhost:8080/api/v1/ops/build-identity
+PYTHONPATH=. venv/bin/python scripts/maintenance/dogfood_backup.py \
+  --db /path/to/orchestrator.db \
+  --backup-root /path/to/backup-root \
+  --retention-days 14
 ```
 
-Confirms which build/commit is actually running. The Docker image copies
-`app/` at build time, so rebuild the `orchestrator` and `celery_worker`
-images explicitly after code changes before trusting anything the running
-system reports as proof of the latest behavior — a stale image will silently
-keep running old code.
+The matching `dogfood_restore.py` helper restores into a required scratch
+`--target-dir` and verifies SQLite integrity and journal archive completeness.
+It is a drill tool; never point it at the live runtime. Set `--backup-root`
+explicitly when the run is not under the helper's default path.
 
-If mobile (ClawMobile) will connect, verify the mobile gateway key is
-configured:
+### A2 Backup Preflight and GX10 Defaults
+
+`scripts/maintenance/backup_preflight.py` is a read-only dry-run. It measures
+candidate paths and can probe SQLite/Redis state; it never copies data or
+performs a restore. For the existing GX10 deployment, its default production
+root is `/root/.openclaw/workspace/vault/orchestrator-production` and its
+default runtime root is
+`/root/.openclaw/workspace/vault/orchestrator-production-runtime`. Those are
+not required paths for new deployments.
+
+The verified explicit options are `--production-root`,
+`--production-runtime-root`, `--destination`, `--restore-target`, and
+`--probe`. For a different deployment, supply both roots explicitly:
 
 ```bash
-curl -s -H "Cookie: <dashboard session cookie>" \
-  http://localhost:8080/api/v1/mobile-admin/connection-info
+venv/bin/python scripts/maintenance/backup_preflight.py \
+  --production-root /path/to/production-checkout \
+  --production-runtime-root /path/to/production-runtime \
+  --destination /path/to/new-backup \
+  --restore-target /path/to/empty-restore-drill \
+  --probe
 ```
 
-`api_key_configured` must be `true`, or mobile REST endpoints will return
-`503`.
+Review its path, size, device, SQLite, and queue findings before any separately
+authorized capture or restore procedure. The preflight itself is not that
+procedure.
 
-## Post-Upgrade Verification
+## Restore and Restore Verification
 
-After pulling new code or rebuilding a Docker image:
+Treat restore as a deployment-specific maintenance operation with a selected
+root, downtime window, verified backup, and rollback copy. Do not restore into
+a running database or Qdrant store, and do not use the development checkout as
+an ambiguous restore target.
 
-1. `./start.sh` (or the Docker equivalent) — rebuilds the venv/frontend deps
-   if `requirements.txt`/`package.json` changed.
-2. Confirm `ops/build-identity` reflects the new commit (Docker images copy
-   `app/` at build time — rebuild `orchestrator` and `celery_worker` images
-   explicitly if using Docker; a stale image will silently keep running old
-   code).
-3. Run the certification test pack before treating any evidence produced
-   after the upgrade as trustworthy:
+Restore a SQLite Online Backup API output as the database file only after all
+connections to the target have stopped. If using a cold copy instead, preserve
+the database and sidecars from that same capture together. Restore Qdrant
+snapshots into a separate instance first, using a compatible Qdrant version;
+verify collection names, point counts, payload/vector access, and any required
+aliases before planning a live replacement. Restore `knowledge/`, workspace
+content, and `.env` from their own verified copies as needed.
 
-   ```bash
-   PYTHONPATH=. venv/bin/python -m pytest \
-     app/tests/test_candidate_audit.py app/tests/test_candidate_generation.py \
-     app/tests/test_candidate_machine_profiles.py app/tests/test_candidate_operator_policy.py \
-     app/tests/test_candidate_outcome.py app/tests/test_candidate_recovery_infrastructure.py \
-     app/tests/test_candidate_registry_runtime.py app/tests/test_candidate_rollout.py \
-     app/tests/test_candidate_selection_policy.py app/tests/test_candidate_selection_runtime.py \
-     app/tests/test_candidate_validation.py app/tests/test_direct_ollama_compact_retry_candidate_prompt.py \
-     app/tests/test_execution_recovery_delegation.py app/tests/test_execution_recovery_s2.py \
-     app/tests/test_execution_recovery_s25.py app/tests/test_execution_recovery_s3.py \
-     app/tests/test_execution_recovery_s4.py app/tests/test_execution_recovery_service.py \
-     app/tests/test_phase10j_audit_api.py app/tests/test_plan_candidate.py \
-     app/tests/test_planner_recovery_regressions.py app/tests/test_recovery_context.py \
-     app/tests/test_recovery_inspection_report.py app/tests/test_recovery_lifecycle.py \
-     app/tests/test_recovery_ops_summary.py app/tests/test_recovery_outcome.py \
-     app/tests/test_recovery_policy.py app/tests/test_recovery_strategy_registry.py \
-     app/tests/test_reflection_validation.py app/tests/test_slot_merge_audit.py \
-     app/tests/test_slot_merge_validation.py app/tests/test_startup_config_validation.py \
-     app/tests/test_validator_rule_telemetry.py app/tests/test_validator_runtime_evidence.py \
-     -q
-   ```
+Before considering the restore usable, run `PRAGMA integrity_check`, require
+an empty `PRAGMA foreign_key_check`, confirm migrations on startup, check
+`/health` and authenticated `/api/v1/ops/health`, then verify representative
+application records and Qdrant collections. A2 only checks proposed paths; it
+does not automate these steps or authorize a production restore.
 
-   This is the fast, targeted subset covering Candidate Recovery, Slot
-   Merge, execution recovery, the recovery policy/strategy registry, and
-   validator rule telemetry — the tests that rollout decisions actually
-   depend on. It is a pre-check, not a replacement for the full suite
-   (`PYTHONPATH=. venv/bin/python -m pytest app/tests/ -q`), which should
-   still run at every release that touches `app/`.
-4. If the upgrade touched `app/db_migrations.py`, confirm the new
-   `_migration_0NN_*` function ran: check the `schema_migrations` table for
-   the new version, or watch `logs/backend.log` startup output. Do not run
-   `alembic upgrade head` — Alembic is not used by this repo; the legacy
-   Alembic migration tree was removed in Phase 20C.
+## Post-Install Smoke Check
+
+The unauthenticated endpoint gives a quick API check:
+
+```bash
+curl -fsS http://127.0.0.1:8080/health
+```
+
+`/api/v1/ops/health` and `/api/v1/ops/build-identity` require an admin bearer
+token. `/api/v1/ops/health` reports database, Redis, Qdrant, Celery, and
+maintenance status; public `/health` reports API, database, Redis, and backend
+checks plus this API process's database-pool details. Check the matching native
+logs under `logs/`; for WSL use `docker compose -f docker-compose.windows.yml logs`.
+
+For mobile connectivity, use the dashboard session cookie to check
+`/api/v1/mobile-admin/connection-info`; `api_key_configured` must be `true`
+for mobile REST endpoints to be available.
+
+## Post-Upgrade Checks
+
+First identify the checkout and its intended runtime. For native Linux,
+`start.sh` uses source from that checkout but only creates a missing virtual
+environment or frontend dependency directory; it does not reinstall updated
+dependencies. If manifests changed, update them explicitly, then stop and
+restart the same checkout with `./stop_all.sh` and `./start.sh`.
+
+For WSL Docker, rebuild and recreate only the selected Compose project. The
+Ollama launcher supports:
+
+```bash
+./wsl-start.sh --ollama --build --force-recreate --no-frontend
+```
+
+The default llama.cpp launcher does not accept `--build`; use Compose from the
+intended WSL checkout:
+
+```bash
+docker compose -f docker-compose.windows.yml build
+docker compose -f docker-compose.windows.yml up -d --force-recreate
+```
+
+Check `/health`, authenticated `/api/v1/ops/health`, and build identity after
+startup. Review the release's focused validation results before relying on
+new behavior. If Python source changed in Docker, verify that the rebuilt
+containers use the expected commit; if `stale_container_check` is `unknown`,
+the image lacks enough metadata to prove freshness. Schema changes use the
+application's startup migration runner; Alembic is not used by this repo.
 
 ## Browser-Session / WF-B / WF-C / WF-D
 
@@ -229,9 +333,11 @@ reports a locked profile after an unclean restart, remove the
 `SingletonLock`/`SingletonSocket`/`SingletonCookie` files from the persistent
 profile volume before restarting the container.
 
-**Security (WF-C hardened):** noVNC (6080) and CDP (9223→9222) now bind to
-`127.0.0.1` on the host by default — set via `NOVNC_BIND_HOST` /
-`CDP_BIND_HOST` in `.env` (see `.env.example`), both default `127.0.0.1`.
+**Security (WF-C hardened):** noVNC (6080) and the host CDP port (9222) bind
+to `127.0.0.1` by default via `NOVNC_BIND_HOST` / `CDP_BIND_HOST` in `.env`
+(see `.env.example`). Compose maps host 9222 to the container relay on 9223;
+that relay forwards to Chrome's container port 9222. Both bind hosts default
+to `127.0.0.1`.
 Neither port has its own authentication (the VNC server still runs without a
 password; CDP has none by design), so both are equivalent to full control of
 the authenticated ChatGPT session — loopback binding is the actual security
@@ -358,58 +464,47 @@ suppressed by default; pass `--verbose` to include expanded exception details.
 
 ## Database Concurrency / SQLite Locking
 
-The control-plane database is SQLite (`orchestrator.db`), in `journal_mode=WAL`
-(set on every connection via `app/database.py`'s pragma listener). Each
-process — the `uvicorn` API and every Celery worker process — opens its own
-SQLAlchemy connection pool (`pool_size=10, max_overflow=20` by default,
-configurable via `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` in `.env`) onto the same
-file; WAL lets readers proceed while a writer commits, and `busy_timeout=30000`
-makes a connection wait up to 30s for a lock before raising, instead of
-failing immediately.
+SQLite runs in WAL mode with a 30-second busy timeout. WAL allows readers to
+continue while a writer commits, but SQLite still serializes writers. The API
+process and each Celery worker process have separate SQLAlchemy pools; defaults
+are `DB_POOL_SIZE=10` and `DB_MAX_OVERFLOW=20`. The native launcher starts the
+Worker with concurrency 4 by default (`CELERY_WORKER_CONCURRENCY` can lower or
+raise that value). The WSL Compose Worker is fixed at concurrency 1.
 
-**Known risk (Phase 18L-R):** under concurrent load, an unbounded Celery
-worker pool (Celery defaults `--concurrency` to one prefork process per CPU
-core) combined with SQLite's default `journal_mode=delete` caused the API to
-become completely unresponsive — every connection blocked on file-level
-locks until each process's pool (`size 5 + overflow 10 = 15`) was exhausted,
-surfacing as `sqlalchemy.exc.TimeoutError: QueuePool limit of size 5
-overflow 10 reached, connection timed out`. Recovery required killing and
-restarting the wedged `uvicorn` process.
+If requests slow down or database operations time out:
 
-**Phase 19A mitigations:**
-- WAL mode (Phase 18N) removes the primary lock-contention path between
-  concurrent readers and a writer.
-- `start.sh` now caps Celery worker concurrency at 4 processes by default
-  (override with `CELERY_WORKER_CONCURRENCY` in `.env`) instead of Celery's
-  default of one process per CPU core — on a 20-core host this previously
-  spawned ~20 worker processes, each holding its own pool against the same
-  file for the full duration of whatever orchestration task it was running.
-- Three Celery maintenance tasks (`process_github_webhook`,
-  `scheduled_task_execution`, `cleanup_old_logs` in
-  `app/tasks/maintenance.py`) only released their DB session on the success
-  path; an exception before that point leaked the connection out of the
-  pool for the rest of the process's life. Fixed to close deterministically
-  in a `finally` block, matching the pattern already used elsewhere in that
-  file.
+1. Check `http://127.0.0.1:8080/health`. Its `details.database_pool` values
+   describe only the API process that answered; each Worker has its own pool.
+   The authenticated `/api/v1/ops/health` reports component availability but
+   does not report pool counters.
+2. Inspect `logs/backend.log`, `logs/worker.log`, and `logs/beat.log` for native
+   startup or task errors. For WSL, inspect service logs and state with
+   `docker compose -f docker-compose.windows.yml logs` and
+   `docker compose -f docker-compose.windows.yml ps`.
+3. Avoid increasing task concurrency as a first response. For native installs,
+   lower `CELERY_WORKER_CONCURRENCY` in `.env` if the host or SQLite file cannot
+   sustain the current level. The Compose Worker remains at 1 unless the
+   deployment's Compose configuration is deliberately changed.
+4. If a native restart is needed, first allow active work to finish where
+   possible, then run `./stop_all.sh` from that checkout. If a task needs a
+   longer graceful shutdown window, set
+   `PROJECT_PROCESS_STOP_TIMEOUT=600 ./stop_all.sh`. The helper uses SIGTERM
+   and never sends SIGKILL; a timeout leaves the process identity available for
+   inspection and returns an error.
+5. If process identity validation fails, stop and preserve the error details.
+   Do not use process-name-wide termination, forced killing, or a PID copied
+   from `ps` as a workaround.
+   Inspect the checkout root, saved identity, start time, executable, argv, and
+   working directory; if ownership remains ambiguous, leave the process
+   untouched and use its actual service supervisor or operator.
+6. For WSL, use Compose from the matching checkout. `docker compose ... down`
+   performs the container lifecycle for that Compose project; it does not
+   signal host services or another checkout. Never remove live SQLite WAL or
+   SHM sidecars to clear a lock.
 
-**If the API wedges again** (health check hangs, backend log shows
-`QueuePool limit ... reached, connection timed out`):
-
-1. Check `GET /api/v1/ops/health` — `details.database_pool` reports this
-   process's own pool state (`size`, `checked_out`, `overflow`,
-   `checked_in`; each process has a separate pool, so this only reflects
-   whichever process answers the request).
-2. If the API itself is unresponsive to `/health`, a graceful `SIGTERM` may
-   also hang (it did during the Phase 18L-R incident) — `SIGKILL` the
-   `uvicorn` process and restart it (`pkill -9 -f "uvicorn app.main:app"`,
-   then `./start.sh`). This does not corrupt `orchestrator.db`; WAL mode is
-   crash-safe.
-3. Confirm no orphaned worker processes remain (`ps aux | grep celery`);
-   `pkill -f "celery -A app.celery_app worker"` if needed, then restart.
-4. This is an operational mitigation for a known SQLite-under-load
-   limitation, not a guarantee that pool exhaustion cannot recur under
-   heavier concurrency than has been verified — see
-   `docs/roadmap/done/phase19/phase19a-db-pool-sqlite-concurrency-hardening-report.md`.
+This is operational guidance, not a guarantee that any level of concurrent
+SQLite writes will succeed. Quiesce writes and use a verified backup before a
+restore or database repair.
 
 ## Evidence Collection
 
@@ -421,7 +516,7 @@ validator/recovery decisions, and nothing currently enforces its retention.
 To collect and summarize retained evidence:
 
 ```bash
-python scripts/session_and_replay/phase18e_collect_real_session_validator_evidence.py --db orchestrator.db
+PYTHONPATH=. venv/bin/python scripts/session_and_replay/phase18e_collect_real_session_validator_evidence.py --db orchestrator.db
 ```
 
 Run this after every evidence-gated validation batch (Candidate Recovery,

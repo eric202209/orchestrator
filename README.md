@@ -23,10 +23,18 @@ Orchestrator is a FastAPI + React control plane for AI-driven development work. 
 |---|---|
 | `local_openclaw` | Linux/Ubuntu with OpenClaw installed (default) |
 | `remote_openclaw_gateway` | Registered for future remote OpenClaw use; not implemented for runtime use yet |
-| `openai_responses_api` | OpenAI API (cloud) |
+| `openai_responses_api` | OpenAI planning and repair; not full shell/tool execution |
 | `direct_ollama` | Native Ollama, no OpenClaw needed — Windows or air-gapped |
 
 `direct_ollama` is planning-first: it supports planning and structured file operations, but not native shell/tool execution. Use `local_openclaw` for full agent execution.
+
+## Implementation Status
+
+The three setup profiles below support local development and evaluation.
+Runtime behavior depends on the selected backend and its permissions. The
+remote OpenClaw gateway is registered but not implemented for runtime use.
+The isolated OCI Executor remains planned (Phase 39 F3), is not production-ready,
+and `ONE_SHOT_EXECUTION_ENABLED` defaults to `False`.
 
 Backend routing is lane-aware. `AGENT_BACKEND` is the default runtime, while
 `PLANNING_BACKEND`, `EXECUTION_BACKEND`, `REPAIR_BACKEND`, and
@@ -43,7 +51,7 @@ back to `AGENT_BACKEND`. Direct planning repair is configured separately with
 - **Knowledge layer** — SQLite/Qdrant runtime with task-type and failure-signature gates; session logs expose `knowledge_used`, retrieval reason, top items, and phase
 - **Security audit** — command, path, quota, and retention policy checks; shadow-mode audit on every execution
 - **Outcome classification** — terminal reasons tracked, aggregated at `/admin/outcome-rates`
-- **Production observability** — `/health`, `/ops/build-identity`, `/ops/metrics/summary`, `/ops/backends`, Langfuse tracing optional
+- **Operational diagnostics** — `/health`, `/api/v1/ops/build-identity`, `/api/v1/ops/metrics/summary`, `/api/v1/ops/backends`, optional Langfuse tracing
 - **Session lifecycle** — start, pause, resume, stop, checkpoint, retry, cross-session diff
 - **Mobile bridge** — `/api/v1/mobile/*` endpoints for ClawMobile and OpenClaw status queries
 - **React dashboard** — projects, tasks, sessions, settings, operator review queue
@@ -56,7 +64,7 @@ See the [Setup Guide](SETUP.md) for step-by-step instructions:
 - **Windows WSL2** (Ollama, no OpenClaw) → [Windows Ollama setup](SETUP.md#windows-nvidia-gpu--ollama-no-openclaw)
 - **Windows WSL2** (llama.cpp, no OpenClaw) → [Windows llama.cpp setup](SETUP.md#windows-llamacpp-no-openclaw)
 
-Linux `start.sh` runs the API, worker, Qdrant, and React dashboard as native processes. Windows/WSL Docker setup uses `docker-compose.windows.yml` for the API, worker, Redis, and Qdrant. On the compact Ollama laptop, use `./wsl-start.sh --ollama`; on the llama.cpp Windows device, use plain `./wsl-start.sh`. Use the ingest command for the runtime you are actually running: native Linux uses `venv/bin/python scripts/planning_and_knowledge/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333`; Docker/WSL Ollama uses `./wsl-start.sh --ollama --ingest-knowledge`.
+Linux `start.sh` runs Redis, the API, Celery worker and Beat, the Vite dashboard, and Qdrant when the executable is installed at `qdrant/bin/qdrant`. WSL2 uses `docker-compose.windows.yml` for the API, worker, Redis, and Qdrant; its optional dashboard runs separately in WSL. For a foreground-safe WSL start, use `./wsl-start.sh --ollama --backend-only` with Windows-host Ollama or `./wsl-start.sh --backend-only` with llama.cpp, then follow SETUP.md to run Vite in a terminal. Knowledge ingestion must target the active runtime: native Linux uses `venv/bin/python scripts/planning_and_knowledge/ingest_knowledge.py --source-dir . --qdrant-url http://localhost:6333`; either WSL profile accepts `--ingest-knowledge`.
 
 For day-2 operations (startup/shutdown, backup/restore, post-upgrade verification, the Planner Relay browser session, and database concurrency notes), see the [Operations Guide](OPERATIONS.md).
 
@@ -93,7 +101,7 @@ orchestrator/
 │                                  planning_and_knowledge/, session_and_replay/, evals/, relay/)
 ├── SETUP.md                      Step-by-step setup guide (Linux + Windows)
 ├── OPERATIONS.md                 Day-2 operations guide (backup/restore, upgrades, Planner Relay)
-├── docker-compose.yml            Linux: qdrant only
+├── docker-compose.yml            Standalone Qdrant only; native start.sh starts its own Qdrant binary
 ├── docker-compose.windows.yml    Windows: full stack (qdrant + redis + app + worker)
 ├── start.sh                      Linux native startup
 └── requirements.txt
@@ -163,11 +171,10 @@ Projects store `workspace_path` as a root-relative slug. API responses also incl
 | Script | Purpose |
 |---|---|
 | `./start.sh` | Start full stack (Linux native) |
-| `./wsl-start.sh --ollama` | Start WSL Docker backend and dashboard for Windows-host Ollama |
-| `./wsl-start.sh --ollama --no-frontend` | Start WSL Docker backend only for Windows-host Ollama |
-| `./wsl-start.sh` | Start WSL Docker backend and dashboard for the Windows llama.cpp device |
+| `./wsl-start.sh --ollama --backend-only` | Start WSL Docker backend for Windows-host Ollama |
+| `./wsl-start.sh --backend-only` | Start WSL Docker backend for the Windows llama.cpp device |
 | `./wsl-start.sh --ollama --ingest-knowledge` | Start Ollama WSL runtime and ingest `knowledge/` into Docker runtime |
-| `./stop_all.sh` | Stop all processes |
+| `./stop_all.sh` | Stop only native processes verified as owned by this checkout |
 | `./scripts/developer_utilities/orchestrator-mobile-api.sh` | Query mobile API from shell |
 | `./scripts/developer_utilities/security_check.sh` | Run security audit |
 | `./scripts/session_and_replay/capture_replay_report.py` | Replay reducer report from event journal |
@@ -208,7 +215,7 @@ after interruption, replay bundles, and permission recovery.
 
 ---
 
-**Last updated: 2026-07-06**
+**Last updated: 2026-10-24**
 
 <p align="center">
   <a href="https://github.com/henrycode03/orchestrator/stargazers">
