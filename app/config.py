@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     # separately reviewed implementation connects a complete binding and a
     # supervisor-backed execution path.
     ONE_SHOT_EXECUTION_ENABLED: bool = False
+    # F2 trusted Supervisor endpoint. Both unset: no Supervisor (dispatch is
+    # refused). Partial or invalid values are refused, never guessed. Kept as
+    # strings so a malformed value cannot break settings loading.
+    ONE_SHOT_SUPERVISOR_SOCKET: Optional[str] = None
+    ONE_SHOT_SUPERVISOR_UID: Optional[str] = None
 
     @field_validator("DATABASE_URL")
     @classmethod

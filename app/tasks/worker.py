@@ -259,6 +259,18 @@ from app.services.orchestration.worker_identity import (
     preload_evaluator_module_for_worker as _preload_evaluator_module_for_worker,
     resolve_worker_identity_paths as _resolve_worker_identity_paths,
 )
+from app.services.execution.one_shot_dispatch import (
+    WorkerIdentityAttestation as _OneShotWorkerIdentityAttestation,
+)
+from app.services.execution.one_shot_routing import (
+    OneShotDelivery as _OneShotDelivery,
+    is_one_shot_delivery as _is_one_shot_delivery,
+    requested_authorization_uuid as _requested_one_shot_authorization_uuid,
+    route_one_shot_delivery as _route_one_shot_delivery,
+)
+from app.services.execution.one_shot_supervisor_client import (
+    configured_supervisor as _configured_one_shot_supervisor,
+)
 from app.services.orchestration.invocation_provenance import (
     INCONCLUSIVE as _INVOCATION_INCONCLUSIVE,
     InvocationProvenanceReference as _InvocationProvenanceReference,
@@ -649,6 +661,80 @@ def reconcile_backend_slots_on_boot(db) -> Optional[Dict[str, Any]]:
     return result
 
 
+def _one_shot_worker_identity_attestation() -> Optional[Any]:
+    """This process's own boot identity record, or None when unavailable.
+
+    The recorded classification is used as-is; nothing here upgrades an
+    INCONCLUSIVE or pin-less record.
+    """
+
+    try:
+        identity_paths = _resolve_worker_identity_paths(
+            source_root=settings.WORKER_SOURCE_ROOT,
+            runtime_root=settings.RUNTIME_ROOT,
+        )
+        manifest, _ = _matching_worker_boot_manifest(
+            identity_paths.identity_dir, _capture_process_identity()
+        )
+        if manifest is None:
+            return None
+        return _OneShotWorkerIdentityAttestation.from_boot_manifest(
+            _WorkerBootIdentityManifest.from_dict(manifest)
+        )
+    except Exception:
+        return None
+
+
+def _one_shot_supervisor() -> Any:
+    # Unconfigured: UnavailableSupervisor. Partial or invalid: refuses.
+    return _configured_one_shot_supervisor(
+        settings.ONE_SHOT_SUPERVISOR_SOCKET, settings.ONE_SHOT_SUPERVISOR_UID
+    )
+
+
+def _route_one_shot_if_requested(
+    task_request: Any,
+    *,
+    session_id: int,
+    task_id: int,
+    task_execution_id: Optional[int],
+    expected_session_instance_id: Optional[str],
+    context: Optional[Dict[str, Any]],
+    continuation_present: bool,
+) -> Optional[Dict[str, Any]]:
+    """Return a terminal result for a one-shot delivery, else None.
+
+    Runs before the legacy lifecycle opens its session, lock, or cleanup, so
+    a one-shot delivery never reaches legacy execution, retry, or recovery.
+    """
+
+    db = get_db_session()
+    try:
+        if not _is_one_shot_delivery(db, task_id, context):
+            return None
+        delivery_info = getattr(task_request, "delivery_info", None) or {}
+        result = _route_one_shot_delivery(
+            db,
+            _OneShotDelivery(
+                session_id=session_id,
+                task_id=task_id,
+                task_execution_id=task_execution_id,
+                expected_session_instance_id=expected_session_instance_id,
+                authorization_uuid=_requested_one_shot_authorization_uuid(context),
+                continuation_present=continuation_present,
+                redelivered=bool(
+                    delivery_info.get("redelivered")
+                    or getattr(task_request, "retries", 0)
+                ),
+            ),
+            worker_identity=_one_shot_worker_identity_attestation,
+            supervisor=_one_shot_supervisor(),
+        )
+        return result.as_task_result()
+    finally:
+        db.close()
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -694,6 +780,24 @@ def execute_orchestration_task(
         timeout_seconds: Maximum execution time
         context: Additional context
     """
+    one_shot_result = _route_one_shot_if_requested(
+        self.request,
+        session_id=session_id,
+        task_id=task_id,
+        task_execution_id=task_execution_id,
+        expected_session_instance_id=expected_session_instance_id,
+        context=context,
+        continuation_present=any(
+            value is not None
+            for value in (
+                continuation_task_id,
+                continuation_kind,
+                continuation_retry_count,
+            )
+        ),
+    )
+    if one_shot_result is not None:
+        return one_shot_result
     invocation_started_at = datetime.now(timezone.utc)
     invocation_reference_token = None
     db = get_db_session()
