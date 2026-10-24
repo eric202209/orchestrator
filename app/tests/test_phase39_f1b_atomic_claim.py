@@ -1599,18 +1599,38 @@ def test_claim_module_has_no_external_launch_imports_or_callers(f1b, monkeypatch
     )
 
     app_root = Path(module.__file__).resolve().parents[2]
+    # F1c-1 dispatch and F1c-2 routing are the only claim importers; the
+    # canonical Worker reaches the claim only through routing (F1c-2).
     callers = [
-        path
+        path.relative_to(app_root).as_posix()
         for path in app_root.rglob("*.py")
         if "tests" not in path.parts
-        and path.name != "one_shot_claim.py"
+        and path.name
+        not in {"one_shot_claim.py", "one_shot_dispatch.py", "one_shot_routing.py"}
         and re.search(
             r"execution\.one_shot_claim|import[^\n]*\bone_shot_claim\b|"
-            r"claim_one_shot_authorization|reconcile_one_shot_claim",
+            r"claim_one_shot_authorization|reconcile_one_shot_claim|"
+            r"execution\.one_shot_dispatch|import[^\n]*\bone_shot_dispatch\b|"
+            r"execution\.one_shot_routing|import[^\n]*\bone_shot_routing\b",
             path.read_text(encoding="utf-8"),
         )
     ]
-    assert callers == []
+    assert sorted(callers) == [
+        "services/orchestration/worker_identity.py",
+        "tasks/worker.py",
+    ]
+    # worker_identity only names the modules in its reviewed identity boundary.
+    identity_source = ast.parse(
+        (app_root / "services/orchestration/worker_identity.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert not any(
+        "one_shot" in (getattr(node, "module", None) or "")
+        or any("one_shot" in alias.name for alias in node.names)
+        for node in ast.walk(identity_source)
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+    )
 
     def _forbidden(*_args, **_kwargs):
         raise AssertionError("claim must not start a process")

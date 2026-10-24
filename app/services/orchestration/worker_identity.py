@@ -152,6 +152,11 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.session.session_execution_service",
     "app.services.session.session_runtime_service",
     "app.services.execution.process_identity",
+    # F1c-2: the Worker reaches the one-shot claim only through routing.
+    "app.services.execution.one_shot_routing",
+    "app.services.execution.one_shot_dispatch",
+    "app.services.execution.one_shot_claim",
+    "app.services.execution.one_shot_authorization",
     "app.tasks.worker_support.workspace",
     "app.services.orchestration.events.event_types",
     "app.services.orchestration.error_handler",
