@@ -16,8 +16,14 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$REPO_ROOT"
+
+PRODUCTION_ROOT="/root/.openclaw/workspace/vault/orchestrator-production"
+if [ "$REPO_ROOT" = "$PRODUCTION_ROOT" ]; then
+    echo "FAIL: dogfood deployment is development-only; production checkout is protected." >&2
+    exit 1
+fi
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     echo "Usage: scripts/maintenance/dogfood_deploy.sh"
@@ -63,7 +69,7 @@ echo "Commit: ${DEPLOY_SHA}"
 echo "Build time: ${DEPLOY_BUILD_TIME}"
 echo "Configuration SHA-256: ${DEPLOY_CONFIG_SHA256}"
 
-echo "--- Stopping existing processes (non-interactive, deterministic) ---"
+echo "--- Stopping only processes verified as owned by this checkout ---"
 ./stop_all.sh
 
 echo "--- Synchronizing revision dependencies ---"
@@ -77,10 +83,8 @@ venv/bin/pip install -r requirements.txt
 )
 
 echo "--- Starting stack (non-interactive) ---"
-# start.sh checks `[ -t 0 ]` to decide whether to prompt for restart; piping
-# stdin from /dev/null forces the non-interactive branch, and since
-# stop_all.sh already cleared every process, there is nothing left for that
-# branch to ask about.
+# start.sh checks recorded project ownership and port availability. It will
+# never discover, adopt, or terminate a process from another checkout.
 ./start.sh < /dev/null
 
 echo "--- Deployment admission gate ---"

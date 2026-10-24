@@ -16,6 +16,7 @@ FRONTEND_DIR="${PROJECT_ROOT}/frontend"
 VENV_DIR="${PROJECT_ROOT}/venv"
 LOG_DIR="${PROJECT_ROOT}/logs"
 PID_DIR="${PROJECT_ROOT}/run"
+PROCESS_HELPER="${PROJECT_ROOT}/scripts/maintenance/project_process.py"
 QDRANT_HOME="${PROJECT_ROOT}/qdrant"
 QDRANT_BIN_DIR="${QDRANT_HOME}/bin"
 QDRANT_DATA_DIR="${QDRANT_HOME}/data"
@@ -74,6 +75,7 @@ prepare_logs() {
     : > "${LOG_DIR}/beat.log"
     : > "${LOG_DIR}/frontend.log"
     : > "${LOG_DIR}/qdrant.log"
+    : > "${LOG_DIR}/redis.log"
 }
 
 normalize_runtime_ownership() {
@@ -91,17 +93,48 @@ normalize_runtime_ownership() {
         2>/dev/null || true
 }
 
-cleanup_pid_file() {
-    local pid_file="$1"
-    [ -f "${pid_file}" ] || return 0
+process_helper() {
+    /usr/bin/python3 "${PROCESS_HELPER}" "$@"
+}
 
-    local pid
-    pid="$(cat "${pid_file}" 2>/dev/null || true)"
-    if [ -n "${pid}" ] && kill -0 "${pid}" 2>/dev/null; then
-        return 0
+record_service_process() {
+    local service="$1"
+    local pid="$2"
+    process_helper record --root "${PROJECT_ROOT}" --service "${service}" --pid "${pid}"
+    printf '%s\n' "${pid}" > "${PID_DIR}/${service}.pid"
+}
+
+require_port_available() {
+    local host="$1"
+    local port="$2"
+    process_helper port-check --host "${host}" --port "${port}"
+}
+
+owned_processes_running() {
+    local service result
+    for service in backend worker worker-candidate beat frontend qdrant redis; do
+        if process_helper status --root "${PROJECT_ROOT}" --service "${service}"; then
+            return 0
+        else
+            result=$?
+            if [ "${result}" -ne 1 ]; then
+                return "${result}"
+            fi
+        fi
+    done
+    return 1
+}
+
+require_no_owned_service() {
+    local service="$1"
+    if process_helper status --root "${PROJECT_ROOT}" --service "${service}"; then
+        echo -e "${RED}❌ Verified project-owned ${service} process is already running.${NC}" >&2
+        return 1
+    else
+        local result=$?
+        [ "${result}" -eq 1 ] && return 0
+        return "${result}"
     fi
-
-    rm -f "${pid_file}"
 }
 
 ensure_venv() {
@@ -245,136 +278,10 @@ ensure_database() {
     echo ""
 }
 
-# Function to check if a process is running (by port for services)
-check_process() {
-    local name="$1"
-    local port=""
-    
-    # Map service names to ports
-    case "$name" in
-        "uvicorn app.main:app")
-            port="${BACKEND_PORT}"
-            ;;
-        "celery -A app.celery_app worker")
-            # Workers don't have a specific port, fall back to pgrep
-            if pgrep -f "$name" > /dev/null; then
-                return 0
-            fi
-            return 1
-            ;;
-        "vite")
-            port=3000
-            ;;
-        "redis-server")
-            port=6379
-            ;;
-        *)
-            # Fallback to pgrep for unknown services
-            if pgrep -f "$name" > /dev/null; then
-                return 0
-            fi
-            return 1
-            ;;
-    esac
-    
-    # Check port using lsof (most reliable)
-    if command -v lsof &> /dev/null; then
-        if lsof -i :$port &> /dev/null; then
-            return 0
-        fi
-    fi
-    
-    # Fallback: netstat
-    if command -v netstat &> /dev/null; then
-        if netstat -tlnp 2>/dev/null | grep -q ":$port "; then
-            return 0
-        fi
-    fi
-    
-    # Last resort: fuser
-    if command -v fuser &> /dev/null; then
-        if fuser $port/tcp &> /dev/null; then
-            return 0
-        fi
-    fi
-
-    # Minimal environments may not have lsof/netstat/fuser. For HTTP services,
-    # use the service endpoint as a port reachability fallback.
-    if [ "$port" = "${BACKEND_PORT}" ]; then
-        if curl -fsS "http://127.0.0.1:${port}/health" > /dev/null 2>&1; then
-            return 0
-        fi
-    elif [ "$port" = "3000" ]; then
-        if curl -fsS "http://127.0.0.1:${port}" > /dev/null 2>&1; then
-            return 0
-        fi
-    fi
-    
-    return 1
-}
-
 # Function to stop existing processes
 stop_existing() {
-    echo -e "${YELLOW}⚠️  Stopping existing processes...${NC}"
-    cleanup_pid_file "${PID_DIR}/backend.pid"
-    cleanup_pid_file "${PID_DIR}/worker.pid"
-    cleanup_pid_file "${PID_DIR}/beat.pid"
-    cleanup_pid_file "${PID_DIR}/frontend.pid"
-
-    # Stop backend
-    local stopped_backend=false
-    if [ -f "${PID_DIR}/backend.pid" ]; then
-        kill "$(cat "${PID_DIR}/backend.pid")" 2>/dev/null || true
-        rm -f "${PID_DIR}/backend.pid"
-        stopped_backend=true
-    fi
-    if check_process "uvicorn app.main:app"; then
-        pkill -f "uvicorn app.main:app" || true
-        stopped_backend=true
-    fi
-    [ "$stopped_backend" = true ] && echo -e "${GREEN}✅ Backend stopped${NC}"
-
-    # Stop workers
-    local stopped_workers=false
-    if [ -f "${PID_DIR}/worker.pid" ]; then
-        kill "$(cat "${PID_DIR}/worker.pid")" 2>/dev/null || true
-        rm -f "${PID_DIR}/worker.pid"
-        stopped_workers=true
-    fi
-    if check_process "celery -A app.celery_app worker"; then
-        pkill -f "celery -A app.celery_app worker" || true
-        stopped_workers=true
-    fi
-    [ "$stopped_workers" = true ] && echo -e "${GREEN}✅ Workers stopped${NC}"
-
-    # Stop the separate Celery Beat scheduler.
-    local stopped_beat=false
-    if [ -f "${PID_DIR}/beat.pid" ]; then
-        kill "$(cat "${PID_DIR}/beat.pid")" 2>/dev/null || true
-        rm -f "${PID_DIR}/beat.pid"
-        stopped_beat=true
-    fi
-    if check_process "celery -A app.celery_app beat"; then
-        pkill -f "celery -A app.celery_app beat" || true
-        stopped_beat=true
-    fi
-    [ "$stopped_beat" = true ] && echo -e "${GREEN}✅ Celery Beat stopped${NC}"
-
-    # Stop frontend
-    local stopped_frontend=false
-    if [ -f "${PID_DIR}/frontend.pid" ]; then
-        kill "$(cat "${PID_DIR}/frontend.pid")" 2>/dev/null || true
-        rm -f "${PID_DIR}/frontend.pid"
-        stopped_frontend=true
-    fi
-    if check_process "vite"; then
-        pkill -f "vite" || true
-        pkill -f "pnpm dev" || true
-        stopped_frontend=true
-    fi
-    [ "$stopped_frontend" = true ] && echo -e "${GREEN}✅ Frontend stopped${NC}"
-    
-    sleep 2
+    echo -e "${YELLOW}⚠️  Stopping verified project-owned processes...${NC}"
+    process_helper stop-all --root "${PROJECT_ROOT}" --timeout 30
     echo ""
 }
 
@@ -382,25 +289,38 @@ stop_existing() {
 start_redis() {
     echo -e "${BLUE}📦 Starting Redis...${NC}"
     
-    if ! check_process "redis-server"; then
-        # Start Redis with specific working directory to prevent dump.rdb in workspace
-        redis-server --daemonize yes --dir /tmp
-        echo -e "${GREEN}✅ Redis started (working dir: /tmp)${NC}"
-    else
-        echo -e "${GREEN}✅ Redis already running${NC}"
-    fi
-    echo ""
+    require_port_available 127.0.0.1 6379
+    command -v redis-server >/dev/null 2>&1 || {
+        echo -e "${RED}❌ redis-server is unavailable${NC}" >&2
+        return 1
+    }
+    cd "${PROJECT_ROOT}"
+    setsid nohup redis-server \
+        --bind 127.0.0.1 --port 6379 --daemonize no --dir /tmp \
+        >> "${LOG_DIR}/redis.log" 2>&1 &
+    local redis_pid=$!
+    record_service_process redis "${redis_pid}"
+    for _ in {1..10}; do
+        if ! kill -0 "${redis_pid}" 2>/dev/null; then
+            echo -e "${RED}❌ Project Redis failed to start${NC}" >&2
+            return 1
+        fi
+        if redis-cli -h 127.0.0.1 -p 6379 ping 2>/dev/null | grep -q '^PONG$'; then
+            echo -e "${GREEN}✅ Project Redis started on 127.0.0.1:6379${NC}"
+            echo ""
+            return 0
+        fi
+        sleep 1
+    done
+    echo -e "${RED}❌ Project Redis did not become ready${NC}" >&2
+    return 1
 }
 
 # Function to start Qdrant
 start_qdrant() {
     echo -e "${BLUE}🔍 Starting Qdrant...${NC}"
 
-    if curl -fsS http://localhost:6333/healthz > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ Qdrant already running${NC}"
-        echo ""
-        return 0
-    fi
+    require_port_available 127.0.0.1 6333
 
     local QDRANT_BIN="${QDRANT_BIN_DIR}/qdrant"
     local QDRANT_STORAGE="${QDRANT_DATA_DIR}/qdrant"
@@ -412,14 +332,13 @@ start_qdrant() {
         return 0
     fi
 
-    (
-        cd "${QDRANT_HOME}"
-        QDRANT__STORAGE__STORAGE_PATH="${QDRANT_STORAGE}" \
-        QDRANT__STORAGE__SNAPSHOTS_PATH="${QDRANT_SNAPSHOTS_DIR}" \
-            setsid nohup "${QDRANT_BIN}" \
-            >> "${LOG_DIR}/qdrant.log" 2>&1 &
-        echo $! > "${PID_DIR}/qdrant.pid"
-    )
+    cd "${QDRANT_HOME}"
+    QDRANT__STORAGE__STORAGE_PATH="${QDRANT_STORAGE}" \
+    QDRANT__STORAGE__SNAPSHOTS_PATH="${QDRANT_SNAPSHOTS_DIR}" \
+        setsid nohup "${QDRANT_BIN}" \
+        >> "${LOG_DIR}/qdrant.log" 2>&1 &
+    local qdrant_pid=$!
+    record_service_process qdrant "${qdrant_pid}"
     normalize_runtime_ownership
 
     local qdrant_ok=false
@@ -454,15 +373,10 @@ start_backend() {
     load_env
     echo -e "${GREEN}✅ Environment loaded from .env${NC}"
     
-    # Kill any existing backend
-    if check_process "uvicorn app.main:app"; then
-        pkill -f "uvicorn app.main:app" || true
-        sleep 1
-    fi
+    require_port_available "${BACKEND_HOST}" "${BACKEND_PORT}"
     
     # Start backend in background with comprehensive timeout configuration
     # LOGS DIRECTIVE: Write directly to root logs/ for history preservation.
-    cleanup_pid_file "${PID_DIR}/backend.pid"
     setsid nohup "${VENV_DIR}/bin/uvicorn" app.main:app \
         --host "${BACKEND_HOST}" \
         --port "${BACKEND_PORT}" \
@@ -472,7 +386,7 @@ start_backend() {
         --access-log \
         >> "${LOG_DIR}/backend.log" 2>&1 &
     local backend_pid=$!
-    echo "${backend_pid}" > "${PID_DIR}/backend.pid"
+    record_service_process backend "${backend_pid}"
     normalize_runtime_ownership
     
     local backend_ok=false
@@ -492,7 +406,7 @@ start_backend() {
         echo -e "${GREEN}🆔 Backend PID: ${backend_pid}${NC}"
         echo -e "${GREEN}📝 Backend logs: tail -f logs/backend.log${NC}"
     else
-        rm -f "${PID_DIR}/backend.pid"
+        process_helper stop --root "${PROJECT_ROOT}" --service backend --timeout 10 || true
         echo -e "${RED}❌ Backend failed to start!${NC}"
         echo -e "${YELLOW}Check logs: cat logs/backend.log${NC}"
         return 1
@@ -511,10 +425,14 @@ start_workers() {
     echo -e "${GREEN}✅ Environment loaded for workers${NC}"
     normalize_runtime_ownership
     
-    # Kill any existing workers
-    if check_process "celery -A app.celery_app worker"; then
-        pkill -f "celery -A app.celery_app worker"
-        sleep 1
+    if process_helper status --root "${PROJECT_ROOT}" --service worker; then
+        echo -e "${RED}❌ A verified project Worker is already running.${NC}" >&2
+        return 1
+    else
+        local worker_status=$?
+        if [ "${worker_status}" -ne 1 ]; then
+            return "${worker_status}"
+        fi
     fi
     
     # Start worker in background
@@ -530,14 +448,13 @@ start_workers() {
     # "DB Connection Pool Exhaustion". Override with CELERY_WORKER_CONCURRENCY
     # in .env if you need more parallel task slots and have verified your
     # host/DB can handle it.
-    cleanup_pid_file "${PID_DIR}/worker.pid"
     setsid nohup "${VENV_DIR}/bin/celery" \
         -A app.celery_app worker \
         --concurrency="${CELERY_WORKER_CONCURRENCY:-4}" \
         --loglevel=info \
         >> "${LOG_DIR}/worker.log" 2>&1 &
     local worker_pid=$!
-    echo "${worker_pid}" > "${PID_DIR}/worker.pid"
+    record_service_process worker "${worker_pid}"
     normalize_runtime_ownership
 
     local worker_ok=false
@@ -557,31 +474,25 @@ start_workers() {
         echo -e "${GREEN}🆔 Worker PID: ${worker_pid}${NC}"
         echo -e "${GREEN}📝 Worker logs: tail -f logs/worker.log${NC}"
     else
-        rm -f "${PID_DIR}/worker.pid"
+        process_helper stop --root "${PROJECT_ROOT}" --service worker --timeout 10 || true
         echo -e "${RED}❌ Worker failed to start!${NC}"
         echo -e "${YELLOW}Check logs: cat logs/worker.log${NC}"
         return 1
     fi
 
-    if check_process "celery -A app.celery_app beat"; then
-        echo -e "${RED}❌ Celery Beat was already running after shutdown preflight.${NC}"
-        echo -e "${YELLOW}Refusing to preserve a potentially mixed-version scheduler.${NC}"
-        return 1
-    fi
-
-    cleanup_pid_file "${PID_DIR}/beat.pid"
+    require_no_owned_service beat
     setsid nohup "${VENV_DIR}/bin/celery" \
         -A app.celery_app beat \
         --loglevel=info \
         --schedule="${PID_DIR}/celerybeat-schedule" \
         >> "${LOG_DIR}/beat.log" 2>&1 &
     local beat_pid=$!
-    echo "${beat_pid}" > "${PID_DIR}/beat.pid"
+    record_service_process beat "${beat_pid}"
     normalize_runtime_ownership
 
     sleep 1
     if ! kill -0 "${beat_pid}" 2>/dev/null; then
-        rm -f "${PID_DIR}/beat.pid"
+        process_helper stop --root "${PROJECT_ROOT}" --service beat --timeout 10 || true
         echo -e "${RED}❌ Celery Beat failed to start!${NC}"
         echo -e "${YELLOW}Check logs: cat logs/beat.log${NC}"
         return 1
@@ -778,6 +689,7 @@ start_worker_only() {
 
     local fixed_path="${VENV_DIR}/bin:/usr/bin:/bin"
     local worker_pid
+    cd "${PROJECT_ROOT}" || return 78
     "${env_bin}" -i \
         "PATH=${fixed_path}" \
         "HOME=/root" \
@@ -789,6 +701,7 @@ start_worker_only() {
         --loglevel=info \
         >> "${LOG_DIR}/worker.log" 2>&1 &
     worker_pid=$!
+    record_service_process worker-candidate "${worker_pid}"
     printf 'LAUNCH_ATTEMPTED pid=%s\n' "${worker_pid}"
 }
 
@@ -798,26 +711,13 @@ start_frontend() {
     
     cd "${FRONTEND_DIR}"
     
-    # Kill any existing frontend
-    if check_process "vite"; then
-        pkill -f "vite" || true
-        pkill -f "pnpm dev" || true
-        sleep 1
-    fi
-
-    if check_process "vite"; then
-        echo -e "${RED}❌ Port 3000 is still occupied after stopping existing frontend processes.${NC}"
-        echo -e "${YELLOW}Run: pgrep -af 'vite|pnpm dev'${NC}"
-        echo -e "${YELLOW}Then stop the stale process before retrying.${NC}"
-        return 1
-    fi
+    require_port_available 0.0.0.0 3000
     
     # Start frontend in background
     # LOGS DIRECTIVE: Write directly to root logs/ for history preservation.
-    cleanup_pid_file "${PID_DIR}/frontend.pid"
     setsid nohup pnpm dev >> "${LOG_DIR}/frontend.log" 2>&1 &
     local frontend_pid=$!
-    echo "${frontend_pid}" > "${PID_DIR}/frontend.pid"
+    record_service_process frontend "${frontend_pid}"
     normalize_runtime_ownership
     
     local frontend_ok=false
@@ -837,7 +737,7 @@ start_frontend() {
         echo -e "${GREEN}🆔 Frontend PID: ${frontend_pid}${NC}"
         echo -e "${GREEN}📝 Frontend logs: tail -f logs/frontend.log${NC}"
     else
-        rm -f "${PID_DIR}/frontend.pid"
+        process_helper stop --root "${PROJECT_ROOT}" --service frontend --timeout 10 || true
         echo -e "${RED}❌ Frontend failed to start!${NC}"
         echo -e "${YELLOW}Check logs: cat logs/frontend.log${NC}${NC}"
         return 1
@@ -882,9 +782,8 @@ check_health() {
     # Require the worker started by this topology to answer within a bounded
     # monotonic window; the helper fails closed on PID exit, no response,
     # broker/probe failure, or an unexpected node.
-    cleanup_pid_file "${PID_DIR}/worker.pid"
     local worker_pid=""
-    if [ -f "${PID_DIR}/worker.pid" ]; then
+    if process_helper status --root "${PROJECT_ROOT}" --service worker; then
         worker_pid="$(cat "${PID_DIR}/worker.pid")"
     fi
     local expected_worker_node="celery@$(hostname)"
@@ -906,9 +805,7 @@ check_health() {
     # Beat has no remote-control ping; its singleton PID is the bounded
     # startup liveness contract. Durable dispatch freshness remains visible
     # through /api/v1/ops/health.
-    cleanup_pid_file "${PID_DIR}/beat.pid"
-    if [ -f "${PID_DIR}/beat.pid" ] \
-        && kill -0 "$(cat "${PID_DIR}/beat.pid")" 2>/dev/null; then
+    if process_helper status --root "${PROJECT_ROOT}" --service beat; then
         echo -e "${GREEN}✅ Celery Beat is running${NC}"
     else
         echo -e "${RED}❌ Celery Beat is not running${NC}"
@@ -947,9 +844,9 @@ main() {
 
     # A start is either from a stopped topology or an explicit interactive
     # restart. Preserving any existing component risks a mixed-version stack.
-    if check_process "uvicorn app.main:app" || check_process "vite" || check_process "celery"; then
+    if owned_processes_running; then
         if [ -t 0 ]; then
-            read -p "Existing processes detected. Stop them and restart? (y/n): " -n 1 -r
+            read -p "Verified project-owned processes are running. Stop them and restart? (y/n): " -n 1 -r
             echo
             if [[ $REPLY =~ ^[Yy]$ ]]; then
                 stop_existing
@@ -958,9 +855,15 @@ main() {
                 return 1
             fi
         else
-            echo -e "${RED}Existing processes detected in non-interactive mode.${NC}"
+            echo -e "${RED}Verified project-owned processes are running in non-interactive mode.${NC}"
             echo -e "${YELLOW}Run ./stop_all.sh first; refusing a mixed-version start.${NC}"
             return 1
+        fi
+    else
+        local owned_status=$?
+        if [ "${owned_status}" -ne 1 ]; then
+            echo -e "${RED}Process identity could not be established; refusing startup.${NC}" >&2
+            return "${owned_status}"
         fi
     fi
     
@@ -996,10 +899,7 @@ main() {
     echo "  Qdrant:     tail -f logs/qdrant.log"
     echo ""
     echo "🛑 To stop all services:"
-    echo "  pkill -f 'uvicorn app.main:app'"
-    echo "  pkill -f 'celery -A app.celery_app worker'"
-    echo "  pkill -f 'vite'"
-    echo "  kill \$(cat run/qdrant.pid)   # stop local Qdrant"
+    echo "  ./stop_all.sh"
     echo ""
 }
 

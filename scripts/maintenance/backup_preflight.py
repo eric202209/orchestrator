@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Phase 39 A2: read-only backup/restore preflight for the GX10 deployment.
 
-Dry-run only. This script never copies data, never writes to production
-paths, never reads file contents, and has no execute mode. It reports:
+Dry-run only. This script never copies data or writes to production paths.
+It reads the production ``DATABASE_URL`` setting (or its explicit config.py
+default); database contents are read only by the optional read-only probe.
+It has no execute mode. It reports:
 
 - per-domain source paths, sizes (lstat only), and device ids;
 - whether a proposed backup destination is safe (not inside or containing
@@ -28,9 +30,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-CHECKOUT = Path("/root/.openclaw/workspace/vault/orchestrator")
+PRODUCTION_ROOT = Path(
+    "/root/.openclaw/workspace/vault/orchestrator-production"
+)
+PRODUCTION_RUNTIME_ROOT = Path(
+    "/root/.openclaw/workspace/vault/orchestrator-production-runtime"
+)
+DEVELOPMENT_ROOT = Path(__file__).resolve().parents[2]
 PROJECTS_ROOT = Path("/root/.openclaw/workspace/vault/projects")
-DEFAULT_DB_PATH = CHECKOUT / "orchestrator.db"
 
 # Capacity margin: raw bytes x this factor must fit at the destination
 # (uncompressed copy plus one previous run kept for rollback).
@@ -62,12 +69,142 @@ class Domain:
     exclude: tuple[Path, ...] = ()
 
 
-def default_domains() -> list[Domain]:
-    orch = Path("/root/.orchestrator")
+class ProductionTargetError(ValueError):
+    """The authoritative production root or database is ambiguous or absent."""
+
+
+def _canonical_production_root(root: Path, development_root: Path) -> Path:
+    try:
+        resolved = root.resolve(strict=True)
+        development = development_root.resolve(strict=True)
+    except OSError as exc:
+        raise ProductionTargetError(f"production root cannot be resolved: {root}") from exc
+    if not resolved.is_dir():
+        raise ProductionTargetError(f"production root is not a directory: {resolved}")
+    if resolved == development:
+        raise ProductionTargetError("production root resolves to the development checkout")
+    if not (resolved / "app" / "config.py").is_file():
+        raise ProductionTargetError(
+            f"production configuration is missing under {resolved}"
+        )
+    return resolved
+
+
+def _production_database_url(root: Path) -> str:
+    """Read DATABASE_URL from production .env or use the config.py root default."""
+    env_file = root / ".env"
+    if env_file.is_symlink() or not env_file.is_file():
+        raise ProductionTargetError(f"production .env is missing or unsafe: {env_file}")
+    values: list[str] = []
+    try:
+        lines = env_file.read_text().splitlines()
+    except OSError as exc:
+        raise ProductionTargetError("production .env cannot be read") from exc
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[7:].lstrip()
+        key, separator, value = stripped.partition("=")
+        if separator and key.strip() == "DATABASE_URL":
+            value = value.strip()
+            if value.startswith(("'", '"')):
+                quote = value[0]
+                if len(value) < 2 or value[-1] != quote:
+                    raise ProductionTargetError("production DATABASE_URL quoting is invalid")
+                value = value[1:-1]
+            values.append(value)
+    if len(values) > 1:
+        raise ProductionTargetError("production .env has multiple DATABASE_URL values")
+    if values:
+        if not values[0] or "${" in values[0] or "\n" in values[0]:
+            raise ProductionTargetError("production DATABASE_URL is unresolved")
+        return values[0]
+
+    # This is the explicit default in app/config.py: DATABASE_URL defaults to
+    # sqlite:///{BASE_DIR}/orchestrator.db, where BASE_DIR is this checkout.
+    try:
+        config_text = (root / "app" / "config.py").read_text()
+    except OSError as exc:
+        raise ProductionTargetError("production app/config.py cannot be read") from exc
+    if (
+        'DEFAULT_DATABASE_URL = f"sqlite:///{BASE_DIR}/orchestrator.db"' not in config_text
+        or "DATABASE_URL: str = DEFAULT_DATABASE_URL" not in config_text
+    ):
+        raise ProductionTargetError(
+            "production DATABASE_URL is absent and config.py has no verified checkout-local default"
+        )
+    return f"sqlite:///{root / 'orchestrator.db'}"
+
+
+def resolve_production_database(
+    production_root: Path = PRODUCTION_ROOT,
+    *,
+    development_root: Path = DEVELOPMENT_ROOT,
+) -> tuple[Path, str]:
+    root = _canonical_production_root(production_root, development_root)
+    url = _production_database_url(root)
+    if not url.startswith("sqlite:///"):
+        raise ProductionTargetError(
+            "A2 SQLite preflight cannot resolve the configured production database URL"
+        )
+    raw_path = url[len("sqlite:///") :].split("?", 1)[0]
+    if not raw_path or raw_path == ":memory:":
+        raise ProductionTargetError("production DATABASE_URL has no persistent file target")
+    db_path = Path(raw_path)
+    if not db_path.is_absolute():
+        db_path = root / db_path
+    db_path = db_path.resolve()
+    try:
+        db_path.relative_to(development_root.resolve(strict=True))
+    except ValueError:
+        pass
+    else:
+        raise ProductionTargetError(
+            "production DATABASE_URL resolves into the development checkout"
+        )
+    return db_path, url
+
+
+def _canonical_production_runtime(
+    runtime_root: Path, production_root: Path, development_root: Path
+) -> Path:
+    try:
+        runtime = runtime_root.resolve(strict=True)
+        development = development_root.resolve(strict=True)
+    except OSError as exc:
+        raise ProductionTargetError(
+            f"production runtime root cannot be resolved: {runtime_root}"
+        ) from exc
+    if not runtime.is_dir():
+        raise ProductionTargetError(f"production runtime root is not a directory: {runtime}")
+    if runtime == development or development in runtime.parents:
+        raise ProductionTargetError(
+            "production runtime root resolves into the development checkout"
+        )
+    if runtime == production_root or production_root in runtime.parents or runtime in production_root.parents:
+        raise ProductionTargetError("production source and runtime roots overlap")
+    return runtime
+
+
+def default_domains(
+    production_root: Path = PRODUCTION_ROOT,
+    production_runtime_root: Path = PRODUCTION_RUNTIME_ROOT,
+    *,
+    development_root: Path = DEVELOPMENT_ROOT,
+) -> list[Domain]:
+    root = _canonical_production_root(production_root, development_root)
+    db_path, _ = resolve_production_database(
+        root, development_root=development_root
+    )
+    runtime_root = _canonical_production_runtime(
+        production_runtime_root, root, development_root
+    )
     return [
         Domain(
             "sqlite",
-            (DEFAULT_DB_PATH,),
+            (db_path,),
             "sqlite3 backup API (dogfood_backup.backup_database)",
             "none",
         ),
@@ -79,7 +216,7 @@ def default_domains() -> list[Domain]:
         ),
         Domain(
             "qdrant",
-            (CHECKOUT / "qdrant" / "data",),
+            (root / "qdrant" / "data",),
             "Qdrant collection snapshot API (approval required)",
             "none",
         ),
@@ -100,8 +237,8 @@ def default_domains() -> list[Domain]:
         ),
         Domain(
             "orchestrator_runtime",
-            (orch / "runtime", orch / "worker-pin", orch / "rollback"),
-            "tar of /root/.orchestrator, preserving modes",
+            (runtime_root,),
+            "tar of the isolated production runtime, preserving modes",
             "no active task executions",
         ),
         Domain(
@@ -113,18 +250,18 @@ def default_domains() -> list[Domain]:
         Domain(
             "checkout_state",
             (
-                CHECKOUT / "docs",
-                CHECKOUT / "checkpoints",
-                CHECKOUT / "candidate-content",
-                CHECKOUT / "knowledge",
-                CHECKOUT / "run" / "celerybeat-schedule.db",
+                root / "docs",
+                root / "checkpoints",
+                root / "candidate-content",
+                root / "knowledge",
+                root / "run" / "celerybeat-schedule.db",
             ),
             "tar (docs/ is Git-ignored and otherwise unprotected)",
             "no active task executions",
         ),
         Domain(
             "deployment_config",
-            (CHECKOUT / ".env",),
+            (root / ".env",),
             "copy, encrypted; host compose/build context captured on host",
             "none",
             confidential=True,
@@ -133,8 +270,8 @@ def default_domains() -> list[Domain]:
             "runtime_components",
             (
                 Path("/usr/lib/node_modules/openclaw"),
-                CHECKOUT / "venv",
-                CHECKOUT / "qdrant" / "bin",
+                root / "venv",
+                root / "qdrant" / "bin",
             ),
             "host: docker image save of the image ID; tar of Git-ignored "
             "runtimes that cannot be rebuilt offline",
@@ -143,7 +280,7 @@ def default_domains() -> list[Domain]:
         ),
         Domain(
             "logs",
-            (Path("/var/log/openclaw"), CHECKOUT / "logs"),
+            (Path("/var/log/openclaw"), root / "logs"),
             "tar",
             "none",
             required=False,
@@ -338,18 +475,57 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--destination", type=Path)
     parser.add_argument("--restore-target", type=Path)
     parser.add_argument(
+        "--production-root",
+        type=Path,
+        default=PRODUCTION_ROOT,
+        help="authoritative production checkout (defaults to the isolated production source)",
+    )
+    parser.add_argument(
+        "--production-runtime-root",
+        type=Path,
+        default=PRODUCTION_RUNTIME_ROOT,
+        help="isolated production runtime backup root",
+    )
+    parser.add_argument(
         "--probe",
         action="store_true",
         help="read-only Redis and SQLite quiescence probe",
     )
     args = parser.parse_args(argv)
 
-    plan = build_plan(default_domains(), args.destination, args.restore_target)
+    try:
+        domains = default_domains(
+            args.production_root,
+            args.production_runtime_root,
+        )
+        database_path, _ = resolve_production_database(args.production_root)
+    except ProductionTargetError as exc:
+        print(json.dumps({"mode": "blocked", "production_target_error": str(exc)}, indent=2))
+        return 2
+
+    plan = build_plan(domains, args.destination, args.restore_target)
+    plan["production_root"] = str(args.production_root.resolve())
+    plan["production_database_path"] = str(database_path)
     if args.probe:
-        plan["quiescence"] = {
-            "redis": probe_redis(),
-            "sqlite": probe_sqlite(DEFAULT_DB_PATH),
-        }
+        db_path = next(
+            path
+            for domain in domains
+            if domain.name == "sqlite"
+            for path in domain.paths
+        )
+        if db_path.is_file():
+            plan["quiescence"] = {
+                "redis": probe_redis(),
+                "sqlite": probe_sqlite(db_path),
+            }
+        else:
+            plan["quiescence"] = {
+                "production_database": {
+                    "path": str(db_path),
+                    "idle": False,
+                    "error": "configured production database target is missing",
+                }
+            }
 
     print(json.dumps(plan, indent=2))
     blocked = bool(plan["missing_required_domains"])

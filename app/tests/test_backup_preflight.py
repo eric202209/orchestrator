@@ -32,6 +32,21 @@ def _domains(tmp_path: Path) -> list[Domain]:
     ]
 
 
+def _production_root(tmp_path: Path, env_text: str = "") -> tuple[Path, Path]:
+    root = tmp_path / "orchestrator-production"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "config.py").write_text(
+        'DEFAULT_DATABASE_URL = f"sqlite:///{BASE_DIR}/orchestrator.db"\n'
+        "DATABASE_URL: str = DEFAULT_DATABASE_URL\n"
+    )
+    (root / ".env").write_text(env_text)
+    (root / "orchestrator.db").write_bytes(b"production-fixture")
+    (root / "qdrant" / "data").mkdir(parents=True)
+    runtime = tmp_path / "orchestrator-production-runtime"
+    runtime.mkdir()
+    return root, runtime
+
+
 def test_plan_sizes_and_never_prints_secret_contents(tmp_path):
     plan = build_plan(_domains(tmp_path), None, None)
     by_name = {d["name"]: d for d in plan["domains"]}
@@ -162,3 +177,104 @@ def test_excluded_subtree_is_not_measured_and_may_hold_destination(tmp_path):
     assert plan["destination"]["accepted"] is True
     plan = build_plan(domains, root / "inside", None)
     assert plan["destination"]["accepted"] is False
+
+
+def test_a2_defaults_select_explicit_production_root_and_database(tmp_path):
+    production, runtime = _production_root(tmp_path)
+
+    domains = bp.default_domains(production, runtime)
+    by_name = {domain.name: domain for domain in domains}
+
+    assert by_name["sqlite"].paths == (production / "orchestrator.db",)
+    assert by_name["qdrant"].paths == (production / "qdrant" / "data",)
+    assert by_name["deployment_config"].paths == (production / ".env",)
+    assert by_name["orchestrator_runtime"].paths == (runtime,)
+    assert all(bp.DEVELOPMENT_ROOT not in path.parents for domain in domains for path in domain.paths)
+
+
+def test_a2_reads_database_path_from_production_configuration(tmp_path):
+    production, _ = _production_root(tmp_path, "DATABASE_URL=sqlite:///state/primary.db\n")
+
+    db_path, _ = bp.resolve_production_database(production)
+
+    assert db_path == production / "state" / "primary.db"
+
+
+def test_a2_production_default_is_root_local_and_never_dev_sqlite(tmp_path):
+    production, _ = _production_root(tmp_path)
+    db_path, _ = bp.resolve_production_database(production)
+
+    assert db_path == production / "orchestrator.db"
+    assert db_path != bp.DEVELOPMENT_ROOT / "orchestrator.db"
+
+
+def test_a2_rejects_development_checkout_as_production(tmp_path):
+    with pytest.raises(bp.ProductionTargetError, match="development checkout"):
+        bp.default_domains(bp.DEVELOPMENT_ROOT, tmp_path / "runtime")
+
+
+def test_a2_rejects_runtime_target_inside_development_checkout(tmp_path):
+    production, _ = _production_root(tmp_path)
+
+    with pytest.raises(bp.ProductionTargetError, match="runtime root resolves into"):
+        bp.default_domains(production, bp.DEVELOPMENT_ROOT)
+
+
+def test_a2_rejects_missing_runtime_target(tmp_path):
+    production, _ = _production_root(tmp_path)
+
+    with pytest.raises(bp.ProductionTargetError, match="runtime root cannot be resolved"):
+        bp.default_domains(production, tmp_path / "missing-runtime")
+
+
+def test_a2_rejects_database_configured_inside_development_checkout(tmp_path):
+    production, _ = _production_root(
+        tmp_path,
+        f"DATABASE_URL=sqlite:///{bp.DEVELOPMENT_ROOT / 'orchestrator.db'}\n",
+    )
+
+    with pytest.raises(bp.ProductionTargetError, match="development checkout"):
+        bp.resolve_production_database(production)
+
+
+def test_a2_rejects_ambiguous_database_configuration(tmp_path):
+    production, _ = _production_root(
+        tmp_path,
+        "DATABASE_URL=sqlite:///one.db\nDATABASE_URL=sqlite:///two.db\n",
+    )
+
+    with pytest.raises(bp.ProductionTargetError, match="multiple DATABASE_URL"):
+        bp.resolve_production_database(production)
+
+
+def test_a2_rejects_missing_production_environment_file(tmp_path):
+    production, _ = _production_root(tmp_path)
+    (production / ".env").unlink()
+
+    with pytest.raises(bp.ProductionTargetError, match="production .env is missing"):
+        bp.resolve_production_database(production)
+
+
+def test_a2_rejects_missing_production_root_without_fallback(tmp_path, capsys):
+    missing = tmp_path / "missing-production"
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+
+    assert bp.main(
+        ["--production-root", str(missing), "--production-runtime-root", str(runtime)]
+    ) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result["mode"] == "blocked"
+    assert "production root cannot be resolved" in result["production_target_error"]
+    assert str(bp.DEVELOPMENT_ROOT / "orchestrator.db") not in json.dumps(result)
+
+
+def test_a2_reports_missing_configured_database_as_required_target(tmp_path):
+    production, runtime = _production_root(
+        tmp_path, "DATABASE_URL=sqlite:///state/missing.db\n"
+    )
+    domains = bp.default_domains(production, runtime)
+
+    plan = build_plan(domains, None, None)
+
+    assert "sqlite" in plan["missing_required_domains"]
