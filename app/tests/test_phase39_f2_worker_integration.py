@@ -124,7 +124,9 @@ def _apply(stack, kwargs, **request):
     result = worker.execute_orchestration_task.apply(
         kwargs=kwargs, throw=True, **request
     )
-    return result.get()["one_shot"]
+    # Eager result: already computed. Other suites boot a Celery worker
+    # in-process, which leaves the global "inside a task" join guard set.
+    return result.get(disable_sync_subtasks=False)["one_shot"]
 
 
 def _client(supervisor):
