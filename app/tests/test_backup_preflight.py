@@ -310,9 +310,7 @@ def test_measure_permission_error_is_reported_and_blocks_required_domain(
         return original_lstat(path)
 
     monkeypatch.setattr(Path, "lstat", deny_path)
-    plan = build_plan(
-        [Domain("locked", (inaccessible,), "tar", "none")], None, None
-    )
+    plan = build_plan([Domain("locked", (inaccessible,), "tar", "none")], None, None)
 
     assert plan["unmeasurable_required_domains"] == ["locked"]
     assert plan["missing_required_domains"] == []
@@ -344,8 +342,16 @@ def test_a2_cli_exits_blocked_when_required_source_is_unreadable(
 
     monkeypatch.setattr(Path, "lstat", deny_database)
 
-    assert bp.main(
-        ["--production-root", str(production), "--production-runtime-root", str(runtime)]
-    ) == 2
+    assert (
+        bp.main(
+            [
+                "--production-root",
+                str(production),
+                "--production-runtime-root",
+                str(runtime),
+            ]
+        )
+        == 2
+    )
     report = json.loads(capsys.readouterr().out)
     assert report["unmeasurable_required_domains"] == ["sqlite"]
