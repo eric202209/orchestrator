@@ -47,9 +47,7 @@ def _fake_process(
     (proc / "stat").write_text(
         f"{PID} (fake process ) name) "
         + " ".join(
-            ["S", "1", str(PID), "0", "0"]
-            + ["0"] * 14
-            + [str(start_ticks), "0"]
+            ["S", "1", str(PID), "0", "0"] + ["0"] * 14 + [str(start_ticks), "0"]
         )
     )
     (proc / "cmdline").write_bytes(b"\0".join(os.fsencode(arg) for arg in argv) + b"\0")
@@ -199,12 +197,20 @@ def test_stale_legacy_pid_file_cannot_signal_unrelated_process(tmp_path):
     (root / "run" / "backend.pid").write_text(f"{PID}\n")
     pidfd_calls = []
 
-    with pytest.raises(pm.ProcessIdentityError, match="legacy PID file has no identity"):
+    with pytest.raises(
+        pm.ProcessIdentityError, match="legacy PID file has no identity"
+    ):
         pm.stop_all(root)
-    with pytest.raises(pm.ProcessIdentityError, match="legacy PID file has no identity"):
+    with pytest.raises(
+        pm.ProcessIdentityError, match="legacy PID file has no identity"
+    ):
         pm.process_status(root, "backend")
-    with pytest.raises(pm.ProcessIdentityError, match="legacy PID file has no identity"):
-        pm.stop_process(root, "backend", pidfd_open=lambda *args: pidfd_calls.append(args))
+    with pytest.raises(
+        pm.ProcessIdentityError, match="legacy PID file has no identity"
+    ):
+        pm.stop_process(
+            root, "backend", pidfd_open=lambda *args: pidfd_calls.append(args)
+        )
 
     assert pidfd_calls == []
 
@@ -230,7 +236,9 @@ def test_port_conflict_is_reported_without_signalling(monkeypatch):
     monkeypatch.setattr(
         pm.socket,
         "getaddrinfo",
-        lambda *args, **kwargs: [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 8080))],
+        lambda *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 8080))
+        ],
     )
     monkeypatch.setattr(pm.socket, "socket", ConflictingSocket)
 
@@ -248,14 +256,17 @@ def test_stop_uses_pidfd_and_only_sigterm_after_full_validation(tmp_path, monkey
     signals = []
     monkeypatch.setattr(pm.os, "close", closed.append)
 
-    assert pm.stop_process(
-        root,
-        "backend",
-        proc_root=proc_root,
-        pidfd_open=lambda pid, flags: 404,
-        signal_sender=signals.append,
-        waiter=lambda pidfd, timeout: True,
-    ) is True
+    assert (
+        pm.stop_process(
+            root,
+            "backend",
+            proc_root=proc_root,
+            pidfd_open=lambda pid, flags: 404,
+            signal_sender=signals.append,
+            waiter=lambda pidfd, timeout: True,
+        )
+        is True
+    )
 
     assert signals == [404]
     assert closed == [404]

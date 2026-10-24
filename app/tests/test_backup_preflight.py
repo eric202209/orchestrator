@@ -189,11 +189,17 @@ def test_a2_defaults_select_explicit_production_root_and_database(tmp_path):
     assert by_name["qdrant"].paths == (production / "qdrant" / "data",)
     assert by_name["deployment_config"].paths == (production / ".env",)
     assert by_name["orchestrator_runtime"].paths == (runtime,)
-    assert all(bp.DEVELOPMENT_ROOT not in path.parents for domain in domains for path in domain.paths)
+    assert all(
+        bp.DEVELOPMENT_ROOT not in path.parents
+        for domain in domains
+        for path in domain.paths
+    )
 
 
 def test_a2_reads_database_path_from_production_configuration(tmp_path):
-    production, _ = _production_root(tmp_path, "DATABASE_URL=sqlite:///state/primary.db\n")
+    production, _ = _production_root(
+        tmp_path, "DATABASE_URL=sqlite:///state/primary.db\n"
+    )
 
     db_path, _ = bp.resolve_production_database(production)
 
@@ -223,7 +229,9 @@ def test_a2_rejects_runtime_target_inside_development_checkout(tmp_path):
 def test_a2_rejects_missing_runtime_target(tmp_path):
     production, _ = _production_root(tmp_path)
 
-    with pytest.raises(bp.ProductionTargetError, match="runtime root cannot be resolved"):
+    with pytest.raises(
+        bp.ProductionTargetError, match="runtime root cannot be resolved"
+    ):
         bp.default_domains(production, tmp_path / "missing-runtime")
 
 
@@ -260,9 +268,17 @@ def test_a2_rejects_missing_production_root_without_fallback(tmp_path, capsys):
     runtime = tmp_path / "runtime"
     runtime.mkdir()
 
-    assert bp.main(
-        ["--production-root", str(missing), "--production-runtime-root", str(runtime)]
-    ) == 2
+    assert (
+        bp.main(
+            [
+                "--production-root",
+                str(missing),
+                "--production-runtime-root",
+                str(runtime),
+            ]
+        )
+        == 2
+    )
     result = json.loads(capsys.readouterr().out)
     assert result["mode"] == "blocked"
     assert "production root cannot be resolved" in result["production_target_error"]
