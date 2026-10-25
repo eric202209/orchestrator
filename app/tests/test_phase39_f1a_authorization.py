@@ -5,10 +5,13 @@ from __future__ import annotations
 import ast
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+import hashlib
 import importlib
+import io
 from pathlib import Path
 import re
 import sqlite3
+import tarfile
 import uuid
 
 import pytest
@@ -29,6 +32,7 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
+from app.supervisor.oci_executor import SUPPORTED_SCOPE_SHA256
 from app.services.execution.one_shot_authorization import (
     IDENTITY_SCHEMA_VERSION,
     POLICY_VERSION,
@@ -49,6 +53,15 @@ from app.services.execution.one_shot_authorization import (
     issue_one_shot_authorization,
     revoke_authorization,
 )
+
+CANDIDATE_FIXTURE_BYTES = b"print('candidate executed')\n"
+_SNAPSHOT_BUFFER = io.BytesIO()
+with tarfile.open(fileobj=_SNAPSHOT_BUFFER, mode="w") as _snapshot_archive:
+    _snapshot_data = b"disposable source snapshot\n"
+    _snapshot_info = tarfile.TarInfo("README.md")
+    _snapshot_info.size = len(_snapshot_data)
+    _snapshot_archive.addfile(_snapshot_info, io.BytesIO(_snapshot_data))
+SOURCE_SNAPSHOT_FIXTURE_BYTES = _SNAPSHOT_BUFFER.getvalue()
 
 
 MIGRATION_057 = next(
@@ -123,14 +136,16 @@ def _identity(project, session, task, execution, **overrides):
         "task_id": task.id,
         "task_execution_id": execution.id,
         "source_revision_identity": "git:9d5a1c0e",
-        "source_snapshot_digest": "a" * 64,
+        "source_snapshot_digest": hashlib.sha256(
+            SOURCE_SNAPSHOT_FIXTURE_BYTES
+        ).hexdigest(),
         "candidate_uuid": str(uuid.uuid4()),
-        "candidate_initial_digest": "b" * 64,
+        "candidate_initial_digest": hashlib.sha256(CANDIDATE_FIXTURE_BYTES).hexdigest(),
         "execution_profile_id": SUPPORTED_PROFILE_ID,
         "execution_profile_version": SUPPORTED_PROFILE_VERSION,
         "operation_scope_id": "restricted-python-workspace",
         "operation_scope_version": "1",
-        "operation_scope_digest": "c" * 64,
+        "operation_scope_digest": SUPPORTED_SCOPE_SHA256,
         "operator_approval_id": f"approval:{uuid.uuid4()}",
         "operator_identity": "operator@example.test",
         "operator_approval_decision": "APPROVED",
@@ -559,7 +574,7 @@ def test_orm_and_sqlite_guards_protect_identity_and_launch_intent(
                 )
         assert (
             db.query(OneShotExecutionAuthorization).one().candidate_initial_digest
-            == "b" * 64
+            == hashlib.sha256(CANDIDATE_FIXTURE_BYTES).hexdigest()
         )
     finally:
         db.close()

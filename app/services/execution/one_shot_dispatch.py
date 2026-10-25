@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -232,9 +232,13 @@ class SupervisorAdmission:
 class AttemptStatus(str, Enum):
     NOT_FOUND = "NOT_FOUND"
     ACCEPTED = "ACCEPTED"
+    CREATING = "CREATING"
     RUNNING = "RUNNING"
     EXITED = "EXITED"
+    FAILED = "FAILED"
+    TIMED_OUT = "TIMED_OUT"
     CANCELLED = "CANCELLED"
+    INTERRUPTED = "INTERRUPTED"
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"
 
@@ -250,6 +254,9 @@ class SupervisorReceipt:
     supervisor_attempt_id: str | None = None
     # True when StartAttempt returned an attempt that already existed.
     deduplicated: bool = False
+    exit_code: int | None = None
+    status_reason: str | None = None
+    execution_result: dict[str, Any] | None = None
 
 
 class SupervisorTransportError(RuntimeError):
@@ -261,7 +268,11 @@ class OneShotSupervisor(Protocol):
 
     def get_attempt_status(self, attempt_idempotency_key: str) -> SupervisorReceipt: ...
 
+    def wait_attempt(self, attempt_idempotency_key: str) -> SupervisorReceipt: ...
+
     def start_attempt(self, request: ExecutorStartRequest) -> SupervisorReceipt: ...
+
+    def cancel_attempt(self, attempt_idempotency_key: str) -> SupervisorReceipt: ...
 
 
 class UnavailableSupervisor:
@@ -276,7 +287,13 @@ class UnavailableSupervisor:
     def get_attempt_status(self, attempt_idempotency_key: str) -> SupervisorReceipt:
         raise SupervisorTransportError("trusted Supervisor is not deployed")
 
+    def wait_attempt(self, attempt_idempotency_key: str) -> SupervisorReceipt:
+        raise SupervisorTransportError("trusted Supervisor is not deployed")
+
     def start_attempt(self, request: ExecutorStartRequest) -> SupervisorReceipt:
+        raise SupervisorTransportError("trusted Supervisor is not deployed")
+
+    def cancel_attempt(self, attempt_idempotency_key: str) -> SupervisorReceipt:
         raise SupervisorTransportError("trusted Supervisor is not deployed")
 
 
@@ -290,6 +307,7 @@ class OneShotDispatchResult:
     start_submitted: bool = False
     supervisor_attempt_id: str | None = None
     attempt_status: AttemptStatus | None = None
+    execution_result: dict[str, Any] | None = None
     reasons: tuple[str, ...] = ()
 
 
@@ -513,6 +531,7 @@ def dispatch_one_shot_intent(
             start_submitted=started,
             supervisor_attempt_id=receipt.supervisor_attempt_id if receipt else None,
             attempt_status=receipt.status if receipt else None,
+            execution_result=receipt.execution_result if receipt else None,
             reasons=tuple(reasons),
         )
 
@@ -530,6 +549,17 @@ def dispatch_one_shot_intent(
         receipt = supervisor.get_attempt_status(key)
     except SupervisorTransportError as exc:
         return result(DispatchOutcome.HOLD_UNKNOWN, (str(exc),), contacted=True)
+    if receipt.status in {
+        AttemptStatus.ACCEPTED,
+        AttemptStatus.CREATING,
+        AttemptStatus.RUNNING,
+    }:
+        wait_attempt = getattr(supervisor, "wait_attempt", None)
+        if callable(wait_attempt):
+            try:
+                receipt = wait_attempt(key)
+            except SupervisorTransportError as exc:
+                return result(DispatchOutcome.HOLD_UNKNOWN, (str(exc),), contacted=True)
     if receipt.status is not AttemptStatus.NOT_FOUND or (
         receipt.attempt_idempotency_key != key
     ):

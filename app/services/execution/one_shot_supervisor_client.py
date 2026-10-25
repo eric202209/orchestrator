@@ -37,8 +37,13 @@ PROTOCOL = "one-shot-supervisor/v1"
 MAX_RESPONSE_BYTES = 64 * 1024
 _LEDGER_STATUSES = {
     "ACCEPTED": AttemptStatus.ACCEPTED,
+    "CREATING": AttemptStatus.CREATING,
     "RUNNING": AttemptStatus.RUNNING,
     "EXITED": AttemptStatus.EXITED,
+    "FAILED": AttemptStatus.FAILED,
+    "TIMED_OUT": AttemptStatus.TIMED_OUT,
+    "CANCELLED": AttemptStatus.CANCELLED,
+    "INTERRUPTED": AttemptStatus.INTERRUPTED,
     "UNKNOWN": AttemptStatus.UNKNOWN,
 }
 
@@ -61,7 +66,13 @@ class MisconfiguredSupervisor:
     def get_attempt_status(self, attempt_idempotency_key: str) -> SupervisorReceipt:
         raise SupervisorTransportError(self.reason)
 
+    def wait_attempt(self, attempt_idempotency_key: str) -> SupervisorReceipt:
+        raise SupervisorTransportError(self.reason)
+
     def start_attempt(self, request: ExecutorStartRequest) -> SupervisorReceipt:
+        raise SupervisorTransportError(self.reason)
+
+    def cancel_attempt(self, attempt_idempotency_key: str) -> SupervisorReceipt:
         raise SupervisorTransportError(self.reason)
 
 
@@ -86,7 +97,7 @@ class UnixSocketSupervisor:
         socket_path: str | os.PathLike,
         *,
         supervisor_uid: int,
-        timeout_seconds: float = 5.0,
+        timeout_seconds: float = 430.0,
     ):
         self.socket_path = Path(socket_path)
         self.supervisor_uid = int(supervisor_uid)
@@ -151,6 +162,13 @@ class UnixSocketSupervisor:
             authorization_identity_sha256=data.get("authorization_identity_sha256"),
             supervisor_attempt_id=data.get("supervisor_attempt_id"),
             deduplicated=data.get("deduplicated") is True,
+            exit_code=data.get("exit_code"),
+            status_reason=data.get("status_reason"),
+            execution_result=(
+                data.get("execution_result")
+                if isinstance(data.get("execution_result"), dict)
+                else None
+            ),
         )
 
     def admission(self) -> SupervisorAdmission:
@@ -168,13 +186,20 @@ class UnixSocketSupervisor:
         return SupervisorAdmission(
             SupervisorAdmissionStatus.UNAVAILABLE,
             False,
-            (str(response.get("error") or "supervisor_ledger_unavailable"),),
+            tuple(response.get("reasons") or ())
+            or (str(response.get("error") or "supervisor_ledger_unavailable"),),
         )
 
     def get_attempt_status(self, attempt_idempotency_key: str) -> SupervisorReceipt:
         response = self._call(
             {"op": "get_attempt_status", "key": attempt_idempotency_key}
         )
+        if "error" in response:
+            raise SupervisorTransportError(str(response["error"]))
+        return self._receipt(attempt_idempotency_key, response.get("receipt"))
+
+    def wait_attempt(self, attempt_idempotency_key: str) -> SupervisorReceipt:
+        response = self._call({"op": "wait_attempt", "key": attempt_idempotency_key})
         if "error" in response:
             raise SupervisorTransportError(str(response["error"]))
         return self._receipt(attempt_idempotency_key, response.get("receipt"))
@@ -196,3 +221,14 @@ class UnixSocketSupervisor:
                 request.authorization_identity_sha256,
             )
         raise SupervisorTransportError(str(error))
+
+    def cancel_attempt(self, attempt_idempotency_key: str) -> SupervisorReceipt:
+        response = self._call({"op": "cancel_attempt", "key": attempt_idempotency_key})
+        if response.get("error") == "attempt_not_found":
+            raise SupervisorTransportError("attempt_not_found")
+        if "error" in response:
+            raise SupervisorTransportError(str(response["error"]))
+        return self._receipt(
+            attempt_idempotency_key,
+            response.get("receipt"),
+        )

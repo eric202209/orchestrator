@@ -8,14 +8,14 @@ Run: ``python -m app.supervisor.server --socket PATH --state-dir DIR
   writable). There is no network listener.
 - Authentication: the kernel-reported peer UID (``SO_PEERCRED``) must be in
   the explicit ``--allowed-uid`` set; anything else is refused unread.
-- Operations: ``admission``, ``get_attempt_status``, ``start_attempt``. A
-  start request must match the fixed F1c-1 ``executor-start-attempt/v1``
-  shape exactly; it cannot carry a command, image, mount, or environment.
-- Execution: the only operation is the built-in fixed no-op. No real
-  executor exists in F2.
-- Durability: ``AttemptLedger`` in the 0700 state directory; one Supervisor
-  per state directory (exclusive lock). On start, RUNNING attempts become
-  UNKNOWN (never re-run) and ACCEPTED attempts, which never began, run once.
+- Operations: ``admission``, ``get_attempt_status``, ``start_attempt``, and
+  ``cancel_attempt``. A start request must match the fixed F1c-1 shape exactly;
+  it cannot carry a command, image, mount, or environment.
+- Execution: the profile resolves only digest-bound candidate/source blobs and
+  runs the fixed Python entry point in a Podman OCI container.
+- Durability: ``AttemptLedger`` and the runtime's deterministic container name
+  allow startup to reconcile accepted, creating, running, and terminal work.
+  Uncertain execution is never replayed.
 """
 
 from __future__ import annotations
@@ -36,7 +36,8 @@ import threading
 import time
 import uuid
 
-from app.supervisor.ledger import AttemptLedger, LedgerError
+from app.supervisor.ledger import AttemptLedger, LedgerError, TERMINAL_STATUSES
+from app.supervisor.oci_executor import OCIExecutionError, OCIExecutor
 
 PROTOCOL = "one-shot-supervisor/v1"
 START_REQUEST_SCHEMA_VERSION = "executor-start-attempt/v1"
@@ -111,8 +112,8 @@ def validate_start_request(request) -> dict:
     return request
 
 
-def _receipt(record, *, deduplicated=False) -> dict:
-    return {
+def _receipt(record, *, deduplicated=False, executor=None) -> dict:
+    result = {
         "attempt_idempotency_key": record.attempt_idempotency_key,
         "status": record.status,
         "request_payload_sha256": record.request_payload_sha256,
@@ -122,33 +123,53 @@ def _receipt(record, *, deduplicated=False) -> dict:
         "exit_code": record.exit_code,
         "status_reason": record.status_reason,
     }
+    if executor is not None:
+        result["execution_result"] = executor.result_document(record)
+    return result
 
 
 class Supervisor:
-    def __init__(self, ledger: AttemptLedger, allowed_uids, noop_seconds=0.0):
+    def __init__(self, ledger: AttemptLedger, executor: OCIExecutor, allowed_uids):
         self.ledger = ledger
+        self.executor = executor
         self.allowed_uids = frozenset(allowed_uids)
-        self.noop_seconds = float(noop_seconds)
-
-    # Fixed operation ------------------------------------------------------
+        self._threads: dict[str, threading.Thread] = {}
+        self._threads_lock = threading.Lock()
 
     def run_attempt(self, key: str) -> None:
-        # RUNNING is durable before the operation begins: a crash after this
-        # point is reported UNKNOWN on restart and never re-run.
-        if not self.ledger.transition(key, "ACCEPTED", "RUNNING"):
-            return
-        time.sleep(self.noop_seconds)
-        self.ledger.transition(key, "RUNNING", "EXITED", exit_code=0)
+        try:
+            self.executor.execute_or_reconcile(key)
+        except Exception:
+            record = self.ledger.get(key)
+            if record is not None and record.status not in TERMINAL_STATUSES:
+                self.executor.fail_unexpected(key)
+        finally:
+            with self._threads_lock:
+                self._threads.pop(key, None)
 
     def launch(self, key: str) -> None:
-        threading.Thread(target=self.run_attempt, args=(key,), daemon=True).start()
+        with self._threads_lock:
+            thread = self._threads.get(key)
+            if thread is not None and thread.is_alive():
+                return
+            thread = threading.Thread(target=self.run_attempt, args=(key,), daemon=True)
+            self._threads[key] = thread
+            thread.start()
+
+    def wait_for_terminal(self, key: str, timeout: float) -> None:
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            record = self.ledger.get(key)
+            if record is None or (
+                record.status in TERMINAL_STATUSES
+                and record.cleanup_status != "NOT_STARTED"
+            ):
+                return
+            time.sleep(0.05)
 
     def recover(self) -> None:
-        for key in self.ledger.keys_with_status("RUNNING"):
-            self.ledger.transition(
-                key, "RUNNING", "UNKNOWN", reason="supervisor_restarted_while_running"
-            )
-        for key in self.ledger.keys_with_status("ACCEPTED"):
+        self.executor.reconcile_startup()
+        for key in self.executor.recoverable_keys():
             self.launch(key)
 
     # Requests -------------------------------------------------------------
@@ -162,6 +183,13 @@ class Supervisor:
                 self.ledger.check()
             except LedgerError:
                 return {"status": "UNAVAILABLE", "durable_deduplication": False}
+            available, reasons = self.executor.admission()
+            if not available:
+                return {
+                    "status": "UNAVAILABLE",
+                    "durable_deduplication": False,
+                    "reasons": list(reasons),
+                }
             return {"status": "TRUSTED", "durable_deduplication": True}
         if op == "get_attempt_status" and set(message) == {"protocol", "op", "key"}:
             if not _digest(message["key"]):
@@ -169,20 +197,57 @@ class Supervisor:
             record = self.ledger.get(message["key"])
             if record is None:
                 return {"receipt": None}
-            return {"receipt": _receipt(record)}
+            return {"receipt": _receipt(record, executor=self.executor)}
+        if op == "wait_attempt" and set(message) == {"protocol", "op", "key"}:
+            key = message["key"]
+            if not _digest(key):
+                raise InvalidRequest("invalid_attempt_idempotency_key")
+            self.wait_for_terminal(key, self.executor.limits.timeout_seconds + 60)
+            record = self.ledger.get(key)
+            if record is None:
+                return {"receipt": None}
+            return {"receipt": _receipt(record, executor=self.executor)}
         if op == "start_attempt" and set(message) == {"protocol", "op", "request"}:
             request = validate_start_request(message["request"])
-            registration = self.ledger.register(request)
+            try:
+                self.executor.validate_request(request)
+            except OCIExecutionError as exc:
+                raise InvalidRequest(exc.reason) from exc
+            registration = self.ledger.register(
+                request,
+                execution_timeout_seconds=self.executor.limits.timeout_seconds,
+                resource_limits=self.executor.resource_limits,
+            )
             if registration.conflict:
                 return {
                     "error": "attempt_conflict",
-                    "receipt": _receipt(registration.record),
+                    "receipt": _receipt(registration.record, executor=self.executor),
                 }
-            if registration.created:
-                self.launch(request["attempt_idempotency_key"])
+            self.launch(request["attempt_idempotency_key"])
+            self.wait_for_terminal(
+                request["attempt_idempotency_key"],
+                registration.record.execution_timeout_seconds + 60,
+            )
+            record = self.ledger.get(request["attempt_idempotency_key"])
             return {
                 "receipt": _receipt(
-                    registration.record, deduplicated=not registration.created
+                    record or registration.record,
+                    deduplicated=not registration.created,
+                    executor=self.executor,
+                )
+            }
+        if op == "cancel_attempt" and set(message) == {"protocol", "op", "key"}:
+            key = message["key"]
+            if not _digest(key):
+                raise InvalidRequest("invalid_attempt_idempotency_key")
+            record = self.executor.cancel(key)
+            if record is None:
+                return {"error": "attempt_not_found", "receipt": None}
+            self.launch(key)
+            self.wait_for_terminal(key, 60.0)
+            return {
+                "receipt": _receipt(
+                    self.ledger.get(key) or record, executor=self.executor
                 )
             }
         raise InvalidRequest("operation_unsupported")
@@ -260,7 +325,13 @@ def main(argv=None) -> int:
     parser.add_argument("--socket", required=True, type=Path)
     parser.add_argument("--state-dir", required=True, type=Path)
     parser.add_argument("--allowed-uid", required=True, type=int, action="append")
-    parser.add_argument("--noop-seconds", type=float, default=0.0)
+    parser.add_argument("--content-store-dir", required=True, type=Path)
+    parser.add_argument("--image", required=True)
+    parser.add_argument("--runtime", default="podman")
+    parser.add_argument("--timeout-seconds", type=int, default=120)
+    parser.add_argument("--cpu-count", type=float, default=1.0)
+    parser.add_argument("--memory-bytes", type=int, default=536870912)
+    parser.add_argument("--pids-limit", type=int, default=64)
     args = parser.parse_args(argv)
 
     _private_directory(args.state_dir, owner_only=True)
@@ -273,7 +344,18 @@ def main(argv=None) -> int:
 
     ledger = AttemptLedger(args.state_dir / "attempts.sqlite3")
     ledger.initialize()
-    supervisor = Supervisor(ledger, args.allowed_uid, args.noop_seconds)
+    executor = OCIExecutor(
+        ledger=ledger,
+        state_dir=args.state_dir,
+        content_store_dir=args.content_store_dir,
+        image=args.image,
+        runtime=args.runtime,
+        timeout_seconds=args.timeout_seconds,
+        cpu_count=args.cpu_count,
+        memory_bytes=args.memory_bytes,
+        pids_limit=args.pids_limit,
+    )
+    supervisor = Supervisor(ledger, executor, args.allowed_uid)
 
     if args.socket.exists() or args.socket.is_symlink():
         if not stat.S_ISSOCK(args.socket.lstat().st_mode):

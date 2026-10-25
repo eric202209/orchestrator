@@ -1,11 +1,11 @@
-"""Canonical Worker -> F1b claim -> F1c dispatch -> real F2 Supervisor.
+"""Canonical Worker -> F1b claim -> F1c dispatch -> real Supervisor process.
 
 Deliveries go through ``execute_orchestration_task`` (Celery ``apply``) and
 the Worker's real configuration-based Supervisor selection, against a real
 ``python -m app.supervisor.server`` child on a disposable socket and ledger.
 The Worker identity attestation is an explicit test-only fixture; no
-production identity evidence is read or created. The Supervisor runs only
-its fixed no-op operation; no executor exists.
+production identity evidence is read or created. The child uses the F2 test
+suite's fake Podman CLI, so this suite is not evidence of OCI isolation.
 """
 
 from __future__ import annotations
@@ -147,6 +147,14 @@ def test_worker_delivery_reaches_the_real_supervisor_once(stack):
     assert result["claim_outcome"] == "CLAIMED_SUCCESSFULLY"
     assert result["dispatch_outcome"] == "DISPATCHED"
     assert result["start_submitted"] is True
+    execution_result = result["execution_result"]
+    assert execution_result["terminal_status"] == "EXITED"
+    assert execution_result["exit_code"] == 0
+    assert execution_result["started_at"] is not None
+    assert execution_result["completed_at"] is not None
+    assert execution_result["stdout"]["reference"]
+    assert execution_result["stderr"]["reference"]
+    assert execution_result["cleanup"]["status"] == "SUCCEEDED"
     assert _auth_state(path, identity) == "CLAIMED"
     assert len(_receipts(path, identity)) == 1
     (row,) = supervisor.rows()

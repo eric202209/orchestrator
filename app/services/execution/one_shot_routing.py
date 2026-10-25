@@ -109,6 +109,7 @@ class OneShotRoutingResult:
     claim_reconciled: bool = False
     dispatch_outcome: str | None = None
     attempt_status: str | None = None
+    execution_result: dict[str, Any] | None = None
     start_submitted: bool = False
     redelivered: bool = False
 
@@ -125,6 +126,7 @@ class OneShotRoutingResult:
                 "claim_reconciled": self.claim_reconciled,
                 "dispatch_outcome": self.dispatch_outcome,
                 "attempt_status": self.attempt_status,
+                "execution_result": self.execution_result,
                 "start_submitted": self.start_submitted,
                 "redelivered": self.redelivered,
             },
@@ -283,6 +285,7 @@ def _route(
         attempt_status=(
             dispatched.attempt_status.value if dispatched.attempt_status else None
         ),
+        execution_result=dispatched.execution_result,
         start_submitted=dispatched.start_submitted,
         **fields,
     )
