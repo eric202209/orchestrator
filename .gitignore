@@ -67,6 +67,7 @@ coverage/
 # Development files
 .notes/
 *.note
+.dev-runtime/
 
 # Database files
 *.db

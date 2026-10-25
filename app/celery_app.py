@@ -36,7 +36,7 @@ celery_app = Celery(
 )
 
 celery_app.conf.update(
-    task_default_queue="celery",
+    task_default_queue=settings.CELERY_QUEUE_NAME,
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",

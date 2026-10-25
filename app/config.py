@@ -356,6 +356,7 @@ class Settings(BaseSettings):
     # Celery Task Queue
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
+    CELERY_QUEUE_NAME: str = "celery"
 
     # E8 lost-continuation-delivery reconciliation.  A durable retry_pending
     # marker becomes reconciliation-eligible only after its own
