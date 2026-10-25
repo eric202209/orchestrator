@@ -5,11 +5,11 @@
     "app/tests/test_phase39_p0b_runtime_wheelhouse_policy.py": "208a1a18269d18de8a76db5037a6c0fb645c43ca39cbc9cf47c6e00b2a0c2f8c",
     "scripts/maintenance/phase39_p0b/runtime_lock_contract.py": "45b4fee97eb24a82f7f56de62c82744ab51775c31758b45cdf9ef8558a731378",
     "scripts/maintenance/phase39_p0b/runtime_wheelhouse_policy.py": "8643406e0e611020709ff46345f9b8aa9a537ce8eca15932a1623a889cbb3ab1",
-    "scripts/maintenance/phase39_p0b/worker-runtime-resolution-evidence-ledger.json": "1e1bc54935b7b9d775476233e6f3164a908f2d65ce926f00993b9465e7378410",
+    "scripts/maintenance/phase39_p0b/worker-runtime-resolution-evidence-ledger.json": "68f78a5d049fbb6ceae0f588fd034b3ec0b29ac262d5c821834b0b2787633f2a",
     "scripts/maintenance/phase39_p0b/worker_metadata_resolution.py": "82be311e20dcc3dbfca9849e6cdca17e58a9fea51bbe2c269eb292890a213df3"
   },
   "approval_packet_binding": {
-    "packet_sha256": "7636f3f294e6dd9a74d2a3285694ee7cc070a0e9fb078f9abe8e5ee5bde84300",
+    "packet_sha256": "b5ac794748c208ed5f160a2309d863e1a5713356f58f48b20244332a7671092a",
     "operator_authorization_status": "NOT_GRANTED",
     "packet_is_authorization": false
   },
@@ -63,13 +63,13 @@
     "scripts/maintenance/phase39_p0b/worker-requirements.in": "93f2a8ad264214af747b9341bfafd792b67e5a9ae2de2a138a780431a21c2394",
     "scripts/maintenance/phase39_p0b/worker_dependency_resolution.py": "2fbc9c60f914e68e66694779e66d35d1888f6a269e3294b2fb232c12be3a45a6",
     "scripts/maintenance/phase39_p0b/worker-resolution-inputs.json": "240e6bc1b38d125b3a32fa3465f06940eb8546edb292f6c6f4794006fd07e1d5",
-    "scripts/maintenance/phase39_p0b/runtime-resolution-approval-packet.json": "32df206771e896b17d8dc6591478c900ab5a100c769873632526d76c54c3a834",
+    "scripts/maintenance/phase39_p0b/runtime-resolution-approval-packet.json": "3df360d67d3094358ee6c1f043f1ed3253936a33e393250331c97e44836581e3",
     "app/tests/test_phase39_p0b_metadata_only_dependency_resolution.py": "c326d7306e8c88cbca92d0d986c07d6f07456475b75e2c0f8ebd5be05913a30d",
     "app/tests/test_phase39_p0b_runtime_lock_contract.py": "0cea4dee7ad365eb5497adcc80b8907c4cb9a52119f4cd11a945361ed4951966",
     "app/tests/test_phase39_p0b_runtime_wheelhouse_policy.py": "208a1a18269d18de8a76db5037a6c0fb645c43ca39cbc9cf47c6e00b2a0c2f8c",
     "scripts/maintenance/phase39_p0b/runtime_lock_contract.py": "45b4fee97eb24a82f7f56de62c82744ab51775c31758b45cdf9ef8558a731378",
     "scripts/maintenance/phase39_p0b/runtime_wheelhouse_policy.py": "8643406e0e611020709ff46345f9b8aa9a537ce8eca15932a1623a889cbb3ab1",
-    "scripts/maintenance/phase39_p0b/worker-runtime-resolution-evidence-ledger.json": "1e1bc54935b7b9d775476233e6f3164a908f2d65ce926f00993b9465e7378410",
+    "scripts/maintenance/phase39_p0b/worker-runtime-resolution-evidence-ledger.json": "68f78a5d049fbb6ceae0f588fd034b3ec0b29ac262d5c821834b0b2787633f2a",
     "scripts/maintenance/phase39_p0b/worker_metadata_resolution.py": "82be311e20dcc3dbfca9849e6cdca17e58a9fea51bbe2c269eb292890a213df3"
   },
   "target": {
