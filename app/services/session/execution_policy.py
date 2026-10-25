@@ -9,10 +9,13 @@ from app.models import TaskExecution, TaskStatus
 _RETRY_EXEMPT_CATEGORIES = {
     "discovery_terminal_failure",
     "planning_failure",
+    "planning_source_missing",
     "governance_hold",
     "backend_transport_error",
     "planning_contract_violation",
 }
+
+_CELERY_RETRY_EXEMPT_CATEGORIES = {"planning_source_missing"}
 
 _MAX_RETRIES = 2
 
@@ -56,6 +59,12 @@ def is_retry_exempt_category(failure_category: str) -> bool:
     """True when persisted policy forbids creating a new attempt for this category."""
 
     return failure_category in _RETRY_EXEMPT_CATEGORIES
+
+
+def is_celery_retry_exempt_category(failure_category: str) -> bool:
+    """True when a failure must not consume a Celery retry delivery."""
+
+    return failure_category in _CELERY_RETRY_EXEMPT_CATEGORIES
 
 
 def resolve_failure_phase(exit_reason: str, active_phase: str | None) -> str:
@@ -114,6 +123,11 @@ def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
         return "planning_contract_violation"
     if provider_classification == "provider_timeout":
         return "provider_timeout"
+    if (
+        context.get("failure_phase") == "planning"
+        and context.get("exception_type") == "FileNotFoundError"
+    ):
+        return "planning_source_missing"
     if context.get("failure_phase") == "planning" and (
         "repair" in reason and "timeout" in reason
     ):

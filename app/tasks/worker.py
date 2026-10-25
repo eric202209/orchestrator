@@ -3406,6 +3406,7 @@ def execute_orchestration_task(
                         str(exc), active_failure_phase
                     ),
                     "failure_category": getattr(exc, "failure_category", None),
+                    "exception_type": type(exc).__name__,
                     "provider_failure_classification": getattr(
                         exc, "provider_failure_classification", None
                     ),

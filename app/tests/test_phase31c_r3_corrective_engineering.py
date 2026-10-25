@@ -183,10 +183,13 @@ def test_untyped_planning_exception_is_not_automatically_retried(db_session):
     category = classify_failure(
         reason,
         "local_openclaw",
-        {"failure_phase": failure_phase},
+        {
+            "failure_phase": failure_phase,
+            "exception_type": "FileNotFoundError",
+        },
     )
 
-    assert category == "planning_failure"
+    assert category == "planning_source_missing"
     assert is_retry_exempt_category(category) is True
     assert should_retry(db_session, ctx.task_execution_id, category) is False
 
@@ -365,7 +368,7 @@ def test_planning_exception_skips_celery_retry_and_automatic_recovery(db_session
         .one()
     )
     assert execution.status == TaskStatus.FAILED
-    assert execution.failure_category == "planning_failure"
+    assert execution.failure_category == "planning_source_missing"
 
 
 # ---------------------------------------------------------------------------

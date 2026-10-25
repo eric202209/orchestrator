@@ -331,6 +331,7 @@ class FailureCoordinator:
         from app.services.session.execution_policy import (
             automatic_recovery_rerun_allowed as _automatic_recovery_rerun_allowed,
             classify_failure as _classify_failure_category,
+            is_celery_retry_exempt_category as _is_celery_retry_exempt_category,
             is_retry_exempt_category as _is_retry_exempt_category,
             resolve_failure_phase as _resolve_failure_phase,
         )
@@ -344,6 +345,7 @@ class FailureCoordinator:
                     str(exc), failure_phase or getattr(exc, "failure_phase", None)
                 ),
                 "failure_category": getattr(exc, "failure_category", None),
+                "exception_type": type(exc).__name__,
                 "provider_failure_classification": getattr(
                     exc, "provider_failure_classification", None
                 ),
@@ -392,7 +394,7 @@ class FailureCoordinator:
             and not is_planning_lock_wait_timeout
             and not is_project_mutation_lock_conflict
             and not is_discovery_terminal_failure
-            and not _is_retry_exempt_category(failure_category_for_retry)
+            and not _is_celery_retry_exempt_category(failure_category_for_retry)
         )
         is_timeout = (
             "time limit" in str(exc).lower()
@@ -423,13 +425,12 @@ class FailureCoordinator:
             and not is_bounded_debug_repair_timeout
         )
 
-        # Retry ownership is a single authority: the automatic-recovery rerun
-        # obeys the same exclusions as the Celery retry path. A canonical-root
-        # mutation-lock conflict must never queue a new attempt (the rerun
-        # races the still-held lock of the failing dispatch), and categories
-        # the persisted execution policy marks retry-exempt (deterministic
-        # backend capability rejections, planning failures, governance holds)
-        # must not be re-executed either.
+        # Automatic recovery has stricter category exclusions than bounded
+        # Celery retries. The latter may retry recognized transient transport
+        # failures and repairable planning failures; only explicitly
+        # non-retryable planning source-missing failures are hard-blocked above.
+        # A canonical-root mutation-lock conflict must never queue a recovery
+        # rerun while the failing dispatch still owns that lock.
         # The episode ceiling is derived from the persisted TaskExecution rows,
         # not from ``task.workspace_status``. Every automatic recovery rerun
         # dispatches a fresh TaskExecution, while the Celery retry path reuses
