@@ -39,6 +39,13 @@ STATE_FILE = "runtime-state.json"
 SCHEMA_VERSION = 1
 STARTUP_TIMEOUT_SECONDS = 30
 SHUTDOWN_TIMEOUT_SECONDS = 10
+# The one operator-authorized inference service: the GX10 host Ollama, reached
+# from this container through its pre-configured host.docker.internal mapping.
+# It is fixed here so the runtime can never be pointed at another server.
+AUTHORIZED_OLLAMA_URL = "http://host.docker.internal:11434"
+INFERENCE_MODEL_ENV = "ORCHESTRATOR_DEV_OLLAMA_MODEL"
+INFERENCE_BACKEND = "openai_chat_completions"
+INFERENCE_CONTEXT_TOKENS = "32768"
 OWNED_TOP_LEVEL_ENTRIES = {
     OWNER_FILE,
     STATE_FILE,
@@ -243,7 +250,53 @@ def build_environment(
         "TRACE_EXPORTER_BACKEND": "local_json",
         "WORKSPACE_REVIEW_POLICY": "hold_all",
     }
+    model = inference_model()
+    if model:
+        chat_url = f"{AUTHORIZED_OLLAMA_URL}/v1"
+        app_env.update(
+            {
+                "AGENT_BACKEND": INFERENCE_BACKEND,
+                "ENABLE_TEST_RUNTIME_BACKENDS": "false",
+                "LOW_RESOURCE_SINGLE_MODEL": "true",
+                "PLANNING_PROVIDER": "direct_openai_compatible",
+                "PLANNING_BACKEND": INFERENCE_BACKEND,
+                "EXECUTION_BACKEND": INFERENCE_BACKEND,
+                "DEBUG_REPAIR_BACKEND": INFERENCE_BACKEND,
+                "REPAIR_BACKEND": INFERENCE_BACKEND,
+                "COMPLETION_REPAIR_BACKEND": INFERENCE_BACKEND,
+                "PLANNING_DIRECT_BASE_URL": chat_url,
+                "PLANNING_DIRECT_MODEL": model,
+                "OPENAI_CHAT_COMPLETIONS_BASE_URL": chat_url,
+                "OPENAI_CHAT_COMPLETIONS_MODEL": model,
+                "PLANNER_MODEL": model,
+                "EXECUTION_MODEL": model,
+                "AGENT_MODEL": model,
+                "EXECUTION_CONTEXT_TOKENS": INFERENCE_CONTEXT_TOKENS,
+                "PLANNING_REPAIR_CONTEXT_TOKENS": INFERENCE_CONTEXT_TOKENS,
+                "DEBUG_REPAIR_CONTEXT_TOKENS": INFERENCE_CONTEXT_TOKENS,
+                "PLANNING_REPAIR_ENABLED": "true",
+                "PLANNING_REPAIR_BASE_URL": chat_url,
+                "PLANNING_REPAIR_MODEL": model,
+                "DEBUG_REPAIR_DIRECT_ENABLED": "true",
+                "DEBUG_REPAIR_BASE_URL": chat_url,
+                "DEBUG_REPAIR_MODEL": model,
+                "COMPLETION_REPAIR_MODEL": model,
+            }
+        )
     return app_env
+
+
+def inference_model() -> str:
+    """Return the opt-in development model, or "" for the fail-closed stub."""
+
+    return os.environ.get(INFERENCE_MODEL_ENV, "").strip()
+
+
+def provider_summary() -> str:
+    model = inference_model()
+    if model:
+        return f"{INFERENCE_BACKEND} {model} at {AUTHORIZED_OLLAMA_URL}/v1"
+    return "planning disabled; deterministic stub configured"
 
 
 def validate_isolation(config: RuntimeConfig, env: dict[str, str]) -> None:
@@ -304,16 +357,24 @@ def validate_isolation(config: RuntimeConfig, env: dict[str, str]) -> None:
     _require_loopback_url(
         "QDRANT_URL", env.get("QDRANT_URL", ""), port=config.qdrant_port, path=""
     )
-    for name in (
-        "OPENCLAW_GATEWAY_URL",
-        "OLLAMA_BASE_URL",
-        "OPENAI_BASE_URL",
+    for name in ("OPENCLAW_GATEWAY_URL", "OLLAMA_BASE_URL", "OPENAI_BASE_URL"):
+        _require_loopback_url(name, env.get(name, ""), port=0)
+    generation_urls = (
         "OPENAI_CHAT_COMPLETIONS_BASE_URL",
         "PLANNING_DIRECT_BASE_URL",
-    ):
-        _require_loopback_url(name, env.get(name, ""), port=0)
-    for name in ("PLANNING_REPAIR_BASE_URL", "DEBUG_REPAIR_BASE_URL"):
-        _require_loopback_url(name, env.get(name, ""), port=0, path="/v1")
+        "PLANNING_REPAIR_BASE_URL",
+        "DEBUG_REPAIR_BASE_URL",
+    )
+    inference = env.get("PLANNING_PROVIDER") != "disabled"
+    if inference:
+        for name in generation_urls:
+            if env.get(name) != f"{AUTHORIZED_OLLAMA_URL}/v1":
+                raise RuntimeToolError(
+                    f"{name} must target only the authorized Ollama endpoint"
+                )
+    else:
+        for name in generation_urls:
+            _require_loopback_url(name, env.get(name, ""), port=0, path="/v1")
     if env.get("HOST") != "127.0.0.1" or env.get("PORT") != str(config.api_port):
         raise RuntimeToolError("API must bind the assigned loopback port")
     if (
@@ -325,16 +386,28 @@ def validate_isolation(config: RuntimeConfig, env: dict[str, str]) -> None:
         )
     if env.get("ONE_SHOT_EXECUTION_ENABLED", "").lower() != "false":
         raise RuntimeToolError("one-shot execution must remain disabled")
-    if env.get("AGENT_BACKEND") != "stub_success":
-        raise RuntimeToolError(
-            "development agent backend must be the explicit test stub"
-        )
-    if env.get("ENABLE_TEST_RUNTIME_BACKENDS", "").lower() != "true":
-        raise RuntimeToolError(
-            "test-only runtime backend gate must be enabled explicitly"
-        )
-    if env.get("PLANNING_PROVIDER") != "disabled":
-        raise RuntimeToolError("planning inference must remain fail-closed")
+    if inference:
+        if (
+            env.get("PLANNING_PROVIDER") != "direct_openai_compatible"
+            or env.get("AGENT_BACKEND") != INFERENCE_BACKEND
+            or env.get("LOW_RESOURCE_SINGLE_MODEL", "").lower() != "true"
+        ):
+            raise RuntimeToolError(
+                "development inference must use the single-model direct profile"
+            )
+        if env.get("ENABLE_TEST_RUNTIME_BACKENDS", "").lower() != "false":
+            raise RuntimeToolError(
+                "test-only runtime backends must be off for real inference"
+            )
+    else:
+        if env.get("AGENT_BACKEND") != "stub_success":
+            raise RuntimeToolError(
+                "development agent backend must be the explicit test stub"
+            )
+        if env.get("ENABLE_TEST_RUNTIME_BACKENDS", "").lower() != "true":
+            raise RuntimeToolError(
+                "test-only runtime backend gate must be enabled explicitly"
+            )
     if env.get("OPENCLAW_CLI_PATH") or env.get("OPENCLAW_CLI_ARGS"):
         raise RuntimeToolError(
             "OpenClaw CLI must be disabled in the development runtime"
@@ -522,7 +595,7 @@ def preflight(config: RuntimeConfig) -> dict[str, Any]:
         "qdrant_url": config.qdrant_url,
         "queue": config.queue_name,
         "worker": config.worker_name,
-        "provider": "disabled (fail-closed); deterministic agent stub configured",
+        "provider": provider_summary(),
         "redis_binary": redis_binary,
         "qdrant_binary": qdrant_binary,
         "qdrant_mode": "isolated_process" if qdrant_binary else "disabled_no_binary",
@@ -1161,7 +1234,7 @@ def status_report(config: RuntimeConfig) -> dict[str, Any]:
         ),
         "queue": config.queue_name,
         "worker": config.worker_name,
-        "provider": "planning disabled; deterministic stub configured",
+        "provider": provider_summary(),
         "processes": processes,
     }
 

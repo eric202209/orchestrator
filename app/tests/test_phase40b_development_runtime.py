@@ -309,3 +309,70 @@ def test_status_does_not_probe_or_claim_unowned_loopback_services(
     assert result["redis_ready"] is False
     assert result["qdrant_ready"] is False
     assert result["worker_ready"] is False
+
+
+def test_stub_runtime_accepts_planning_invocation_options() -> None:
+    import asyncio
+
+    from app.services.agents.stub_runtime import StubRuntime
+
+    runtime = StubRuntime(None, 1, 1, backend_id="stub_success")
+
+    result = asyncio.run(
+        runtime.execute_task(
+            "discover",
+            timeout_seconds=5,
+            reuse_task_session=False,
+            diagnostic_label="PLANNING_DISCOVERY",
+            invocation_options=None,
+        )
+    )
+
+    assert result["status"] == "completed"
+
+
+def test_inference_profile_targets_only_authorized_ollama(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _fake_checkout(tmp_path)
+    monkeypatch.setenv(dev_runtime.INFERENCE_MODEL_ENV, "qwen3-coder:30b")
+    monkeypatch.setenv("OPENAI_API_KEY", "production-credential-marker")
+
+    env = dev_runtime.build_environment(config)
+    dev_runtime.validate_isolation(config, env)
+
+    chat_url = "http://host.docker.internal:11434/v1"
+    assert env["PLANNING_PROVIDER"] == "direct_openai_compatible"
+    assert env["PLANNING_DIRECT_BASE_URL"] == chat_url
+    assert env["OPENAI_CHAT_COMPLETIONS_BASE_URL"] == chat_url
+    assert env["EXECUTION_BACKEND"] == "openai_chat_completions"
+    assert env["EXECUTION_MODEL"] == "qwen3-coder:30b"
+    assert env["LOW_RESOURCE_SINGLE_MODEL"] == "true"
+    assert env["ENABLE_TEST_RUNTIME_BACKENDS"] == "false"
+    assert env["OPENCLAW_CLI_PATH"] == ""
+    assert env["ONE_SHOT_EXECUTION_ENABLED"] == "false"
+    assert all("production-credential-marker" not in value for value in env.values())
+
+
+def test_inference_profile_rejects_unapproved_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _fake_checkout(tmp_path)
+    monkeypatch.setenv(dev_runtime.INFERENCE_MODEL_ENV, "qwen3-coder:30b")
+    env = dev_runtime.build_environment(config)
+    env["PLANNING_DIRECT_BASE_URL"] = "http://10.0.0.5:11434/v1"
+
+    with pytest.raises(dev_runtime.RuntimeToolError, match="authorized Ollama"):
+        dev_runtime.validate_isolation(config, env)
+
+
+def test_default_profile_remains_fail_closed_stub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _fake_checkout(tmp_path)
+    monkeypatch.delenv(dev_runtime.INFERENCE_MODEL_ENV, raising=False)
+    env = dev_runtime.build_environment(config)
+    env["PLANNING_DIRECT_BASE_URL"] = "http://host.docker.internal:11434/v1"
+
+    with pytest.raises(dev_runtime.RuntimeToolError, match="assigned loopback"):
+        dev_runtime.validate_isolation(config, env)

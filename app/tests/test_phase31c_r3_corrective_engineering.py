@@ -371,6 +371,46 @@ def test_planning_exception_skips_celery_retry_and_automatic_recovery(db_session
     assert execution.failure_category == "planning_source_missing"
 
 
+def test_unsupported_backend_skips_celery_retry_and_automatic_recovery(db_session):
+    from app.services.agents.agent_backends import UnsupportedAgentBackendError
+
+    ctx, _session, task = _seed_auto_ctx(db_session)
+    ctx.error_handler = SimpleNamespace(should_retry=lambda *_args: True)
+    queue_fn = MagicMock()
+    celery_task = _RetryCapableSelfTask()
+    exc = UnsupportedAgentBackendError("Unsupported orchestration backend: missing")
+
+    with pytest.raises(UnsupportedAgentBackendError):
+        _run_handle_failure(ctx, exc, queue_fn, self_task=celery_task)
+
+    assert celery_task.retry_calls == 0
+    queue_fn.assert_not_called()
+    db_session.refresh(task)
+    assert task.status == TaskStatus.FAILED
+    execution = (
+        db_session.query(TaskExecution)
+        .filter(TaskExecution.id == ctx.task_execution_id)
+        .one()
+    )
+    assert execution.status == TaskStatus.FAILED
+    assert execution.failure_category == "backend_configuration_invalid"
+
+
+def test_transient_backend_transport_error_keeps_celery_retry(db_session):
+    ctx, _session, _task = _seed_auto_ctx(db_session)
+    ctx.error_handler = SimpleNamespace(should_retry=lambda *_args: True)
+    celery_task = _RetryCapableSelfTask()
+    exc = RuntimeError("provider transport reset by peer")
+
+    # The double raises from retry(); only the publication attempt matters.
+    try:
+        _run_handle_failure(ctx, exc, MagicMock(), self_task=celery_task)
+    except Exception:
+        pass
+
+    assert celery_task.retry_calls == 1
+
+
 # ---------------------------------------------------------------------------
 # Family B — bootstrap classification of artifact-only tasks with bare
 # action-verb prompts

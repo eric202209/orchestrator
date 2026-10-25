@@ -53,7 +53,10 @@ class StubRuntime:
         *,
         diagnostic_label: Optional[str] = None,
         diagnostic_metadata: Optional[dict[str, Any]] = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
+        # Accept caller options (e.g. reuse_task_session, invocation_options)
+        # exactly like the registered provider adapters do.
         if self.backend_id == "stub_capacity":
             return {
                 "status": "failed",

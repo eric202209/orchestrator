@@ -13,9 +13,13 @@ _RETRY_EXEMPT_CATEGORIES = {
     "governance_hold",
     "backend_transport_error",
     "planning_contract_violation",
+    "backend_configuration_invalid",
 }
 
-_CELERY_RETRY_EXEMPT_CATEGORIES = {"planning_source_missing"}
+_CELERY_RETRY_EXEMPT_CATEGORIES = {
+    "planning_source_missing",
+    "backend_configuration_invalid",
+}
 
 _MAX_RETRIES = 2
 
@@ -121,6 +125,10 @@ def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
         return "runtime_safety_stop"
     if is_deterministic_planning_contract_failure(reason):
         return "planning_contract_violation"
+    # A backend name missing from (or unimplemented in) the static registry
+    # fails identically on every delivery until the deployment changes.
+    if context.get("exception_type") == "UnsupportedAgentBackendError":
+        return "backend_configuration_invalid"
     if provider_classification == "provider_timeout":
         return "provider_timeout"
     if (
