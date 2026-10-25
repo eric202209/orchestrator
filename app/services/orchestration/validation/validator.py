@@ -482,20 +482,27 @@ def _plan_target_paths(plan: List[Dict[str, Any]]) -> list[str]:
 
 
 def _explicit_task_scope_paths(*values: Any) -> set[str]:
-    text = "\n".join(str(value or "") for value in values)
     scope_paths: set[str] = set()
-    for match in re.finditer(
-        r"\b(?:only|hard\s+scope\s*:)\b(?P<body>.{0,320})",
-        text,
-        flags=re.IGNORECASE | re.DOTALL,
-    ):
-        body = re.split(
-            r"\b(?:may\s+change|may\s+modify|do\s+not)\b",
-            match.group("body"),
-            maxsplit=1,
-            flags=re.IGNORECASE,
-        )[0]
-        scope_paths.update(extract_required_file_paths(body))
+    # Each field is scanned on its own so a scope clause cannot absorb paths
+    # from the next concatenated field (the prompt often repeats the
+    # description).
+    for value in values:
+        for match in re.finditer(
+            r"\b(?P<keyword>only|hard\s+scope\s*:)\b(?P<body>.{0,320})",
+            str(value or ""),
+            flags=re.IGNORECASE | re.DOTALL,
+        ):
+            body = re.split(
+                r"\b(?:may\s+change|may\s+modify|do\s+not)\b",
+                match.group("body"),
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
+            if match.group("keyword").lower() == "only":
+                # An "only" clause ends with its sentence; prose such as
+                # "ids differ only by case." must not scope later paths.
+                body = re.split(r"\.(?=\s|$)", body, maxsplit=1)[0]
+            scope_paths.update(extract_required_file_paths(body))
     return {path.replace("\\", "/").lstrip("./") for path in scope_paths}
 
 

@@ -307,3 +307,39 @@ def test_planning_prompt_subtracts_only_proven_positional_and_rollback_fields(tm
         "Each step must include these required keys, optional ops, and no other keys"
         not in prompt
     )
+
+
+def test_only_scope_clause_ends_with_its_sentence():
+    from app.services.orchestration.validation.validator import (
+        _explicit_task_scope_paths,
+    )
+
+    # Phase 40C-1 Workflow C: prose "only" plus a later criterion that names a
+    # test file produced a scope that excluded the defective source module.
+    description = (
+        "Records whose ids differ only by case are the same customer.\n"
+        "FAILED tests/test_aggregate.py::test_count\n"
+        "3. Change only files under dataflow/.\n"
+        "4. Existing passing tests (tests/test_normalize.py) must keep passing."
+    )
+
+    assert _explicit_task_scope_paths(description) == set()
+    assert _explicit_task_scope_paths("Change only pricing/discount.py.") == {
+        "pricing/discount.py"
+    }
+    assert _explicit_task_scope_paths(
+        "Only app/tasks/maintenance.py may be modified. See app/celery_app.py."
+    ) == {"app/tasks/maintenance.py"}
+
+
+def test_only_scope_clause_does_not_cross_into_next_field():
+    from app.services.orchestration.validation.validator import (
+        _explicit_task_scope_paths,
+    )
+
+    description = (
+        "checkout_total() in order_service/checkout.py is wrong.\n"
+        "Change only files under order_service/"
+    )
+
+    assert _explicit_task_scope_paths(description, "Fix checkout", description) == set()
