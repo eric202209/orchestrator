@@ -219,7 +219,10 @@ from app.services.agents.subprocess_lifecycle import (
     register_forced_termination_cleanup,
 )
 from app.services.agents.agent_backends import get_backend_descriptor
-from app.services.session.execution_policy import classify_failure
+from app.services.session.execution_policy import (
+    classify_failure,
+    resolve_failure_phase,
+)
 from app.services.session.session_execution_service import (
     update_execution_failure_metadata,
 )
@@ -820,6 +823,7 @@ def execute_orchestration_task(
     _backend_slot_redis = None
     _resolved_execution_backend: str = settings.AGENT_BACKEND
     planning_runtime_service = None
+    active_failure_phase: Optional[str] = None
     task_execution: Optional[TaskExecution] = None
     identity_projection = None
     runtime_selection: Dict[str, Any] = {}
@@ -2868,6 +2872,7 @@ def execute_orchestration_task(
             # Slice J: incremental execution path (creation-only prototype, flag-gated).
             # Runs after context injection; before execute_planning_phase.
             # Falls back to full planning on any failure.
+            active_failure_phase = "planning"
             _incremental_route_taken = False
             if settings.INCREMENTAL_EXECUTION_ENABLED:
                 _inc_task_desc = getattr(task, "description", None) or prompt or ""
@@ -3105,6 +3110,7 @@ def execute_orchestration_task(
                 "phase": "executing",
             },
         ) as execution_phase_observation:
+            active_failure_phase = "execution"
             step_loop_result = _execute_step_loop(
                 ctx=run_ctx,
                 extract_structured_text=_extract_structured_text,
@@ -3183,11 +3189,7 @@ def execute_orchestration_task(
                 failure_reason,
                 _resolved_execution_backend,
                 {
-                    "failure_phase": (
-                        "planning"
-                        if "planning" in failure_reason.lower()
-                        else "execution"
-                    ),
+                    "failure_phase": "execution",
                     "failure_category": step_loop_result.get("failure_category"),
                 },
             )
@@ -3400,8 +3402,8 @@ def execute_orchestration_task(
                         if isinstance(getattr(exc, "runtime_diagnostics", None), dict)
                         else {}
                     ),
-                    "failure_phase": (
-                        "planning" if "planning" in str(exc).lower() else "execution"
+                    "failure_phase": resolve_failure_phase(
+                        str(exc), active_failure_phase
                     ),
                     "failure_category": getattr(exc, "failure_category", None),
                     "provider_failure_classification": getattr(
@@ -3495,6 +3497,7 @@ def execute_orchestration_task(
             exc=exc,
             get_latest_session_task_link_fn=_get_latest_session_task_link,
             queue_task_for_session_fn=_queue_task_for_session,
+            failure_phase=active_failure_phase,
         )
 
     finally:

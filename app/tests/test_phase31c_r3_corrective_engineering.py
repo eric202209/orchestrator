@@ -43,6 +43,8 @@ from app.services.orchestration.types import OrchestrationRunContext
 from app.services.session.execution_policy import (
     classify_failure,
     is_retry_exempt_category,
+    resolve_failure_phase,
+    should_retry,
 )
 from app.services.workspace.baseline_promotion_service import (
     BaselinePromotionService,
@@ -64,6 +66,17 @@ class _TerminalSelfTask:
 
     def retry(self, exc, **kwargs):
         raise AssertionError("celery retry should not be called")
+
+
+class _RetryCapableSelfTask(_TerminalSelfTask):
+    max_retries = 3
+
+    def __init__(self):
+        self.retry_calls = 0
+
+    def retry(self, exc, **kwargs):
+        self.retry_calls += 1
+        raise AssertionError("retry-exempt planning failure was retried")
 
 
 # ---------------------------------------------------------------------------
@@ -156,6 +169,28 @@ def test_generic_execution_failure_stays_retry_eligible():
     assert is_retry_exempt_category(category) is False
 
 
+def test_untyped_planning_exception_is_not_automatically_retried(db_session):
+    ctx, _session, _task = _seed_auto_ctx(db_session)
+    reason = (
+        "FileNotFoundError: [Errno 2] No such file or directory: "
+        "'/tmp/project/tests/test_wordcount.py'"
+    )
+
+    failure_phase = resolve_failure_phase(reason, "planning")
+    assert failure_phase == "planning"
+    assert resolve_failure_phase("planning verifier failed", "execution") == "execution"
+
+    category = classify_failure(
+        reason,
+        "local_openclaw",
+        {"failure_phase": failure_phase},
+    )
+
+    assert category == "planning_failure"
+    assert is_retry_exempt_category(category) is True
+    assert should_retry(db_session, ctx.task_execution_id, category) is False
+
+
 def _seed_auto_ctx(db_session):
     project = Project(name="R3 Project", workspace_path="/tmp/r3-auto")
     db_session.add(project)
@@ -214,9 +249,9 @@ def _seed_auto_ctx(db_session):
     return ctx, session, task
 
 
-def _run_handle_failure(ctx, exc, queue_fn):
+def _run_handle_failure(ctx, exc, queue_fn, *, failure_phase=None, self_task=None):
     return FailureCoordinator().handle_failure(
-        self_task=_TerminalSelfTask(),
+        self_task=self_task or _TerminalSelfTask(),
         ctx=ctx,
         exc=exc,
         get_latest_session_task_link_fn=lambda *a, **k: None,
@@ -224,6 +259,7 @@ def _run_handle_failure(ctx, exc, queue_fn):
         save_orchestration_checkpoint_fn=_NOOP,
         record_live_log_fn=_NOOP,
         queue_task_for_session_fn=queue_fn,
+        failure_phase=failure_phase,
     )
 
 
@@ -299,6 +335,37 @@ def test_generic_execution_failure_still_queues_one_automatic_recovery(db_sessio
     assert result is None
     db_session.refresh(session)
     assert session.status == "retry_pending"
+
+
+def test_planning_exception_skips_celery_retry_and_automatic_recovery(db_session):
+    ctx, _session, task = _seed_auto_ctx(db_session)
+    ctx.error_handler = SimpleNamespace(should_retry=lambda *_args: True)
+    queue_fn = MagicMock()
+    celery_task = _RetryCapableSelfTask()
+    exc = FileNotFoundError(
+        2, "No such file or directory", "/tmp/project/tests/test_wordcount.py"
+    )
+
+    with pytest.raises(FileNotFoundError):
+        _run_handle_failure(
+            ctx,
+            exc,
+            queue_fn,
+            failure_phase="planning",
+            self_task=celery_task,
+        )
+
+    assert celery_task.retry_calls == 0
+    queue_fn.assert_not_called()
+    db_session.refresh(task)
+    assert task.status == TaskStatus.FAILED
+    execution = (
+        db_session.query(TaskExecution)
+        .filter(TaskExecution.id == ctx.task_execution_id)
+        .one()
+    )
+    assert execution.status == TaskStatus.FAILED
+    assert execution.failure_category == "planning_failure"
 
 
 # ---------------------------------------------------------------------------

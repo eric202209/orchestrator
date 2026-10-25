@@ -275,6 +275,7 @@ class FailureCoordinator:
         ] = save_orchestration_checkpoint,
         record_live_log_fn: Callable[..., None] = record_live_log,
         queue_task_for_session_fn: Optional[Callable[..., Any]] = None,
+        failure_phase: Optional[str] = None,
     ) -> None:
         # Deferred imports from failure_flow so that test patches on
         # failure_flow.* are respected at call time.
@@ -327,6 +328,27 @@ class FailureCoordinator:
         )
         max_retries = int(getattr(self_task, "max_retries", 0) or 0)
         runtime_diagnostics = getattr(exc, "runtime_diagnostics", None) or {}
+        from app.services.session.execution_policy import (
+            automatic_recovery_rerun_allowed as _automatic_recovery_rerun_allowed,
+            classify_failure as _classify_failure_category,
+            is_retry_exempt_category as _is_retry_exempt_category,
+            resolve_failure_phase as _resolve_failure_phase,
+        )
+
+        failure_category_for_retry = _classify_failure_category(
+            str(exc),
+            "",
+            {
+                **runtime_diagnostics,
+                "failure_phase": _resolve_failure_phase(
+                    str(exc), failure_phase or getattr(exc, "failure_phase", None)
+                ),
+                "failure_category": getattr(exc, "failure_category", None),
+                "provider_failure_classification": getattr(
+                    exc, "provider_failure_classification", None
+                ),
+            },
+        )
         # ER4: a typed terminal-attempt handoff carries the exact generation
         # and attempt its worker claimed.  Ordinary failures carry neither, so
         # their existing behaviour is unchanged.
@@ -370,6 +392,7 @@ class FailureCoordinator:
             and not is_planning_lock_wait_timeout
             and not is_project_mutation_lock_conflict
             and not is_discovery_terminal_failure
+            and not _is_retry_exempt_category(failure_category_for_retry)
         )
         is_timeout = (
             "time limit" in str(exc).lower()
@@ -407,26 +430,6 @@ class FailureCoordinator:
         # the persisted execution policy marks retry-exempt (deterministic
         # backend capability rejections, planning failures, governance holds)
         # must not be re-executed either.
-        from app.services.session.execution_policy import (
-            automatic_recovery_rerun_allowed as _automatic_recovery_rerun_allowed,
-            classify_failure as _classify_failure_category,
-            is_retry_exempt_category as _is_retry_exempt_category,
-        )
-
-        failure_category_for_retry = _classify_failure_category(
-            str(exc),
-            "",
-            {
-                **runtime_diagnostics,
-                "failure_phase": (
-                    "planning" if "planning" in str(exc).lower() else "execution"
-                ),
-                "failure_category": getattr(exc, "failure_category", None),
-                "provider_failure_classification": getattr(
-                    exc, "provider_failure_classification", None
-                ),
-            },
-        )
         # The episode ceiling is derived from the persisted TaskExecution rows,
         # not from ``task.workspace_status``. Every automatic recovery rerun
         # dispatches a fresh TaskExecution, while the Celery retry path reuses

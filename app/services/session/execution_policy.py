@@ -58,6 +58,13 @@ def is_retry_exempt_category(failure_category: str) -> bool:
     return failure_category in _RETRY_EXEMPT_CATEGORIES
 
 
+def resolve_failure_phase(exit_reason: str, active_phase: str | None) -> str:
+    """Prefer the phase observed by the worker over words in an error message."""
+    if active_phase in {"planning", "execution"}:
+        return active_phase
+    return "planning" if "planning" in (exit_reason or "").lower() else "execution"
+
+
 def automatic_recovery_rerun_allowed(
     db: Session, *, session_id: int | None, task_id: int | None
 ) -> bool:
@@ -147,6 +154,8 @@ def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
         return "validation_failure"
     if any(k in reason for k in ("governance", "review", "hold", "permission")):
         return "governance_hold"
+    if context.get("failure_phase") == "planning":
+        return "planning_failure"
     return "execution_failure"
 
 
