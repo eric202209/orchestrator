@@ -511,6 +511,38 @@ def validate_runtime_provider_contract(
     role = _coerce_backend_role(role)
     configuration = runtime_configuration or resolve_runtime_configuration(db, role)
     _validate_low_resource_runtime_configuration(db, configuration)
+    if _is_test_runtime_backend(configuration.backend_name):
+        if not _test_runtime_backends_enabled():
+            raise UnsupportedAgentBackendError(
+                f"Backend '{configuration.backend_name}' is test-only and "
+                "ENABLE_TEST_RUNTIME_BACKENDS is false."
+            )
+        role_requires_context = role in {
+            BackendRole.EXECUTION,
+            BackendRole.REPAIR,
+            BackendRole.DEBUG_REPAIR,
+            BackendRole.COMPLETION_REPAIR,
+        }
+        return {
+            "backend": configuration.backend_name,
+            "role": role.value,
+            "provider_ready": True,
+            "execution_topology": (
+                ExecutionTopology.STRUCTURED_ORCHESTRATOR.value
+                if role is BackendRole.EXECUTION
+                else None
+            ),
+            "required_execution_capabilities": [],
+            "effective_context_tokens": _configured_context_tokens(role),
+            "required_context_tokens": (
+                MIN_EXECUTION_CONTEXT_TOKENS
+                if role is BackendRole.EXECUTION
+                else MIN_REPAIR_CONTEXT_TOKENS if role_requires_context else None
+            ),
+            "test_runtime_backend": True,
+            "model": configuration.model_family,
+            "adaptation_profile": configuration.adaptation_profile,
+        }
     descriptor = require_backend_descriptor(configuration.backend_name)
     readiness = validate_runtime_capabilities(
         descriptor,

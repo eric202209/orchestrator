@@ -1243,6 +1243,38 @@ def test_stub_backends_are_not_production_registered():
     assert "stub_capacity" not in backend_names
 
 
+def test_test_stub_provider_contract_is_explicitly_gated(db_session, monkeypatch):
+    from app.services.agents import agent_runtime as runtime_module
+    from app.services.agents.agent_runtime import (
+        resolve_runtime_configuration,
+        validate_runtime_provider_contract,
+    )
+    from app.services.agents.agent_backends import UnsupportedAgentBackendError
+    from app.services.agents.runtime_configuration import BackendRole
+
+    monkeypatch.setattr(runtime_module.settings, "ENABLE_TEST_RUNTIME_BACKENDS", True)
+    monkeypatch.setattr(runtime_module.settings, "EXECUTION_BACKEND", "stub_success")
+    configuration = resolve_runtime_configuration(db_session, BackendRole.EXECUTION)
+
+    result = validate_runtime_provider_contract(
+        db_session,
+        BackendRole.EXECUTION,
+        runtime_configuration=configuration,
+    )
+
+    assert result["backend"] == "stub_success"
+    assert result["role"] == BackendRole.EXECUTION.value
+    assert result["test_runtime_backend"] is True
+
+    monkeypatch.setattr(runtime_module.settings, "ENABLE_TEST_RUNTIME_BACKENDS", False)
+    with pytest.raises(UnsupportedAgentBackendError, match="test-only"):
+        validate_runtime_provider_contract(
+            db_session,
+            BackendRole.EXECUTION,
+            runtime_configuration=configuration,
+        )
+
+
 def test_stub_backend_rejected_unless_test_backends_enabled(db_session, monkeypatch):
     from app.services.agents.agent_runtime import create_agent_runtime
     from app.services.agents.agent_backends import UnsupportedAgentBackendError

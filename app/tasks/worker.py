@@ -402,6 +402,17 @@ from app.services.observability.runtime_identity import (
 logger = logging.getLogger(__name__)
 
 
+def _capacity_admission_backend(backend_name: str):
+    """Return a registered capacity descriptor, or skip it for gated test stubs."""
+
+    if settings.ENABLE_TEST_RUNTIME_BACKENDS and backend_name in {
+        "stub_success",
+        "stub_capacity",
+    }:
+        return None
+    return get_backend_descriptor(backend_name)
+
+
 def _release_backend_slot_safely(
     redis_client: Any,
     backend_id: str,
@@ -747,7 +758,7 @@ def _route_one_shot_if_requested(
     acks_late=True,
     reject_on_worker_lost=True,
     acks_on_failure_or_timeout=True,
-    queue="celery",
+    queue=settings.CELERY_QUEUE_NAME,
 )
 def execute_orchestration_task(
     self,
@@ -1164,9 +1175,10 @@ def execute_orchestration_task(
         # Capacity admission happens before logical execution claim.  A
         # capacity-blocked delivery therefore remains pending/retry_pending
         # instead of exposing Session=running while it only waits for a slot.
-        _capacity_backend = get_backend_descriptor(_resolved_execution_backend)
+        _capacity_backend = _capacity_admission_backend(_resolved_execution_backend)
         _capacity_governed = (
-            _capacity_backend.capabilities.max_parallel_sessions is not None
+            _capacity_backend is not None
+            and _capacity_backend.capabilities.max_parallel_sessions is not None
         )
         if _capacity_governed:
             if is_e3_continuation_dispatch:

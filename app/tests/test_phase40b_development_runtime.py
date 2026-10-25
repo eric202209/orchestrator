@@ -123,7 +123,11 @@ def test_celery_uses_configured_development_queue(tmp_path: Path) -> None:
             sys.executable,
             "-c",
             "from app.celery_app import celery_app; "
-            "print(celery_app.conf.task_default_queue)",
+            "from app.tasks.worker import execute_orchestration_task, "
+            "_capacity_admission_backend; "
+            "print(celery_app.conf.task_default_queue + '|' + "
+            "execute_orchestration_task.queue + '|' + "
+            "str(_capacity_admission_backend('stub_success') is None))",
         ],
         cwd=process_cwd,
         env=env,
@@ -135,7 +139,7 @@ def test_celery_uses_configured_development_queue(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == config.queue_name
+    assert result.stdout.strip() == f"{config.queue_name}|{config.queue_name}|True"
 
 
 def test_worker_identity_and_queue_are_development_specific(tmp_path: Path) -> None:
