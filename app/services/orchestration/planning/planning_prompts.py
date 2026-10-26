@@ -20,6 +20,7 @@ from app.services.orchestration.planning.prompt_contracts import (
     render_operation_choice_contract as _render_operation_choice_contract,
     render_existing_file_mutation_contract as _render_existing_file_mutation_contract,
     render_ops_first_contract as _render_ops_first_contract,
+    render_source_edit_decision_contract as _render_source_edit_decision_contract,
     render_shell_fallback_limits as _render_shell_fallback_limits,
     render_test_scaffold_contract as _render_test_scaffold_contract,
     render_verification_contract as _render_verification_contract,
@@ -208,6 +209,11 @@ def build_minimal_planning_prompt(
         if existing_file_mutation_contract
         else ""
     )
+    source_edit_decision_rule = (
+        f"13c. {_render_source_edit_decision_contract()}\n"
+        if source_materialization is not None
+        else ""
+    )
     shell_fallback_limits = _render_shell_fallback_limits()
     verification_contract = _render_verification_contract()
     test_scaffold_contract = _render_test_scaffold_contract()
@@ -258,7 +264,7 @@ Rules:
 12. expected_files must be relative file paths or []
 13. {ops_contract}
 13a. {operation_choice_contract}
-{existing_file_mutation_rule}14. Shell fallback limits: {shell_fallback_limits}
+{existing_file_mutation_rule}{source_edit_decision_rule}14. Shell fallback limits: {shell_fallback_limits}
 15. Do not join separate shell commands with commas
 16. Commands must be runnable shell, not prose. Do not emit pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. {verification_contract}
@@ -352,6 +358,11 @@ def build_ultra_minimal_planning_prompt(
         if existing_file_mutation_contract
         else ""
     )
+    source_edit_decision_rule = (
+        f"4c. {_render_source_edit_decision_contract()}\n"
+        if source_materialization is not None
+        else ""
+    )
     shell_fallback_limits = _render_shell_fallback_limits()
     verification_contract = _render_verification_contract()
     test_scaffold_contract = _render_test_scaffold_contract()
@@ -380,7 +391,7 @@ Requirements:
 3. If a step will later use file-read or file-write tools, keep that path relative in the plan; execution will expand it under {display_project_dir}
 4. {ops_contract}
 4a. {operation_choice_contract}
-{existing_file_mutation_rule}5. Shell fallback limits: {shell_fallback_limits}
+{existing_file_mutation_rule}{source_edit_decision_rule}5. Shell fallback limits: {shell_fallback_limits}
 6. {verification_contract}
 6a. {test_scaffold_contract}
 7. Each step must contain description, commands, verification, and expected_files; optional keys are step_number, rollback, and ops

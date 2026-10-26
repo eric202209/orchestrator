@@ -16,6 +16,7 @@ from app.config import settings
 from app.services.orchestration.planning.prompt_contracts import (
     render_operation_choice_contract,
     render_existing_file_mutation_contract,
+    render_existing_file_write_contract,
     render_ops_first_contract,
     render_shell_fallback_limits,
     render_test_scaffold_contract,
@@ -33,6 +34,7 @@ from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
     plan_target_paths,
     plan_source_materialization_paths,
+    provider_planning_contract_capabilities,
     repair_projection_required_records,
     render_repair_source_materialization,
 )
@@ -694,23 +696,43 @@ def build_planning_repair_prompt_with_metadata(
     default_validation_error = (
         "Validation error:\n- malformed or non-runnable planning output\n"
     )
-    semantic_mode_available = _issued_target_id_listed(guidance_block)
+    source_contract_block = "\n".join((guidance_block, materialization_block))
+    semantic_mode_available = _issued_target_id_listed(source_contract_block)
+    source_contract_is_visible = (
+        "## CURRENT SOURCE MATERIALIZATION" in source_contract_block
+    )
+    if source_contract_is_visible:
+        _, legacy_replace_available = provider_planning_contract_capabilities(
+            planner_source_materialization,
+            additional_candidate_paths=plan_source_materialization_paths(
+                parsed_malformed_output
+            ),
+        )
+    else:
+        legacy_replace_available = False
     ops_contract = render_ops_first_contract(
-        semantic_mode_available=semantic_mode_available
+        semantic_mode_available=semantic_mode_available,
+        legacy_replace_available=legacy_replace_available,
     )
     operation_choice_contract = render_operation_choice_contract(
-        semantic_mode_available=semantic_mode_available
+        semantic_mode_available=semantic_mode_available,
+        legacy_replace_available=legacy_replace_available,
     )
     # Repair previously received this validator code as a bare string with no
     # statement of the legal shape it demands, so the contract is attached to
     # exactly the rejections that turn on it.
-    existing_file_mutation_contract = render_existing_file_mutation_contract(
-        legacy_replace_available=any(
-            "existing_file_write_requires_explicit_replace_authorization" in str(reason)
-            or "new_file_creation_not_authorized" in str(reason)
-            for reason in (rejection_reasons or ())
-        )
+    existing_file_mutation_rejected = any(
+        "existing_file_write_requires_explicit_replace_authorization" in str(reason)
+        or "new_file_creation_not_authorized" in str(reason)
+        for reason in (rejection_reasons or ())
     )
+    existing_file_mutation_contract = ""
+    if existing_file_mutation_rejected:
+        existing_file_mutation_contract = (
+            render_existing_file_mutation_contract()
+            if legacy_replace_available
+            else render_existing_file_write_contract()
+        )
     existing_file_mutation_rule = (
         f"2y. {existing_file_mutation_contract}\n"
         if existing_file_mutation_contract
@@ -737,6 +759,13 @@ def build_planning_repair_prompt_with_metadata(
     )
     grounded_source_edit_guidance = _build_grounded_source_edit_repair_guidance(
         rejection_reasons
+    )
+    python_definition_preservation_guidance = (
+        _build_python_definition_preservation_repair_guidance(
+            rejection_reasons,
+            semantic_mode_available=semantic_mode_available,
+            legacy_replace_available=legacy_replace_available,
+        )
     )
     brittle_inline_python_guidance = _build_brittle_inline_python_repair_guidance(
         rejection_reasons
@@ -766,6 +795,7 @@ def build_planning_repair_prompt_with_metadata(
         verification_source_mutation_guidance,
         materialization_preservation_guidance,
         grounded_source_edit_guidance,
+        python_definition_preservation_guidance,
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,
         unsafe_python_append_guidance,
@@ -773,6 +803,16 @@ def build_planning_repair_prompt_with_metadata(
         python_framework_guidance,
         stale_replace_target_guidance,
         nested_workspace_guidance,
+    )
+    task_objective = _compact_task_objective(task_description)
+    preserve_task_objective = any(
+        "python_write_file_drops_referenced_definitions" in str(reason).lower()
+        for reason in (rejection_reasons or ())
+    )
+    task_objective_line = (
+        f"Task objective (preserve): {task_objective}\n"
+        if task_objective and preserve_task_objective
+        else ""
     )
 
     def _compose_prompt(
@@ -785,7 +825,7 @@ def build_planning_repair_prompt_with_metadata(
 No prose. No markdown fences. No plan.json. No explanation.
 Do not create, edit, read, or write files during planning repair; return the JSON array as message text only.
 Repair the plan, not the task. Preserve valid steps.
-
+{task_objective_line}
 {guidance_block + chr(10) if guidance_block else ""}Bad:
 {broken_output}
 
@@ -1571,6 +1611,57 @@ def _build_grounded_source_edit_repair_guidance(
     )
 
 
+def _build_python_definition_preservation_repair_guidance(
+    rejection_reasons: Optional[list[str]],
+    *,
+    semantic_mode_available: bool = True,
+    legacy_replace_available: bool = True,
+) -> str:
+    """Give an actionable operation choice after the GR2 preservation rule fires."""
+
+    text = "\n".join(str(reason or "") for reason in (rejection_reasons or []))
+    if "python_write_file_drops_referenced_definitions" not in text.lower():
+        return ""
+
+    lines = [
+        "Existing Python module preservation repair required:",
+        "- The rejected `write_file` replaces the whole module and dropped definitions that its replacement still references.",
+    ]
+    if semantic_mode_available and legacy_replace_available:
+        lines.extend(
+            [
+                "- For a localized function or body change, replace that rejected operation with one `replace_in_file` using either a listed exact `target_id` or exact `{op,path,old,new}` text from the supplied current source for that same path, as allowed by the operation-selection contract.",
+                "- Use exact `old` text only when it occurs exactly once in that source; use a `target_id` only when the supplied inventory lists it for that exact path. If the source text is missing, stale, truncated, or ambiguous, do not guess or fabricate an anchor; follow the existing grounding and GR2 contract.",
+            ]
+        )
+    elif semantic_mode_available:
+        lines.extend(
+            [
+                "- For a localized function or body change, replace that rejected operation with one `replace_in_file` using the listed `{op,path,target_id,new}` target for the exact path.",
+                "- Use only a target listed in the supplied inventory. If no exact target is listed, do not invent one; follow the existing grounding and GR2 contract.",
+            ]
+        )
+    elif legacy_replace_available:
+        lines.extend(
+            [
+                "- For a localized function or body change, replace that rejected operation with one `replace_in_file` using `{op,path,old,new}` and exact `old` text from the supplied current source for that same path.",
+                "- Use `old` text only when it occurs exactly once in that source. If it is missing, stale, truncated, or ambiguous, do not guess or fabricate an anchor; follow the existing grounding and GR2 contract.",
+            ]
+        )
+    else:
+        lines.append(
+            "- Follow the operation-selection contract below for the edit shape available to this task; do not invent an exact-match anchor or target identifier when the corresponding source evidence is unavailable."
+        )
+    lines.extend(
+        [
+            "- Do not repeat the rejected fragment as `write_file` or split one module edit across multiple `write_file` operations.",
+            "- If the task truly requires a complete module rewrite, use one `write_file` with the complete grounded module content, preserve required imports/helpers/definitions and existing behavior unless the task authorizes changing them, and state the whole-file rewrite intent in the step description.",
+            "- Preserve the original task objective, authorized paths, and real verification step.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def _is_verification_source_mutation_repair_case(
     rejection_reasons: Optional[list[str]],
 ) -> bool:
@@ -2112,13 +2203,23 @@ def build_compact_planning_repair_prompt(
     source_api_contract_block: str = "",
     guidance_block: str = "",
     workspace_identity: PlannerWorkspaceIdentity | None = None,
+    task_description: str = "",
 ) -> str:
     semantic_mode_available = _issued_target_id_listed(guidance_block)
+    legacy_replace_available = any(
+        marker in guidance_block
+        for marker in (
+            "Legacy replace_in_file may use exact old/new from the supplied current source evidence.",
+            "When no target_id is listed, legacy replace_in_file uses exact old/new source evidence.",
+        )
+    )
     ops_contract = render_ops_first_contract(
-        semantic_mode_available=semantic_mode_available
+        semantic_mode_available=semantic_mode_available,
+        legacy_replace_available=legacy_replace_available,
     )
     operation_choice_contract = render_operation_choice_contract(
-        semantic_mode_available=semantic_mode_available
+        semantic_mode_available=semantic_mode_available,
+        legacy_replace_available=legacy_replace_available,
     )
     shell_fallback_limits = render_shell_fallback_limits()
     verification_contract = render_verification_contract()
@@ -2144,6 +2245,13 @@ def build_compact_planning_repair_prompt(
     grounded_source_edit_guidance = _build_grounded_source_edit_repair_guidance(
         rejection_reasons
     )
+    python_definition_preservation_guidance = (
+        _build_python_definition_preservation_repair_guidance(
+            rejection_reasons,
+            semantic_mode_available=semantic_mode_available,
+            legacy_replace_available=legacy_replace_available,
+        )
+    )
     brittle_inline_python_guidance = _build_brittle_inline_python_repair_guidance(
         rejection_reasons
     )
@@ -2167,12 +2275,30 @@ def build_compact_planning_repair_prompt(
         verification_source_mutation_guidance,
         materialization_preservation_guidance,
         grounded_source_edit_guidance,
+        python_definition_preservation_guidance,
         brittle_inline_python_guidance,
         empty_replace_old_text_guidance,
         unsafe_python_append_guidance,
         python_source_syntax_guidance,
         python_framework_guidance,
         nested_workspace_guidance,
+    )
+    task_objective = _compact_task_objective(task_description)
+    preserve_task_objective = any(
+        "python_write_file_drops_referenced_definitions" in str(reason).lower()
+        for reason in (rejection_reasons or ())
+    )
+    task_objective_line = (
+        f"Task objective (preserve): {task_objective}\n"
+        if task_objective and preserve_task_objective
+        else ""
+    )
+    targeted_source_edit_repair = bool(task_objective_line)
+    source_edit_repair_contract = (
+        f"Operation selection contract: {operation_choice_contract}\n"
+        f"{python_definition_preservation_guidance}\n"
+        if targeted_source_edit_repair
+        else ""
     )
 
     def _compose_observation_preserving_prompt(
@@ -2200,15 +2326,15 @@ def build_compact_planning_repair_prompt(
             )
         return f"""Return ONLY a valid JSON array. First character must be `[`. Last must be `]`.
 No prose or markdown. Repair the plan.
-
-{current_guidance_block}
-Bad:
+{task_objective_line}
+{current_guidance_block.rstrip()}{chr(10) if source_edit_repair_contract else ""}
+{source_edit_repair_contract.rstrip() + chr(10) if source_edit_repair_contract else ""}Bad:
 {malformed_excerpt}
 
 Validation errors:
 {reason_lines or '- malformed or non-runnable planning output'}
 
-Rules: output 3-4 JSON steps with description, commands, verification, expected_files, and optional ops. Use supplied evidence and relative paths only. Keep source materialization separate from the advisory observation. Never fabricate whole-file replacements. Verify mutations. JSON only."""
+Rules: output 3-4 JSON steps with description, commands, verification, expected_files, and optional ops. Use supplied evidence and relative paths only. Keep source materialization separate from the advisory observation. {"A whole-file write requires complete GR2-grounded source and complete replacement content. " if targeted_source_edit_repair else "Never fabricate whole-file replacements. "}Verify mutations. JSON only."""
 
     if "## READ-ONLY OBSERVATION" in guidance_block:
         observation_guidance_candidates = [guidance_block]
@@ -2263,7 +2389,7 @@ Rules: output 3-4 JSON steps with description, commands, verification, expected_
 No prose. No markdown fences. No plan.json. No explanation.
 
 Repair this invalid plan into 3 to 4 executable steps.
-
+{task_objective_line}
 {guidance_block + chr(10) if guidance_block else ""}Validation errors:
 {reason_lines or "- malformed or non-runnable planning output"}
 

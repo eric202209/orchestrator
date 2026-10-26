@@ -27,6 +27,7 @@ from app.services.orchestration.operations.file_ops_contract import (
 from app.services.orchestration.planning.prompt_contracts import (
     render_operator_guidance_precedence,
     render_operation_choice_contract,
+    render_source_edit_decision_contract,
 )
 from app.services.workspace.control_state_paths import (
     ControlStateLocation,
@@ -369,6 +370,7 @@ No prose. No markdown fences. No plan.json. No explanation.
 12. `expected_files` must always be present and must be a JSON array of relative path strings (or [])
 13. Optional `ops` may contain these operations with relative `path` values and required string fields: {supported_file_ops}
 14. {operation_choice_contract}
+{source_edit_decision_rule}
 
 **Planning Rules:**
 1. Short runnable shell only. `commands` must not be prose or pseudo-commands such as `"create files"` or `"implement component"`.
@@ -1101,6 +1103,11 @@ Examples:
             "operation_choice_contract": render_operation_choice_contract(
                 semantic_mode_available=semantic_mode_available,
                 legacy_replace_available=legacy_replace_available,
+            ),
+            "source_edit_decision_rule": (
+                f"14a. {render_source_edit_decision_contract()}"
+                if source_materialization is not None
+                else ""
             ),
         }
 
