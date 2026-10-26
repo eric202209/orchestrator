@@ -436,6 +436,167 @@ def _plan_writes_obvious_undefined_python_decorators(
     return sorted(set(bad_paths))
 
 
+# PHASE40C5: ``write_file`` replaces the whole file. Workflows A and B returned
+# function-only content for existing modules, deleting imports and helpers that
+# the new content itself still referenced. Flag only names the replaced
+# content bound and the new content uses but no longer binds anywhere.
+_PYTHON_MODULE_DUNDERS = frozenset(
+    {
+        "__name__",
+        "__file__",
+        "__doc__",
+        "__package__",
+        "__spec__",
+        "__loader__",
+        "__builtins__",
+        "__path__",
+        "__annotations__",
+    }
+)
+
+
+def _python_module_scope_bindings(statements: List[ast.stmt]) -> set[str]:
+    names: set[str] = set()
+    for node in statements:
+        if isinstance(node, ast.Import):
+            names.update(
+                alias.asname or alias.name.split(".")[0] for alias in node.names
+            )
+        elif isinstance(node, ast.ImportFrom):
+            names.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                names.update(_python_bound_names(target))
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            names.update(_python_bound_names(node.target))
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            names.update(_python_bound_names(node.target))
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    names.update(_python_bound_names(item.optional_vars))
+        for field_name in ("body", "orelse", "finalbody"):
+            nested = getattr(node, field_name, None)
+            if isinstance(nested, list) and not isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
+                names.update(_python_module_scope_bindings(nested))
+        for handler in getattr(node, "handlers", None) or []:
+            names.update(_python_module_scope_bindings(handler.body))
+    return names
+
+
+def _python_unbound_name_references(tree: ast.Module) -> set[str]:
+    """Return loaded names bound nowhere in the module (any scope)."""
+
+    postponed = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "__future__"
+        and any(alias.name == "annotations" for alias in node.names)
+        for node in tree.body
+    )
+    annotation_nodes: set[int] = set()
+    if postponed:
+        for node in ast.walk(tree):
+            for annotation in (
+                getattr(node, "annotation", None),
+                getattr(node, "returns", None),
+            ):
+                if isinstance(annotation, ast.AST):
+                    annotation_nodes.update(id(sub) for sub in ast.walk(annotation))
+
+    bound: set[str] = set(dir(builtins)) | _PYTHON_MODULE_DUNDERS
+    loaded: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load):
+                if id(node) not in annotation_nodes:
+                    loaded.add(node.id)
+            else:
+                bound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                bound.add(alias.asname or alias.name.split(".")[0])
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound.update(node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            bound.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound.add(node.rest)
+    return loaded - bound
+
+
+def _plan_write_file_drops_referenced_python_definitions(
+    plan: List[Dict[str, Any]],
+    project_dir: Optional[Path],
+) -> List[Dict[str, Any]]:
+    if project_dir is None:
+        return []
+    root = Path(project_dir).resolve()
+    simulated: Dict[str, str] = {}
+    findings: List[Dict[str, Any]] = []
+    for step_index, step in enumerate(plan or [], start=1):
+        if not isinstance(step, dict):
+            continue
+        for raw_operation in step.get("ops", []) or []:
+            if not isinstance(raw_operation, dict):
+                continue
+            operation = normalize_file_op_shape(raw_operation)
+            if str(operation.get("op") or "") != "write_file":
+                continue
+            content = operation.get("content")
+            path_text = str(operation.get("path") or "").strip()
+            if not isinstance(content, str) or Path(path_text).suffix != ".py":
+                continue
+            try:
+                relative_path = normalize_path_reference(path_text, root)
+            except TaskWorkspaceViolationError:
+                continue
+            previous = simulated.get(relative_path)
+            if previous is None:
+                candidate = root / relative_path
+                try:
+                    if not candidate.is_file():
+                        simulated[relative_path] = content
+                        continue
+                    previous = candidate.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+            simulated[relative_path] = content
+            try:
+                before = ast.parse(previous)
+                after = ast.parse(content)
+            except SyntaxError:
+                continue
+            if any(
+                isinstance(node, ast.ImportFrom)
+                and any(alias.name == "*" for alias in node.names)
+                for node in ast.walk(after)
+            ):
+                continue
+            dropped = sorted(
+                _python_unbound_name_references(after)
+                & _python_module_scope_bindings(before.body)
+            )
+            if dropped:
+                findings.append(
+                    {
+                        "path": relative_path,
+                        "step_number": step.get("step_number", step_index),
+                        "dropped_referenced_names": dropped[:20],
+                    }
+                )
+    return findings
+
+
 def _plan_writes_import_time_python_parse_args(
     plan: List[Dict[str, Any]],
     project_dir: Optional[Path],

@@ -124,6 +124,7 @@ from .rules.contract_python import (
     _plan_appends_contextual_python_fragments,
     _plan_physical_src_python_import_details,
     _plan_python_source_syntax_issues,
+    _plan_write_file_drops_referenced_python_definitions,
     _plan_writes_import_time_python_parse_args,
     _plan_writes_obvious_undefined_python_decorators,
     _plan_writes_obvious_undefined_python_test_names,
@@ -1234,6 +1235,9 @@ class ValidatorService:
         _plan_physical_src_python_import_details
     )
     _plan_python_source_syntax_issues = staticmethod(_plan_python_source_syntax_issues)
+    _plan_write_file_drops_referenced_python_definitions = staticmethod(
+        _plan_write_file_drops_referenced_python_definitions
+    )
     _plan_writes_import_time_python_parse_args = staticmethod(
         _plan_writes_import_time_python_parse_args
     )
@@ -2079,6 +2083,26 @@ class ValidatorService:
                 details["python_source_syntax_invalid"] = python_source_syntax_issues[
                     :20
                 ]
+
+            dropped_python_definitions = (
+                cls._plan_write_file_drops_referenced_python_definitions(
+                    plan, Path(project_dir)
+                )
+            )
+            if dropped_python_definitions:
+                first = dropped_python_definitions[0]
+                repairable.append(
+                    "write_file replaces the entire existing Python module but its "
+                    "content drops module definitions it still uses "
+                    "(python_write_file_drops_referenced_definitions; "
+                    f"{first['path']}: {', '.join(first['dropped_referenced_names'])}). "
+                    "Use replace_in_file with exact current text for a localized "
+                    "edit, or write_file with the complete grounded file content "
+                    "preserving existing imports and definitions"
+                )
+                details["python_write_file_drops_referenced_definitions"] = (
+                    dropped_python_definitions[:20]
+                )
 
             static_site_off_root_mutations = cls._plan_static_site_off_root_mutations(
                 plan,
