@@ -905,17 +905,22 @@ def test_dry_run_blocks_incomplete_case_and_rejects_invalid_config():
     assert unknown["status"] == runner.STATUS_INVALID_CONFIG
 
 
-def test_live_run_fails_closed(capsys):
-    outcome = runner.run_live(runner.build_run_config("workflow-a", 1, live=True))
-    assert outcome["status"] == runner.STATUS_NOT_IMPLEMENTED
+def test_live_run_fails_closed_without_campaign(capsys):
+    # Phase 40D-2 implements live runs; without a pinned campaign they still
+    # fail closed before touching any runtime, provider, or repository.
+    outcome = runner.run_live(
+        runner.build_run_config("workflow-a", 1, live=True),
+        repo_root=REPO,
+        campaign_id=None,
+        output_root=REPO / "docs/roadmap/reports/evidence/phase40d2",
+    )
+    assert outcome["status"] == runner.STATUS_INVALID_CONFIG
     assert outcome["is_benchmark_attempt"] is False
     assert (
         cli.main(["run", "--case", "workflow-a", "--max-attempts", "1", "--live"])
-        == cli.EXIT_NOT_IMPLEMENTED
+        == cli.EXIT_INVALID
     )
-    assert (
-        json.loads(capsys.readouterr().out)["status"] == runner.STATUS_NOT_IMPLEMENTED
-    )
+    assert json.loads(capsys.readouterr().out)["status"] == runner.STATUS_INVALID_CONFIG
     with pytest.raises(SystemExit):
         cli.main(["run", "--case", "workflow-a"])  # mode must be explicit
 

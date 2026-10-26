@@ -121,10 +121,14 @@ def _parse_iso(value: Any) -> float | None:
 
 
 class _Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, immutable: bool = True):
+        # Historical evaluation reads a quiescent database. A live campaign reads
+        # while the runtime may still hold a WAL, which immutable=1 would ignore.
         self.available = path.is_file()
         self._conn = (
-            sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
+            sqlite3.connect(
+                f"file:{path}?mode=ro{'&immutable=1' if immutable else ''}", uri=True
+            )
             if self.available
             else None
         )
@@ -418,11 +422,13 @@ class HistoryLoader:
         roots: EvidenceRoots,
         registry: dict[str, Any],
         cases: dict[str, dict[str, Any]],
+        *,
+        live_database: bool = False,
     ):
         self.roots = roots
         self.registry = registry
         self.cases = cases
-        self.db = _Database(roots.database)
+        self.db = _Database(roots.database, immutable=not live_database)
         self._commit_times: dict[str, int | None] = {}
 
     # -- identity helpers -------------------------------------------------

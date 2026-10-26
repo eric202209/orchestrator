@@ -1,9 +1,9 @@
 """Mode B: controlled benchmark runs against the isolated development runtime.
 
-Phase 40D-1 implements schema-validated configuration and a side-effect-free
-dry run that checks isolation, the pinned canonical seed, and the planned
-disposable workspaces. Live provider-backed execution is not implemented and
-fails closed; a dry run is never reported as a benchmark attempt.
+The dry run is side-effect free: it checks isolation, the pinned canonical
+seed, and the planned disposable workspaces, and is never reported as a
+benchmark attempt. Live runs (Phase 40D-2) execute inside a pinned campaign;
+see ``live.py``.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from .schema import RUN_CONFIG_SCHEMA_VERSION, validate_case, validate_run_confi
 STATUS_DRY_RUN_PREPARED = "DRY_RUN_PREPARED"
 STATUS_DRY_RUN_BLOCKED = "DRY_RUN_BLOCKED"
 STATUS_INVALID_CONFIG = "INVALID_CONFIG"
-STATUS_NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
 PRODUCTION_QUEUE_NAMES = frozenset({"celery", ""})
 WORKSPACE_PREFIX = "phase40d"
 
@@ -105,7 +104,11 @@ def dry_run(
             "errors": errors,
         }
     if run_config["mode"] != "dry_run":
-        return run_live(run_config)
+        return {
+            "status": STATUS_INVALID_CONFIG,
+            "is_benchmark_attempt": False,
+            "errors": ["live mode requires run_live and a campaign"],
+        }
 
     cases = load_cases() if cases is None else cases
     blockers: list[str] = []
@@ -195,19 +198,37 @@ def dry_run(
     }
 
 
-def run_live(run_config: dict[str, Any]) -> dict[str, Any]:
-    """Live provider-backed runs are deferred to Phase 40D-2; fail closed."""
+def run_live(
+    run_config: dict[str, Any],
+    *,
+    repo_root: Path,
+    campaign_id: str | None,
+    output_root: Path,
+    resume_campaign: str | None = None,
+    context: Any = None,
+) -> dict[str, Any]:
+    """Run a case's budgeted attempts inside an existing campaign; fail closed."""
+
+    from . import live
 
     errors = validate_run_config(run_config)
+    if run_config.get("mode") != "live":
+        errors.append("mode must be live")
+    if not campaign_id:
+        errors.append("a live run requires --campaign (create one with campaign-init)")
     if errors:
         return {
             "status": STATUS_INVALID_CONFIG,
             "is_benchmark_attempt": False,
             "errors": errors,
         }
-    return {
-        "status": STATUS_NOT_IMPLEMENTED,
-        "is_benchmark_attempt": False,
-        "run_config": run_config,
-        "detail": "live controlled runs are not implemented in Phase 40D-1; no runtime, provider, or repository was touched",
-    }
+    ctx = context or live.LiveContext(
+        repo_root=repo_root, output_root=output_root, cases=load_cases()
+    )
+    return live.run_case(
+        ctx,
+        campaign_id,
+        run_config["case_id"],
+        run_config["max_attempts"],
+        resume_campaign=resume_campaign,
+    )

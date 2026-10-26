@@ -7,7 +7,14 @@
     venv/bin/python scripts/benchmark/cli.py run --case workflow-a \
         --profile isolated-development --max-attempts 2 --dry-run
 
-``run --live`` fails closed with NOT_IMPLEMENTED in Phase 40D-1.
+Live campaign (Phase 40D-2), against a running isolated development runtime:
+
+    venv/bin/python scripts/benchmark/cli.py campaign-init \
+        --campaign phase40d2-c1 --cases workflow-a,workflow-b,workflow-c
+    venv/bin/python scripts/benchmark/cli.py run --case workflow-a \
+        --profile isolated-development --max-attempts 2 --live --campaign phase40d2-c1
+    venv/bin/python scripts/benchmark/cli.py campaign-metrics --campaign phase40d2-c1
+    venv/bin/python scripts/benchmark/cli.py campaign-close --campaign phase40d2-c1 --stop-runtime
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if __package__ in (None, ""):
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.benchmark import runner  # noqa: E402
+from scripts.benchmark import live, runner  # noqa: E402
 from scripts.benchmark.evidence_loader import (  # noqa: E402
     CASES_DIR,
     REGISTRY_PATH,
@@ -40,8 +47,9 @@ from scripts.benchmark.schema import validate_case  # noqa: E402
 RESULT_SCHEMA_VERSION = "benchmark.history_result.v1"
 EXIT_OK = 0
 EXIT_INVALID = 2
-EXIT_NOT_IMPLEMENTED = 3
 EXIT_BLOCKED = 4
+EXIT_LIVE_STOPPED = 5
+LIVE_OUTPUT_ROOT = REPO_ROOT / "docs/roadmap/reports/evidence/phase40d2"
 
 
 class NetworkDisabledError(RuntimeError):
@@ -104,15 +112,7 @@ def evaluate_history(
 
 
 def _protected_output(output: Path, repo_root: Path) -> str | None:
-    resolved = output.resolve()
-    for phase in load_registry()["phases"]:
-        evidence_dir = (repo_root / phase["evidence_dir"]).resolve()
-        if resolved.is_relative_to(evidence_dir):
-            return f"refusing to write into historical evidence directory {phase['evidence_dir']}"
-    control = (repo_root / ".dev-runtime" / "phase40b-r1" / "runtime").resolve()
-    if resolved.is_relative_to(control):
-        return "refusing to write into the development runtime's control state"
-    return None
+    return live.protected_output_problem(output, repo_root)
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -148,17 +148,65 @@ def main(argv: list[str] | None = None) -> int:
 
     commands.add_parser("validate-cases", help="validate canonical case definitions")
 
-    run = commands.add_parser(
-        "run", help="controlled benchmark run (dry-run only in Phase 40D-1)"
-    )
+    run = commands.add_parser("run", help="controlled benchmark run")
     run.add_argument("--case", required=True)
     run.add_argument("--profile", default="isolated-development")
     run.add_argument("--max-attempts", type=int, default=2)
     mode = run.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true")
     mode.add_argument("--live", action="store_true")
+    run.add_argument("--campaign", help="live: campaign created by campaign-init")
+    run.add_argument(
+        "--resume-campaign",
+        help="live: repeat the campaign id to confirm resuming a case with existing attempts",
+    )
+    run.add_argument("--output-root", type=Path, default=LIVE_OUTPUT_ROOT)
+
+    init = commands.add_parser(
+        "campaign-init",
+        help="pin source, runtime, model, and cases for a live campaign",
+    )
+    init.add_argument("--campaign", required=True)
+    init.add_argument("--cases", required=True, help="comma-separated case ids")
+    init.add_argument("--max-attempts", type=int, default=2)
+    init.add_argument("--output-root", type=Path, default=LIVE_OUTPUT_ROOT)
+
+    for name, text in (
+        ("campaign-metrics", "deterministic metrics over a campaign's attempt records"),
+        ("campaign-close", "record cleanup; optionally stop owned runtime processes"),
+    ):
+        sub = commands.add_parser(name, help=text)
+        sub.add_argument("--campaign", required=True)
+        sub.add_argument("--output-root", type=Path, default=LIVE_OUTPUT_ROOT)
+        if name == "campaign-close":
+            sub.add_argument("--stop-runtime", action="store_true")
 
     args = parser.parse_args(argv)
+
+    if args.command in {"campaign-init", "campaign-metrics", "campaign-close"}:
+        ctx = live.LiveContext(
+            repo_root=REPO_ROOT, output_root=args.output_root, cases=load_cases()
+        )
+        if args.command == "campaign-init":
+            outcome = live.init_campaign(
+                ctx, args.campaign, args.cases.split(","), args.max_attempts
+            )
+            code = (
+                EXIT_OK
+                if outcome["status"] == live.STATUS_CAMPAIGN_CREATED
+                else EXIT_INVALID
+            )
+        elif args.command == "campaign-metrics":
+            outcome = live.campaign_metrics(ctx, args.campaign)
+            _write_json(ctx.campaign_dir(args.campaign) / "metrics.json", outcome)
+            code = EXIT_OK
+        else:
+            outcome = live.close_campaign(
+                ctx, args.campaign, stop_runtime=args.stop_runtime
+            )
+            code = EXIT_OK
+        print(json.dumps(outcome, indent=2, sort_keys=True, default=str))
+        return code
 
     if args.command == "validate-cases":
         errors = {
@@ -206,15 +254,26 @@ def main(argv: list[str] | None = None) -> int:
     config = runner.build_run_config(args.case, args.max_attempts, args.live)
     config["profile"] = args.profile
     outcome = (
-        runner.run_live(config)
+        runner.run_live(
+            config,
+            repo_root=REPO_ROOT,
+            campaign_id=args.campaign,
+            output_root=args.output_root,
+            resume_campaign=args.resume_campaign,
+        )
         if args.live
         else runner.dry_run(config, repo_root=REPO_ROOT)
     )
-    print(json.dumps(outcome, indent=2, sort_keys=True))
+    print(json.dumps(outcome, indent=2, sort_keys=True, default=str))
     return {
         runner.STATUS_DRY_RUN_PREPARED: EXIT_OK,
         runner.STATUS_DRY_RUN_BLOCKED: EXIT_BLOCKED,
-        runner.STATUS_NOT_IMPLEMENTED: EXIT_NOT_IMPLEMENTED,
+        live.STATUS_CASE_COMPLETE: EXIT_OK,
+        live.STATUS_BUDGET_EXHAUSTED: EXIT_OK,
+        live.STATUS_PREFLIGHT_FAILED: EXIT_LIVE_STOPPED,
+        live.STATUS_CAMPAIGN_TERMINATED: EXIT_LIVE_STOPPED,
+        live.STATUS_RESUME_CONFIRMATION_REQUIRED: EXIT_LIVE_STOPPED,
+        live.STATUS_BUSY: EXIT_LIVE_STOPPED,
     }.get(outcome["status"], EXIT_INVALID)
 
 
