@@ -128,7 +128,8 @@ def test_repair_prompt_includes_capsule_without_exceeding_budget(tmp_path):
     assert "Use these paths as workspace facts." in prompt
     # No target handle is issued, so repair must not advertise the target-ID shape.
     assert "{op,path,target_id,new}" not in prompt
-    assert "{op,path,old,new}" in prompt
+    assert "No grounded replace is available" in prompt
+    assert "{op,path,old,new}" not in prompt
     assert "Do not invent helper variables" in prompt
     assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
 

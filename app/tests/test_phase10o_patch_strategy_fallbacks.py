@@ -115,7 +115,8 @@ def test_phase10o_stale_replace_fallback_repair_prompt_keeps_file_excerpt(
     assert "Current file excerpt:" in prompt
     assert "def main(argv: list[str] | None = None) -> int:" in prompt
     assert 'parser.add_argument("message", help="Message to print")' in prompt
-    assert "do not emit another replace_in_file" in prompt
+    assert "Do not write_file to this existing target" in prompt
+    assert "partial excerpt cannot ground a whole-file rewrite" in prompt
     assert "write_file.content must be a JSON string" in prompt
     assert "escape newline characters as \\n" in prompt
     assert "do not use raw triple-quoted Python blocks" in prompt
@@ -211,7 +212,7 @@ def test_phase10o_stale_replace_second_pass_preserves_source_targets(
     assert "Stale replace second-pass target preservation:" in prompt
     assert "Preserve existing valid source ops" in prompt
     assert "do not drop unrelated src edits" in prompt
-    assert "Only convert stale replace_in_file ops for the same target" in prompt
+    assert "Correct only the rejected stale target operation" in prompt
     assert "src/medium_cli/formatting.py" in prompt
     assert "src/medium_cli/store.py" in prompt
     assert "src/medium_cli/cli.py" in prompt
@@ -359,7 +360,9 @@ def test_phase10o_stale_replace_after_repair_gets_fallback_second_pass():
     assert reason.retry_reason == "post_repair_stale_replace_fallback"
     assert reason.event_reason == "post_repair_stale_replace_fallback_pass"
     assert reason.semantic_violation_code == "patch_strategy_fallback_required"
-    assert "Exact-text patching is exhausted" in reason.rejection_text
+    assert "Do not reuse that stale text" in reason.rejection_text
+    assert "listed semantic target_id" in reason.rejection_text
+    assert "complete source" in reason.rejection_text
     assert "write_file.content must be a JSON string" in reason.rejection_text
     assert "escape newline characters as \\n" in reason.rejection_text
     assert "do not use raw triple-quoted Python blocks" in reason.rejection_text

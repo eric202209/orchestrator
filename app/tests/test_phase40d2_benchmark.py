@@ -73,6 +73,8 @@ class FakeOrchestrator:
         self.next_project = 100
         self.next_task = 500
         self.unauthorized_once = False
+        self.stop_status = 200
+        self.force_stop_terminal = True
         (self.config.root / "database").mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.config.database_file)
         conn.executescript(
@@ -155,8 +157,19 @@ class FakeOrchestrator:
                     {"task_execution_id": execution[0][0]} if execution else None
                 ),
             }
-        if method == "POST" and path.endswith("/stop"):
-            return 200, {}
+        if method == "POST" and path.split("?", 1)[0].endswith("/stop"):
+            status = self.stop_status
+            if (
+                status == 200
+                and path.endswith("?force=true")
+                and self.force_stop_terminal
+            ):
+                session_id = int(path.split("/")[4].split("?", 1)[0])
+                self._db(
+                    "update tasks set status='CANCELLED' where id=?",
+                    session_id - 1000,
+                )
+            return status, {"status": "stopped" if status == 200 else "stop_failed"}
         raise AssertionError(f"unexpected request {method} {path}")
 
     def _execute(self, task_id: int) -> dict:
@@ -742,7 +755,43 @@ def test_timeout_is_recorded_and_session_stopped(world):
         item["code"] == "observation_timeout"
         for item in record["reliability"]["evidence_limitations"]
     )
-    assert world.fake.request_count("POST", "/stop") == 1
+    assert world.fake.request_count("POST", "/stop?force=true") == 1
+    stop_call = next(
+        call for call in world.fake.calls if call[0] == "POST" and "/stop" in call[1]
+    )
+    assert stop_call[1].endswith("?force=true")
+    progress = (
+        world.ctx.campaign_dir(world.campaign)
+        / "attempts"
+        / CASE_ID
+        / "attempt-1"
+        / "progress.jsonl"
+    ).read_text()
+    assert '"step": "cancellation_confirmed"' in progress
+
+
+def test_unconfirmed_timeout_cancellation_terminates_campaign_before_next_attempt(
+    world,
+):
+    world.fake.terminal = False
+    world.fake.stop_status = 500
+    _init(world, attempts=2)
+
+    outcome = _run(world, attempts=2)
+
+    assert outcome["status"] == live.STATUS_CAMPAIGN_TERMINATED
+    assert outcome["reason"] == "cancellation_unconfirmed"
+    assert world.fake.request_count("POST", "/execute") == 1
+    assert (world.ctx.campaign_dir(world.campaign) / "terminated.json").is_file()
+    assert live._reservations(world.ctx.campaign_dir(world.campaign), CASE_ID) == [1]
+    progress = (
+        world.ctx.campaign_dir(world.campaign)
+        / "attempts"
+        / CASE_ID
+        / "attempt-1"
+        / "progress.jsonl"
+    ).read_text()
+    assert '"step": "cancellation_unconfirmed"' in progress
 
 
 # -- fail-closed preflight -----------------------------------------------------

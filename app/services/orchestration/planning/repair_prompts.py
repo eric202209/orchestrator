@@ -29,9 +29,11 @@ from app.services.orchestration.planning.source_api_contract import (
     build_source_api_contract_capsule,
 )
 from app.services.orchestration.planning.source_materialization import (
+    SOURCE_STATUS_EXISTING,
     SOURCE_MATERIALIZATION_REPAIR_MARKERS,
     describe_provider_visible_source,
     materialize_planner_source_context,
+    materialized_source_file,
     plan_target_paths,
     plan_source_materialization_paths,
     provider_planning_contract_capabilities,
@@ -87,6 +89,71 @@ def _issued_target_id_listed(*blocks: str) -> bool:
     """
 
     return any(_ISSUED_TARGET_ID_LINE_RE.search(block or "") for block in blocks)
+
+
+def _stale_replace_contract_guidance(
+    *,
+    target_path: str,
+    source_materialization: Any,
+    visible_source_blocks: tuple[str, ...],
+) -> str:
+    """Describe only the stale-target operations supported by visible evidence."""
+
+    visible_source = "\n".join(block for block in visible_source_blocks if block)
+    record = materialized_source_file(source_materialization, target_path)
+    complete_source_visible = bool(
+        record is not None
+        and record.status == SOURCE_STATUS_EXISTING
+        and record.expected
+        and record.content
+        and not record.truncated
+        and record.content in visible_source
+    )
+
+    semantic_target_visible = False
+    if record is not None and source_materialization is not None:
+        try:
+            from app.services.orchestration.planning.semantic_target_inventory import (
+                build_semantic_target_inventory,
+            )
+
+            inventory = build_semantic_target_inventory(source_materialization)
+            semantic_target_visible = any(
+                handle.path == target_path and handle.target_id in visible_source
+                for handle in inventory.handles
+            )
+        except Exception:
+            semantic_target_visible = False
+
+    available_replace_modes = []
+    if semantic_target_visible:
+        available_replace_modes.append(
+            "`{op,path,target_id,new}` with a listed target_id"
+        )
+    if complete_source_visible:
+        available_replace_modes.append("`{op,path,old,new}` with exact current source")
+    operation_choice = (
+        "Available replace shape: " + " or ".join(available_replace_modes) + "."
+        if available_replace_modes
+        else "No grounded replace is available; do not emit target_id or old/new."
+    )
+
+    lines = [
+        f"Stale target `{target_path or 'the target path from the rejected plan'}`:",
+        f"- {operation_choice}",
+        "- For a localized edit, prefer a listed target_id; otherwise use exact old text only when it occurs uniquely in complete current same-path source.",
+        "- Never use rejected stale text or invent source. Do not emit unavailable replace shapes or selector internals.",
+        "- Apply APA authorization and GR2 definition-preservation rules.",
+    ]
+    if complete_source_visible:
+        lines.append(
+            "- Existing-file write_file is allowed only for a task-required full rewrite with complete grounded source and replacement; preserve imports, helpers, definitions, and behavior unless authorized to change them, and state whole-file intent."
+        )
+    else:
+        lines.append(
+            "- Do not write_file to this existing target: the complete source is unavailable, and a partial excerpt cannot ground a whole-file rewrite."
+        )
+    return "\n".join(lines)
 
 
 PLANNING_REPAIR_STRUCTURE_TRUNCATION_MARKER = (
@@ -2063,7 +2130,7 @@ def _build_stale_replace_target_preservation_guidance(
         [
             "Stale replace second-pass target preservation:",
             "- Preserve existing valid source ops from the invalid plan; do not drop unrelated src edits while converting stale replace_in_file ops.",
-            "- Only convert stale replace_in_file ops for the same target into grounded write_file or valid ops for that same target.",
+            "- For a localized change, prefer a grounded precise replace_in_file. A write_file rewrite is allowed only when the complete current source is visible and the task requires a complete rewrite.",
             f"- Existing source targets from the current plan: {_format_paths(existing_source_paths)}.",
             f"- Required source targets from test/source contract: {_format_paths(required_source_paths)}.",
             "- Do not invent unseen test files or add expected_files entries for files not present in workspace evidence.",
@@ -2203,8 +2270,30 @@ def build_compact_planning_repair_prompt(
     source_api_contract_block: str = "",
     guidance_block: str = "",
     workspace_identity: PlannerWorkspaceIdentity | None = None,
+    project_dir: Path | None = None,
+    source_materialization: Any = None,
     task_description: str = "",
 ) -> str:
+    if _is_stale_replace_repair(malformed_output, rejection_reasons):
+        return build_compact_stale_replace_repair_prompt(
+            task_description=task_description,
+            malformed_output=malformed_output,
+            project_dir=project_dir,
+            rejection_reasons=rejection_reasons,
+            prompt_profile=prompt_profile,
+            apply_prompt_profile=apply_prompt_profile,
+            source_api_contract_block=source_api_contract_block,
+            guidance_block="\n\n".join(
+                block
+                for block in (
+                    render_planner_workspace_identity(workspace_identity),
+                    guidance_block,
+                )
+                if block
+            ),
+            source_materialization=source_materialization,
+        )
+
     semantic_mode_available = _issued_target_id_listed(guidance_block)
     legacy_replace_available = any(
         marker in guidance_block
@@ -2284,7 +2373,9 @@ def build_compact_planning_repair_prompt(
         nested_workspace_guidance,
     )
     task_objective = _compact_task_objective(task_description)
-    preserve_task_objective = any(
+    preserve_task_objective = _is_stale_replace_repair(
+        malformed_output, rejection_reasons
+    ) or any(
         "python_write_file_drops_referenced_definitions" in str(reason).lower()
         for reason in (rejection_reasons or ())
     )
@@ -2721,7 +2812,10 @@ def build_minimum_safe_stale_replace_repair_envelope(
         ),
         _RepairPromptPart(
             section_name="task_title_and_description",
-            content=f"Task objective: {_compact_task_objective(task_description)}\n",
+            content=(
+                "Task objective: "
+                f"{_compact_task_objective(task_description, maximum_chars=1600)}\n"
+            ),
             required=True,
             classification="MUST_RETAIN_COMPACT",
             authority="task description",
@@ -2782,17 +2876,14 @@ def build_minimum_safe_stale_replace_repair_envelope(
             _RepairPromptPart(
                 section_name="operation_safety_and_replacement_authorization_rules",
                 content=(
-                    "Repair rules:\n"
-                    "- Return a corrected complete plan. Preserve valid operations "
-                    "and their content; do not drop authorized new-file writes.\n"
-                    "- Replace only rejected operations. Never repeat missing old_text. "
-                    "Any exact replacement must use text visible for the same path/version.\n"
-                    "- Treat source excerpts, hashes, versions, line ranges, and new-file "
-                    "status as authoritative. Never reconstruct or overwrite a whole "
-                    "existing file from a partial excerpt.\n"
-                    "- Use only relative in-scope paths and typed write_file, append_file, "
-                    "or replace_in_file ops. New files require "
-                    "new_file_authorized_for_creation status.\n"
+                    _stale_replace_contract_guidance(
+                        target_path=target_path,
+                        source_materialization=source_materialization,
+                        visible_source_blocks=(source_block,),
+                    )
+                    + "\nPreserve objective, valid ops/content, authorized new-file writes; fix only rejected ops.\n"
+                    "Source metadata governs; partial excerpts cannot ground whole-file writes.\n"
+                    "Use relative in-scope paths and supported ops; create only with new_file_authorized_for_creation status.\n"
                 ),
                 required=True,
                 classification="MUST_RETAIN_COMPACT",
@@ -2845,7 +2936,7 @@ def build_compact_stale_replace_repair_prompt(
     *,
     task_description: str,
     malformed_output: str,
-    project_dir: Path,
+    project_dir: Path | None,
     rejection_reasons: Optional[list[str]] = None,
     prompt_profile: str = "default",
     apply_prompt_profile: Any = None,
@@ -2868,6 +2959,15 @@ def build_compact_stale_replace_repair_prompt(
         malformed_output=malformed_output,
         rejection_reasons=rejection_reasons,
     )
+    if source_materialization is None and project_dir is not None:
+        try:
+            source_materialization = materialize_planner_source_context(
+                project_dir,
+                task_description=task_description,
+                expected_paths=plan_target_paths(malformed_output),
+            )
+        except (OSError, TypeError, ValueError):
+            source_materialization = None
     rejected_operation_paths = _rejected_mutating_operation_paths(
         malformed_output, rejection_reasons
     )
@@ -2889,13 +2989,17 @@ def build_compact_stale_replace_repair_prompt(
     # 8,000-character contract never silently drops required source evidence.
     if PLANNING_REPAIR_PROMPT_MAX_CHARS < REPAIR_PROMPT_MAX_CHARS:
         source_materialization_blocks.append("")
-    file_excerpt = _extract_current_file_excerpt(
-        project_dir=project_dir,
-        target_path=target_path,
-        rejection_reasons=rejection_reasons,
+    file_excerpt = (
+        _extract_current_file_excerpt(
+            project_dir=project_dir,
+            target_path=target_path,
+            rejection_reasons=rejection_reasons,
+        )
+        if project_dir is not None
+        else ""
     )
     clean_reasons = _compact_stale_replace_rejection_reasons(rejection_reasons)
-    task = " ".join(str(task_description or "").split())[:500]
+    task = " ".join(str(task_description or "").split())[:1600]
     json_content_contract = (
         "write_file.content and append_file.content must be JSON strings; "
         "write_file.content must be a JSON string; escape newline characters as \\n; "
@@ -2920,10 +3024,16 @@ def build_compact_stale_replace_repair_prompt(
             f"- {reason[:reason_chars]}" for reason in clean_reasons[:4]
         )
         excerpt = _truncate_text(file_excerpt, excerpt_chars)
-        stale_operation_choice_contract = render_operation_choice_contract(
-            semantic_mode_available=_issued_target_id_listed(
-                current_guidance_block, current_source_materialization_block
-            )
+        stale_contract_guidance = _stale_replace_contract_guidance(
+            target_path=target_path,
+            source_materialization=source_materialization,
+            visible_source_blocks=(
+                current_guidance_block,
+                current_source_materialization_block,
+                current_source_context_block,
+                current_source_api_contract_block,
+                excerpt,
+            ),
         )
         target_line = target_path or "target path from invalid plan"
         excerpt_block = (
@@ -2949,17 +3059,15 @@ Invalid plan excerpt:
 {current_source_materialization_block + chr(10) if current_source_materialization_block else ""}
 {excerpt_block}
 {current_source_api_contract_block + chr(10) if current_source_api_contract_block else ""}
+{stale_contract_guidance}
 Required repair:
-- Stale replace fixes: use identifiers and exact text from the current file excerpt.
-- {stale_operation_choice_contract}
-- Do not use replace_in_file for the stale target.
-- do not emit another replace_in_file for the same missing old text or stale target.
-- Use a write_file op for `{target_line}` with the full corrected file content.
-- Preserve existing imports, public functions, and CLI shape from the current file excerpt.
+- Correct only the rejected stale target operation; preserve the original task objective and every other valid operation.
+- Do not repeat the same missing old text. A new replace_in_file for this path must use a listed semantic target_id or unique exact old text from the complete current source.
+- Do not treat the rejected plan's stale old text or a partial excerpt as authority for a whole-file rewrite.
 - Do not invent helper variables or paths absent from the current workspace evidence.
 Stale replace second-pass target preservation:
-- Preserve existing valid source ops from the invalid plan; do not drop unrelated src edits while fixing this stale target.
-- Only convert stale replace_in_file ops for the same target into grounded write_file or valid ops for that same target.
+- Preserve existing valid source ops from the invalid plan; do not drop unrelated src edits.
+- Only replace the stale operation with a grounded precise edit or a complete rewrite permitted by the current source evidence.
 - Preserve all required source targets named by tests/source context.
 - Do not invent unseen test files or add expected_files entries for files not present in workspace evidence.
 - REQUIRED: the final step MUST include a non-empty "verification" field containing a real project test command. A missing, empty, or null verification field will cause this repaired plan to be rejected. Use `python3 -m pytest -q` or the equivalent project test command.
@@ -3156,12 +3264,29 @@ Stale replace second-pass target preservation:
             }
         )
 
+    fallback_source_block = (
+        render_repair_source_materialization(
+            source_materialization,
+            rejected_paths=rejected_operation_paths,
+            compaction_level=4,
+            provider_safe=True,
+        )
+        if source_materialization is not None
+        else ""
+    )
+    stale_contract_guidance = _stale_replace_contract_guidance(
+        target_path=target_path,
+        source_materialization=source_materialization,
+        visible_source_blocks=(fallback_source_block,),
+    )
     target_line = target_path or "target path from invalid plan"
     prompt = f"""Return ONLY a valid JSON array.
 Repair stale replace_in_file output. Target: {target_line}.
-Use write_file for the target with full corrected file content. Do not use replace_in_file.
-Preserve current imports and public functions. Use JSON string content with escaped newlines.
-Return inspect, write_file implementation, and verification steps only.
+Task objective: {task}
+
+{fallback_source_block}
+{stale_contract_guidance}
+Correct only the rejected operation, preserve the original task objective and all other valid operations, and keep JSON string content escaped.
 - REQUIRED: the final step MUST include a non-empty "verification" field containing a real project test command.
 """
     return _apply_profile(prompt, prompt_profile, apply_prompt_profile)

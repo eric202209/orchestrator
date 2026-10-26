@@ -169,7 +169,10 @@ def build_minimal_planning_prompt(
     apply_prompt_profile: Any = None,
     intent_mode: str = "default",
 ) -> str:
-    concise_task = " ".join((task_description or "").split())[:1200]
+    # Keep the same bounded task allowance as the full Planning prompt.  The
+    # compact source context is expendable; task objectives and path/test
+    # constraints must not disappear when a fallback is selected.
+    concise_task = " ".join((task_description or "").split())[:1600]
     if str(validation_profile or "") == "verification":
         concise_task = f"{concise_task}\n{VERIFICATION_PROFILE_PLANNING_CONTRACT_LINE}"
     display_project_dir = render_workspace_path_for_prompt(project_dir)
@@ -318,7 +321,9 @@ def build_ultra_minimal_planning_prompt(
     apply_prompt_profile: Any = None,
     intent_mode: str = "default",
 ) -> str:
-    concise_task = " ".join((task_description or "").split())[:700]
+    # Keep the same bounded task allowance as the full Planning prompt so the
+    # last acceptance or authorization clause is not silently truncated.
+    concise_task = " ".join((task_description or "").split())[:1600]
     if str(validation_profile or "") == "verification":
         concise_task = f"{concise_task}\n{VERIFICATION_PROFILE_PLANNING_CONTRACT_LINE}"
     display_project_dir = render_workspace_path_for_prompt(project_dir)

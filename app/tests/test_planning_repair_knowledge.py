@@ -224,7 +224,7 @@ def test_planning_repair_prompt_fits_duplicate_stale_replace_source_context(
     assert len(prompt) <= PLANNING_REPAIR_PROMPT_MAX_CHARS
     assert "REPAIR KNOWLEDGE REFERENCES" in prompt
     assert "Planning repair produced non-runnable step" in prompt
-    assert "Stale replace fixes" in prompt
+    assert "For a localized edit, prefer a listed target_id" in prompt
     assert "Current file excerpt:" in prompt
 
 
@@ -329,7 +329,11 @@ def test_stale_replace_repair_over_budget_uses_compact_stale_prompt(
     assert "Planning repair produced non-runnable step" in prompt
     assert "src/small_cli/cli.py" in prompt
     assert "Current file excerpt for src/small_cli/cli.py" in prompt
-    assert "Use a write_file op for `src/small_cli/cli.py`" in prompt
+    assert "Do not repeat the same missing old text" in prompt
+    assert (
+        "Existing-file write_file is allowed only for a task-required full rewrite"
+        in prompt
+    )
     assert "write_file.content and append_file.content must be JSON strings" in prompt
 
 

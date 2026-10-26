@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -493,16 +494,19 @@ class OpenAIChatCompletionsRuntime:
                 {
                     "configured_logical_timeout_seconds": effective_timeout,
                     "effective_logical_deadline_seconds": effective_timeout,
+                    "effective_total_request_deadline_seconds": effective_timeout,
+                    "total_request_deadline_enforced": True,
                     "effective_transport_timeout_seconds": transport_timeout,
                 }
             )
             async with httpx.AsyncClient(timeout=transport_timeout) as client:
                 provider_diagnostics["provider_invocation_started"] = True
-                response = await client.post(
-                    request_url,
-                    headers=headers,
-                    json=payload,
-                )
+                async with asyncio.timeout(effective_timeout):
+                    response = await client.post(
+                        request_url,
+                        headers=headers,
+                        json=payload,
+                    )
                 provider_diagnostics["provider_response_received"] = True
                 if repair_response_evidence is not None:
                     repair_response_evidence.record_http_response(
@@ -585,7 +589,7 @@ class OpenAIChatCompletionsRuntime:
                             else "thinking_removed_before_planner"
                         ),
                     )
-        except httpx.TimeoutException as exc:
+        except (httpx.TimeoutException, TimeoutError) as exc:
             if repair_response_evidence is not None:
                 repair_response_evidence.fail(
                     exc,
@@ -596,18 +600,41 @@ class OpenAIChatCompletionsRuntime:
                 provider_diagnostics["provider_response_evidence"] = (
                     repair_response_evidence.diagnostics()
                 )
+            total_deadline = isinstance(exc, TimeoutError) and not isinstance(
+                exc, httpx.TimeoutException
+            )
+            timeout_description = (
+                "total request deadline" if total_deadline else "logical deadline"
+            )
             error = AgentRuntimeError(
                 f"OpenAI-compatible chat request timed out after {effective_timeout}s "
-                f"(logical deadline; transport timeout {transport_timeout}s)."
+                f"({timeout_description}; transport timeout {transport_timeout}s)."
             )
             error.provider_failure_classification = "provider_timeout"
             error.runtime_diagnostics = {
                 **provider_diagnostics,
                 "timed_out": True,
-                "timeout_boundary": "runtime_invocation",
+                "timeout_boundary": (
+                    "runtime_invocation_total_deadline"
+                    if total_deadline
+                    else "runtime_invocation"
+                ),
                 "timeout_seconds": effective_timeout,
             }
             raise error from exc
+        except asyncio.CancelledError as exc:
+            if repair_response_evidence is not None:
+                repair_response_evidence.fail(
+                    exc,
+                    response_received=bool(
+                        provider_diagnostics.get("provider_response_received")
+                    ),
+                )
+                provider_diagnostics["provider_response_evidence"] = (
+                    repair_response_evidence.diagnostics()
+                )
+            provider_diagnostics["caller_cancellation_observed"] = True
+            raise
         except httpx.HTTPError as exc:
             if repair_response_evidence is not None:
                 repair_response_evidence.fail(

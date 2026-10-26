@@ -2530,6 +2530,8 @@ class PlannerService:
         workspace_identity: PlannerWorkspaceIdentity | None = None,
         planner_contract: Optional[Dict[str, Any]] = None,
         task_description: str = "",
+        project_dir: Path | None = None,
+        source_materialization: Any = None,
     ) -> str:
         grounding_block = render_planner_repair_contract_context(planner_contract)
         effective_guidance_block = "\n\n".join(
@@ -2542,6 +2544,8 @@ class PlannerService:
             apply_prompt_profile=PlannerService.apply_prompt_profile,
             guidance_block=effective_guidance_block,
             workspace_identity=workspace_identity,
+            project_dir=project_dir,
+            source_materialization=source_materialization,
             task_description=task_description,
         )
 
@@ -2941,6 +2945,8 @@ class PlannerService:
                     workspace_identity=workspace_identity,
                     planner_contract=planner_contract,
                     task_description=task_description,
+                    project_dir=project_dir,
+                    source_materialization=source_materialization,
                 )
                 if needs_execution_contract:
                     prompt = cls.include_execution_capability_contract(

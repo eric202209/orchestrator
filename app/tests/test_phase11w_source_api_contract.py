@@ -660,7 +660,8 @@ def test_stale_replace_over_budget_fallback_preserves_provider_safe_budget(
     )
 
     assert len(result.prompt) <= repair_prompts.PLANNING_REPAIR_PROMPT_MAX_CHARS
-    assert "Stale replace repair mode" in result.prompt
+    assert result.metadata["repair_prompt_strategy"] == "compact_stale_replace"
+    assert "Current file excerpt" in result.prompt
     assert "## SOURCE/API CONTRACT CAPSULE" not in result.prompt
     assert result.metadata["source_api_contract_omitted_reason"] == "over_budget"
     assert result.metadata["source_api_contract_available"] is True

@@ -51,6 +51,7 @@ LOCK_NAME = ".live-runner.lock"
 TERMINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled"})
 DEFAULT_TIMEOUT_SECONDS = 1800
 DEFAULT_POLL_SECONDS = 5.0
+CANCELLATION_CONFIRM_TIMEOUT_SECONDS = 30.0
 # An execute request whose response was lost is resolved by observing whether a
 # TaskExecution appeared; it is never re-sent.
 UNCONFIRMED_EXECUTE_GRACE_SECONDS = 120
@@ -71,7 +72,7 @@ ALLOWED_REQUESTS: tuple[tuple[str, str], ...] = (
     ("POST", r"/api/v1/tasks/\d+/execute"),
     ("GET", r"/api/v1/tasks/\d+"),
     ("GET", r"/api/v1/tasks/\d+/change-set"),
-    ("POST", r"/api/v1/sessions/\d+/stop"),
+    ("POST", r"/api/v1/sessions/\d+/stop\?force=true"),
 )
 
 
@@ -92,6 +93,7 @@ STATUS_CASE_COMPLETE = "CASE_COMPLETE"
 STATUS_BUDGET_EXHAUSTED = "BUDGET_EXHAUSTED"
 STATUS_CAMPAIGN_TERMINATED = "CAMPAIGN_TERMINATED"
 STATUS_RESUME_CONFIRMATION_REQUIRED = "RESUME_CONFIRMATION_REQUIRED"
+STATUS_CANCELLATION_UNCONFIRMED = "CANCELLATION_UNCONFIRMED"
 STATUS_INVALID = "INVALID_CONFIG"
 STATUS_BUSY = "RUNNER_BUSY"
 
@@ -947,9 +949,19 @@ def _run_case_locked(
                 "attempt": number,
                 "checks": result["checks"],
             }
-        outcomes.append(
-            _execute_attempt(ctx, manifest, directory, case_id, number, result)
-        )
+        outcome = _execute_attempt(ctx, manifest, directory, case_id, number, result)
+        outcomes.append(outcome)
+        if outcome.get("unresolved_active_task"):
+            _terminate(
+                directory,
+                "cancellation_unconfirmed",
+                {"case_id": case_id, "attempt": number, "task_id": outcome["task_id"]},
+            )
+            return {
+                "status": STATUS_CAMPAIGN_TERMINATED,
+                "reason": "cancellation_unconfirmed",
+                "attempts": outcomes,
+            }
 
     while len(_reservations(directory, case_id)) < budget:
         used = len(_reservations(directory, case_id))
@@ -972,9 +984,19 @@ def _run_case_locked(
                 "attempts": outcomes,
             }
         number = reserve_attempt(directory, case_id, budget)
-        outcomes.append(
-            _execute_attempt(ctx, manifest, directory, case_id, number, result)
-        )
+        outcome = _execute_attempt(ctx, manifest, directory, case_id, number, result)
+        outcomes.append(outcome)
+        if outcome.get("unresolved_active_task"):
+            _terminate(
+                directory,
+                "cancellation_unconfirmed",
+                {"case_id": case_id, "attempt": number, "task_id": outcome["task_id"]},
+            )
+            return {
+                "status": STATUS_CAMPAIGN_TERMINATED,
+                "reason": "cancellation_unconfirmed",
+                "attempts": outcomes,
+            }
         if (directory / "terminated.json").exists():
             return {"status": STATUS_CAMPAIGN_TERMINATED, "attempts": outcomes}
     return {
@@ -1151,14 +1173,86 @@ def _observe(
         if ctx.hooks.monotonic() >= deadline:
             break
         ctx.hooks.sleep(ctx.poll_seconds)
-    stop = None
-    if last.get("session_id"):
+    confirmed = _cancel_timed_out_task(ctx, api, task_id, last, progress)
+    progress.mark(
+        "timeout",
+        polls=polls,
+        cancellation_confirmed=confirmed,
+        unresolved_active_task=not confirmed,
+        **last,
+    )
+    return {
+        **last,
+        "timed_out": True,
+        "cancellation_confirmed": confirmed,
+        "unresolved_active_task": not confirmed,
+    }
+
+
+def _cancel_timed_out_task(
+    ctx: LiveContext,
+    api: DevApiClient,
+    task_id: int,
+    last: dict[str, Any],
+    progress: Progress,
+) -> bool:
+    session_id = last.get("session_id")
+    if not session_id:
+        progress.mark("cancellation_unconfirmed", reason="session_id_unavailable")
+        return False
+
+    path = f"/api/v1/sessions/{session_id}/stop?force=true"
+    progress.mark("cancellation_requested", task_id=task_id, session_id=session_id)
+    try:
+        stop_status, stop_body = api.request("POST", path)
+    except (LiveError, OSError, dev_runtime.RuntimeToolError) as exc:
+        stop_status, stop_body = 0, {"error": type(exc).__name__}
+    progress.mark(
+        "cancellation_response",
+        http_status=stop_status,
+        response=(
+            stop_body
+            if isinstance(stop_body, (dict, list, str, int, float, bool))
+            else None
+        ),
+    )
+
+    deadline = ctx.hooks.monotonic() + CANCELLATION_CONFIRM_TIMEOUT_SECONDS
+    polls = 0
+    last_status: int | None = None
+    last_task_status: str | None = None
+    while True:
         try:
-            stop = api.request("POST", f"/api/v1/sessions/{last['session_id']}/stop")[0]
-        except OSError:
-            stop = None
-    progress.mark("timeout", polls=polls, session_stop_http=stop, **last)
-    return {**last, "timed_out": True}
+            status, task = api.request("GET", f"/api/v1/tasks/{task_id}")
+        except (LiveError, OSError, dev_runtime.RuntimeToolError) as exc:
+            status, task = 0, {"error": type(exc).__name__}
+        polls += 1
+        last_status = status
+        if status == 200:
+            last_task_status = str(task.get("status") or "").lower()
+            if last_task_status in TERMINAL_TASK_STATUSES:
+                progress.mark(
+                    "cancellation_confirmed",
+                    task_id=task_id,
+                    task_status=last_task_status,
+                    polls=polls,
+                    stop_http_status=stop_status,
+                )
+                return True
+        now = ctx.hooks.monotonic()
+        if now >= deadline:
+            break
+        ctx.hooks.sleep(min(ctx.poll_seconds, deadline - now))
+
+    progress.mark(
+        "cancellation_unconfirmed",
+        task_id=task_id,
+        polls=polls,
+        stop_http_status=stop_status,
+        last_task_http_status=last_status,
+        last_task_status=last_task_status,
+    )
+    return False
 
 
 def _copy_tree(source: Path, destination: Path) -> list[Path]:
@@ -1628,6 +1722,8 @@ def _finalize(
         "independently_accepted": reliability["independently_accepted"],
         "record": str(attempt_dir / "record.json"),
         "source_identity_after": "unchanged" if not mismatch else "MISMATCH",
+        "cancellation_confirmed": observed.get("cancellation_confirmed"),
+        "unresolved_active_task": bool(observed.get("unresolved_active_task")),
     }
 
 
