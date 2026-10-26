@@ -439,7 +439,7 @@ def test_case5_read_only_inspection_step_is_not_treated_as_mutating(workspace):
     assert outcome.status == "accepted"
 
 
-def test_case6_non_mutating_residual_reasoning_still_reaches_a_direct_runtime(
+def test_case6_unsupported_residual_command_never_reaches_a_direct_runtime(
     db_session, tmp_path
 ):
     step = _step(
@@ -466,11 +466,13 @@ def test_case6_non_mutating_residual_reasoning_still_reaches_a_direct_runtime(
 
     result = _run_loop(ctx)
 
-    assert result == {"status": "completed"}
-    # E1 already performed the mutation; the residual turn is advisory and legal.
+    # Phase 40C-2: E1 applied the structured op, but the residual command has
+    # no channel under STRUCTURED_ORCHESTRATOR.  The direct runtime cannot run
+    # it, so it is not asked to and its self-report is never step evidence.
+    assert result["status"] == "failed"
+    assert result["reason"] == "execution_capability_unsupported"
     assert (runtime_workspace / "accepted.txt").read_text(encoding="utf-8") == "safe\n"
-    assert len(runtime.calls) == 1
-    assert "Report on this step." in runtime.calls[0]["prompt"]
+    assert runtime.calls == []
 
 
 # ---------------------------------------------------------------------------

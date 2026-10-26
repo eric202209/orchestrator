@@ -138,14 +138,25 @@ def _bounded_text(value: Any, limit: int) -> tuple[str | None, bool]:
 
 def _runtime_identity(runtime_service: Any) -> dict[str, Any]:
     task = getattr(runtime_service, "task_model", None)
+    db = getattr(runtime_service, "db", None)
+    task_id = getattr(runtime_service, "task_id", None)
     project_id = getattr(runtime_service, "project_id", None)
     if project_id is None:
         project_id = getattr(task, "project_id", None)
+    if project_id is None and db is not None and task_id is not None:
+        try:
+            from app.models import Task
+
+            task_record = db.query(Task).filter(Task.id == task_id).first()
+            project_id = getattr(task_record, "project_id", None)
+        except Exception:
+            # Evidence capture is best-effort and must not block Planning.
+            project_id = None
     return {
-        "db": getattr(runtime_service, "db", None),
+        "db": db,
         "project_id": project_id,
         "session_id": getattr(runtime_service, "session_id", None),
-        "task_id": getattr(runtime_service, "task_id", None),
+        "task_id": task_id,
         "task_execution_id": getattr(runtime_service, "task_execution_id", None),
     }
 
@@ -177,6 +188,29 @@ def _resolve_control_state_location(
     return project_control_state_location(
         get_effective_runtime_root(db), project_id, db=db
     )
+
+
+def planning_response_evidence_target_from_runtime(
+    runtime_service: Any,
+) -> tuple[str, str] | None:
+    """Return a unique response-evidence path under this runtime's control state."""
+
+    identity = _runtime_identity(runtime_service)
+    location = _resolve_control_state_location(
+        db=identity["db"],
+        project_id=identity["project_id"],
+        control_state_location=None,
+    )
+    if location is None:
+        return None
+    correlation_id = f"planning-response-{uuid.uuid4().hex}"
+    response_path = (
+        control_state_root(location)
+        / PLANNING_EVIDENCE_DIRECTORY
+        / correlation_id
+        / "provider-response.json"
+    )
+    return str(response_path), correlation_id
 
 
 def begin_planning_provider_evidence(
@@ -605,7 +639,7 @@ def _evidence_representation(value: Any, *, retained: bool = True) -> dict[str, 
 
 
 class PlanningRepairResponseEvidence:
-    """Explicit, bounded response capture for one Planning repair call.
+    """Explicit, bounded response capture for one Planning generation call.
 
     This is intentionally separate from the existing always-on lifecycle
     evidence recorder. A caller supplies a unique path to opt in. Every write
@@ -625,13 +659,18 @@ class PlanningRepairResponseEvidence:
         endpoint: str | None,
         logical_timeout_seconds: float | int | None,
         transport_timeout_seconds: float | int | None,
+        capture_scope: str = "planning_repair",
     ) -> None:
         self.path = Path(path)
         self._persistence_errors: list[str] = []
         self.document: dict[str, Any] = {
-            "schema_version": "planning_repair_provider_response_evidence.v1",
+            "schema_version": (
+                "planning_provider_response_evidence.v1"
+                if capture_scope == "planning_generation"
+                else "planning_repair_provider_response_evidence.v1"
+            ),
             "capture_enabled": True,
-            "capture_scope": "planning_repair",
+            "capture_scope": capture_scope,
             "correlation": {
                 "provider_call_id": str(correlation_id or uuid.uuid4().hex),
             },
@@ -682,6 +721,17 @@ class PlanningRepairResponseEvidence:
             "planner_output_contract": {
                 "status": "not_reached",
             },
+            "planning_parse": {
+                "status": "not_reached",
+                "failure_category": None,
+                "serialization_normalization_applied": False,
+                "normalized_structure": None,
+                "parser_strategy": None,
+            },
+            "plan_validation": {
+                "schema_validation": {"status": "not_run"},
+                "final_plan_validation": {"status": "not_run"},
+            },
             "timing": {
                 "request_started_utc": _utc_now(),
                 "response_received_utc": None,
@@ -726,11 +776,46 @@ class PlanningRepairResponseEvidence:
             if message not in self._persistence_errors:
                 self._persistence_errors.append(message)
 
-    def start(self, *, prompt: str, payload_keys: list[str]) -> None:
+    def start(
+        self,
+        *,
+        prompt: str,
+        payload_keys: list[str],
+        response_format: Any = None,
+    ) -> None:
+        capability_contract = None
+        marker = "## EXECUTION CAPABILITY CONTRACT"
+        contract_start = str(prompt or "").find(marker)
+        if contract_start >= 0:
+            contract_end = str(prompt or "").find("\n## ", contract_start + len(marker))
+            if contract_end < 0:
+                contract_end = min(len(prompt), contract_start + 1600)
+            contract_text = str(prompt)[contract_start:contract_end].strip()[:1600]
+            capability_contract = {
+                "present": True,
+                "chars": len(contract_text),
+                "sha256": hashlib.sha256(contract_text.encode("utf-8")).hexdigest(),
+                "content": contract_text,
+            }
+        response_format_evidence: dict[str, Any] = {"type": None}
+        if isinstance(response_format, Mapping):
+            response_format_evidence["type"] = (
+                str(response_format.get("type") or "")[:80] or None
+            )
+            schema = response_format.get("json_schema")
+            if isinstance(schema, Mapping):
+                canonical_schema = json.dumps(
+                    schema, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+                )
+                response_format_evidence["schema_sha256"] = hashlib.sha256(
+                    canonical_schema.encode("utf-8")
+                ).hexdigest()
         self.document["request"] = {
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "prompt_chars": len(prompt),
             "payload_keys": sorted(str(key) for key in payload_keys),
+            "response_format": response_format_evidence,
+            "execution_capability_contract": capability_contract or {"present": False},
         }
         self._persist()
 
@@ -857,6 +942,72 @@ class PlanningRepairResponseEvidence:
         }
         self._persist()
 
+    def record_planning_parse(
+        self,
+        *,
+        status: str,
+        failure_category: str | None,
+        serialization_normalization_applied: bool,
+        normalized_structure: Any = None,
+        normalized_sha256: str | None = None,
+        parser_strategy: str | None = None,
+    ) -> None:
+        serialized = None
+        if normalized_structure is not None:
+            serialized = _evidence_serialized(normalized_structure)
+        digest = normalized_sha256
+        if digest is None and serialized is not None:
+            digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        self.document["planning_parse"] = {
+            "status": str(status),
+            "failure_category": failure_category,
+            "serialization_normalization_applied": bool(
+                serialization_normalization_applied
+            ),
+            "normalized_structure": (
+                {
+                    "type": type(normalized_structure).__name__,
+                    "length": len(serialized or ""),
+                    "sha256": digest,
+                }
+                if normalized_structure is not None
+                else None
+            ),
+            "parser_strategy": str(parser_strategy or "")[:240] or None,
+        }
+        self._persist()
+
+    def record_plan_validation(
+        self,
+        *,
+        schema_validation: Mapping[str, Any] | None,
+        final_plan_validation: Mapping[str, Any] | None,
+    ) -> None:
+        def _bounded_validation(value: Mapping[str, Any] | None) -> dict[str, Any]:
+            if value is None:
+                return {"status": "not_run"}
+            errors = value.get("errors")
+            reasons = value.get("reasons")
+            return {
+                "status": str(value.get("status") or "not_run"),
+                "errors": (
+                    [str(item)[:240] for item in errors[:8]]
+                    if isinstance(errors, list)
+                    else []
+                ),
+                "reasons": (
+                    [str(item)[:240] for item in reasons[:8]]
+                    if isinstance(reasons, list)
+                    else []
+                ),
+            }
+
+        self.document["plan_validation"] = {
+            "schema_validation": _bounded_validation(schema_validation),
+            "final_plan_validation": _bounded_validation(final_plan_validation),
+        }
+        self._persist()
+
     def complete(self) -> None:
         self.document["timing"]["request_finished_utc"] = _utc_now()
         if not self._persistence_errors:
@@ -888,6 +1039,7 @@ __all__ = [
     "MAX_RETAINED_PROMPT_CHARS",
     "PlanningProviderEvidence",
     "PlanningRepairResponseEvidence",
+    "planning_response_evidence_target_from_runtime",
     "begin_planning_provider_evidence",
     "begin_planning_provider_evidence_from_runtime",
     "inspect_chat_completion_response",

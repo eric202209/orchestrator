@@ -25,6 +25,8 @@ from app.services.orchestration.context.assembly import (
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.diagnostics.debug_feedback import (
+    _debug_repair_normalization_rejected,
+    bounded_debug_repair_ops_authority_rejection,
     build_bounded_debug_repair_prompt_with_metadata,
     build_bounded_debug_repair_observability,
     build_debug_feedback_envelope,
@@ -52,6 +54,7 @@ from app.services.orchestration.diagnostics.signature_guard import (
     signature_violation_event_details,
 )
 from app.services.orchestration.execution import ExecutorService
+from app.services.agents.agent_backends import ExecutionTopology
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.orchestration.execution.path_guard import (
     detect_advisory_nested_scaffold,
@@ -255,6 +258,82 @@ def _execution_topology_for_runtime(runtime_service: Any) -> Any:
     from app.services.agents.agent_runtime import execution_topology_for_runtime
 
     return execution_topology_for_runtime(runtime_service)
+
+
+def _fail_unsupported_step_commands(
+    *,
+    db: Any,
+    session: Any,
+    project: Any,
+    task: Any,
+    session_task_link: Any,
+    session_id: int,
+    task_id: int,
+    prompt: str,
+    task_execution_id: Optional[int],
+    orchestration_state: Any,
+    step_index: int,
+    step_commands: list[Any],
+    emit_live: Any,
+    write_project_state_snapshot_fn: Any,
+) -> dict[str, Any]:
+    """Fail a step whose commands no channel of this topology can execute.
+
+    Phase 40C-2 execution-time guard behind the plan-admission rule.  A
+    ``STRUCTURED_ORCHESTRATOR`` runtime has no command tools, so dispatching the
+    step would only produce the model's self-report of a command it never ran.
+    The command is not executed and no runtime call is made.
+    """
+
+    unsupported = [
+        str(command or "").strip()
+        for command in step_commands or []
+        if str(command or "").strip()
+    ]
+    terminal_message = (
+        f"Execution capability unsupported on step {step_index + 1}: the "
+        "execution runtime has no command tools and no Orchestrator executor "
+        f"admits the step command(s) {unsupported[:3]}; nothing was executed"
+    )
+    step_record = StepResult(
+        step_number=step_index + 1,
+        status="failed",
+        output="",
+        verification_output="",
+        files_changed=[],
+        error_message=terminal_message,
+        attempt=1,
+    )
+    orchestration_state.status = OrchestrationStatus.ABORTED
+    orchestration_state.abort_reason = terminal_message
+    orchestration_state.record_failure(step_record)
+    save_orchestration_checkpoint(db, session_id, task_id, prompt, orchestration_state)
+    _persist_terminal_execution_failure(
+        db=db,
+        session=session,
+        task=task,
+        session_task_link=session_task_link,
+        task_execution_id=task_execution_id,
+        error_message=terminal_message,
+        failure_category="validation_failure",
+    )
+    emit_live(
+        "ERROR",
+        terminal_message,
+        metadata={
+            "phase": "execution",
+            "step_index": step_index + 1,
+            "failure_category": "validation_failure",
+            "unsupported_commands": unsupported[:5],
+        },
+    )
+    write_project_state_snapshot_fn(db, project, task, session_id)
+    return {
+        "status": "failed",
+        "reason": "execution_capability_unsupported",
+        "failure_category": "validation_failure",
+        "unsupported_commands": unsupported[:5],
+    }
 
 
 def _restore_authority_bound_step(
@@ -966,6 +1045,28 @@ def execute_step_loop(
                         )
                         if local_shell_result is not None:
                             step_result = local_shell_result
+                        elif (
+                            _execution_topology_for_runtime(runtime_service)
+                            is ExecutionTopology.STRUCTURED_ORCHESTRATOR
+                        ):
+                            return _fail_unsupported_step_commands(
+                                db=db,
+                                session=session,
+                                project=project,
+                                task=task,
+                                session_task_link=session_task_link,
+                                session_id=session_id,
+                                task_id=task_id,
+                                prompt=prompt,
+                                task_execution_id=ctx.task_execution_id,
+                                orchestration_state=orchestration_state,
+                                step_index=step_index,
+                                step_commands=step_commands,
+                                emit_live=emit_live,
+                                write_project_state_snapshot_fn=(
+                                    write_project_state_snapshot_fn
+                                ),
+                            )
                         else:
                             # GR11: the structured ops are this step's mutation
                             # authority.  Unless a command is itself an explicit
@@ -2661,6 +2762,25 @@ def execute_step_loop(
                     parsed_repair = json.loads(repair_output)
                 except (TypeError, json.JSONDecodeError):
                     parsed_repair = None
+                if success and (debug_data or {}).get("fix_type") == "ops_fix":
+                    # Phase 40C-2: a recognized source op still needs the
+                    # accepted plan's grant and, for a whole-file rewrite, the
+                    # file's complete current content in this repair prompt.
+                    ops_authority_rejection = bounded_debug_repair_ops_authority_rejection(
+                        debug_data.get("ops"),
+                        authority=accepted_path_authority,
+                        project_dir=Path(orchestration_state.project_dir),
+                        complete_source_paths=debug_source_api_contract_metadata.get(
+                            "bounded_execution_debug_repair_changed_file_context_complete_paths"
+                        )
+                        or (),
+                    )
+                    if ops_authority_rejection:
+                        normalization_result = _debug_repair_normalization_rejected(
+                            parsed_repair, ops_authority_rejection
+                        )
+                        success = False
+                        debug_data = None
                 if not success or debug_data is None:
                     debug_repair_rejection_reason = (
                         normalization_result.rejection_reason

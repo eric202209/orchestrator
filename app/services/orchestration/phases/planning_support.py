@@ -103,6 +103,48 @@ def _provider_prompt_observability(
     }
 
 
+def record_planning_parse_result(
+    *,
+    ctx: OrchestrationRunContext,
+    planning_result: Dict[str, Any],
+    parse_metadata: Dict[str, Any],
+    parsed_plan: Any,
+    success: bool,
+    strategy_info: str,
+) -> None:
+    """Persist parse evidence and emit a bounded parse-result event."""
+
+    PlannerService.record_planning_parse_evidence(
+        planning_result,
+        parse_metadata=parse_metadata,
+        parsed_plan=parsed_plan if success else None,
+    )
+    emit_phase_event(
+        ctx.orchestration_state,
+        ctx.emit_live,
+        level="INFO" if success else "WARN",
+        phase="planning",
+        message="[ORCHESTRATION] Planning JSON parse evidence recorded",
+        details={
+            "phase_state": "planning_json_parse_result",
+            "parse_status": parse_metadata.get("status"),
+            "parse_failure_category": parse_metadata.get("failure_category"),
+            "serialization_normalization_applied": bool(
+                parse_metadata.get("serialization_normalization_applied")
+            ),
+            "normalized_structure_type": parse_metadata.get(
+                "normalized_structure_type"
+            ),
+            "normalized_structure_sha256": parse_metadata.get(
+                "normalized_structure_sha256"
+            ),
+            "parser_strategy": str(
+                parse_metadata.get("parser_strategy") or strategy_info or ""
+            )[:240],
+        },
+    )
+
+
 def _usable_knowledge_context(knowledge_context: Any) -> Any:
     return (
         knowledge_context
@@ -309,6 +351,7 @@ def _repair_planning_output(
         source_materialization=getattr(ctx, "planner_source_materialization", None),
         grounding_planning_context=getattr(ctx, "grounding_planning_context", None),
         read_only_observation=getattr(ctx, "read_only_observation", None),
+        **PlannerService.planning_response_evidence_kwargs(ctx.runtime_service),
     )
 
 

@@ -894,7 +894,8 @@ def test_minimal_prompt_retry_flags_ultra_dense_prompt_without_changing_retry(
     assert ultra_dense_events[0]["minimal_prompt_estimated_tokens"] > (
         MINIMAL_PLANNING_PROMPT_TOKEN_DIAGNOSTIC_THRESHOLD
     )
-    assert captured["prompt"] == huge_prompt
+    assert captured["prompt"].startswith("## EXECUTION CAPABILITY CONTRACT")
+    assert captured["prompt"].endswith(huge_prompt)
     assert captured["kwargs"]["diagnostic_label"] == "MINIMAL_PLANNING"
 
 

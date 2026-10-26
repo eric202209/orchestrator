@@ -5,13 +5,13 @@
     "app/tests/test_phase39_p0b_runtime_wheelhouse_policy.py": "208a1a18269d18de8a76db5037a6c0fb645c43ca39cbc9cf47c6e00b2a0c2f8c",
     "scripts/maintenance/phase39_p0b/runtime_lock_contract.py": "45b4fee97eb24a82f7f56de62c82744ab51775c31758b45cdf9ef8558a731378",
     "scripts/maintenance/phase39_p0b/runtime_wheelhouse_policy.py": "8643406e0e611020709ff46345f9b8aa9a537ce8eca15932a1623a889cbb3ab1",
-    "scripts/maintenance/phase39_p0b/worker-runtime-resolution-evidence-ledger.json": "68f78a5d049fbb6ceae0f588fd034b3ec0b29ac262d5c821834b0b2787633f2a",
+    "scripts/maintenance/phase39_p0b/worker-runtime-resolution-evidence-ledger.json": "b737c28168167fef78311148c7161d059c7751afe7966fa5f1997e218ba8d357",
     "scripts/maintenance/phase39_p0b/worker_metadata_resolution.py": "82be311e20dcc3dbfca9849e6cdca17e58a9fea51bbe2c269eb292890a213df3"
   },
   "approval_packet_binding": {
-    "packet_sha256": "b5ac794748c208ed5f160a2309d863e1a5713356f58f48b20244332a7671092a",
     "operator_authorization_status": "NOT_GRANTED",
-    "packet_is_authorization": false
+    "packet_is_authorization": false,
+    "packet_sha256": "47c28fb01a1f945d594334d363bcd76653d580cd16eeffd4b7545b9c0792aed2"
   },
   "artifact_acquisition_authorized": false,
   "candidate_overrides": [
@@ -57,19 +57,19 @@
   "schema": "phase39-p0b-worker-metadata-resolution-config",
   "schema_version": 1,
   "source_bindings": {
-    "requirements.txt": "30b2f8e5e23d2e56ec69ab2376abbdf699af8bccb1c7b6831226e5895b0b8c43",
-    "scripts/maintenance/phase39_p0b/worker-dependency-classification.json": "ab17a9644c7c67b62b662cd2c1fbd9e50e3b60e516cca45a96827bbab3956ccb",
-    "scripts/maintenance/phase39_p0b/worker-import-graph.json": "c70c3446558fc1b66e5c38ad81b50f3ebd236b516afb673865cec45d75594145",
-    "scripts/maintenance/phase39_p0b/worker-requirements.in": "93f2a8ad264214af747b9341bfafd792b67e5a9ae2de2a138a780431a21c2394",
-    "scripts/maintenance/phase39_p0b/worker_dependency_resolution.py": "2fbc9c60f914e68e66694779e66d35d1888f6a269e3294b2fb232c12be3a45a6",
-    "scripts/maintenance/phase39_p0b/worker-resolution-inputs.json": "240e6bc1b38d125b3a32fa3465f06940eb8546edb292f6c6f4794006fd07e1d5",
-    "scripts/maintenance/phase39_p0b/runtime-resolution-approval-packet.json": "3df360d67d3094358ee6c1f043f1ed3253936a33e393250331c97e44836581e3",
     "app/tests/test_phase39_p0b_metadata_only_dependency_resolution.py": "c326d7306e8c88cbca92d0d986c07d6f07456475b75e2c0f8ebd5be05913a30d",
     "app/tests/test_phase39_p0b_runtime_lock_contract.py": "0cea4dee7ad365eb5497adcc80b8907c4cb9a52119f4cd11a945361ed4951966",
     "app/tests/test_phase39_p0b_runtime_wheelhouse_policy.py": "208a1a18269d18de8a76db5037a6c0fb645c43ca39cbc9cf47c6e00b2a0c2f8c",
+    "requirements.txt": "30b2f8e5e23d2e56ec69ab2376abbdf699af8bccb1c7b6831226e5895b0b8c43",
+    "scripts/maintenance/phase39_p0b/runtime-resolution-approval-packet.json": "d0b327243b07284f38bd9d25b8eb02085495dee51775d872733abfa1c2f24279",
     "scripts/maintenance/phase39_p0b/runtime_lock_contract.py": "45b4fee97eb24a82f7f56de62c82744ab51775c31758b45cdf9ef8558a731378",
     "scripts/maintenance/phase39_p0b/runtime_wheelhouse_policy.py": "8643406e0e611020709ff46345f9b8aa9a537ce8eca15932a1623a889cbb3ab1",
-    "scripts/maintenance/phase39_p0b/worker-runtime-resolution-evidence-ledger.json": "68f78a5d049fbb6ceae0f588fd034b3ec0b29ac262d5c821834b0b2787633f2a",
+    "scripts/maintenance/phase39_p0b/worker-dependency-classification.json": "e4b7b722949fb408bec3b86180359f29578c40ed8b9ef29fd043ba032a4832f5",
+    "scripts/maintenance/phase39_p0b/worker-import-graph.json": "0e981069be8120d30c556f44c25c582c918f10d29c21743b7fd236328773b5f8",
+    "scripts/maintenance/phase39_p0b/worker-requirements.in": "93f2a8ad264214af747b9341bfafd792b67e5a9ae2de2a138a780431a21c2394",
+    "scripts/maintenance/phase39_p0b/worker-resolution-inputs.json": "e6c0a0709b7f3bbbd9c3c77dd4059c904093ce4c8865d9c0665a7ec1a30c052a",
+    "scripts/maintenance/phase39_p0b/worker-runtime-resolution-evidence-ledger.json": "b737c28168167fef78311148c7161d059c7751afe7966fa5f1997e218ba8d357",
+    "scripts/maintenance/phase39_p0b/worker_dependency_resolution.py": "2fbc9c60f914e68e66694779e66d35d1888f6a269e3294b2fb232c12be3a45a6",
     "scripts/maintenance/phase39_p0b/worker_metadata_resolution.py": "82be311e20dcc3dbfca9849e6cdca17e58a9fea51bbe2c269eb292890a213df3"
   },
   "target": {

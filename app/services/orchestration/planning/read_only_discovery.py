@@ -16,6 +16,10 @@ from app.services.orchestration.planning.discovery_contract_capture import (
     DISCOVERY_ACTION_SCHEMA,
     DiscoveryContractCapture,
 )
+from app.services.orchestration.planning.direct_import_grounding import (
+    DirectImportExpansion,
+    direct_first_party_imports,
+)
 from app.services.orchestration.planning.source_materialization import (
     SOURCE_STATUS_EXISTING,
     SOURCE_STATUS_NEW,
@@ -131,8 +135,14 @@ def assess_discovery_admission(
     planner_contract: Mapping[str, Any] | None,
     materialization: PlannerSourceMaterialization,
     intent_mode: str = TaskIntentMode.DEFAULT.value,
+    direct_imports: DirectImportExpansion | None = None,
 ) -> DiscoveryAdmission:
-    """Decide whether current bounded source facts justify one discovery call."""
+    """Decide whether current bounded source facts justify one discovery call.
+
+    ``direct_imports`` (Phase 40C-2) lists the direct first-party imports of the
+    expected source.  Grounding is not sufficient while one of them is
+    unresolved, beyond the bound, or not completely materialized.
+    """
 
     if normalize_task_intent(intent_mode) == TaskIntentMode.CREATE_ONLY.value:
         # CREATE_ONLY narrows the legal mutation set; it does not mint any
@@ -176,6 +186,33 @@ def assess_discovery_admission(
         return DiscoveryAdmission(
             DISCOVERY_ADMISSION_REQUIRED, "current_source_is_missing_or_truncated"
         )
+
+    if direct_imports is not None:
+        if direct_imports.exceeded:
+            return DiscoveryAdmission(
+                DISCOVERY_ADMISSION_REQUIRED, "direct_first_party_imports_unbounded"
+            )
+        if direct_imports.unresolved:
+            return DiscoveryAdmission(
+                DISCOVERY_ADMISSION_REQUIRED, "direct_first_party_import_unresolved"
+            )
+        records = {
+            getattr(item, "relative_path", None): item for item in materialization.files
+        }
+        for path in direct_imports.resolved:
+            item = records.get(path)
+            if (
+                item is None
+                or getattr(item, "status", None) != SOURCE_STATUS_EXISTING
+                or getattr(item, "content", None) is None
+                or bool(getattr(item, "truncated", False))
+                or not getattr(item, "version_identity", None)
+                or not getattr(item, "content_hash", None)
+            ):
+                return DiscoveryAdmission(
+                    DISCOVERY_ADMISSION_REQUIRED,
+                    "direct_first_party_import_not_grounded",
+                )
 
     hints = extract_source_target_hints(prompt, planner_contract=planner_contract)
     if hints:
@@ -260,11 +297,31 @@ def prepare_discovery_context(
         supporting_paths=(),
         source_cache=source_cache,
     )
+    # Phase 40C-2: ground the direct first-party imports of the expected
+    # existing source through the same bounded materializer and budgets.
+    direct_imports = direct_first_party_imports(
+        Path(ctx.orchestration_state.project_dir),
+        [
+            str(getattr(item, "relative_path", ""))
+            for item in materialization.files
+            if bool(getattr(item, "expected", False))
+            and getattr(item, "status", None) == SOURCE_STATUS_EXISTING
+        ],
+    )
+    if direct_imports.resolved:
+        materialization = materialize(
+            project_dir=Path(ctx.orchestration_state.project_dir),
+            task_description=ctx.prompt,
+            planner_contract=ctx.planner_contract,
+            supporting_paths=direct_imports.resolved,
+            source_cache=source_cache,
+        )
     admission = assess_discovery_admission(
         prompt=ctx.prompt,
         planner_contract=ctx.planner_contract,
         materialization=materialization,
         intent_mode=intent_mode,
+        direct_imports=direct_imports,
     )
     emit_discovery_admission(
         ctx=ctx, admission=admission, emit_phase_event=emit_phase_event

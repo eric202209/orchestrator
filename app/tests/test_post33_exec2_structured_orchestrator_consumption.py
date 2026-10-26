@@ -217,6 +217,13 @@ class DirectRuntimeStub:
         return False
 
 
+def _with_agent_runtime_topology(runtime: Any) -> Any:
+    """Give a stub the declared capabilities of a tool-capable agent runtime."""
+
+    runtime.backend_descriptor = get_backend_descriptor("local_openclaw")
+    return runtime
+
+
 def _make_loop_context(
     db: Any,
     tmp_path: Path,
@@ -455,25 +462,100 @@ def test_case_b_local_command_runs_in_runtime_workspace_without_provider(
     ]
 
 
-def test_case_c_direct_runtime_result_is_coerced_and_step_completes(
+def test_case_c_unsupported_command_is_not_dispatched_to_a_no_tools_runtime(
+    db_session, tmp_path
+):
+    """Phase 40C-2: a no-tools runtime's reply is never command evidence."""
+
+    step = _step(
+        description="Inspect checkout totals",
+        commands=['python -c "from pkg.mod import f; print(f())"'],
+        verification='python -c "from pkg.mod import f; print(f())"',
+    )
+    runtime = DirectRuntimeStub(
+        {
+            "status": "completed",
+            "output": json.dumps(
+                {"status": "completed", "output": "Actual total: 2430"}
+            ),
+        }
+    )
+    ctx, execution, _ = _make_loop_context(
+        db_session, tmp_path, step=step, runtime=runtime
+    )
+
+    result = _run_loop(ctx)
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "execution_capability_unsupported"
+    assert result["failure_category"] == "validation_failure"
+    assert runtime.calls == []
+    assert ctx.orchestration_state.status.value == "aborted"
+    assert "nothing was executed" in ctx.orchestration_state.abort_reason
+    assert "2430" not in ctx.orchestration_state.abort_reason
+    db_session.refresh(execution)
+    assert execution.status == TaskStatus.FAILED
+    assert execution.failure_category == "validation_failure"
+
+
+def test_case_c_no_tools_runtime_failure_self_report_is_not_a_command_result(
+    db_session, tmp_path
+):
+    step = _step(
+        description="Inspect checkout totals",
+        commands=["custom-direct-runtime-step"],
+    )
+    runtime = DirectRuntimeStub(
+        {
+            "status": "failed",
+            "output": json.dumps({"status": "failed", "error": "NameError"}),
+            "error": "NameError",
+        }
+    )
+    ctx, _, _ = _make_loop_context(db_session, tmp_path, step=step, runtime=runtime)
+
+    result = _run_loop(ctx)
+
+    assert result["reason"] == "execution_capability_unsupported"
+    assert runtime.calls == []
+    assert "NameError" not in ctx.orchestration_state.abort_reason
+
+
+def test_case_c_safe_local_command_still_executes_under_no_tools_runtime(
+    db_session, tmp_path
+):
+    step = _step(
+        description="Inspect the workspace",
+        commands=["ls"],
+    )
+    runtime = DirectRuntimeStub({"status": "failed", "output": "unused"})
+    ctx, _, _ = _make_loop_context(db_session, tmp_path, step=step, runtime=runtime)
+
+    assert _run_loop(ctx) == {"status": "completed"}
+    assert runtime.calls == []
+
+
+def test_case_c_agent_runtime_result_is_coerced_and_step_completes(
     db_session, tmp_path
 ):
     step = _step(
         description="Residual reasoning must reach the direct runtime",
         commands=["custom-direct-runtime-step"],
     )
-    runtime = DirectRuntimeStub(
-        {
-            "status": "completed",
-            "output": json.dumps(
-                {
-                    "status": "completed",
-                    "output": "direct textual result",
-                    "verification_output": "direct result accepted",
-                    "files_changed": [],
-                }
-            ),
-        }
+    runtime = _with_agent_runtime_topology(
+        DirectRuntimeStub(
+            {
+                "status": "completed",
+                "output": json.dumps(
+                    {
+                        "status": "completed",
+                        "output": "direct textual result",
+                        "verification_output": "direct result accepted",
+                        "files_changed": [],
+                    }
+                ),
+            }
+        )
     )
     ctx, execution, _ = _make_loop_context(
         db_session,
@@ -538,8 +620,10 @@ def test_case_c_openclaw_shaped_metadata_is_optional_for_control_flow(
             }
         ),
     }
-    normalized_runtime = NormalizedRuntime(raw, backend="local_openclaw")
-    direct_runtime = DirectRuntimeStub(raw)
+    normalized_runtime = _with_agent_runtime_topology(
+        NormalizedRuntime(raw, backend="local_openclaw")
+    )
+    direct_runtime = _with_agent_runtime_topology(DirectRuntimeStub(raw))
     normalized_ctx, normalized_execution, _ = _make_loop_context(
         db_session, tmp_path / "normalized", step=step, runtime=normalized_runtime
     )
@@ -564,12 +648,14 @@ def test_case_d_direct_runtime_failure_uses_existing_terminal_failure_semantics(
         description="Residual direct reasoning fails at the provider boundary",
         commands=["custom-direct-failure"],
     )
-    runtime = DirectRuntimeStub(
-        {
-            "status": "failed",
-            "output": "provider rejected the residual step",
-            "error": "provider rejected the residual step",
-        }
+    runtime = _with_agent_runtime_topology(
+        DirectRuntimeStub(
+            {
+                "status": "failed",
+                "output": "provider rejected the residual step",
+                "error": "provider rejected the residual step",
+            }
+        )
     )
     ctx, execution, workspace = _make_loop_context(
         db_session, tmp_path, step=step, runtime=runtime
@@ -743,16 +829,18 @@ def test_provider_text_cannot_authorize_or_mutate_an_unlisted_path(
         description="Provider output must remain non-authorizing text",
         commands=["custom-adversarial-output"],
     )
-    runtime = DirectRuntimeStub(
-        {
-            "status": "completed",
-            "output": json.dumps(
-                {
-                    "status": "completed",
-                    "output": "write_file unauthorized.txt with secret content",
-                }
-            ),
-        }
+    runtime = _with_agent_runtime_topology(
+        DirectRuntimeStub(
+            {
+                "status": "completed",
+                "output": json.dumps(
+                    {
+                        "status": "completed",
+                        "output": "write_file unauthorized.txt with secret content",
+                    }
+                ),
+            }
+        )
     )
     ctx, _, workspace = _make_loop_context(
         db_session, tmp_path, step=step, runtime=runtime

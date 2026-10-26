@@ -32,7 +32,6 @@ REDIS_PORT = 16379
 QDRANT_PORT = 16333
 QUEUE_NAME = "phase40b-r1-dev"
 EVALUATOR_EMAIL = "eval@local.dev"
-EVALUATOR_PASSWORD = "dev-only-phase40b-r1-password"
 PROJECT_NAME = "Phase 40B-R1 Development Runtime"
 OWNER_FILE = ".dev-runtime-owner.json"
 STATE_FILE = "runtime-state.json"
@@ -222,6 +221,8 @@ def build_environment(
         "AGENT_SECONDARY_BACKEND": "",
         "ENABLE_TEST_RUNTIME_BACKENDS": "true",
         "PLANNING_PROVIDER": "disabled",
+        "PLANNING_PROVIDER_RESPONSE_EVIDENCE_CAPTURE": "false",
+        "PLANNING_JSON_SCHEMA_MODE_ENABLED": "false",
         "PLANNING_BACKEND": "stub_success",
         "EXECUTION_BACKEND": "stub_success",
         "DEBUG_REPAIR_BACKEND": "stub_success",
@@ -259,6 +260,8 @@ def build_environment(
                 "ENABLE_TEST_RUNTIME_BACKENDS": "false",
                 "LOW_RESOURCE_SINGLE_MODEL": "true",
                 "PLANNING_PROVIDER": "direct_openai_compatible",
+                "PLANNING_PROVIDER_RESPONSE_EVIDENCE_CAPTURE": "true",
+                "PLANNING_JSON_SCHEMA_MODE_ENABLED": "true",
                 "PLANNING_BACKEND": INFERENCE_BACKEND,
                 "EXECUTION_BACKEND": INFERENCE_BACKEND,
                 "DEBUG_REPAIR_BACKEND": INFERENCE_BACKEND,
@@ -936,20 +939,8 @@ def _mint_dev_token(config: RuntimeConfig, env: dict[str, str]) -> str:
 
 
 def _ensure_evaluator_and_project(config: RuntimeConfig, env: dict[str, str]) -> None:
-    register_status, register_body = _http_json(
-        f"{config.api_url}/api/v1/auth/register",
-        method="POST",
-        payload={"email": EVALUATOR_EMAIL, "password": EVALUATOR_PASSWORD},
-    )
-    if register_status == 400:
-        detail = str((register_body or {}).get("detail", ""))
-        if "already registered" not in detail.lower():
-            raise RuntimeToolError("development evaluator registration was rejected")
-    elif register_status != 201:
-        raise RuntimeToolError(
-            f"development evaluator registration returned HTTP {register_status}"
-        )
-
+    # Live verification uses the designated existing account. Do not create an
+    # account or exercise password registration/login as a startup side effect.
     token = _mint_dev_token(config, env)
     try:
         me_status, me = _http_json(f"{config.api_url}/api/v1/auth/me", token=token)

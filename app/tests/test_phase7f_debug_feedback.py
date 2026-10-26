@@ -6,6 +6,7 @@ import ast
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+from app.services.agents.agent_backends import get_backend_descriptor
 from app.models import (
     LogEntry,
     Project,
@@ -181,6 +182,11 @@ def test_bounded_debug_repair_stale_replace_prompt_includes_current_excerpt():
 
 
 class _FakeRuntime:
+    # Stands in for a runtime that executes the step's commands itself, so it
+    # declares the tool-capable agent topology (Phase 40C-2: a no-tools runtime
+    # is never asked to run a command).
+    backend_descriptor = get_backend_descriptor("local_openclaw")
+
     def __init__(self, responses):
         self.responses = list(responses)
         self.prompts = []

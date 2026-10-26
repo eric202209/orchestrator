@@ -158,6 +158,7 @@ from app.services.orchestration.phases.planning_support import (
     _truncated_multistep_collapse_diagnostics,
     _usable_knowledge_context,
     _provider_prompt_observability,
+    record_planning_parse_result,
     _validate_planning_plan,
 )
 
@@ -322,6 +323,11 @@ def execute_planning_phase(
         planning_prompt = PlannerService.apply_prompt_profile(
             planning_prompt,
             prompt_profile=prompt_profile,
+        )
+        planning_prompt = PlannerService.include_execution_capability_contract(
+            planning_prompt,
+            runtime_service=ctx.runtime_service,
+            project_dir=ctx.orchestration_state.project_dir,
         )
     if planning_knowledge_ctx:
         _log_knowledge_usage(
@@ -624,6 +630,25 @@ def execute_planning_phase(
 
             success, plan_data, strategy_info = ctx.error_handler.attempt_json_parsing(
                 output_text, context="planning"
+            )
+            parse_metadata = dict(
+                getattr(ctx.error_handler, "last_planning_parse_metadata", {}) or {}
+            )
+            if not parse_metadata:
+                parse_metadata = {
+                    "status": "accepted" if success else "rejected",
+                    "failure_category": None,
+                    "serialization_normalization_applied": False,
+                    "normalized_structure_sha256": None,
+                    "parser_strategy": strategy_info or "strict_json",
+                }
+            record_planning_parse_result(
+                ctx=ctx,
+                planning_result=planning_result,
+                parse_metadata=parse_metadata,
+                parsed_plan=plan_data,
+                success=success,
+                strategy_info=strategy_info,
             )
             if not success:
                 ctx.logger.warning(
@@ -1858,6 +1883,9 @@ def execute_planning_phase(
                 ctx.orchestration_state,
                 plan_verdict.verdict,
                 parent_event_id=(planning_phase_event or {}).get("event_id"),
+            )
+            PlannerService.record_planning_validation_evidence(
+                planning_result, plan_verdict=plan_verdict
             )
             _emit_task1_bootstrap_contract_event(ctx, plan_verdict)
             if not plan_verdict.accepted or plan_verdict.warning:

@@ -22,7 +22,11 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.services.agents.agent_backends import ExecutionTopology
+from app.services.agents.agent_backends import (
+    EXECUTION_TOPOLOGY_REQUIRED_CAPABILITIES,
+    ExecutionTopology,
+)
+from app.services.orchestration.operations.file_ops_contract import CONTENT_FILE_OPS
 from app.services.orchestration.validation.local_command_policy import (
     local_shell_command_is_executable,
 )
@@ -102,3 +106,157 @@ def plan_steps_without_execution_channel(
         if offending:
             findings[step_number] = offending
     return findings
+
+
+def plan_steps_with_unsupported_commands(
+    plan: List[Dict[str, Any]],
+    *,
+    project_dir: Optional[Path],
+    execution_topology: ExecutionTopology,
+) -> Dict[int, List[str]]:
+    """Return step commands no execution channel of this topology can run.
+
+    Phase 40C-2.  Under ``STRUCTURED_ORCHESTRATOR`` the runtime has no command
+    tools, so a step command is only executable when one of the Orchestrator's
+    local executors admits it.  Otherwise the execution loop would hand the
+    command to a text-only runtime whose reply is self-report, not evidence.
+    Steps ``plan_steps_without_execution_channel`` already reports are skipped here.
+    """
+
+    if execution_topology is not ExecutionTopology.STRUCTURED_ORCHESTRATOR:
+        return {}
+    if project_dir is None:
+        return {}
+    # Lazy: the execution phase module imports ``ValidatorService``.
+    from app.services.orchestration.phases.execution_local_steps import (
+        local_step_commands_are_executable,
+    )
+
+    resolved_dir = Path(project_dir)
+    findings: Dict[int, List[str]] = {}
+    for index, step in enumerate(plan, start=1):
+        if not isinstance(step, dict):
+            continue
+        commands = [
+            str(command or "").strip()
+            for command in step.get("commands", []) or []
+            if str(command or "").strip()
+        ]
+        if not commands:
+            continue
+        if step_unexecutable_mutating_commands(step, resolved_dir):
+            continue
+        if local_step_commands_are_executable(
+            project_dir=resolved_dir,
+            commands=commands,
+            verification_command=step.get("verification"),
+        ):
+            continue
+        try:
+            step_number = int(step.get("step_number", index))
+        except (TypeError, ValueError):
+            step_number = index
+        findings[step_number] = commands
+    return findings
+
+
+def local_executor_command_examples(project_dir: Path) -> tuple[list[str], list[str]]:
+    """Return representative inspection and verification forms admitted locally."""
+
+    from app.services.orchestration.phases.execution_local_steps import (
+        _is_read_only_inspection_command,
+        _is_simple_verification_command,
+        local_step_commands_are_executable,
+    )
+
+    inspection_candidates = (
+        "rg --files .",
+        "ls",
+        "pwd",
+        "cat README.md",
+        "rg TODO ./README.md",
+        "grep TODO ./README.md",
+    )
+    verification_candidates = (
+        "pytest -q tests",
+        "python -m pytest -q tests",
+        "python -m py_compile module.py",
+        "python -m unittest tests.test_example",
+        "npm run build",
+    )
+    inspections = [
+        command
+        for command in inspection_candidates
+        if _is_read_only_inspection_command(command)
+        and local_step_commands_are_executable(
+            project_dir=Path(project_dir),
+            commands=[command],
+            verification_command=None,
+        )
+    ]
+    verifications = [
+        command
+        for command in verification_candidates
+        if _is_simple_verification_command(command, project_dir=Path(project_dir))
+        and local_step_commands_are_executable(
+            project_dir=Path(project_dir),
+            commands=[command],
+            verification_command=command,
+        )
+    ]
+    return inspections, verifications
+
+
+def render_planning_execution_capability_contract(
+    *, runtime_service: Any, project_dir: Path
+) -> str:
+    """Render a compact Planning contract from the resolved executor policy.
+
+    Command examples are admitted through the same predicates used at Plan
+    admission and execution. They are representative forms, not a second
+    allowlist and do not grant additional execution authority.
+    """
+
+    from app.services.agents.agent_runtime import execution_topology_for_runtime
+
+    topology = execution_topology_for_runtime(runtime_service)
+    descriptor = getattr(runtime_service, "backend_descriptor", None)
+    capabilities = getattr(descriptor, "capabilities", None)
+    if topology is ExecutionTopology.AGENT_RUNTIME:
+        declared = [
+            name
+            for name in EXECUTION_TOPOLOGY_REQUIRED_CAPABILITIES[
+                ExecutionTopology.AGENT_RUNTIME
+            ]
+            if bool(getattr(capabilities, name, False))
+        ]
+        return (
+            "## EXECUTION CAPABILITY CONTRACT\n"
+            "Resolved topology: agent runtime. Native execution is limited to "
+            f"the configured runtime's declared capabilities ({', '.join(declared)}). "
+            "Use only tools that runtime actually exposes for its bound workspace; "
+            "this prompt grants no additional tools or command permissions. "
+            "Source changes remain subject to Plan operation, APA, grounding, and "
+            "GR2 validation. Keep genuine verification requirements in the Plan."
+        )
+
+    inspections, verifications = local_executor_command_examples(Path(project_dir))
+    missing = (
+        capabilities.missing_execution_capabilities(ExecutionTopology.AGENT_RUNTIME)
+        if capabilities is not None
+        else ["backend descriptor unavailable"]
+    )
+    source_ops = ", ".join(sorted(CONTENT_FILE_OPS | {"replace_in_file"}))
+    inspect_forms = "; ".join(inspections[:2]) or "none admitted"
+    verify_forms = "; ".join(verifications[:3]) or "none admitted"
+    return (
+        "## EXECUTION CAPABILITY CONTRACT\n"
+        f"Resolved topology: structured orchestrator; this runtime has no native command tools ({', '.join(missing)}). "
+        f"Plan ops from {{{source_ops}}} are source edits, subject to APA, grounding, and GR2. "
+        f"Local inspection forms admitted by this executor: {inspect_forms}. "
+        f"Verification forms admitted by this executor: {verify_forms}. "
+        "These examples still require command/path admission. Arbitrary shell and "
+        "project-importing inline Python are not available; preserve the objective, "
+        "source scope, and verification checks. Do not drop work or relabel an "
+        "edit as verification."
+    )

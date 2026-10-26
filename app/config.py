@@ -174,6 +174,12 @@ class Settings(BaseSettings):
     )
     AGENT_SECONDARY_BACKEND: Optional[str] = None
     PLANNING_PROVIDER: str = "openclaw"
+    # Full provider response capture is opt-in and intended for bounded
+    # development investigations; normal deployments retain metadata only.
+    PLANNING_PROVIDER_RESPONSE_EVIDENCE_CAPTURE: bool = False
+    # Development-only opt-in for providers verified to implement strict JSON
+    # Schema output. All Plan validators still run after generation.
+    PLANNING_JSON_SCHEMA_MODE_ENABLED: bool = False
     PLANNING_DIRECT_BASE_URL: str = ""
     PLANNING_DIRECT_MODEL: str = ""
     PLANNING_DIRECT_API_KEY: str = ""

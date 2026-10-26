@@ -83,6 +83,56 @@ def test_development_database_initializes_only_inside_owned_runtime(
         assert connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0] == 0
 
 
+def test_runtime_verifies_existing_evaluator_without_password_registration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _fake_checkout(tmp_path)
+    workspace = config.root / "workspace" / "phase40b-r1-project"
+    calls: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(dev_runtime, "_mint_dev_token", lambda *_args: "ephemeral")
+
+    def request(url: str, *, method: str = "GET", token: str | None = None, **_kwargs):
+        calls.append((url, method if method != "GET" else None))
+        if url.endswith("/api/v1/auth/me"):
+            assert token == "ephemeral"
+            return 200, {"email": "eval@local.dev"}
+        if url.endswith("/api/v1/projects?skip=0&limit=100"):
+            return 200, [
+                {"name": dev_runtime.PROJECT_NAME, "workspace_path": str(workspace)}
+            ]
+        raise AssertionError(f"unexpected request: {url}")
+
+    monkeypatch.setattr(dev_runtime, "_http_json", request)
+
+    dev_runtime._ensure_evaluator_and_project(config, {})
+
+    assert calls == [
+        (f"{config.api_url}/api/v1/auth/me", None),
+        (f"{config.api_url}/api/v1/projects?skip=0&limit=100", None),
+    ]
+
+
+def test_runtime_fails_closed_when_existing_evaluator_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _fake_checkout(tmp_path)
+    calls: list[str] = []
+
+    monkeypatch.setattr(dev_runtime, "_mint_dev_token", lambda *_args: "ephemeral")
+
+    def request(url: str, **_kwargs):
+        calls.append(url)
+        return 401, {"detail": "Could not validate credentials"}
+
+    monkeypatch.setattr(dev_runtime, "_http_json", request)
+
+    with pytest.raises(dev_runtime.RuntimeToolError, match="identity did not resolve"):
+        dev_runtime._ensure_evaluator_and_project(config, {})
+
+    assert calls == [f"{config.api_url}/api/v1/auth/me"]
+
+
 def test_preflight_can_disable_qdrant_without_referencing_shared_storage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -170,6 +220,9 @@ def test_openclaw_profile_isolated_and_provider_urls_fail_closed(
     assert env["OPENCLAW_CLI_PATH"] == ""
     assert env["OPENCLAW_API_KEY"] == ""
     assert env["PLANNING_PROVIDER"] == "disabled"
+    assert env["PLANNING_PROVIDER_RESPONSE_EVIDENCE_CAPTURE"] == "false"
+    assert env["PLANNING_JSON_SCHEMA_MODE_ENABLED"] == "false"
+    assert env["WORKSPACE_REVIEW_POLICY"] == "hold_all"
     assert all("production-credential-marker" not in value for value in env.values())
     assert "shared-ollama.example" not in " ".join(env.values())
 
@@ -349,6 +402,9 @@ def test_inference_profile_targets_only_authorized_ollama(
     assert env["EXECUTION_MODEL"] == "qwen3-coder:30b"
     assert env["LOW_RESOURCE_SINGLE_MODEL"] == "true"
     assert env["ENABLE_TEST_RUNTIME_BACKENDS"] == "false"
+    assert env["PLANNING_PROVIDER_RESPONSE_EVIDENCE_CAPTURE"] == "true"
+    assert env["PLANNING_JSON_SCHEMA_MODE_ENABLED"] == "true"
+    assert env["WORKSPACE_REVIEW_POLICY"] == "hold_all"
     assert env["OPENCLAW_CLI_PATH"] == ""
     assert env["ONE_SHOT_EXECUTION_ENABLED"] == "false"
     assert all("production-credential-marker" not in value for value in env.values())

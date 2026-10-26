@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +16,80 @@ _VISIBLE_TEXT_KEYS = (
     "output_text",
     "content_text",
 )
+
+
+@dataclass(frozen=True)
+class PlanningJSONDocumentParse:
+    """Result of Planning's complete-document JSON parser.
+
+    The sole tolerant case is an otherwise complete JSON document rejected
+    only because a string contains an unescaped JSON control character.
+    """
+
+    parsed: Any | None
+    success: bool
+    failure_category: str | None
+    serialization_normalization_applied: bool
+    normalized_sha256: str | None
+
+
+def _planning_json_failure_category(error: json.JSONDecodeError) -> str:
+    if error.msg == "Invalid control character at":
+        return "invalid_control_character"
+    if error.msg.startswith("Unterminated string") or error.pos >= len(error.doc):
+        return "truncated_json"
+    if error.msg == "Extra data":
+        return "extra_data"
+    if error.msg == "Expecting value":
+        return "invalid_value"
+    return "invalid_json_structure"
+
+
+def parse_planning_json_document(text: str) -> PlanningJSONDocumentParse:
+    """Parse one complete Planning JSON document with bounded tolerance.
+
+    Strict JSON remains the first and default path. ``strict=False`` is tried
+    only after the decoder identifies an unescaped control character inside a
+    string; it does not extract fragments, repair syntax, or complete input.
+    """
+
+    candidate = str(text or "")
+    try:
+        parsed = json.loads(candidate)
+        failure_category = None
+        normalized = False
+    except json.JSONDecodeError as strict_error:
+        failure_category = _planning_json_failure_category(strict_error)
+        if failure_category != "invalid_control_character":
+            return PlanningJSONDocumentParse(
+                parsed=None,
+                success=False,
+                failure_category=failure_category,
+                serialization_normalization_applied=False,
+                normalized_sha256=None,
+            )
+        try:
+            parsed = json.loads(candidate, strict=False)
+        except json.JSONDecodeError:
+            return PlanningJSONDocumentParse(
+                parsed=None,
+                success=False,
+                failure_category=failure_category,
+                serialization_normalization_applied=False,
+                normalized_sha256=None,
+            )
+        normalized = True
+
+    canonical = json.dumps(
+        parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+    )
+    return PlanningJSONDocumentParse(
+        parsed=parsed,
+        success=True,
+        failure_category=failure_category,
+        serialization_normalization_applied=normalized,
+        normalized_sha256=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+    )
 
 
 def build_json_compliance_retry_prompt(

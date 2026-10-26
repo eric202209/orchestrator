@@ -80,6 +80,7 @@ from app.services.observability.planning_provider_evidence import (
     begin_planning_provider_evidence_from_runtime,
     inspect_chat_completion_response,
     PlanningRepairResponseEvidence,
+    planning_response_evidence_target_from_runtime,
 )
 from app.services.orchestration.planning.workspace_identity import (
     PlannerWorkspaceIdentity,
@@ -566,9 +567,31 @@ class PlannerService:
         backend_name = str(backend_metadata.get("backend") or "").strip()
         if backend_name not in PLANNING_GENERATION_CONTRACT_BACKENDS:
             return None
+        evidence_target = (
+            planning_response_evidence_target_from_runtime(runtime_service)
+            if settings.PLANNING_PROVIDER_RESPONSE_EVIDENCE_CAPTURE
+            else None
+        )
+        evidence_options = (
+            {
+                "provider_response_evidence_path": evidence_target[0],
+                "provider_response_evidence_correlation_id": evidence_target[1],
+            }
+            if evidence_target is not None
+            else {}
+        )
+        schema_options = {}
+        if settings.PLANNING_JSON_SCHEMA_MODE_ENABLED:
+            from app.services.orchestration.validation.validator import ValidatorService
+
+            schema_options["response_schema"] = (
+                ValidatorService._planning_response_json_schema()
+            )
         return RuntimeInvocationOptions(
             reasoning_enabled=False,
             max_output_tokens=PLANNING_GENERATION_MAX_OUTPUT_TOKENS,
+            **evidence_options,
+            **schema_options,
         )
 
     @classmethod
@@ -583,6 +606,117 @@ class PlannerService:
         if options is None:
             return {}
         return {"invocation_options": options}
+
+    @staticmethod
+    def include_execution_capability_contract(
+        prompt: str, *, runtime_service: Any, project_dir: Path
+    ) -> str:
+        """Place the resolved executor contract before prompt content."""
+
+        from app.services.orchestration.validation.validator import ValidatorService
+
+        contract = ValidatorService._render_planning_execution_capability_contract(
+            runtime_service=runtime_service,
+            project_dir=project_dir,
+        )
+        if not contract or "## EXECUTION CAPABILITY CONTRACT" in str(prompt or ""):
+            return str(prompt or "")
+        return f"{contract}\n\n{str(prompt or '')}"
+
+    @staticmethod
+    def planning_response_evidence_kwargs(runtime_service: Any) -> Dict[str, Any]:
+        """Return an opt-in response evidence target for a Planning repair call."""
+
+        if not settings.PLANNING_PROVIDER_RESPONSE_EVIDENCE_CAPTURE:
+            return {}
+        target = planning_response_evidence_target_from_runtime(runtime_service)
+        if target is None:
+            return {}
+        return {
+            "provider_response_evidence_path": target[0],
+            "provider_response_evidence_correlation_id": target[1],
+        }
+
+    @staticmethod
+    def _provider_response_evidence_path(planning_result: Any) -> Optional[str]:
+        if not isinstance(planning_result, dict):
+            return None
+        diagnostics = planning_result.get("runtime_diagnostics")
+        if not isinstance(diagnostics, dict):
+            diagnostics = planning_result.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return None
+        evidence = diagnostics.get("provider_response_evidence")
+        if not isinstance(evidence, dict):
+            adapter_diagnostics = diagnostics.get("adapter_diagnostics")
+            if isinstance(adapter_diagnostics, dict):
+                evidence = adapter_diagnostics.get("provider_response_evidence")
+        if not isinstance(evidence, dict) or not evidence.get("enabled"):
+            return None
+        path = str(evidence.get("path") or "").strip()
+        return path or None
+
+    @classmethod
+    def record_planning_parse_evidence(
+        cls,
+        planning_result: Any,
+        *,
+        parse_metadata: Dict[str, Any],
+        parsed_plan: Any = None,
+    ) -> None:
+        evidence_path = cls._provider_response_evidence_path(planning_result)
+        if not evidence_path:
+            return
+        try:
+            evidence = PlanningRepairResponseEvidence.load(evidence_path)
+            evidence.record_planning_parse(
+                status=str(parse_metadata.get("status") or "not_reached"),
+                failure_category=parse_metadata.get("failure_category"),
+                serialization_normalization_applied=bool(
+                    parse_metadata.get("serialization_normalization_applied")
+                ),
+                normalized_structure=parsed_plan,
+                normalized_sha256=parse_metadata.get("normalized_structure_sha256"),
+                parser_strategy=parse_metadata.get("parser_strategy"),
+            )
+        except Exception as exc:
+            _logger.debug(
+                "[ORCHESTRATION] Planning parse evidence update unavailable: %s", exc
+            )
+
+    @classmethod
+    def record_planning_validation_evidence(
+        cls, planning_result: Any, *, plan_verdict: Any
+    ) -> None:
+        evidence_path = cls._provider_response_evidence_path(planning_result)
+        if not evidence_path:
+            return
+        details = getattr(plan_verdict, "details", None) or {}
+        schema = details.get("plan_schema") if isinstance(details, dict) else None
+        schema = schema if isinstance(schema, dict) else None
+        schema_result = None
+        if schema is not None:
+            schema_result = {
+                "status": "passed" if schema.get("valid", True) else "failed",
+                "errors": schema.get("errors") or [],
+            }
+        final_result = {
+            "status": (
+                "accepted" if getattr(plan_verdict, "accepted", False) else "rejected"
+            ),
+            "reasons": list(getattr(plan_verdict, "reasons", []) or []),
+        }
+        try:
+            evidence = PlanningRepairResponseEvidence.load(evidence_path)
+            evidence.record_plan_validation(
+                schema_validation=schema_result,
+                final_plan_validation=final_result,
+            )
+        except Exception as exc:
+            _logger.debug(
+                "[ORCHESTRATION] Planning validation evidence update unavailable: %s",
+                exc,
+            )
 
     @staticmethod
     def _is_no_model_output_planning_timeout(exc: Exception) -> bool:
@@ -1794,7 +1928,11 @@ class PlannerService:
 
     @staticmethod
     def _normalize_repair_json_array_output(output_text: str) -> Optional[str]:
-        """Normalize fenced JSON arrays before the main planning parser runs."""
+        """Use the canonical Planning document parser for repair arrays."""
+        from app.services.orchestration.validation.parsing import (
+            parse_planning_json_document,
+        )
+
         stripped = str(output_text or "").strip()
         if not stripped.startswith("```"):
             if not stripped.startswith("["):
@@ -1802,11 +1940,18 @@ class PlannerService:
             decoder = json.JSONDecoder()
             try:
                 parsed, end_index = decoder.raw_decode(stripped)
+                if not isinstance(parsed, list) or stripped[end_index:].strip():
+                    return None
+                return stripped[:end_index].strip()
             except json.JSONDecodeError:
+                parsed_document = parse_planning_json_document(stripped)
+                if (
+                    parsed_document.success
+                    and parsed_document.serialization_normalization_applied
+                    and isinstance(parsed_document.parsed, list)
+                ):
+                    return json.dumps(parsed_document.parsed, ensure_ascii=False)
                 return None
-            if not isinstance(parsed, list) or stripped[end_index:].strip():
-                return None
-            return stripped[:end_index].strip()
 
         match = re.match(
             r"^```(?:json)?\s*(?P<body>.*?)\s*```\s*.*$",
@@ -1820,13 +1965,22 @@ class PlannerService:
         array_start = body.find("[")
         if array_start < 0:
             return None
+        candidate = body[array_start:].strip()
         decoder = json.JSONDecoder()
         try:
-            parsed, end_index = decoder.raw_decode(body[array_start:])
+            parsed, end_index = decoder.raw_decode(candidate)
+            if not isinstance(parsed, list):
+                return None
+            return candidate[:end_index].strip()
         except json.JSONDecodeError:
+            parsed_document = parse_planning_json_document(candidate)
+            if (
+                parsed_document.success
+                and parsed_document.serialization_normalization_applied
+                and isinstance(parsed_document.parsed, list)
+            ):
+                return json.dumps(parsed_document.parsed, ensure_ascii=False)
             return None
-        candidate = body[array_start : array_start + end_index].strip()
-        return candidate if isinstance(parsed, list) else None
 
     @staticmethod
     def _record_repair_provider_evidence_contract(
@@ -1871,21 +2025,6 @@ class PlannerService:
         from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
 
         db = getattr(runtime_service, "db", None)
-        invocation_options = RuntimeInvocationOptions(
-            timeout_seconds=float(repair_timeout),
-            no_output_timeout_seconds=float(
-                PlannerService._effective_planning_repair_no_output_timeout(
-                    repair_timeout
-                )
-            ),
-            max_output_tokens=2048,
-            temperature=0.0,
-            reasoning_enabled=(not settings.PLANNING_REPAIR_DISABLE_THINKING),
-            stream=False,
-            provider_response_evidence_path=response_evidence_path,
-            provider_response_evidence_correlation_id=response_evidence_correlation_id,
-        )
-
         repair_runtime = None
         if db is not None:
             repair_runtime = create_agent_runtime(
@@ -1912,6 +2051,32 @@ class PlannerService:
                 repair_runtime, "bind_runtime_workspace"
             ):
                 repair_runtime.bind_runtime_workspace(runtime_context)
+
+        response_schema = None
+        repair_descriptor = getattr(repair_runtime, "backend_descriptor", None)
+        repair_backend = str(getattr(repair_descriptor, "name", "") or "").strip()
+        if (
+            settings.PLANNING_JSON_SCHEMA_MODE_ENABLED
+            and repair_backend == "openai_chat_completions"
+        ):
+            from app.services.orchestration.validation.validator import ValidatorService
+
+            response_schema = ValidatorService._planning_response_json_schema()
+        invocation_options = RuntimeInvocationOptions(
+            timeout_seconds=float(repair_timeout),
+            no_output_timeout_seconds=float(
+                PlannerService._effective_planning_repair_no_output_timeout(
+                    repair_timeout
+                )
+            ),
+            max_output_tokens=2048,
+            temperature=0.0,
+            reasoning_enabled=(not settings.PLANNING_REPAIR_DISABLE_THINKING),
+            stream=False,
+            response_schema=response_schema,
+            provider_response_evidence_path=response_evidence_path,
+            provider_response_evidence_correlation_id=response_evidence_correlation_id,
+        )
 
         async def _invoke_registry_fallback(primary_error: Exception | None = None):
             """Preserve the pre-Stage-C repair fallback behind a role runtime."""
@@ -2456,6 +2621,11 @@ class PlannerService:
             read_only_observation=read_only_observation,
             intent_mode=intent_mode,
         )
+        minimal_prompt = cls.include_execution_capability_contract(
+            minimal_prompt,
+            runtime_service=runtime_service,
+            project_dir=project_dir,
+        )
         minimal_prompt_chars = len(minimal_prompt)
         minimal_prompt_estimated_tokens = _estimate_prompt_tokens(minimal_prompt)
         ultra_dense_planning_context = (
@@ -2593,6 +2763,11 @@ class PlannerService:
                 source_materialization=source_materialization,
                 read_only_observation=read_only_observation,
                 intent_mode=intent_mode,
+            )
+            ultra_minimal_prompt = cls.include_execution_capability_contract(
+                ultra_minimal_prompt,
+                runtime_service=runtime_service,
+                project_dir=project_dir,
             )
             ultra_minimal_prompt_diagnostics = {
                 "planning_prompt_builder": "ultra_minimal_planning_prompt",
@@ -2751,15 +2926,26 @@ class PlannerService:
                 )
 
         def _build_repair_prompt(current_guidance_block: str):
+            needs_execution_contract = any(
+                "unsupported_step_command" in str(reason or "")
+                for reason in (rejection_reasons or [])
+            )
             if _compact_no_output_retry:
-                return cls.build_compact_planning_repair_prompt(
+                prompt = cls.build_compact_planning_repair_prompt(
                     malformed_output,
                     rejection_reasons=rejection_reasons,
                     prompt_profile=prompt_profile,
                     guidance_block=current_guidance_block,
                     workspace_identity=workspace_identity,
                     planner_contract=planner_contract,
-                ), {
+                )
+                if needs_execution_contract:
+                    prompt = cls.include_execution_capability_contract(
+                        prompt,
+                        runtime_service=runtime_service,
+                        project_dir=project_dir,
+                    )
+                return prompt, {
                     "source_api_contract_available": False,
                     "source_api_contract_included": False,
                     "source_api_contract_chars": 0,
@@ -2780,7 +2966,14 @@ class PlannerService:
                 guidance_block=current_guidance_block,
                 planner_contract=planner_contract,
             )
-            return built.prompt, dict(built.metadata)
+            prompt = built.prompt
+            if needs_execution_contract:
+                prompt = cls.include_execution_capability_contract(
+                    prompt,
+                    runtime_service=runtime_service,
+                    project_dir=project_dir,
+                )
+            return prompt, dict(built.metadata)
 
         # GR12: the repair continues the Planning attempt whose Plan it repairs,
         # so it keeps that attempt's read-only observation, rendered with the

@@ -443,10 +443,17 @@ class OpenAIChatCompletionsRuntime:
                 transport_timeout_seconds=(
                     effective_timeout if exact_contract else effective_timeout + 30
                 ),
+                capture_scope=(
+                    "planning_generation"
+                    if str(getattr(self.backend_role, "value", self.backend_role))
+                    == _PLANNING_ROLE
+                    else "planning_repair"
+                ),
             )
             repair_response_evidence.start(
                 prompt=user,
                 payload_keys=sorted(payload),
+                response_format=payload.get("response_format"),
             )
             provider_diagnostics["provider_response_evidence"] = (
                 repair_response_evidence.diagnostics()

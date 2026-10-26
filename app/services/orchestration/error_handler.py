@@ -3,6 +3,7 @@
 Provides intelligent error recovery, retry logic, and JSON parsing improvements.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -13,6 +14,7 @@ from app.services.orchestration.validation.parsing import (
     _find_json_substring,
     _strip_markdown_fences,
     _should_skip_nested_non_plan_candidate,
+    parse_planning_json_document,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,37 @@ class EnhancedErrorHandler:
     def __init__(self, max_retries: int = 3, retry_delay: int = 60):
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.last_planning_parse_metadata: Dict[str, Any] = {}
+
+    def _planning_parse_result(
+        self,
+        *,
+        success: bool,
+        parsed: Any,
+        strategy: str,
+        failure_category: Optional[str],
+        serialization_normalization_applied: bool = False,
+    ) -> Tuple[bool, Any, str]:
+        canonical = None
+        if success:
+            canonical = json.dumps(
+                parsed, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+            )
+        self.last_planning_parse_metadata = {
+            "status": "accepted" if success else "rejected",
+            "failure_category": failure_category,
+            "serialization_normalization_applied": bool(
+                serialization_normalization_applied
+            ),
+            "normalized_structure_type": type(parsed).__name__ if success else None,
+            "normalized_structure_sha256": (
+                hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+                if canonical is not None
+                else None
+            ),
+            "parser_strategy": strategy or ("strict_json" if success else "rejected"),
+        }
+        return success, parsed, strategy
 
     def attempt_json_parsing(
         self, text: str, context: str = "JSON"
@@ -34,16 +67,60 @@ class EnhancedErrorHandler:
         Returns:
             Tuple of (success, parsed_data, error_message)
         """
+        self.last_planning_parse_metadata = {}
         if not text or not text.strip():
+            if context == "planning":
+                self.last_planning_parse_metadata = {
+                    "status": "rejected",
+                    "failure_category": "empty_input",
+                    "serialization_normalization_applied": False,
+                    "normalized_structure_type": None,
+                    "normalized_structure_sha256": None,
+                    "parser_strategy": "rejected",
+                }
             return False, None, "Empty or whitespace-only input"
 
         # Strategy 1: Direct JSON parsing
+        planning_document = (
+            parse_planning_json_document(text) if context == "planning" else None
+        )
+        initial_failure_category = (
+            planning_document.failure_category if planning_document else None
+        )
         try:
-            parsed = json.loads(text)
+            if planning_document is not None:
+                if not planning_document.success:
+                    raise json.JSONDecodeError(
+                        "Invalid Planning JSON document", text, 0
+                    )
+                parsed = planning_document.parsed
+            else:
+                parsed = json.loads(text)
             if not self._should_skip_non_plan_candidate_for_planning(
                 context, text, text, parsed
             ):
-                return True, parsed, ""
+                strategy = ""
+                if (
+                    planning_document
+                    and planning_document.serialization_normalization_applied
+                ):
+                    strategy = (
+                        "Applied bounded raw-control JSON normalization; "
+                        "failure_category=invalid_control_character; "
+                        f"normalized_sha256={planning_document.normalized_sha256}"
+                    )
+                if context == "planning":
+                    return self._planning_parse_result(
+                        success=True,
+                        parsed=parsed,
+                        strategy=strategy,
+                        failure_category=initial_failure_category,
+                        serialization_normalization_applied=bool(
+                            planning_document
+                            and planning_document.serialization_normalization_applied
+                        ),
+                    )
+                return True, parsed, strategy
         except json.JSONDecodeError as e:
             logger.debug(f"[JSON-PARSE] Strategy 1 failed: {e}")
 
@@ -51,11 +128,48 @@ class EnhancedErrorHandler:
         cleaned = self._clean_markdown_fences(text)
         if cleaned != text:
             try:
-                parsed_cleaned = json.loads(cleaned)
+                cleaned_document = (
+                    parse_planning_json_document(cleaned)
+                    if context == "planning"
+                    else None
+                )
+                if cleaned_document is not None:
+                    if not cleaned_document.success:
+                        raise json.JSONDecodeError(
+                            "Invalid Planning JSON document", cleaned, 0
+                        )
+                    parsed_cleaned = cleaned_document.parsed
+                else:
+                    parsed_cleaned = json.loads(cleaned)
                 if not self._should_skip_non_plan_candidate_for_planning(
                     context, text, cleaned, parsed_cleaned
                 ):
-                    return True, parsed_cleaned, "Cleaned markdown fences"
+                    strategy = "Cleaned markdown fences"
+                    if (
+                        cleaned_document
+                        and cleaned_document.serialization_normalization_applied
+                    ):
+                        strategy = (
+                            "Cleaned markdown fences and applied bounded raw-control "
+                            "JSON normalization; "
+                            f"normalized_sha256={cleaned_document.normalized_sha256}"
+                        )
+                    if context == "planning":
+                        return self._planning_parse_result(
+                            success=True,
+                            parsed=parsed_cleaned,
+                            strategy=strategy,
+                            failure_category=(
+                                cleaned_document.failure_category
+                                if cleaned_document
+                                else initial_failure_category
+                            ),
+                            serialization_normalization_applied=bool(
+                                cleaned_document
+                                and cleaned_document.serialization_normalization_applied
+                            ),
+                        )
+                    return True, parsed_cleaned, strategy
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 2 failed: {e}")
             fixed_cleaned = self._fix_common_json_errors(cleaned)
@@ -69,11 +183,15 @@ class EnhancedErrorHandler:
                             "[JSON-PARSE] Strategy 2 fixed skipped non-plan candidate"
                         )
                     else:
-                        return (
-                            True,
-                            parsed_fixed_cleaned,
-                            "Cleaned markdown fences and fixed common errors",
-                        )
+                        strategy = "Cleaned markdown fences and fixed common errors"
+                        if context == "planning":
+                            return self._planning_parse_result(
+                                success=True,
+                                parsed=parsed_fixed_cleaned,
+                                strategy=strategy,
+                                failure_category=initial_failure_category,
+                            )
+                        return True, parsed_fixed_cleaned, strategy
                 except json.JSONDecodeError as e:
                     logger.debug(f"[JSON-PARSE] Strategy 2 fixed failed: {e}")
 
@@ -87,7 +205,15 @@ class EnhancedErrorHandler:
                 ) and not self._should_skip_non_plan_candidate_for_planning(
                     context, text, extracted, parsed_extracted
                 ):
-                    return True, parsed_extracted, "Extracted from mixed content"
+                    strategy = "Extracted from mixed content"
+                    if context == "planning":
+                        return self._planning_parse_result(
+                            success=True,
+                            parsed=parsed_extracted,
+                            strategy=strategy,
+                            failure_category=initial_failure_category,
+                        )
+                    return True, parsed_extracted, strategy
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 3 failed: {e}")
 
@@ -99,7 +225,15 @@ class EnhancedErrorHandler:
                 if not self._should_skip_non_plan_candidate_for_planning(
                     context, text, fixed, parsed_fixed
                 ):
-                    return True, parsed_fixed, "Fixed common errors"
+                    strategy = "Fixed common errors"
+                    if context == "planning":
+                        return self._planning_parse_result(
+                            success=True,
+                            parsed=parsed_fixed,
+                            strategy=strategy,
+                            failure_category=initial_failure_category,
+                        )
+                    return True, parsed_fixed, strategy
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 4 failed: {e}")
 
@@ -114,7 +248,15 @@ class EnhancedErrorHandler:
                 ) and not self._should_skip_non_plan_candidate_for_planning(
                     context, text, found, parsed_found
                 ):
-                    return True, parsed_found, "Found JSON in text"
+                    strategy = "Found JSON in text"
+                    if context == "planning":
+                        return self._planning_parse_result(
+                            success=True,
+                            parsed=parsed_found,
+                            strategy=strategy,
+                            failure_category=initial_failure_category,
+                        )
+                    return True, parsed_found, strategy
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 5 direct failed: {e}")
 
@@ -128,11 +270,15 @@ class EnhancedErrorHandler:
                     ) and not self._should_skip_non_plan_candidate_for_planning(
                         context, text, fixed, parsed_fixed_found
                     ):
-                        return (
-                            True,
-                            parsed_fixed_found,
-                            "Found and fixed JSON in text",
-                        )
+                        strategy = "Found and fixed JSON in text"
+                        if context == "planning":
+                            return self._planning_parse_result(
+                                success=True,
+                                parsed=parsed_fixed_found,
+                                strategy=strategy,
+                                failure_category=initial_failure_category,
+                            )
+                        return True, parsed_fixed_found, strategy
                 except json.JSONDecodeError as e:
                     logger.debug(f"[JSON-PARSE] Strategy 5 fixed failed: {e}")
 
@@ -144,11 +290,15 @@ class EnhancedErrorHandler:
                 if not self._should_skip_non_plan_candidate_for_planning(
                     context, text, embedded, parsed_embedded
                 ):
-                    return (
-                        True,
-                        parsed_embedded,
-                        "Extracted embedded JSON payload",
-                    )
+                    strategy = "Extracted embedded JSON payload"
+                    if context == "planning":
+                        return self._planning_parse_result(
+                            success=True,
+                            parsed=parsed_embedded,
+                            strategy=strategy,
+                            failure_category=initial_failure_category,
+                        )
+                    return True, parsed_embedded, strategy
             except json.JSONDecodeError as e:
                 logger.debug(f"[JSON-PARSE] Strategy 6 direct failed: {e}")
 
@@ -163,17 +313,28 @@ class EnhancedErrorHandler:
                             "[JSON-PARSE] Strategy 6 fixed skipped non-plan candidate"
                         )
                     else:
-                        return (
-                            True,
-                            parsed_fixed_embedded,
-                            "Extracted and fixed embedded JSON payload",
-                        )
+                        strategy = "Extracted and fixed embedded JSON payload"
+                        if context == "planning":
+                            return self._planning_parse_result(
+                                success=True,
+                                parsed=parsed_fixed_embedded,
+                                strategy=strategy,
+                                failure_category=initial_failure_category,
+                            )
+                        return True, parsed_fixed_embedded, strategy
                 except json.JSONDecodeError as e:
                     logger.debug(f"[JSON-PARSE] Strategy 6 fixed failed: {e}")
 
         # All strategies failed
         error_msg = f"Failed to parse {context}"
         logger.error(f"[JSON-PARSE] All strategies failed. Last attempt: {text[:200]}")
+        if context == "planning":
+            self._planning_parse_result(
+                success=False,
+                parsed=None,
+                strategy=error_msg,
+                failure_category=initial_failure_category or "invalid_json_structure",
+            )
         return False, None, error_msg
 
     def _should_skip_non_plan_candidate_for_planning(

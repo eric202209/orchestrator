@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.services.orchestration.operations.file_ops_contract import (
+    CONTENT_FILE_OPS,
+    FILE_OP_FIELD_SETS,
     operation_has_file_op_path,
     validate_file_op_shape,
 )
@@ -20,6 +22,62 @@ from app.services.orchestration.workflow_profiles import (
     get_workflow_markers,
     get_workflow_phases,
 )
+
+
+PLAN_REQUIRED_STEP_FIELDS = frozenset(
+    {
+        "step_number",
+        "description",
+        "commands",
+        "verification",
+        "rollback",
+        "expected_files",
+    }
+)
+PLAN_SUPPORTED_SOURCE_OPS = frozenset(CONTENT_FILE_OPS | {"replace_in_file"})
+
+
+def planning_response_json_schema() -> Dict[str, Any]:
+    """Return a strict provider schema derived from the Plan validator contract."""
+
+    operation_schemas = []
+    for operation_name in sorted(PLAN_SUPPORTED_SOURCE_OPS):
+        fields = sorted(FILE_OP_FIELD_SETS[operation_name])
+        operation_schemas.append(
+            {
+                "type": "object",
+                "properties": {
+                    field: (
+                        {"type": "string", "enum": [operation_name]}
+                        if field == "op"
+                        else {"type": "string"}
+                    )
+                    for field in fields
+                },
+                "required": fields,
+                "additionalProperties": False,
+            }
+        )
+
+    step_properties: Dict[str, Any] = {
+        "step_number": {"type": "integer"},
+        "description": {"type": "string"},
+        "commands": {"type": "array", "items": {"type": "string"}},
+        "verification": {"type": ["string", "null"]},
+        "rollback": {"type": ["string", "null"]},
+        "expected_files": {"type": "array", "items": {"type": "string"}},
+        "ops": {"type": "array", "items": {"anyOf": operation_schemas}},
+    }
+    return {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": step_properties,
+            "required": sorted(PLAN_REQUIRED_STEP_FIELDS | {"ops"}),
+            "additionalProperties": False,
+        },
+    }
+
 
 from .core_file_ops import (
     _file_op_alias_issue,
@@ -52,14 +110,7 @@ def validate_plan_schema(plan: Any) -> Dict[str, Any]:
     invalid_nested_file_ops: Dict[int, List[str]] = {}
     missing_required_fields: Dict[int, List[str]] = {}
     extra_fields: Dict[int, List[str]] = {}
-    required_fields = {
-        "step_number",
-        "description",
-        "commands",
-        "verification",
-        "rollback",
-        "expected_files",
-    }
+    required_fields = set(PLAN_REQUIRED_STEP_FIELDS)
     allowed_fields = set(required_fields)
     allowed_fields.add("ops")
 

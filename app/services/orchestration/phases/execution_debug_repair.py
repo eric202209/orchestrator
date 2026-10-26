@@ -16,6 +16,9 @@ from app.runtime_naming import (
     is_bounded_debug_repair_mode,
     is_diff_scoped_debug_repair_mode,
 )
+from app.services.orchestration.diagnostics.debug_feedback import (
+    debug_repair_source_path,
+)
 from app.services.orchestration.state.execution_states import OrchestrationPhase
 
 
@@ -76,27 +79,22 @@ def _debug_repair_materially_changes_source_or_tests(
 def _bounded_debug_repair_source_edit_context(
     step: dict[str, Any], envelope: Any
 ) -> bool:
+    # Phase 40C-2: source is recognized by the canonical product-source rule,
+    # so flat-layout packages count like ``src/`` ones; tests never do.
     ops = step.get("ops") if isinstance(step, dict) else []
     if isinstance(ops, list) and any(
-        isinstance(op, dict)
-        and _is_source_or_test_path(op.get("path"))
-        and str(op.get("path") or "").replace("\\", "/").lstrip("./").startswith("src/")
-        for op in ops
+        isinstance(op, dict) and debug_repair_source_path(op.get("path")) for op in ops
     ):
         return True
     expected_files = step.get("expected_files") if isinstance(step, dict) else []
     if isinstance(expected_files, list) and any(
-        str(path or "").replace("\\", "/").lstrip("./").startswith("src/")
-        for path in expected_files
+        debug_repair_source_path(path) for path in expected_files
     ):
         return True
     changed_files = (
         getattr(envelope, "changed_files", []) if envelope is not None else []
     )
-    return any(
-        str(path or "").replace("\\", "/").lstrip("./").startswith("src/")
-        for path in changed_files
-    )
+    return any(debug_repair_source_path(path) for path in changed_files)
 
 
 def _bounded_debug_repair_prior_source_paths(
@@ -109,12 +107,8 @@ def _bounded_debug_repair_prior_source_paths(
     seen: set[str] = set()
 
     def add_path(path: Any) -> None:
-        normalized = str(path or "").replace("\\", "/").lstrip("./")
-        if (
-            normalized.startswith("src/")
-            and normalized.endswith(".py")
-            and normalized not in seen
-        ):
+        normalized = debug_repair_source_path(path)
+        if normalized and normalized.endswith(".py") and normalized not in seen:
             seen.add(normalized)
             paths.append(normalized)
 

@@ -25,6 +25,17 @@ from app.services.orchestration.execution.step_support import (
     is_runnable_shell_command_fix,
 )
 from app.services.orchestration.state.persistence import append_orchestration_event
+from app.services.orchestration.planning.orientation_import_facts import (
+    is_import_fact_source,
+    is_test_path,
+)
+from app.services.orchestration.validation.path_authority import (
+    PathAuthorityError,
+    TrustClass,
+    classify_trust,
+    declare,
+    observe,
+)
 from app.services.workspace.path_display import render_workspace_path_for_prompt
 
 ELIGIBLE_DEBUG_FAILURE_CLASSES = frozenset(
@@ -578,6 +589,7 @@ def build_bounded_debug_repair_changed_file_context(
         "Treat these files as the current source truth. Existing function signatures shown here are authoritative. Do not change parameter names, types, order, or count unless the task explicitly requests an API change. If a function body raises NotImplementedError, implement the body while keeping the exact signature. Do not redesign the API.",
     ]
     included_paths: list[str] = []
+    complete_paths: list[str] = []
     for relative_path in ordered_paths:
         if len(included_paths) >= _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_FILES:
             break
@@ -604,6 +616,8 @@ def build_bounded_debug_repair_changed_file_context(
             break
         lines.extend((section_header, _excerpt(content, content_limit)))
         included_paths.append(relative_path)
+        if len(content) <= content_limit:
+            complete_paths.append(relative_path)
 
     if not included_paths:
         return "", metadata
@@ -615,6 +629,9 @@ def build_bounded_debug_repair_changed_file_context(
         {
             "bounded_execution_debug_repair_changed_file_context_present": True,
             "bounded_execution_debug_repair_changed_file_context_paths": included_paths,
+            "bounded_execution_debug_repair_changed_file_context_complete_paths": (
+                complete_paths if len(rendered) == len("\n".join(lines)) else []
+            ),
             "bounded_execution_debug_repair_changed_file_context_chars": len(rendered),
         }
     )
@@ -624,7 +641,7 @@ def build_bounded_debug_repair_changed_file_context(
 def _normalize_bounded_debug_repair_source_path(
     raw_path: Any, project_dir: Path
 ) -> str:
-    """Return a safe ``src/`` Python path; tests are intentionally excluded."""
+    """Return a safe product Python source path; tests are intentionally excluded."""
 
     candidate = Path(str(raw_path or "").strip().replace("\\", "/"))
     if not candidate.name or candidate.suffix != ".py":
@@ -638,8 +655,42 @@ def _normalize_bounded_debug_repair_source_path(
         relative = resolved.relative_to(project_dir.resolve()).as_posix()
     except (OSError, ValueError):
         return ""
-    if not relative.startswith("src/"):
+    return debug_repair_source_path(relative, project_dir)
+
+
+def debug_repair_source_path(raw_path: Any, project_dir: Optional[Path] = None) -> str:
+    """Canonical workspace-relative path of a product source file, else ``""``.
+
+    Phase 40C-2: debug repair recognizes source by the repository-wide rules,
+    not a ``src/`` prefix, so flat-layout packages (``pkg/mod.py``) count like
+    ``src/pkg/mod.py``.  The path must be a canonical Accepted Path Authority
+    declaration (no traversal, absolute path, or protected root), classified
+    as product content, and not a test.  With ``project_dir``, a symlink in any
+    segment also disqualifies it.  Shape only: this grants no authority.
+    """
+
+    text = str(raw_path or "").strip().replace("\\", "/")
+    while text.startswith("./"):
+        text = text[2:]
+    try:
+        canonical = declare(text)
+    except PathAuthorityError:
         return ""
+    if classify_trust(canonical) is not TrustClass.PRODUCT:
+        return ""
+    relative = canonical.value
+    if is_test_path(relative):
+        return ""
+    if not (relative.startswith("src/") or is_import_fact_source(relative)):
+        return ""
+    if project_dir is not None:
+        try:
+            if observe(
+                Path(project_dir), canonical, include_content=False
+            ).symlink_segment:
+                return ""
+        except (PathAuthorityError, OSError):
+            return ""
     return relative
 
 
@@ -1273,6 +1324,10 @@ def normalize_bounded_debug_repair_payload_detailed(
     raw_ops_present = isinstance(item.get("ops"), list)
     if explicit_ops_fix and raw_ops_present and not ops:
         return _debug_repair_normalization_rejected(parsed_data, "invalid_ops_fix_ops")
+    if (source_edit_context or explicit_ops_fix) and _ops_have_unauthorized_path(ops):
+        return _debug_repair_normalization_rejected(
+            parsed_data, "unauthorized_source_path"
+        )
     if (source_edit_context or explicit_ops_fix) and _ops_touch_source_files(ops):
         if not verification:
             return _debug_repair_normalization_rejected(
@@ -1468,10 +1523,72 @@ def _ops_touch_source_files(ops: Any) -> bool:
         if not isinstance(op, dict):
             continue
         op_name = str(op.get("op") or "").strip()
-        path = str(op.get("path") or "").strip().replace("\\", "/").lstrip("./")
-        if op_name in durable_ops and path.startswith("src/"):
+        if op_name in durable_ops and debug_repair_source_path(op.get("path")):
             return True
     return False
+
+
+def _ops_have_unauthorized_path(ops: Any) -> bool:
+    """True when a durable repair op targets a path no repair may write.
+
+    Traversal, absolute or protected-root paths, orchestration-internal or
+    toolchain content, and tests are never debug-repair source targets.
+    """
+
+    durable_ops = {"replace_in_file", "write_file", "append_file"}
+    for op in ops or []:
+        if not isinstance(op, dict):
+            continue
+        if str(op.get("op") or "").strip() not in durable_ops:
+            continue
+        text = str(op.get("path") or "").strip().replace("\\", "/")
+        while text.startswith("./"):
+            text = text[2:]
+        try:
+            canonical = declare(text)
+        except PathAuthorityError:
+            return True
+        if classify_trust(canonical) is not TrustClass.PRODUCT:
+            return True
+        if is_test_path(canonical.value):
+            return True
+    return False
+
+
+def bounded_debug_repair_ops_authority_rejection(
+    ops: Any,
+    *,
+    authority: Any,
+    project_dir: Path,
+    complete_source_paths: Iterable[str] = (),
+) -> Optional[str]:
+    """Reject an accepted ``ops_fix`` that its execution could not justify.
+
+    ``unauthorized_source_path``: the op path is not a recognized source file,
+    escapes through a symlink, or the accepted plan's path authority grants no
+    access to it.  ``missing_source_provenance``: a ``write_file`` replaces an
+    existing file whose complete current content was not in the repair prompt.
+    """
+
+    complete = set(complete_source_paths or ())
+    for op in ops or []:
+        if not isinstance(op, dict):
+            continue
+        op_name = str(op.get("op") or "").strip()
+        if op_name not in {"replace_in_file", "write_file", "append_file"}:
+            continue
+        relative = debug_repair_source_path(op.get("path"), project_dir)
+        if not relative:
+            return "unauthorized_source_path"
+        if authority is not None and authority.grant_for(declare(relative)) is None:
+            return "unauthorized_source_path"
+        if (
+            op_name == "write_file"
+            and (Path(project_dir) / relative).is_file()
+            and relative not in complete
+        ):
+            return "missing_source_provenance"
+    return None
 
 
 def _normalize_durable_source_ops(ops: Any) -> list[dict[str, Any]]:

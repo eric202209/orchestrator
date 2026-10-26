@@ -19,6 +19,7 @@ from typing import Any
 
 import pytest
 
+from app.services.agents.agent_backends import get_backend_descriptor
 from app.models import (
     Project,
     Session as SessionModel,
@@ -211,6 +212,9 @@ def _persist_authority(
 
 
 class _ObservedScopeRuntime:
+    # A runtime that writes the workspace itself owns command tools.
+    backend_descriptor = get_backend_descriptor("local_openclaw")
+
     def __init__(self, project_dir: Path):
         self.project_dir = project_dir
         self.prompts: list[str] = []

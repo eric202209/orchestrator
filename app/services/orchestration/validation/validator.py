@@ -163,6 +163,7 @@ from .rules.core_schema import (
     _plan_has_invalid_step_sequence,
     _plan_missing_required_fields,
     _workflow_phase_order_violations,
+    planning_response_json_schema,
     validate_plan_schema,
 )
 from .rules.core_file_ops import (
@@ -178,7 +179,9 @@ from .rules.core_file_ops import (
 )
 from .rules.core_execution_capability import (
     command_requires_mutation,
+    plan_steps_with_unsupported_commands,
     plan_steps_without_execution_channel,
+    render_planning_execution_capability_contract,
 )
 from .rules.core_paths import (
     _plan_contains_duplicated_path_roots,
@@ -1133,6 +1136,11 @@ READ_ONLY_WORKFLOW_STAGES = {
 class ValidatorService:
     """Deterministic plan and completion validation."""
 
+    _planning_response_json_schema = staticmethod(planning_response_json_schema)
+    _render_planning_execution_capability_contract = staticmethod(
+        render_planning_execution_capability_contract
+    )
+
     _iter_candidate_files = staticmethod(_iter_candidate_files)
     _command_requires_mutation = staticmethod(command_requires_mutation)
     _find_nested_expected_file_matches = staticmethod(
@@ -1346,6 +1354,7 @@ class ValidatorService:
             ),
             "unmaterialized_expected_files": "unmaterialized_expected_files",
             "steps_without_execution_channel": "step_execution_channel_missing",
+            "steps_with_unsupported_commands": "step_command_capability_unsupported",
             "oversized_command_steps": "oversized_command_length",
             "brittle_command_subcodes": "brittle_command",
             "malformed_shell_quoting_steps": "malformed_shell_quoting",
@@ -2406,6 +2415,37 @@ class ValidatorService:
                 details["steps_without_execution_channel"] = {
                     str(step_number): commands[:5]
                     for step_number, commands in sorted(unexecutable_steps.items())
+                }
+                details["execution_topology"] = execution_topology.value
+            # Phase 40C-2: a non-mutating step command the topology cannot run
+            # would only be answered by a text-only runtime's self-report.
+            unsupported_command_steps = plan_steps_with_unsupported_commands(
+                plan,
+                project_dir=Path(project_dir) if project_dir is not None else None,
+                execution_topology=execution_topology,
+            )
+            if unsupported_command_steps:
+                first_commands = sorted(unsupported_command_steps.items())[0][1]
+                # Repair retains the rejected command and capability limit
+                # under its 180-character per-reason bound. The complete
+                # command remains in the malformed Plan shown to the repair.
+                reason_prefix = "unsupported_step_command: rejected "
+                reason_suffix = (
+                    "; structured runtime has no command tools. "
+                    "Plan ops for edits; keep goal, scope, checks."
+                )
+                rejected_command = repr(" ".join(str(first_commands[0]).split()))
+                command_limit = 180 - len(reason_prefix) - len(reason_suffix)
+                if len(rejected_command) > command_limit:
+                    rejected_command = (
+                        rejected_command[: max(0, command_limit - 3)].rstrip() + "..."
+                    )
+                repairable.append(f"{reason_prefix}{rejected_command}{reason_suffix}")
+                details["steps_with_unsupported_commands"] = {
+                    str(step_number): commands[:5]
+                    for step_number, commands in sorted(
+                        unsupported_command_steps.items()
+                    )
                 }
                 details["execution_topology"] = execution_topology.value
 

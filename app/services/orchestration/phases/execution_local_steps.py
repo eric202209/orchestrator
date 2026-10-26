@@ -459,6 +459,87 @@ def _same_simple_verification_command(command: str, verification: str) -> bool:
     return bool(command_script and command_script == verification_script)
 
 
+def _admitted_local_shell_commands(
+    project_dir: Path, commands: list[Any]
+) -> list[str] | None:
+    normalized_cmds = [
+        str(c or "").strip() for c in (commands or []) if str(c or "").strip()
+    ]
+    if not normalized_cmds:
+        return None
+    if not all(_is_safe_local_shell_command(c) for c in normalized_cmds):
+        return None
+    for cmd in normalized_cmds:
+        try:
+            assert_no_workspace_cd_escape(cmd, project_dir)
+        except TaskWorkspaceViolationError:
+            return None
+        if not _local_shell_command_paths_are_safe(cmd, project_dir):
+            return None
+    return normalized_cmds
+
+
+def _simple_verification_command_to_run(
+    project_dir: Path, commands: list[Any], verification_command: Any
+) -> str | None:
+    normalized_commands = [str(command or "").strip() for command in commands or []]
+    verification = str(verification_command or "").strip()
+    if len(normalized_commands) != 1:
+        return None
+    command = normalized_commands[0]
+    command_is_simple_verification = _is_simple_verification_command(
+        command, project_dir=project_dir
+    )
+    verification_is_simple = _is_simple_verification_command(
+        verification, project_dir=project_dir
+    )
+    if not verification and _is_safe_compileall_command(
+        command, project_dir=project_dir
+    ):
+        command_to_run = command
+    elif not verification and command_is_simple_verification:
+        command_to_run = command
+    elif not verification:
+        return None
+    elif _same_simple_verification_command(command, verification):
+        command_to_run = verification
+    elif (
+        command.startswith("node -e ")
+        and verification.startswith("node -e ")
+        and command_is_simple_verification
+        and verification_is_simple
+    ):
+        command_to_run = command
+    elif command_is_simple_verification and verification_is_simple:
+        command_to_run = command
+    else:
+        return None
+    command_to_run = _normalize_unittest_module_command(command_to_run, project_dir)
+    command_to_run = _patch_python_verification_cmd(command_to_run)
+    if not _is_simple_verification_command(command_to_run, project_dir=project_dir):
+        return None
+    return command_to_run
+
+
+def local_step_commands_are_executable(
+    *, project_dir: Path, commands: list[Any], verification_command: Any
+) -> bool:
+    """True when one of the Orchestrator's own local executors admits the step.
+
+    Mirrors the admission order of the execution loop: read-only inspection,
+    simple verification, then the safe local shell channel.  Nothing is run.
+    """
+
+    if commands and all(_is_read_only_inspection_command(str(c)) for c in commands):
+        return True
+    if (
+        _simple_verification_command_to_run(project_dir, commands, verification_command)
+        is not None
+    ):
+        return True
+    return _admitted_local_shell_commands(project_dir, commands) is not None
+
+
 def _execute_read_only_inspection_step(
     *,
     project_dir: Path,
@@ -501,20 +582,9 @@ def _execute_local_shell_commands_step(
     commands: list[Any],
     verification_command: Any,
 ) -> dict[str, Any] | None:
-    normalized_cmds = [
-        str(c or "").strip() for c in (commands or []) if str(c or "").strip()
-    ]
-    if not normalized_cmds:
+    normalized_cmds = _admitted_local_shell_commands(project_dir, commands)
+    if normalized_cmds is None:
         return None
-    if not all(_is_safe_local_shell_command(c) for c in normalized_cmds):
-        return None
-    for cmd in normalized_cmds:
-        try:
-            assert_no_workspace_cd_escape(cmd, project_dir)
-        except TaskWorkspaceViolationError:
-            return None
-        if not _local_shell_command_paths_are_safe(cmd, project_dir):
-            return None
 
     files_before = set(
         os.path.relpath(os.path.join(root, f), project_dir)
@@ -630,41 +700,10 @@ def _execute_simple_verification_step(
     commands: list[Any],
     verification_command: Any,
 ) -> dict[str, Any] | None:
-    normalized_commands = [str(command or "").strip() for command in commands or []]
-    verification = str(verification_command or "").strip()
-    if len(normalized_commands) != 1:
-        return None
-    command = normalized_commands[0]
-    command_is_simple_verification = _is_simple_verification_command(
-        command, project_dir=project_dir
+    command_to_run = _simple_verification_command_to_run(
+        project_dir, commands, verification_command
     )
-    verification_is_simple = _is_simple_verification_command(
-        verification, project_dir=project_dir
-    )
-    if not verification and _is_safe_compileall_command(
-        command, project_dir=project_dir
-    ):
-        command_to_run = command
-    elif not verification and command_is_simple_verification:
-        command_to_run = command
-    elif not verification:
-        return None
-    elif _same_simple_verification_command(command, verification):
-        command_to_run = verification
-    elif (
-        command.startswith("node -e ")
-        and verification.startswith("node -e ")
-        and command_is_simple_verification
-        and verification_is_simple
-    ):
-        command_to_run = command
-    elif command_is_simple_verification and verification_is_simple:
-        command_to_run = command
-    else:
-        return None
-    command_to_run = _normalize_unittest_module_command(command_to_run, project_dir)
-    command_to_run = _patch_python_verification_cmd(command_to_run)
-    if not _is_simple_verification_command(command_to_run, project_dir=project_dir):
+    if command_to_run is None:
         return None
 
     result = execute_verification_command(
