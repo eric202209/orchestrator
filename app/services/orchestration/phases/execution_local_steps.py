@@ -558,6 +558,16 @@ def _execute_read_only_inspection_step(
             timeout_seconds=settings.READ_ONLY_INSPECTION_TIMEOUT_SECONDS,
         )
         if not result.get("success"):
+            try:
+                executable = shlex.split(str(command), posix=True)[0]
+            except (ValueError, IndexError):
+                executable = ""
+            if (
+                executable in {"grep", "rg", "ripgrep"}
+                and result.get("returncode") == 1
+            ):
+                outputs.append(f"$ {command}\n(no matches)")
+                continue
             return {
                 "status": "failed",
                 "output": result.get("output", ""),

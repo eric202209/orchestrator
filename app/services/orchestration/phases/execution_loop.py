@@ -152,6 +152,7 @@ from app.services.orchestration.phases.execution_local_steps import (
     _is_read_only_inspection_command,
     _is_safe_local_shell_command,
     _is_simple_verification_command,
+    local_step_commands_are_executable,
     _patch_python_verification_cmd,
     _same_simple_verification_command,
     _verification_can_replace_stale_commands,
@@ -165,6 +166,7 @@ from app.services.orchestration.phases.execution_debug_repair import (
     _bounded_debug_repair_stale_replace_issues,
     _build_bounded_debug_repair_stale_replace_correction_prompt,
     _command_fix_materially_targets_source_or_tests,
+    bounded_debug_repair_command_authority_rejection,
     _debug_prompt_mode_architecture,
     _debug_repair_materially_changes_source_or_tests,
     _debug_repair_output_excerpt,
@@ -717,6 +719,7 @@ def execute_step_loop(
         db.commit()
 
         step_description = step.get("description", f"Step {step_index + 1}")
+        accepted_step_snapshot = deepcopy(step)
         step_commands = step.get("commands", [])
         step_ops = step.get("ops", [])
         verification_command = step.get("verification")
@@ -2877,6 +2880,64 @@ def execute_step_loop(
 
             fix_type = debug_data.get("fix_type", "code_fix")
             logger.info("[DEBUG-PARSE] Using strategy: %s", strategy_info)
+
+            if fix_type in {"code_fix", "command_fix", "ops_fix"}:
+                command_authority_rejection = bounded_debug_repair_command_authority_rejection(
+                    debug_data,
+                    accepted_step_snapshot,
+                    command_is_admitted=lambda command: local_step_commands_are_executable(
+                        project_dir=orchestration_state.project_dir,
+                        commands=[command],
+                        verification_command=command,
+                    ),
+                )
+                if command_authority_rejection:
+                    logger.warning(
+                        "[ORCHESTRATION] Rejecting DEBUG repair command not admitted by the accepted step or local executor: %s",
+                        command_authority_rejection,
+                    )
+                    try:
+                        append_orchestration_event(
+                            project_dir=control_state_of(orchestration_state),
+                            session_id=session_id,
+                            task_id=task_id,
+                            event_type=EventType.REPAIR_REJECTED,
+                            parent_event_id=(debugging_phase_event or {}).get(
+                                "event_id"
+                            ),
+                            details={
+                                "phase": "execution",
+                                "reason": "debug_repair_command_not_authorized",
+                                "reason_architecture": (
+                                    "debug_repair_command_not_authorized"
+                                ),
+                                "debug_repair_terminal_reason": (
+                                    "unapproved_execution_command"
+                                ),
+                                "debug_repair_rejection_reason": (
+                                    command_authority_rejection
+                                ),
+                                "debug_repair_request_ids": list(
+                                    debug_repair_request_ids
+                                ),
+                                "debug_repair_raw_output_excerpt": (
+                                    _debug_repair_output_excerpt(
+                                        debug_result.get("output", "")
+                                    )
+                                ),
+                                "accepted_step_command_count": len(
+                                    accepted_step_snapshot.get("commands", [])
+                                    if isinstance(
+                                        accepted_step_snapshot.get("commands"),
+                                        list,
+                                    )
+                                    else []
+                                ),
+                            },
+                        )
+                    except Exception:
+                        pass
+                    raise ValueError(command_authority_rejection)
 
             if (
                 bounded_debug_repair_allowed

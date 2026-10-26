@@ -1456,8 +1456,8 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
                     [
                         {
                             "title": "Fix test command",
-                            "command": "python3 -c \"print('fixed')\"",
-                            "verification_command": "python3 -c \"print('ok')\"",
+                            "command": "python3 -m py_compile tests/test_demo.py",
+                            "verification_command": "python3 -m py_compile tests/test_demo.py",
                         }
                     ]
                 )
@@ -1475,6 +1475,10 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
         runtime=runtime,
         step_overrides={"commands": ["custom-test-command"], "verification": ""},
     )
+    (ctx.orchestration_state.project_dir / "tests").mkdir(parents=True)
+    (ctx.orchestration_state.project_dir / "tests" / "test_demo.py").write_text(
+        "def test_import():\n    assert True\n", encoding="utf-8"
+    )
 
     result = execute_step_loop(
         ctx=ctx,
@@ -1487,7 +1491,7 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
     )
 
     assert result["status"] == "completed", result
-    assert len(runtime.prompts) == 3
+    assert len(runtime.prompts) == 2
     assert "Return a bare JSON array" in runtime.prompts[1]
     assert runtime.kwargs[1]["diagnostic_label"] == "BOUNDED_EXECUTION_DEBUG_REPAIR"
     assert (
@@ -1506,7 +1510,7 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
     assert runtime.kwargs[1]["diagnostic_metadata"]["step_index"] == 1
     assert ctx.orchestration_state.debug_repair_task_execution_ids == [execution.id]
     assert ctx.orchestration_state.plan[0]["commands"] == [
-        "python3 -c \"print('fixed')\""
+        "python3 -m py_compile tests/test_demo.py"
     ]
     assert ctx.orchestration_state.current_step_index == 1
 
@@ -2106,7 +2110,7 @@ def test_code_fix_verification_replaces_stale_commands_before_retry(
                         "fix_type": "code_fix",
                         "analysis": "Use the existing nested stylesheet path.",
                         "fix": "Verify css/style.css instead of style.css.",
-                        "verification": "test -f index.html && test -f css/style.css",
+                        "verification": "ls css",
                         "expected_files": ["index.html", "css/style.css"],
                         "confidence": "HIGH",
                     }
@@ -2151,10 +2155,8 @@ def test_code_fix_verification_replaces_stale_commands_before_retry(
 
     assert result["status"] == "completed"
     repaired_step = ctx.orchestration_state.plan[0]
-    assert repaired_step["commands"] == ["test -f index.html && test -f css/style.css"]
-    assert (
-        repaired_step["verification"] == "test -f index.html && test -f css/style.css"
-    )
+    assert repaired_step["commands"] == ["ls css"]
+    assert repaired_step["verification"] == "ls css"
     assert repaired_step["expected_files"] == ["index.html", "css/style.css"]
 
 
@@ -2810,8 +2812,15 @@ def test_phase7g_diff_repair_prompt_is_used_when_capsule_available(
                 "output": json.dumps(
                     [
                         {
-                            "title": "Fix value",
-                            "command": "python3 -c \"from pathlib import Path; Path('src/demo.py').write_text('VALUE = 1\\\\n')\"",
+                            "repair_type": "ops_fix",
+                            "ops": [
+                                {
+                                    "op": "replace_in_file",
+                                    "path": "src/demo.py",
+                                    "old": "VALUE = 2\n",
+                                    "new": "VALUE = 1\n",
+                                }
+                            ],
                             "verification_command": "python3 -m py_compile src/demo.py",
                         }
                     ]

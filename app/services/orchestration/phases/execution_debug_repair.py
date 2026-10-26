@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from app.runtime_naming import (
     BOUNDED_DEBUG_REPAIR_PROMPT_MODE,
@@ -53,6 +53,59 @@ def _command_fix_materially_targets_source_or_tests(command: str) -> bool:
             lowered,
         )
     )
+
+
+def bounded_debug_repair_command_authority_rejection(
+    debug_data: Any,
+    accepted_step: Any,
+    *,
+    command_is_admitted: Optional[Callable[[str], bool]] = None,
+) -> Optional[str]:
+    """Reject DEBUG repair commands unless the accepted step or executor admits them.
+
+    DEBUG repair may update source operations under its separate APA/GR2
+    contract. A changed command is eligible only when the caller rechecks it
+    against the same local executor admission used for Plan execution.
+    """
+
+    if not isinstance(debug_data, dict) or not isinstance(accepted_step, dict):
+        return "debug_repair_command_not_authorized: accepted step is unavailable"
+
+    approved: set[str] = set()
+    accepted_commands = accepted_step.get("commands")
+    if isinstance(accepted_commands, list):
+        approved.update(
+            str(command).strip()
+            for command in accepted_commands
+            if str(command or "").strip()
+        )
+    for key in ("verification", "rollback"):
+        value = accepted_step.get(key)
+        if isinstance(value, str) and value.strip():
+            approved.add(value.strip())
+
+    proposed: list[str] = []
+    if str(debug_data.get("fix_type") or "").strip() == "command_fix":
+        value = debug_data.get("fix")
+        if isinstance(value, str) and value.strip():
+            proposed.append(value.strip())
+    for key in ("verification", "verification_command"):
+        value = debug_data.get(key)
+        if isinstance(value, str) and value.strip():
+            proposed.append(value.strip())
+
+    for command in proposed:
+        if command in approved:
+            continue
+        admitted = False
+        if command_is_admitted is not None:
+            try:
+                admitted = bool(command_is_admitted(command))
+            except Exception:
+                admitted = False
+        if not admitted:
+            return f"debug_repair_command_not_authorized: {command}"
+    return None
 
 
 def _debug_repair_materially_changes_source_or_tests(

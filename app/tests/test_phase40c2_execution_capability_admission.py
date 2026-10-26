@@ -15,6 +15,7 @@ import pytest
 
 from app.services.agents.agent_backends import ExecutionTopology
 from app.services.orchestration.phases.execution_local_steps import (
+    _execute_read_only_inspection_step,
     local_step_commands_are_executable,
 )
 from app.services.orchestration.phases.planning_support import (
@@ -237,3 +238,131 @@ def test_capability_rejection_is_terminal_without_retry_or_runtime_call(
     assert ctx.orchestration_state.status.value == "aborted"
     db_session.refresh(execution)
     assert execution.failure_category == "validation_failure"
+
+
+def test_read_only_search_no_match_is_a_completed_inspection(workspace):
+    (workspace / "README.md").write_text("Project overview\n", encoding="utf-8")
+
+    result = _execute_read_only_inspection_step(
+        project_dir=workspace,
+        commands=["rg TODO ./README.md"],
+    )
+
+    assert result is not None
+    assert result["status"] == "completed"
+    assert "no matches" in result["output"].lower()
+
+
+def test_read_only_search_syntax_error_remains_a_failure(workspace):
+    (workspace / "README.md").write_text("Project overview\n", encoding="utf-8")
+
+    result = _execute_read_only_inspection_step(
+        project_dir=workspace,
+        commands=["rg '[' ./README.md"],
+    )
+
+    assert result is not None
+    assert result["status"] == "failed"
+
+
+def test_debug_repair_cannot_introduce_a_command_outside_the_accepted_step():
+    from app.services.orchestration.phases.execution_debug_repair import (
+        bounded_debug_repair_command_authority_rejection,
+    )
+
+    reason = bounded_debug_repair_command_authority_rejection(
+        {
+            "fix_type": "code_fix",
+            "verification": "test -f ./README.md && rg TODO ./README.md",
+        },
+        {
+            "commands": ["rg TODO ./README.md"],
+            "verification": "python -m pytest -q",
+        },
+    )
+
+    assert reason is not None
+    assert "debug_repair_command_not_authorized" in reason
+    assert "test -f ./README.md && rg TODO ./README.md" in reason
+
+
+def test_debug_repair_may_reuse_an_accepted_step_command():
+    from app.services.orchestration.phases.execution_debug_repair import (
+        bounded_debug_repair_command_authority_rejection,
+    )
+
+    assert (
+        bounded_debug_repair_command_authority_rejection(
+            {"fix_type": "command_fix", "fix": "python -m pytest -q"},
+            {
+                "commands": ["rg TODO ./README.md"],
+                "verification": "python -m pytest -q",
+            },
+        )
+        is None
+    )
+
+
+def test_debug_repair_may_use_a_new_command_admitted_by_local_executor(workspace):
+    from app.services.orchestration.phases.execution_debug_repair import (
+        bounded_debug_repair_command_authority_rejection,
+    )
+    from app.services.orchestration.phases.execution_local_steps import (
+        local_step_commands_are_executable,
+    )
+
+    (workspace / "src").mkdir()
+    (workspace / "src" / "module.py").write_text("value = 1\n", encoding="utf-8")
+    command = "python3 -m py_compile src/module.py"
+
+    assert (
+        bounded_debug_repair_command_authority_rejection(
+            {"fix_type": "code_fix", "verification": command},
+            {"commands": ["ls"], "verification": "ls"},
+            command_is_admitted=lambda proposed: local_step_commands_are_executable(
+                project_dir=workspace,
+                commands=[proposed],
+                verification_command=proposed,
+            ),
+        )
+        is None
+    )
+
+
+def test_execution_loop_rejects_debug_replacement_outside_accepted_step(
+    db_session, tmp_path
+):
+    accepted_command = "python -m pytest -q tests/test_failure.py"
+    runtime = DirectRuntimeStub(
+        {
+            "status": "completed",
+            "output": (
+                '[{"title":"Rerun the suite",'
+                '"command":"test -f ./README.md && rg TODO ./README.md",'
+                '"verification_command":"python -m pytest -q tests/test_failure.py"}]'
+            ),
+        }
+    )
+    ctx, execution, workspace = _make_loop_context(
+        db_session,
+        tmp_path,
+        step=_step(
+            description="Run the accepted failing verification",
+            commands=[accepted_command],
+            verification=accepted_command,
+        ),
+        runtime=runtime,
+    )
+    tests = workspace / "tests"
+    tests.mkdir()
+    (tests / "test_failure.py").write_text(
+        "def test_fails():\n    assert False\n", encoding="utf-8"
+    )
+
+    _run_loop(ctx)
+
+    assert "debug_repair_command_not_authorized" in ctx.orchestration_state.abort_reason
+    assert ctx.orchestration_state.plan[0]["commands"] == [accepted_command]
+    assert len(runtime.calls) == 1  # DEBUG request only; its replacement never ran.
+    db_session.refresh(execution)
+    assert "fail" in str(execution.status).lower()
