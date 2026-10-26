@@ -54,6 +54,7 @@ Answer concisely and accurately."""
 # ROUTE1-D1: role ownership -- not diagnostic prose -- decides which system
 # contract an execute_task() invocation receives.
 _PLANNING_ROLE = BackendRole.PLANNING.value
+_DEBUG_REPAIR_ROLE = BackendRole.DEBUG_REPAIR.value
 _STEP_SHAPED_ROLES = frozenset(
     {
         BackendRole.EXECUTION.value,
@@ -443,11 +444,12 @@ class OpenAIChatCompletionsRuntime:
                 transport_timeout_seconds=(
                     effective_timeout if exact_contract else effective_timeout + 30
                 ),
-                capture_scope=(
-                    "planning_generation"
-                    if str(getattr(self.backend_role, "value", self.backend_role))
-                    == _PLANNING_ROLE
-                    else "planning_repair"
+                capture_scope={
+                    _PLANNING_ROLE: "planning_generation",
+                    _DEBUG_REPAIR_ROLE: "debug_repair",
+                }.get(
+                    str(getattr(self.backend_role, "value", self.backend_role)),
+                    "planning_repair",
                 ),
             )
             repair_response_evidence.start(

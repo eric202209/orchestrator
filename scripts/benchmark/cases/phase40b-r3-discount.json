@@ -10,8 +10,32 @@
     "command": "python -m pytest -q tests",
     "evidence_ref": "docs/roadmap/done/phase40/phase40b-disposable-development-dogfood-runtime.md",
     "expected_failed": 2,
-    "expected_failed_tests": null,
-    "expected_passed": 2
+    "expected_failed_tests": [
+      "test_full_discount_is_free",
+      "test_ten_percent_off"
+    ],
+    "expected_passed": 2,
+    "recovery": {
+      "command": "python -m pytest -q tests -rA",
+      "evidence_refs": [
+        "docs/roadmap/reports/evidence/phase40d2/r3-baseline-recovery.txt",
+        "docs/roadmap/reports/evidence/phase40d3/r3-baseline-reverification.txt"
+      ],
+      "method": "independent re-execution of the exact seed commit in a fresh --no-hardlinks disposable clone; the original Phase 40B evidence recorded only the 2 failed / 2 passed counts",
+      "observed_failed_tests": [
+        "test_full_discount_is_free",
+        "test_ten_percent_off"
+      ],
+      "observed_passed_tests": [
+        "test_out_of_range_percent_rejected",
+        "test_zero_percent_is_unchanged"
+      ],
+      "recovered_fields": [
+        "expected_failed_tests"
+      ],
+      "seed_commit": "4639c1ede8dbd3b07c6a2dbcb0ec0a902e57cfa3",
+      "seed_tree": "d3c48722e8a1df4bcfc4a759bebfc561a6f769e4"
+    }
   },
   "behavioral_contract": "apply_discount(price, percent) returns round(price - price * percent / 100, 2) and rejects percent outside 0..100.",
   "case_id": "phase40b-r3-discount",
@@ -19,9 +43,7 @@
     "docs/roadmap/reports/evidence/phase40b-r3/dogfood-task4-report.md",
     "docs/roadmap/reports/evidence/phase40b-r3/dogfood-task4-source-diff-and-acceptance.txt"
   ],
-  "incomplete_reasons": [
-    "names of the two initially failing tests were not retained (report records 2 of 4 failing)"
-  ],
+  "incomplete_reasons": [],
   "original_task": {
     "description": "pricing/discount.py apply_discount(price, percent) treats `percent` as a fraction, so apply_discount(200, 10) returns -1800.0 instead of 180.0. Fix the calculation in pricing/discount.py so percent is interpreted as a percentage (10 means 10%).\n\nAcceptance criteria:\n1. `python -m pytest -q` passes (all 4 tests in tests/test_discount.py).\n2. Do not modify anything under tests/.\n3. Keep the existing ValueError check for percent outside 0..100.\n4. Change only pricing/discount.py.",
     "evidence_ref": "docs/roadmap/reports/evidence/phase40b-r3/dogfood-task4-report.md",
@@ -38,6 +60,6 @@
     "repository": "phase40b-r1-project",
     "tree": "d3c48722e8a1df4bcfc4a759bebfc561a6f769e4"
   },
-  "status": "incomplete",
+  "status": "complete",
   "title": "Single-file defect repair (pricing apply_discount)"
 }

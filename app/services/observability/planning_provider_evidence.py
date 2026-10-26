@@ -31,6 +31,7 @@ from app.services.workspace.system_settings import get_effective_runtime_root
 logger = logging.getLogger(__name__)
 
 PLANNING_EVIDENCE_DIRECTORY = "planning-evidence"
+DEBUG_REPAIR_EVIDENCE_DIRECTORY = "debug-repair-evidence"
 MAX_RETAINED_PROMPT_CHARS = 100_000
 MAX_RETAINED_VISIBLE_CHARS = 100_000
 MAX_RETAINED_REASONING_CHARS = 20_000
@@ -208,6 +209,36 @@ def planning_response_evidence_target_from_runtime(
         control_state_root(location)
         / PLANNING_EVIDENCE_DIRECTORY
         / correlation_id
+        / "provider-response.json"
+    )
+    return str(response_path), correlation_id
+
+
+def debug_repair_response_evidence_target(
+    runtime_service: Any, *, task_execution_id: Any, request_id: str
+) -> tuple[str, str] | None:
+    """Return the response-evidence path for one DEBUG repair request.
+
+    The path binds the TaskExecution and the DEBUG request id explicitly so
+    a retained response is never correlated by time or across executions.
+    """
+
+    if task_execution_id is None or not str(request_id or "").strip():
+        return None
+    identity = _runtime_identity(runtime_service)
+    location = _resolve_control_state_location(
+        db=identity["db"],
+        project_id=identity["project_id"],
+        control_state_location=None,
+    )
+    if location is None:
+        return None
+    correlation_id = f"debug-repair-{request_id}"
+    response_path = (
+        control_state_root(location)
+        / DEBUG_REPAIR_EVIDENCE_DIRECTORY
+        / f"execution-{int(task_execution_id)}"
+        / str(request_id)
         / "provider-response.json"
     )
     return str(response_path), correlation_id
@@ -617,9 +648,14 @@ def _evidence_serialized(value: Any) -> str:
         return str(value)
 
 
-def _evidence_representation(value: Any, *, retained: bool = True) -> dict[str, Any]:
+def _evidence_representation(
+    value: Any, *, retained: bool = True, limit: int | None = None
+) -> dict[str, Any]:
     serialized = _evidence_serialized(value)
     safe_value, redacted = _redact_evidence_value(value)
+    truncated = False
+    if limit is not None and isinstance(safe_value, str) and len(safe_value) > limit:
+        safe_value, truncated = safe_value[:limit], True
     safe_serialized = _evidence_serialized(safe_value)
     representation = {
         "retained": retained,
@@ -633,6 +669,8 @@ def _evidence_representation(value: Any, *, retained: bool = True) -> dict[str, 
             else None
         ),
     }
+    if limit is not None:
+        representation["truncated"] = truncated
     if retained:
         representation["value"] = safe_value
     return representation
@@ -667,7 +705,11 @@ class PlanningRepairResponseEvidence:
             "schema_version": (
                 "planning_provider_response_evidence.v1"
                 if capture_scope == "planning_generation"
-                else "planning_repair_provider_response_evidence.v1"
+                else (
+                    "debug_repair_provider_response_evidence.v1"
+                    if capture_scope == "debug_repair"
+                    else "planning_repair_provider_response_evidence.v1"
+                )
             ),
             "capture_enabled": True,
             "capture_scope": capture_scope,
@@ -894,23 +936,29 @@ class PlanningRepairResponseEvidence:
         classification: str,
     ) -> None:
         representations = self.document["representations"]
+        # DEBUG retention is bounded; Planning capture keeps its shape.
+        limit = (
+            MAX_RETAINED_VISIBLE_CHARS
+            if self.document.get("capture_scope") == "debug_repair"
+            else None
+        )
         representations["assistant_content"] = {
-            **_evidence_representation(assistant_content),
+            **_evidence_representation(assistant_content, limit=limit),
             "source_representation": "RAW_ASSISTANT_CONTENT",
             "representation": "REDACTED_ASSISTANT_CONTENT",
         }
         representations["extracted_content"] = {
-            **_evidence_representation(extracted_content),
+            **_evidence_representation(extracted_content, limit=limit),
             "source_representation": "ADAPTER_EXTRACTED_CONTENT",
             "representation": "REDACTED_ADAPTER_EXTRACTED_CONTENT",
         }
         representations["adapter_normalized_content"] = {
-            **_evidence_representation(adapter_normalized_content),
+            **_evidence_representation(adapter_normalized_content, limit=limit),
             "source_representation": "ADAPTER_NORMALIZED_CONTENT",
             "representation": "REDACTED_ADAPTER_NORMALIZED_CONTENT",
         }
         representations["planner_visible_content"] = {
-            **_evidence_representation(planner_visible_content),
+            **_evidence_representation(planner_visible_content, limit=limit),
             "source_representation": "PLANNER_VISIBLE_CONTENT",
             "representation": "REDACTED_PLANNER_VISIBLE_CONTENT",
         }
@@ -1008,6 +1056,23 @@ class PlanningRepairResponseEvidence:
         }
         self._persist()
 
+    def record_debug_repair(self, section: str, values: Mapping[str, Any]) -> None:
+        """Merge bounded DEBUG identity or outcome fields into the artifact."""
+
+        bounded = {
+            str(key)[:80]: (
+                str(value)[:500]
+                if value is not None and not isinstance(value, (bool, int, float))
+                else value
+            )
+            for key, value in values.items()
+        }
+        debug_repair = self.document.setdefault("debug_repair", {})
+        debug_repair.setdefault(str(section)[:80], {}).update(
+            _redact_evidence_value(bounded)[0]
+        )
+        self._persist()
+
     def complete(self) -> None:
         self.document["timing"]["request_finished_utc"] = _utc_now()
         if not self._persistence_errors:
@@ -1040,6 +1105,7 @@ __all__ = [
     "PlanningProviderEvidence",
     "PlanningRepairResponseEvidence",
     "planning_response_evidence_target_from_runtime",
+    "debug_repair_response_evidence_target",
     "begin_planning_provider_evidence",
     "begin_planning_provider_evidence_from_runtime",
     "inspect_chat_completion_response",

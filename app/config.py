@@ -177,6 +177,9 @@ class Settings(BaseSettings):
     # Full provider response capture is opt-in and intended for bounded
     # development investigations; normal deployments retain metadata only.
     PLANNING_PROVIDER_RESPONSE_EVIDENCE_CAPTURE: bool = False
+    # Same opt-in capture for bounded DEBUG repair provider responses.
+    # Observability only: it never changes DEBUG output or admission.
+    DEBUG_REPAIR_PROVIDER_RESPONSE_EVIDENCE_CAPTURE: bool = False
     # Development-only opt-in for providers verified to implement strict JSON
     # Schema output. All Plan validators still run after generation.
     PLANNING_JSON_SCHEMA_MODE_ENABLED: bool = False

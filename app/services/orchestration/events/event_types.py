@@ -85,6 +85,7 @@ class EventType:
     REPAIR_GENERATED = "repair_generated"
     REPAIR_APPLIED = "repair_applied"
     REPAIR_REJECTED = "repair_rejected"
+    DEBUG_REPAIR_PROVIDER_RESPONSE = "debug_repair_provider_response"
     EVALUATOR_RESULT = "evaluator_result"
     INVOCATION_PROJECTION = "invocation_projection"
 

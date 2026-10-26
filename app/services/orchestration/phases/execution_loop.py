@@ -160,6 +160,9 @@ from app.services.orchestration.phases.execution_local_steps import (
 from app.services.orchestration.phases.execution_debug_repair import (
     _bounded_debug_repair_output_observability,
     _bounded_debug_repair_prior_source_paths,
+    debug_repair_evidence_options,
+    debug_repair_provider_response_details,
+    record_debug_repair_evidence,
     _bounded_debug_repair_prompt_manifest,
     _bounded_debug_repair_rejection_alias_details,
     _bounded_debug_repair_source_edit_context,
@@ -2478,6 +2481,7 @@ def execute_step_loop(
         debug_repair_runtime = None
         debug_repair_runtime_context = None
         debug_repair_request_ids: list[str] = []
+        debug_repair_invocations: dict[str, dict[str, Any]] = {}
 
         def _ensure_role_owned_debug_repair_runtime():
             nonlocal debug_repair_runtime, debug_repair_runtime_context
@@ -2546,6 +2550,47 @@ def execute_step_loop(
             _ensure_role_owned_debug_repair_runtime()
 
         def _invoke_debug_repair(prompt_text: str) -> dict[str, Any]:
+            result = None
+            try:
+                result = _invoke_debug_repair_provider(prompt_text)
+                return result
+            finally:
+                if settings.DEBUG_REPAIR_PROVIDER_RESPONSE_EVIDENCE_CAPTURE:
+                    _record_debug_repair_provider_response(result)
+
+        def _record_debug_repair_provider_response(result: Any) -> None:
+            # Observability only: never alters the DEBUG result or its flow.
+            try:
+                request_id = debug_repair_request_ids[-1]
+                invocation = debug_repair_invocations.get(request_id) or {}
+                append_orchestration_event(
+                    project_dir=control_state_of(orchestration_state),
+                    session_id=session_id,
+                    task_id=task_id,
+                    event_type=EventType.DEBUG_REPAIR_PROVIDER_RESPONSE,
+                    parent_event_id=(debugging_phase_event or {}).get("event_id"),
+                    details=debug_repair_provider_response_details(
+                        evidence_path=invocation.get("evidence_path"),
+                        invocation_path=str(invocation.get("path") or "unknown"),
+                        result=result,
+                        identity={
+                            "project_id": getattr(project, "id", None),
+                            "task_id": task_id,
+                            "session_id": session_id,
+                            "task_execution_id": ctx.task_execution_id,
+                            "debug_repair_request_id": request_id,
+                            "debug_repair_invocation_index": len(
+                                debug_repair_request_ids
+                            ),
+                            "step_index": step_index + 1,
+                            "attempt": current_attempt,
+                        },
+                    ),
+                )
+            except Exception:
+                pass
+
+        def _invoke_debug_repair_provider(prompt_text: str) -> dict[str, Any]:
             request_id = str(uuid.uuid4())
             debug_repair_request_ids.append(request_id)
             if is_bounded_debug_repair_mode(debug_prompt_mode):
@@ -2560,6 +2605,7 @@ def execute_step_loop(
                 return annotated
 
             if debug_repair_runtime is None:
+                debug_repair_invocations[request_id] = {"path": "primary_runtime"}
                 primary_error: Exception | None = None
                 try:
                     result = _run_coroutine(
@@ -2623,12 +2669,24 @@ def execute_step_loop(
                     raise primary_error
                 return result
             optimized_prompt = optimize_prompt(prompt_text, max_tokens=25000)
+            evidence_options = debug_repair_evidence_options(
+                debug_repair_runtime,
+                task_execution_id=ctx.task_execution_id,
+                request_id=request_id,
+            )
+            debug_repair_invocations[request_id] = {
+                "path": "role_owned_runtime",
+                "evidence_path": evidence_options.get(
+                    "provider_response_evidence_path"
+                ),
+            }
             options = RuntimeInvocationOptions(
                 timeout_seconds=float(DEBUG_TIMEOUT_SECONDS),
                 max_output_tokens=2048,
                 temperature=0.0,
                 reasoning_enabled=(not settings.DEBUG_REPAIR_DISABLE_THINKING),
                 stream=False,
+                **evidence_options,
             )
             return _annotate(
                 _run_coroutine(
@@ -2784,6 +2842,24 @@ def execute_step_loop(
                         )
                         success = False
                         debug_data = None
+                if debug_repair_request_ids:
+                    record_debug_repair_evidence(
+                        (
+                            debug_repair_invocations.get(debug_repair_request_ids[-1])
+                            or {}
+                        ).get("evidence_path"),
+                        "parse",
+                        {
+                            "status": "accepted" if success else "rejected",
+                            "strategy": strategy_info,
+                            "rejection_reason": normalization_result.rejection_reason,
+                            "parsed_shape": normalization_result.parsed_shape,
+                            "fix_type": (debug_data or {}).get("fix_type"),
+                            "repair_output_sha256": hashlib.sha256(
+                                str(final_repair_output or "").encode("utf-8")
+                            ).hexdigest(),
+                        },
+                    )
                 if not success or debug_data is None:
                     debug_repair_rejection_reason = (
                         normalization_result.rejection_reason

@@ -480,6 +480,7 @@ def test_live_attempt_runs_through_api_and_independent_acceptance(world):
     assert outcome["status"] == live.STATUS_CASE_COMPLETE, outcome
     record = _record(world)
     assert validate_attempt(record) == []
+    assert record["schema_version"] == "benchmark.attempt.v2"
     assert record["attempted"] is True
     assert record["identity"]["campaign_id"] == world.campaign
     assert (
@@ -501,7 +502,74 @@ def test_live_attempt_runs_through_api_and_independent_acceptance(world):
     assert record["acceptance"]["exit_code"] == 0
     assert record["reliability"]["independently_accepted"] is True
     assert record["reliability"]["failure_stage"] == "none"
+    assert record["reliability"]["root_cause"]["attribution"] == "not_applicable"
+
+    # Campaign metrics reconcile the immutable record summary with raw event
+    # evidence. This fixture represents a record serialized before the event
+    # name casing was corrected.
     attempt = directory / "attempts" / CASE_ID / "attempt-1"
+    control = attempt / "evidence" / "control"
+    event_dir = control / "events"
+    event_dir.mkdir(parents=True, exist_ok=True)
+    (event_dir / "session_1_task_1.jsonl").write_text(
+        json.dumps(
+            {
+                "event_type": "debug_repair_provider_response",
+                "details": {"response_content_retained": True},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    response = (
+        control
+        / "debug-repair-evidence"
+        / "execution-1"
+        / "request-1"
+        / "provider-response.json"
+    )
+    response.parent.mkdir(parents=True)
+    response.write_text(
+        json.dumps(
+            {
+                "schema_version": "debug_repair_provider_response_evidence.v1",
+                "provider": {"role": "debug_repair", "model": "model-x"},
+                "representations": {"planner_visible_content": {"retained": True}},
+                "evidence_persistence": {"status": "complete"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    stale_retention = record["identity"]["provider_identity"][
+        "debug_response_retention"
+    ]
+    record["execution"]["debug_repair_count"] = 1
+    record["reliability"]["evidence_limitations"].append(
+        {
+            "code": "debug_provider_response_not_retained",
+            "statement": "stale pre-correction record summary",
+        }
+    )
+    record_path = attempt / "record.json"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    metrics = live.campaign_metrics(world.ctx, world.campaign)
+    assert metrics["debug_response_retention"]["known_attempts"] == 1
+    assert metrics["debug_response_retention"]["debug_provider_invocations"] == 1
+    assert metrics["debug_response_retention"]["retained_responses"] == 1
+    metric_attempt = metrics["attempts"][0]
+    assert metric_attempt["debug_response_retention_source"] == "raw_event_journal"
+    assert metric_attempt["recorded_debug_response_retention"] == stale_retention
+    assert not any(
+        item["code"] == "debug_provider_response_not_retained"
+        for item in metric_attempt["evidence_limitations"]
+    )
+    assert any(
+        item["code"] == "debug_provider_response_not_retained"
+        for item in json.loads(record_path.read_text())["reliability"][
+            "evidence_limitations"
+        ]
+    )
     acceptance = json.loads((attempt / "acceptance" / "acceptance.json").read_text())
     assert acceptance["integrity"]["valid"] and acceptance["promoted"] is False
     assert acceptance["seed_clone"]["head"] == world.case["seed"]["commit"]
@@ -963,6 +1031,32 @@ def test_close_campaign_records_cleanup_without_touching_processes(world):
     assert (world.ctx.campaign_dir(world.campaign) / "cleanup.json").is_file()
 
 
+def test_close_campaign_waits_before_port_check_when_stopping_runtime(
+    world, monkeypatch
+):
+    _init(world, attempts=1)
+    calls = []
+    world.ctx.hooks.sleep = lambda seconds: calls.append(("sleep", seconds))
+    monkeypatch.setattr(
+        live.dev_runtime,
+        "stop_runtime",
+        lambda _config: calls.append(("stop", None))
+        or {"status": "stopped", "processes": {}},
+    )
+    monkeypatch.setattr(
+        live.dev_runtime,
+        "_port_available",
+        lambda port: calls.append(("port", port)) or True,
+    )
+
+    result = live.close_campaign(world.ctx, world.campaign, stop_runtime=True)
+
+    assert calls[:2] == [("stop", None), ("sleep", 60)]
+    assert all(kind == "port" for kind, _ in calls[2:])
+    assert result["port_check_settle_seconds"] == 60
+    assert all(result["ports_closed"].values())
+
+
 def test_canonical_case_files_are_unchanged_by_live_mode():
     cases = json.loads((REPO / "scripts/benchmark/cases/workflow-a.json").read_text())
     assert cases["seed"]["commit"] == "6cd8ab904f695634e1b1b0b8c6496f09f55bc062"
@@ -970,7 +1064,117 @@ def test_canonical_case_files_are_unchanged_by_live_mode():
 
     loaded = load_cases()
     assert {key for key, case in loaded.items() if case["status"] == "complete"} == {
+        "phase40b-r3-discount",
         "workflow-a",
         "workflow-b",
         "workflow-c",
     }
+
+
+def test_phase40d3_campaign_pins_comparison_and_requires_debug_capture(world):
+    world.campaign = "phase40d3-c1"
+    original_observe = world.ctx.hooks.observe_runtime
+    capture = {"enabled": True}
+
+    def observe(config):
+        runtime = original_observe(config)
+        for process in runtime["processes"].values():
+            process["environment"][
+                "DEBUG_REPAIR_PROVIDER_RESPONSE_EVIDENCE_CAPTURE"
+            ] = str(capture["enabled"]).lower()
+        return runtime
+
+    world.ctx.hooks.observe_runtime = observe
+    created = live.init_campaign(
+        world.ctx,
+        world.campaign,
+        [CASE_ID],
+        1,
+        comparison_baseline="phase40d2-c1",
+        campaign_purpose="repeatability",
+    )
+    assert created["status"] == live.STATUS_CAMPAIGN_CREATED, created
+    manifest = json.loads(Path(created["manifest"]).read_text())
+    assert manifest["phase"] == "phase40d3"
+    assert manifest["comparison_baseline"] == "phase40d2-c1"
+    assert manifest["campaign_purpose"] == "repeatability"
+
+    ready = live.preflight(world.ctx, manifest, CASE_ID, used=0)
+    capture_check = next(
+        item for item in ready["checks"] if item["check"] == "debug_capture_readiness"
+    )
+    assert capture_check["passed"] is True
+
+    capture["enabled"] = False
+    unready = live.preflight(world.ctx, manifest, CASE_ID, used=0)
+    capture_check = next(
+        item for item in unready["checks"] if item["check"] == "debug_capture_readiness"
+    )
+    assert capture_check["passed"] is False
+
+
+def test_provider_evidence_summarizes_debug_files_and_counts_response_events(tmp_path):
+    control = tmp_path / "control"
+    evidence = (
+        control
+        / "debug-repair-evidence"
+        / "execution-42"
+        / "request-abc"
+        / "provider-response.json"
+    )
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text(
+        json.dumps(
+            {
+                "schema_version": "debug_repair_provider_response_evidence.v1",
+                "correlation": {"provider_call_id": "call-1"},
+                "provider": {"role": "debug_repair", "model": "model-x"},
+                "planning_parse": {"status": "accepted"},
+                "representations": {"planner_visible_content": {"retained": True}},
+                "evidence_persistence": {"status": "complete"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    events = control / "events" / "session_1_task_1.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "event_type": "debug_repair_provider_response",
+                    "details": {"response_content_retained": retained},
+                }
+            )
+            for retained in (True, False)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    snapshots = control / "events" / "session_1_task_1_state_snapshots.jsonl"
+    snapshots.write_text(
+        json.dumps(
+            {
+                "event_type": "debug_repair_provider_response",
+                "details": {"response_content_retained": True},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = live.provider_evidence(control, None, None, task_count=1)
+
+    assert len(result["debug_responses"]) == 1
+    assert result["debug_responses"][0]["task_execution_id"] == "42"
+    assert result["debug_responses"][0]["response_content_retained"] is True
+    assert result["debug_response_retention"] == {
+        "name": "DEBUG responses retained / DEBUG provider invocations",
+        "retained_responses": 1,
+        "debug_provider_invocations": 2,
+        "known": True,
+        "value": 0.5,
+        "counted_from_event": "debug_repair_provider_response",
+    }
+    assert "debug_provider_responses_retained" not in result
+    assert cli.LIVE_OUTPUT_ROOT == REPO / "docs/roadmap/reports/evidence/phase40d3"

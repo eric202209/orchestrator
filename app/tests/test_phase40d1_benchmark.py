@@ -225,8 +225,18 @@ def test_canonical_cases_validate():
     ]
     for case in cases.values():
         assert validate_case(case) == []
-    assert cases["phase40b-r3-discount"]["status"] == "incomplete"
-    assert cases["phase40b-r3-discount"]["baseline"]["expected_failed_tests"] is None
+    # Phase 40D-3 recovered the R3 failing-test names by re-execution; the
+    # original Phase 40B evidence reference is kept distinct from recovery.
+    r3_baseline = cases["phase40b-r3-discount"]["baseline"]
+    assert cases["phase40b-r3-discount"]["status"] == "complete"
+    assert r3_baseline["expected_failed_tests"] == [
+        "test_full_discount_is_free",
+        "test_ten_percent_off",
+    ]
+    assert r3_baseline["evidence_ref"].endswith(
+        "phase40b-disposable-development-dogfood-runtime.md"
+    )
+    assert r3_baseline["recovery"]["recovered_fields"] == ["expected_failed_tests"]
 
 
 def test_case_schema_rejects_missing_and_unknown_fields():
@@ -890,6 +900,11 @@ def test_dry_run_prepares_without_side_effects():
 
 def test_dry_run_blocks_incomplete_case_and_rejects_invalid_config():
     cases = load_cases()
+    cases["phase40b-r3-discount"] = {
+        **cases["phase40b-r3-discount"],
+        "status": "incomplete",
+        "incomplete_reasons": ["synthetic incomplete copy"],
+    }
     outcome = runner.dry_run(
         runner.build_run_config("phase40b-r3-discount", 1, live=False),
         repo_root=REPO,

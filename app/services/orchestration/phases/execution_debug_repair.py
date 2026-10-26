@@ -8,6 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from app.config import settings
 from app.runtime_naming import (
     BOUNDED_DEBUG_REPAIR_PROMPT_MODE,
     DIFF_SCOPED_DEBUG_REPAIR_PROMPT_MODE,
@@ -18,6 +19,10 @@ from app.runtime_naming import (
 )
 from app.services.orchestration.diagnostics.debug_feedback import (
     debug_repair_source_path,
+)
+from app.services.observability.planning_provider_evidence import (
+    PlanningRepairResponseEvidence,
+    debug_repair_response_evidence_target,
 )
 from app.services.orchestration.state.execution_states import OrchestrationPhase
 
@@ -392,3 +397,88 @@ def _bounded_debug_repair_rejection_alias_details(
         "bounded_execution_debug_repair_parsed_shape": parsed_shape,
         "bounded_execution_debug_repair_raw_output_excerpt": raw_output_excerpt,
     }
+
+
+def debug_repair_evidence_options(
+    runtime_service: Any, *, task_execution_id: Any, request_id: str
+) -> dict[str, str]:
+    """Opt-in DEBUG response capture target; empty when disabled or unavailable."""
+
+    if not settings.DEBUG_REPAIR_PROVIDER_RESPONSE_EVIDENCE_CAPTURE:
+        return {}
+    try:
+        target = debug_repair_response_evidence_target(
+            runtime_service,
+            task_execution_id=task_execution_id,
+            request_id=request_id,
+        )
+    except Exception:
+        target = None
+    if target is None:
+        return {}
+    return {
+        "provider_response_evidence_path": target[0],
+        "provider_response_evidence_correlation_id": target[1],
+    }
+
+
+def record_debug_repair_evidence(
+    evidence_path: Optional[str], section: str, values: Dict[str, Any]
+) -> Optional[str]:
+    """Best-effort update of a retained DEBUG response; returns capture status."""
+
+    if not evidence_path:
+        return None
+    try:
+        evidence = PlanningRepairResponseEvidence.load(evidence_path)
+    except FileNotFoundError:
+        return "missing"
+    except Exception:
+        return "incomplete"
+    try:
+        evidence.record_debug_repair(section, values)
+    except Exception:
+        return "incomplete"
+    if evidence.persistence_errors:
+        return "incomplete"
+    status = (evidence.document.get("evidence_persistence") or {}).get("status")
+    return str(status or "incomplete")
+
+
+def debug_repair_provider_response_details(
+    *,
+    evidence_path: Optional[str],
+    invocation_path: str,
+    result: Any,
+    identity: Dict[str, Any],
+) -> dict[str, Any]:
+    """Per-invocation DEBUG evidence summary bound by explicit request id."""
+
+    details: dict[str, Any] = {
+        "phase": "debugging",
+        **identity,
+        "invocation_path": invocation_path,
+        "response_received": isinstance(result, dict),
+        "evidence_path": evidence_path,
+        "provider_call_id": None,
+        "response_content_retained": False,
+    }
+    if not evidence_path:
+        details["capture_status"] = (
+            "not_captured:primary_runtime_path"
+            if invocation_path != "role_owned_runtime"
+            else "not_captured:target_unavailable"
+        )
+        return details
+    details["capture_status"] = record_debug_repair_evidence(
+        evidence_path, "identity", identity
+    )
+    try:
+        document = PlanningRepairResponseEvidence.load(evidence_path).document
+        details["provider_call_id"] = document["correlation"]["provider_call_id"]
+        details["response_content_retained"] = bool(
+            document["representations"]["assistant_content"].get("retained")
+        )
+    except Exception:
+        pass
+    return details

@@ -7,14 +7,15 @@
     venv/bin/python scripts/benchmark/cli.py run --case workflow-a \
         --profile isolated-development --max-attempts 2 --dry-run
 
-Live campaign (Phase 40D-2), against a running isolated development runtime:
+Live campaign (Phase 40D-3), against a running isolated development runtime:
 
     venv/bin/python scripts/benchmark/cli.py campaign-init \
-        --campaign phase40d2-c1 --cases workflow-a,workflow-b,workflow-c
+        --campaign phase40d3-c1 --cases workflow-a,workflow-b,workflow-c \
+        --comparison-baseline phase40d2-c1 --campaign-purpose repeatability
     venv/bin/python scripts/benchmark/cli.py run --case workflow-a \
-        --profile isolated-development --max-attempts 2 --live --campaign phase40d2-c1
-    venv/bin/python scripts/benchmark/cli.py campaign-metrics --campaign phase40d2-c1
-    venv/bin/python scripts/benchmark/cli.py campaign-close --campaign phase40d2-c1 --stop-runtime
+        --profile isolated-development --max-attempts 2 --live --campaign phase40d3-c1
+    venv/bin/python scripts/benchmark/cli.py campaign-metrics --campaign phase40d3-c1
+    venv/bin/python scripts/benchmark/cli.py campaign-close --campaign phase40d3-c1 --stop-runtime
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ EXIT_OK = 0
 EXIT_INVALID = 2
 EXIT_BLOCKED = 4
 EXIT_LIVE_STOPPED = 5
-LIVE_OUTPUT_ROOT = REPO_ROOT / "docs/roadmap/reports/evidence/phase40d2"
+LIVE_OUTPUT_ROOT = REPO_ROOT / "docs/roadmap/reports/evidence/phase40d3"
 
 
 class NetworkDisabledError(RuntimeError):
@@ -169,6 +170,8 @@ def main(argv: list[str] | None = None) -> int:
     init.add_argument("--campaign", required=True)
     init.add_argument("--cases", required=True, help="comma-separated case ids")
     init.add_argument("--max-attempts", type=int, default=2)
+    init.add_argument("--comparison-baseline")
+    init.add_argument("--campaign-purpose")
     init.add_argument("--output-root", type=Path, default=LIVE_OUTPUT_ROOT)
 
     for name, text in (
@@ -189,7 +192,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.command == "campaign-init":
             outcome = live.init_campaign(
-                ctx, args.campaign, args.cases.split(","), args.max_attempts
+                ctx,
+                args.campaign,
+                args.cases.split(","),
+                args.max_attempts,
+                comparison_baseline=args.comparison_baseline,
+                campaign_purpose=args.campaign_purpose,
             )
             code = (
                 EXIT_OK

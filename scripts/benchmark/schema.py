@@ -8,6 +8,9 @@ from jsonschema import Draft202012Validator
 
 CASE_SCHEMA_VERSION = "benchmark.case.v1"
 ATTEMPT_SCHEMA_VERSION = "benchmark.attempt.v1"
+# v2 (Phase 40D-3) adds observed mechanisms and a separate root cause; v1
+# fields, including ``reliability.attribution``, keep their v1 meaning.
+ATTEMPT_SCHEMA_V2_VERSION = "benchmark.attempt.v2"
 RUN_CONFIG_SCHEMA_VERSION = "benchmark.run_config.v1"
 REGISTRY_SCHEMA_VERSION = "benchmark.history_registry.v1"
 
@@ -81,6 +84,33 @@ CASE_SCHEMA: dict[str, Any] = {
                 "expected_failed": _NULLABLE_INT,
                 "expected_passed": _NULLABLE_INT,
                 "evidence_ref": _NULLABLE_STR,
+                # Optional (Phase 40D-3): a baseline fact recovered later by
+                # independent re-execution of the exact seed, kept distinct
+                # from the original historical evidence in ``evidence_ref``.
+                "recovery": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "recovered_fields",
+                        "method",
+                        "seed_commit",
+                        "seed_tree",
+                        "command",
+                        "observed_failed_tests",
+                        "observed_passed_tests",
+                        "evidence_refs",
+                    ],
+                    "properties": {
+                        "recovered_fields": _STR_LIST,
+                        "method": {"type": "string", "minLength": 1},
+                        "seed_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                        "seed_tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                        "command": {"type": "string"},
+                        "observed_failed_tests": _STR_LIST,
+                        "observed_passed_tests": _STR_LIST,
+                        "evidence_refs": {**_STR_LIST, "minItems": 1},
+                    },
+                },
             },
         },
         "acceptance": {
@@ -96,6 +126,18 @@ CASE_SCHEMA: dict[str, Any] = {
         "protected_test_paths": {**_STR_LIST, "minItems": 1},
         "behavioral_contract": {"type": "string", "minLength": 1},
         "historical_evidence_refs": _STR_LIST,
+        # Optional (Phase 40D-3): an explicit, verified statement of which
+        # source paths the fix must touch. Only this can support a wrong-file
+        # mechanism; none of the canonical cases declares one.
+        "target_contract": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["source_paths", "basis"],
+            "properties": {
+                "source_paths": {**_STR_LIST, "minItems": 1},
+                "basis": {"type": "string", "minLength": 1},
+            },
+        },
     },
 }
 
@@ -205,6 +247,51 @@ _ATTEMPT_SECTIONS = {
     },
 }
 
+ROOT_CAUSE_ATTRIBUTIONS = (
+    "not_applicable",
+    "unknown",
+    "model_output",
+    "application_defect",
+    "infrastructure",
+)
+ROOT_CAUSE_CONFIDENCE = (
+    "not_applicable",
+    "unproven",
+    "observed",
+    "rule_inferred",
+    "explicit_contract",
+    "report_grounded",
+)
+_V2_RELIABILITY = {
+    "type": "object",
+    "required": ["observed_mechanisms", "root_cause"],
+    "properties": {
+        "observed_mechanisms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["mechanism", "evidence"],
+                "properties": {
+                    "mechanism": {"type": "string", "minLength": 1},
+                    "evidence": {"type": "string", "minLength": 1},
+                },
+            },
+        },
+        "root_cause": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["attribution", "basis", "confidence", "evidence_refs"],
+            "properties": {
+                "attribution": {"enum": list(ROOT_CAUSE_ATTRIBUTIONS)},
+                "basis": {"type": "string", "minLength": 1},
+                "confidence": {"enum": list(ROOT_CAUSE_CONFIDENCE)},
+                "evidence_refs": _STR_LIST,
+            },
+        },
+    },
+}
+
 ATTEMPT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -215,10 +302,25 @@ ATTEMPT_SCHEMA: dict[str, Any] = {
         *_ATTEMPT_SECTIONS,
     ],
     "properties": {
-        "schema_version": {"const": ATTEMPT_SCHEMA_VERSION},
+        "schema_version": {"enum": [ATTEMPT_SCHEMA_VERSION, ATTEMPT_SCHEMA_V2_VERSION]},
         "attempted": {"type": "boolean"},
         "not_attempted_reason": _NULLABLE_STR,
         **_ATTEMPT_SECTIONS,
+    },
+    # A v1 record never carries v2 fields, so old records are not reinterpreted.
+    "if": {"properties": {"schema_version": {"const": ATTEMPT_SCHEMA_V2_VERSION}}},
+    "then": {"properties": {"reliability": _V2_RELIABILITY}},
+    "else": {
+        "properties": {
+            "reliability": {
+                "not": {
+                    "anyOf": [
+                        {"required": ["observed_mechanisms"]},
+                        {"required": ["root_cause"]},
+                    ]
+                }
+            }
+        }
     },
 }
 

@@ -31,6 +31,7 @@ from urllib.parse import urlsplit
 from scripts import dev_runtime
 
 from . import identity
+from .attribution import MODEL_PROPOSAL_REJECTIONS, upgrade_to_v2
 from .evidence_loader import (
     EvidenceRoots,
     HistoryLoader,
@@ -40,10 +41,12 @@ from .evidence_loader import (
 from .metrics import compute_metrics, grouped_metrics
 from .schema import validate_attempt, validate_case
 
-PHASE = "phase40d2"
 CAMPAIGN_SCHEMA = "benchmark.campaign.v1"
 PREFLIGHT_SCHEMA = "benchmark.preflight.v1"
-CAMPAIGN_ID = re.compile(r"^phase40d2-[a-z0-9][a-z0-9-]{0,40}$")
+CAMPAIGN_ID = re.compile(
+    r"^(?P<phase>phase[0-9]+[a-z][0-9]+)-(?P<campaign>[a-z0-9][a-z0-9-]{0,40})$"
+)
+DEBUG_PROVIDER_RESPONSE_EVENT = "debug_repair_provider_response"
 LOCK_NAME = ".live-runner.lock"
 TERMINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled"})
 DEFAULT_TIMEOUT_SECONDS = 1800
@@ -70,21 +73,18 @@ ALLOWED_REQUESTS: tuple[tuple[str, str], ...] = (
     ("GET", r"/api/v1/tasks/\d+/change-set"),
     ("POST", r"/api/v1/sessions/\d+/stop"),
 )
-# Terminal safety rejections of content the model proposed.
-MODEL_PROPOSAL_REJECTIONS = frozenset(
-    {
-        "apa_unauthorized_path",
-        "gr2_existing_file_rewrite",
-        "python_syntax_invalid",
-        "python_write_file_drops_definitions",
-        "semantic_string_edit_rejected",
-        "plan_output_contract",
-        "debug_repair_output_contract",
-        "unsupported_command",
-        "task_scope",
-        "missing_verification",
-    }
-)
+
+
+def _campaign_phase(campaign_id: str) -> str:
+    match = CAMPAIGN_ID.fullmatch(campaign_id)
+    if match is None:
+        raise ValueError(f"invalid campaign id: {campaign_id}")
+    return match.group("phase")
+
+
+def _phase_label(phase: str) -> str:
+    return f"Phase {phase.removeprefix('phase').upper()}"
+
 
 STATUS_CAMPAIGN_CREATED = "CAMPAIGN_CREATED"
 STATUS_PREFLIGHT_FAILED = "PREFLIGHT_FAILED"
@@ -535,12 +535,33 @@ def _config_fingerprint(runtime: dict[str, Any]) -> str | None:
 
 
 def init_campaign(
-    ctx: LiveContext, campaign_id: str, case_ids: list[str], max_attempts: int
+    ctx: LiveContext,
+    campaign_id: str,
+    case_ids: list[str],
+    max_attempts: int,
+    *,
+    comparison_baseline: str | None = None,
+    campaign_purpose: str | None = None,
 ) -> dict[str, Any]:
     if not CAMPAIGN_ID.fullmatch(campaign_id):
         return {
             "status": STATUS_INVALID,
             "errors": [f"campaign id must match {CAMPAIGN_ID.pattern}"],
+        }
+    phase = _campaign_phase(campaign_id)
+    if comparison_baseline is not None and not CAMPAIGN_ID.fullmatch(
+        comparison_baseline
+    ):
+        return {
+            "status": STATUS_INVALID,
+            "errors": ["comparison_baseline must be a valid campaign id"],
+        }
+    if phase == "phase40d3" and (
+        not comparison_baseline or not (campaign_purpose or "").strip()
+    ):
+        return {
+            "status": STATUS_INVALID,
+            "errors": ["Phase 40D-3 requires comparison_baseline and campaign_purpose"],
         }
     if not 1 <= max_attempts <= 2:
         return {"status": STATUS_INVALID, "errors": ["max_attempts must be 1..2"]}
@@ -580,7 +601,9 @@ def init_campaign(
     manifest = {
         "schema": CAMPAIGN_SCHEMA,
         "campaign_id": campaign_id,
-        "phase": PHASE,
+        "phase": phase,
+        "comparison_baseline": comparison_baseline,
+        "campaign_purpose": campaign_purpose,
         "created_at": _utc(),
         "cases": {
             case_id: {
@@ -774,6 +797,21 @@ def preflight(
     ) or {}
     check(
         "hold_policy", not _policy_problems(environment), _policy_problems(environment)
+    )
+    capture_values = {
+        kind: str(
+            ((runtime.get("processes") or {}).get(kind) or {})
+            .get("environment", {})
+            .get("DEBUG_REPAIR_PROVIDER_RESPONSE_EVIDENCE_CAPTURE", "")
+        ).lower()
+        for kind in ("api", "worker")
+    }
+    capture_required = manifest.get("phase") == "phase40d3"
+    check(
+        "debug_capture_readiness",
+        not capture_required
+        or all(value == "true" for value in capture_values.values()),
+        {"required": capture_required, "api_worker": capture_values},
     )
     isolation = isolation_checks(ctx.config)
     check("development_isolation", all(item["passed"] for item in isolation), isolation)
@@ -986,8 +1024,8 @@ def _execute_attempt(
                     "POST",
                     "/api/v1/projects",
                     {
-                        "name": f"Phase 40D2 {manifest['campaign_id']} {case_id} attempt {number}",
-                        "description": f"Disposable Phase 40D-2 benchmark Project ({case_id}).",
+                        "name": f"{_phase_label(manifest['phase'])} {manifest['campaign_id']} {case_id} attempt {number}",
+                        "description": f"Disposable {_phase_label(manifest['phase'])} benchmark Project ({case_id}).",
                         "branch": "main",
                         "workspace_path": name,
                     },
@@ -1211,6 +1249,77 @@ def provider_evidence(
                 ),
             }
         )
+    debug_responses = []
+    for path in sorted(
+        control_project.glob(
+            "debug-repair-evidence/execution-*/**/provider-response.json"
+        )
+    ):
+        data = _read_json(path)
+        provider = data.get("provider") or {}
+        representations = data.get("representations") or {}
+        retained = any(
+            (representations.get(name) or {}).get("retained") is True
+            for name in (
+                "assistant_content",
+                "extracted_content",
+                "adapter_normalized_content",
+                "planner_visible_content",
+            )
+        )
+        debug_responses.append(
+            {
+                "path": str(path.relative_to(control_project)),
+                "schema_version": data.get("schema_version"),
+                "task_execution_id": path.parent.parent.name.removeprefix("execution-"),
+                "request_id": path.parent.name,
+                "provider_call_id": (data.get("correlation") or {}).get(
+                    "provider_call_id"
+                ),
+                "role": provider.get("role"),
+                "model": provider.get("model"),
+                "http_status": provider.get("http_status"),
+                "finish_reason": provider.get("finish_reason"),
+                "parse_status": (data.get("planning_parse") or {}).get("status"),
+                "response_content_retained": retained,
+                "persistence_status": (data.get("evidence_persistence") or {}).get(
+                    "status"
+                ),
+            }
+        )
+
+    event_paths = sorted(
+        path
+        for path in (control_project / "events").glob("session_*_task_*.jsonl")
+        if re.fullmatch(r"session_\d+_task_\d+\.jsonl", path.name)
+    )
+    debug_invocations = 0
+    retained_debug_responses = 0
+    for event_path in event_paths:
+        for line in event_path.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("event_type") != DEBUG_PROVIDER_RESPONSE_EVENT:
+                continue
+            debug_invocations += 1
+            details = event.get("details") or {}
+            if details.get("response_content_retained") is True:
+                retained_debug_responses += 1
+    debug_retention_known = bool(event_paths) and task_count == 1
+    debug_retention = {
+        "name": "DEBUG responses retained / DEBUG provider invocations",
+        "retained_responses": retained_debug_responses,
+        "debug_provider_invocations": debug_invocations,
+        "known": debug_retention_known,
+        "value": (
+            round(retained_debug_responses / debug_invocations, 4)
+            if debug_retention_known and debug_invocations
+            else ("N/A" if debug_retention_known else None)
+        ),
+        "counted_from_event": DEBUG_PROVIDER_RESPONSE_EVENT,
+    }
     outside = [
         item["provider_call_id"]
         for item in responses
@@ -1221,8 +1330,9 @@ def provider_evidence(
         "project_task_count": task_count,
         "ambiguous": task_count != 1 or bool(outside),
         "outside_window": outside,
-        "debug_provider_responses_retained": False,
         "responses": responses,
+        "debug_responses": debug_responses,
+        "debug_response_retention": debug_retention,
     }
 
 
@@ -1375,7 +1485,7 @@ def _finalize(
         redacted = []
 
     phase = {
-        "phase": PHASE,
+        "phase": manifest["phase"],
         "source_identity": _compact_source(manifest["source_identity"]),
         "provider": {"model": manifest["provider"]["model"]},
     }
@@ -1398,7 +1508,7 @@ def _finalize(
         record["identity"]["task_id"] = (steps.get("task_created") or {}).get("task_id")
     timed_out = bool(observed.get("timed_out"))
     record["identity"].update(
-        attempt_id=f"{PHASE}:{campaign_id}:{case['case_id']}:attempt-{number}",
+        attempt_id=f"{manifest['phase']}:{campaign_id}:{case['case_id']}:attempt-{number}",
         campaign_id=campaign_id,
         attempt_number=number,
     )
@@ -1428,6 +1538,8 @@ def _finalize(
             key: provider[key]
             for key in ("correlation_basis", "ambiguous", "outside_window")
         }
+        retention = provider["debug_response_retention"]
+        record["identity"]["provider_identity"]["debug_response_retention"] = retention
         if provider["ambiguous"]:
             limitations.append(
                 {
@@ -1435,11 +1547,17 @@ def _finalize(
                     "statement": provider["correlation_basis"],
                 }
             )
-        if (record["execution"]["debug_repair_count"] or 0) > 0:
+        debug_attempts = record["execution"]["debug_repair_count"] or 0
+        debug_invocations = retention["debug_provider_invocations"]
+        expected_responses = max(debug_attempts, debug_invocations or 0)
+        if expected_responses > 0 and (
+            not retention["known"]
+            or retention["retained_responses"] < expected_responses
+        ):
             limitations.append(
                 {
                     "code": "debug_provider_response_not_retained",
-                    "statement": "the application retains Planning provider responses only; DEBUG repair responses are summarized by journal events",
+                    "statement": "one or more DEBUG provider invocations lack retained response content",
                 }
             )
     if timed_out:
@@ -1484,6 +1602,7 @@ def _finalize(
         set(reliability["evidence_refs"])
         | {_rel(path, ctx.repo_root) for path in copied}
     )
+    record = upgrade_to_v2(record, case, repo_root=ctx.repo_root, timed_out=timed_out)
     errors = validate_attempt(record)
     if errors:
         raise LiveError("attempt_schema_invalid", "; ".join(errors))
@@ -1621,7 +1740,7 @@ def independent_acceptance(
         ctx.repo_root
         / ".dev-runtime"
         / "benchmark"
-        / PHASE
+        / _campaign_phase(campaign_id)
         / campaign_id
         / f"{case['case_id']}-a{number}-acceptance"
     )
@@ -1777,15 +1896,89 @@ def campaign_records(ctx: LiveContext, campaign_id: str) -> list[dict[str, Any]]
     ]
 
 
+def _campaign_attempt_debug_retention(
+    ctx: LiveContext, campaign_id: str, record: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str]:
+    """Prefer retained raw event evidence over a previously serialized summary."""
+
+    identity = record["identity"]
+    attempt_dir = (
+        ctx.campaign_dir(campaign_id)
+        / "attempts"
+        / identity["case_id"]
+        / f"attempt-{identity['attempt_number']}"
+    )
+    evidence_dir = attempt_dir / "evidence"
+    control_dir = evidence_dir / "control"
+    db_rows_path = evidence_dir / "db-rows.json"
+    if control_dir.is_dir() and db_rows_path.is_file():
+        db_rows = _read_json(db_rows_path)
+        task_count = len(db_rows.get("tasks") or [])
+        provider = provider_evidence(control_dir, None, None, task_count=task_count)
+        retention = provider["debug_response_retention"]
+        if retention["known"]:
+            return retention, "raw_event_journal"
+    stored = identity.get("provider_identity", {}).get("debug_response_retention")
+    return stored, "attempt_record_fallback"
+
+
+def _campaign_attempt_limitations(
+    record: dict[str, Any], retention: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    limitations = list(record["reliability"].get("evidence_limitations") or [])
+    if retention and retention.get("known"):
+        expected = max(
+            record["execution"].get("debug_repair_count") or 0,
+            retention.get("debug_provider_invocations") or 0,
+        )
+        if expected and retention.get("retained_responses", 0) >= expected:
+            limitations = [
+                item
+                for item in limitations
+                if item.get("code") != "debug_provider_response_not_retained"
+            ]
+    return limitations
+
+
 def campaign_metrics(ctx: LiveContext, campaign_id: str) -> dict[str, Any]:
     records = campaign_records(ctx, campaign_id)
     manifest = _read_json(ctx.campaign_dir(campaign_id) / "manifest.json")
     per_case: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         per_case.setdefault(record["identity"]["case_id"], []).append(record)
+    retention_by_attempt = {
+        record["identity"]["attempt_id"]: _campaign_attempt_debug_retention(
+            ctx, campaign_id, record
+        )
+        for record in records
+    }
+    retention_items = [item[0] for item in retention_by_attempt.values()]
+    known_retention = [
+        item for item in retention_items if item is not None and item.get("known")
+    ]
+    retained_responses = sum(item["retained_responses"] for item in known_retention)
+    debug_invocations = sum(
+        item["debug_provider_invocations"] for item in known_retention
+    )
+    unknown_retention = len(records) - len(known_retention)
+    debug_retention_metric = {
+        "name": "DEBUG responses retained / DEBUG provider invocations",
+        "retained_responses": retained_responses,
+        "debug_provider_invocations": debug_invocations,
+        "known_attempts": len(known_retention),
+        "unknown_attempts": unknown_retention,
+        "value": (
+            round(retained_responses / debug_invocations, 4)
+            if not unknown_retention and debug_invocations
+            else ("N/A" if not unknown_retention else None)
+        ),
+        "counted_from_event": DEBUG_PROVIDER_RESPONSE_EVENT,
+    }
     return {
         "schema": "benchmark.campaign_metrics.v1",
         "campaign_id": campaign_id,
+        "comparison_baseline": manifest.get("comparison_baseline"),
+        "campaign_purpose": manifest.get("campaign_purpose"),
         "source_snapshot_sha256": manifest["source_identity"]["snapshot_sha256"],
         "configuration_fingerprint": manifest["runtime"]["configuration_fingerprint"],
         "model": manifest["provider"]["model"],
@@ -1798,6 +1991,7 @@ def campaign_metrics(ctx: LiveContext, campaign_id: str) -> dict[str, Any]:
             for case_id, items in sorted(per_case.items())
         },
         "grouped": grouped_metrics(records),
+        "debug_response_retention": debug_retention_metric,
         "attempts": [
             {
                 "attempt_id": record["identity"]["attempt_id"],
@@ -1806,6 +2000,21 @@ def campaign_metrics(ctx: LiveContext, campaign_id: str) -> dict[str, Any]:
                 "task_status": record["execution"]["task_status"],
                 "failure_stage": record["reliability"]["failure_stage"],
                 "attribution": record["reliability"]["attribution"],
+                "observed_mechanisms": record["reliability"].get("observed_mechanisms"),
+                "root_cause": record["reliability"].get("root_cause"),
+                "recorded_debug_response_retention": record["identity"]
+                .get("provider_identity", {})
+                .get("debug_response_retention"),
+                "debug_response_retention": retention_by_attempt[
+                    record["identity"]["attempt_id"]
+                ][0],
+                "debug_response_retention_source": retention_by_attempt[
+                    record["identity"]["attempt_id"]
+                ][1],
+                "evidence_limitations": _campaign_attempt_limitations(
+                    record,
+                    retention_by_attempt[record["identity"]["attempt_id"]][0],
+                ),
                 "independently_accepted": record["reliability"][
                     "independently_accepted"
                 ],
@@ -1828,6 +2037,9 @@ def close_campaign(
         if stop_runtime
         else dev_runtime.status_report(config)
     )
+    port_check_settle_seconds = 60 if stop_runtime else 0
+    if port_check_settle_seconds:
+        ctx.hooks.sleep(port_check_settle_seconds)
     ports = {
         str(port): dev_runtime._port_available(port)
         for port in (config.api_port, config.redis_port, config.qdrant_port)
@@ -1845,6 +2057,7 @@ def close_campaign(
         "closed_at": _utc(),
         "runtime_status": stopped.get("status"),
         "processes": stopped.get("processes"),
+        "port_check_settle_seconds": port_check_settle_seconds,
         "ports_closed": ports,
         "source_identity_unchanged": not identity.source_mismatch(
             manifest["source_identity"], source
