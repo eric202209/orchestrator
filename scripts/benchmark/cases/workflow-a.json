@@ -1,0 +1,47 @@
+{
+  "acceptance": {
+    "command": "python -m pytest -q tests",
+    "requires_unchanged_tests": true
+  },
+  "authorized_source_paths": [
+    "order_service/"
+  ],
+  "baseline": {
+    "command": "python -m pytest -q tests",
+    "evidence_ref": "docs/roadmap/reports/evidence/phase40c3/seed-baseline.json",
+    "expected_failed": 4,
+    "expected_failed_tests": [
+      "test_flat_coupon_reduces_subtotal_before_tax",
+      "test_percent_coupon_reduces_subtotal_before_tax",
+      "test_total_without_coupon_includes_tax",
+      "test_zero_tax_rate"
+    ],
+    "expected_passed": 6
+  },
+  "behavioral_contract": "checkout_total(order, tax_rate_bps) charges the discounted subtotal plus tax: discount_for() returns the discount AMOUNT, so discounted = subtotal - discount_for(subtotal, coupon) and tax is tax_for(discounted, rate). order_service/pricing.py behavior and its tests stay unchanged; existing module interfaces are preserved.",
+  "case_id": "workflow-a",
+  "historical_evidence_refs": [
+    "docs/roadmap/reports/evidence/phase40c1/task-input-A.json",
+    "docs/roadmap/reports/evidence/phase40c3/seed-baseline.json",
+    "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md"
+  ],
+  "incomplete_reasons": [],
+  "original_task": {
+    "description": "checkout_total() in order_service/checkout.py returns wrong amounts. Example: two items at 1000 cents plus one at 500 cents with coupon SAVE10 and tax 800 bps should charge 2430 cents, but the function returns 270. Orders without a coupon return only 0 plus tax. The failing tests are in tests/test_checkout.py; tests/test_pricing.py passes and documents the pricing contract.\n\nRead order_service/pricing.py and order_service/models.py to understand the contract between the modules, then fix the defect where it lives.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes (all tests in tests/).\n2. Do not modify anything under tests/.\n3. Do not change the documented behavior of order_service/pricing.py (its tests must keep passing unchanged).\n4. Change only files under order_service/.",
+    "evidence_ref": "docs/roadmap/reports/evidence/phase40c1/task-input-A.json",
+    "origin_task_id": 5,
+    "title": "Fix checkout total calculation"
+  },
+  "protected_test_paths": [
+    "tests/"
+  ],
+  "schema_version": "benchmark.case.v1",
+  "seed": {
+    "commit": "6cd8ab904f695634e1b1b0b8c6496f09f55bc062",
+    "evidence_ref": "docs/roadmap/reports/evidence/phase40c3/seed-baseline.json",
+    "repository": "phase40c1-a-orders",
+    "tree": "9e754774f931c6f0104719bf9105b9183c64a9cb"
+  },
+  "status": "complete",
+  "title": "Cross-file bug repair (order_service checkout)"
+}

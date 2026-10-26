@@ -1,0 +1,45 @@
+{
+  "acceptance": {
+    "command": "python -m pytest -q tests",
+    "requires_unchanged_tests": true
+  },
+  "authorized_source_paths": [
+    "dataflow/"
+  ],
+  "baseline": {
+    "command": "python -m pytest -q tests",
+    "evidence_ref": "docs/roadmap/reports/evidence/phase40c3/seed-baseline.json",
+    "expected_failed": 2,
+    "expected_failed_tests": [
+      "test_case_and_whitespace_variants_count_once",
+      "test_region_totals_use_latest_version_of_each_customer"
+    ],
+    "expected_passed": 3
+  },
+  "behavioral_contract": "Restore 1.4.0 semantics: records whose ids differ only by case or surrounding whitespace are the same customer and the most recently updated version wins, so aggregation counts each customer once; deduplication and the emitted id use the same normalized key.",
+  "case_id": "workflow-c",
+  "historical_evidence_refs": [
+    "docs/roadmap/reports/evidence/phase40c1/task-input-C.json",
+    "docs/roadmap/reports/evidence/phase40c3/seed-baseline.json",
+    "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md"
+  ],
+  "incomplete_reasons": [],
+  "original_task": {
+    "description": "After the 2.0.0 refactor (see CHANGELOG.md), downstream aggregation in dataflow/aggregate.py double counts customers. Version 1.4.0 behavior was: records whose ids differ only by case or surrounding whitespace are the same customer, and the most recently updated version wins.\n\nCurrent failing test output:\n$ python -m pytest -q\nFAILED tests/test_aggregate.py::test_case_and_whitespace_variants_count_once - assert 5 == 3\nFAILED tests/test_aggregate.py::test_region_totals_use_latest_version_of_each_customer - AssertionError: assert {'eu': 1099, 'us': 250} == {'eu': 100, 'us': 150}\n2 failed, 3 passed\n\nDiagnose the regression from this evidence and fix the actual defect in the implementation. Do not change test expectations.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes (all tests in tests/).\n2. Do not modify anything under tests/.\n3. Change only files under dataflow/.\n4. Existing passing tests (tests/test_normalize.py) must keep passing.",
+    "evidence_ref": "docs/roadmap/reports/evidence/phase40c1/task-input-C.json",
+    "origin_task_id": 7,
+    "title": "Fix duplicate-customer regression in dataflow 2.0"
+  },
+  "protected_test_paths": [
+    "tests/"
+  ],
+  "schema_version": "benchmark.case.v1",
+  "seed": {
+    "commit": "759413781ec678ea91e2c0073d60bebebda07baf",
+    "evidence_ref": "docs/roadmap/reports/evidence/phase40c3/seed-baseline.json",
+    "repository": "phase40c1-c-dataflow",
+    "tree": "69e608a05118dee69cf714b776a7063f230fc9de"
+  },
+  "status": "complete",
+  "title": "Regression repair (dataflow 2.0 duplicate customers)"
+}

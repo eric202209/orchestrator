@@ -1,0 +1,50 @@
+{
+  "acceptance": {
+    "command": "python -m pytest -q tests",
+    "requires_unchanged_tests": true
+  },
+  "authorized_source_paths": [
+    "configlib/"
+  ],
+  "baseline": {
+    "command": "python -m pytest -q tests",
+    "evidence_ref": "docs/roadmap/reports/evidence/phase40c3/seed-baseline.json",
+    "expected_failed": 7,
+    "expected_failed_tests": [
+      "test_custom_prefix",
+      "test_env_none_means_no_overrides",
+      "test_env_override_takes_precedence_and_is_typed",
+      "test_invalid_override_raises_config_error_naming_variable",
+      "test_missing_override_preserves_file_value",
+      "test_override_can_supply_key_missing_from_file",
+      "test_unrelated_env_vars_are_ignored"
+    ],
+    "expected_passed": 5
+  },
+  "behavioral_contract": "load_config(text, schema, env=None, prefix='APP_'): prefix+KEY.upper() in env overrides the file value with the same int/bool/str coercion; override-only keys are valid; unrelated env vars are ignored; env=None means no overrides (os.environ is not read); an invalid override raises ConfigError naming the variable; existing load_config(text, schema) behavior and helpers are preserved.",
+  "case_id": "workflow-b",
+  "historical_evidence_refs": [
+    "docs/roadmap/reports/evidence/phase40c1/task-input-B.json",
+    "docs/roadmap/reports/evidence/phase40c3/seed-baseline.json",
+    "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md"
+  ],
+  "incomplete_reasons": [],
+  "original_task": {
+    "description": "Implement environment-variable override support in configlib/loader.py.\n\nNew signature: load_config(text, schema, env=None, prefix=\"APP_\").\n- For each schema key, the variable named prefix + KEY.upper() in the `env` mapping overrides the file value and is coerced with the same type rules (int, bool, str).\n- A key present only in the override (missing from the file) is valid.\n- Missing overrides keep the file value; env variables that do not correspond to a schema key are ignored.\n- env=None means no overrides at all (do not read os.environ).\n- An invalid override value raises ConfigError whose message names the environment variable (e.g. APP_PORT).\n- Existing calls load_config(text, schema) must behave exactly as before.\n\nThe contract is defined by tests/test_env_overrides.py (currently failing); tests/test_loader.py covers existing behavior and passes.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes (all tests in tests/).\n2. Do not modify anything under tests/.\n3. Change only files under configlib/.",
+    "evidence_ref": "docs/roadmap/reports/evidence/phase40c1/task-input-B.json",
+    "origin_task_id": 6,
+    "title": "Add environment-variable overrides to load_config"
+  },
+  "protected_test_paths": [
+    "tests/"
+  ],
+  "schema_version": "benchmark.case.v1",
+  "seed": {
+    "commit": "835038e4339750e76d3bb5c09e83c4bc33aef541",
+    "evidence_ref": "docs/roadmap/reports/evidence/phase40c3/seed-baseline.json",
+    "repository": "phase40c1-b-config",
+    "tree": "ce07b359facc40a9f52cf7d3bca62106fcefda33"
+  },
+  "status": "complete",
+  "title": "Feature implementation (configlib environment overrides)"
+}

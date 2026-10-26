@@ -1,0 +1,178 @@
+{
+  "schema_version": "benchmark.history_registry.v1",
+  "description": "Curated mapping of retained Phase 40B-40C attempts to benchmark cases. Identity values come from phase reports and are cross-checked by the loader against the development SQLite database, event journals, ChangeSet manifests, and git history. Attribution entries record report-grounded root causes; observed outcomes are derived from raw evidence by the classifier, not from this file.",
+  "excluded_tasks": [
+    {"task_id": 1, "reason": "Phase 40A deterministic planning-retry fixture; not an engineering benchmark case"},
+    {"task_id": 2, "reason": "Phase 40A planning-retry fixture replay; not an engineering benchmark case"},
+    {"task_id": 3, "reason": "Phase 40A planning-retry fixture replay 2; not an engineering benchmark case"}
+  ],
+  "phases": [
+    {
+      "phase": "40B-R3",
+      "report": "docs/roadmap/done/phase40/phase40b-disposable-development-dogfood-runtime.md",
+      "evidence_dir": "docs/roadmap/reports/evidence/phase40b-r3",
+      "source_identity": {
+        "entering_head": "2ab13b0f788d4105c68bf69f3ac7c427db5fc8da",
+        "worktree_state": "uncommitted_changes",
+        "committed_as": "097bd5c5e7ca410bb0fad1ed4e004b4ce4a79bca",
+        "exact_tree": null
+      },
+      "provider": {"model": "qwen3-coder:30b", "backend": "openai_chat_completions", "endpoint": "http://host.docker.internal:11434/v1"},
+      "slots": [
+        {
+          "case_id": "phase40b-r3-discount", "slot": "1", "task_id": 4, "project_id": 1,
+          "reported": {"task_status": "DONE", "independent_acceptance": "passed"},
+          "acceptance": {
+            "record": "docs/roadmap/reports/evidence/phase40b-r3/dogfood-task4-source-diff-and-acceptance.txt",
+            "format": "unified_diff_then_pytest",
+            "method": "independent clone of the seed commit with the captured candidate overlaid (report)"
+          },
+          "root_causes": []
+        }
+      ]
+    },
+    {
+      "phase": "40C-1",
+      "report": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md",
+      "evidence_dir": "docs/roadmap/reports/evidence/phase40c1",
+      "source_identity": {
+        "entering_head": "097bd5c5e7ca410bb0fad1ed4e004b4ce4a79bca",
+        "worktree_state": "uncommitted_changes",
+        "committed_as": "4dd06556a3883997c4e781b60fb534d5423df2db",
+        "exact_tree": null
+      },
+      "provider": {"model": "qwen3-coder:30b", "backend": "openai_chat_completions", "endpoint": "http://host.docker.internal:11434/v1"},
+      "slots": [
+        {"case_id": "workflow-a", "slot": "A1", "task_id": 5, "project_id": 2, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "application_defect", "code": "execution_authority_mismatch", "statement": "No-tools backend decided a command step by model self-report (execution-topology defect).", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md#workflow-a--execution-topology-defect"}]},
+        {"case_id": "workflow-a", "slot": "A2", "task_id": 9, "project_id": 2, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "application_defect", "code": "execution_authority_mismatch", "statement": "Same execution-topology defect as A1.", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md#workflow-a--execution-topology-defect"}]},
+        {"case_id": "workflow-b", "slot": "B1", "task_id": 6, "project_id": 3, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [
+           {"kind": "model_output", "code": "incomplete_feature_implementation", "statement": "Partial implementation failed verification.", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md#results"},
+           {"kind": "application_defect", "code": "flat_layout_debug_repair_source_classification", "statement": "Bounded debug repair detected source only under src/.", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md#results"}]},
+        {"case_id": "workflow-b", "slot": "B2", "task_id": 10, "project_id": 3, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [
+           {"kind": "model_output", "code": "incomplete_feature_implementation", "statement": "Partial implementation failed verification.", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md#results"},
+           {"kind": "application_defect", "code": "flat_layout_debug_repair_source_classification", "statement": "Bounded debug repair detected source only under src/.", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md#results"}]},
+        {"case_id": "workflow-c", "slot": "C1", "task_id": 7, "project_id": 4, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [
+           {"kind": "application_defect", "code": "incorrect_scope_extraction", "statement": "Validator scope check matched every 'only' and swept in paths across sentences.", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md#results"},
+           {"kind": "model_output", "code": "unauthorized_whole_file_rewrite", "statement": "Wholesale rewrite rejected by GR2.", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md"}]},
+        {"case_id": "workflow-c", "slot": "C2", "task_id": 8, "project_id": 4, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [
+           {"kind": "application_defect", "code": "insufficient_direct_import_grounding", "statement": "Imports of mentioned files were not grounded.", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md#results"},
+           {"kind": "model_output", "code": "unauthorized_whole_file_rewrite", "statement": "Wholesale rewrite rejected by GR2.", "evidence_ref": "docs/roadmap/done/phase40/phase40c1-multi-workflow-autonomous-engineering-dogfood.md"}]}
+      ]
+    },
+    {
+      "phase": "40C-2",
+      "report": "docs/roadmap/done/phase40/phase40c2-autonomous-execution-grounding-corrective-engineering.md",
+      "evidence_dir": "docs/roadmap/reports/evidence/phase40c2",
+      "source_identity": {
+        "entering_head": "4dd06556a3883997c4e781b60fb534d5423df2db",
+        "worktree_state": "uncommitted_changes",
+        "committed_as": "855cb68cab1aaca0a02ec9f3d2b9c0e93bc94cc1",
+        "exact_tree": null
+      },
+      "provider": {"model": "qwen3-coder:30b", "backend": "openai_chat_completions", "endpoint": "http://host.docker.internal:11434/v1"},
+      "slots": [
+        {"case_id": "workflow-a", "slot": "A1", "task_id": 11, "project_id": 5, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [
+           {"kind": "model_output", "code": "unsupported_command_proposal", "statement": "Inline project-importing python -c inspection kept after repair.", "evidence_ref": "docs/roadmap/done/phase40/phase40c2-autonomous-execution-grounding-corrective-engineering.md"},
+           {"kind": "application_defect", "code": "truncated_repair_feedback", "statement": "Repair saw a truncated rejection reason (fixed later).", "evidence_ref": "docs/roadmap/done/phase40/phase40c2-autonomous-execution-grounding-corrective-engineering.md"}]},
+        {"case_id": "workflow-a", "slot": "A2", "task_id": 12, "project_id": 5, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "invalid_plan_output", "statement": "Unparseable initial JSON; repaired Plan kept unsupported commands and pseudo-commands with no source change.", "evidence_ref": "docs/roadmap/done/phase40/phase40c2-autonomous-execution-grounding-corrective-engineering.md"}]},
+        {"case_id": "workflow-b", "slot": "B1", "task_id": 13, "project_id": 6, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "unsupported_command_proposal", "statement": "python -c inspection kept after repair.", "evidence_ref": "docs/roadmap/done/phase40/phase40c2-autonomous-execution-grounding-corrective-engineering.md"}]},
+        {"case_id": "workflow-b", "slot": "B2", "task_id": 14, "project_id": 6, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "unsupported_command_proposal", "statement": "Same pattern as B1.", "evidence_ref": "docs/roadmap/done/phase40/phase40c2-autonomous-execution-grounding-corrective-engineering.md"}]},
+        {"case_id": "workflow-c", "slot": "C1", "task_id": 15, "project_id": 7, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "invalid_json", "statement": "Unparseable initial Plan; repair returned prose.", "evidence_ref": "docs/roadmap/done/phase40/phase40c2-autonomous-execution-grounding-corrective-engineering.md"}]},
+        {"case_id": "workflow-c", "slot": "C2", "task_id": 16, "project_id": 7, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "invalid_json", "statement": "Raw newlines in JSON strings; repair returned prose.", "evidence_ref": "docs/roadmap/done/phase40/phase40c2-autonomous-execution-grounding-corrective-engineering.md"}]}
+      ]
+    },
+    {
+      "phase": "40C-3",
+      "report": "docs/roadmap/done/phase40/phase40c3-planning-contract-reliability.md",
+      "evidence_dir": "docs/roadmap/reports/evidence/phase40c3",
+      "source_identity": {
+        "entering_head": "4dd06556a3883997c4e781b60fb534d5423df2db",
+        "worktree_state": "uncommitted_changes",
+        "committed_as": "855cb68cab1aaca0a02ec9f3d2b9c0e93bc94cc1",
+        "exact_tree": null
+      },
+      "provider": {"model": "qwen3-coder:30b", "backend": "openai_chat_completions", "endpoint": "http://host.docker.internal:11434/v1"},
+      "phase_limitations": ["API readiness failures stopped the bounded replay after one attempt"],
+      "slots": [
+        {"case_id": "workflow-a", "slot": "A1", "task_id": 17, "project_id": 8, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "known_evidence_limitations": [{"code": "provider_response_missing", "statement": "Original raw provider response was not retained (evidence-target identity bug).", "evidence_ref": "docs/roadmap/reports/evidence/phase40c3/workflow-replays.json"}],
+         "root_causes": [
+           {"kind": "model_output", "code": "unsupported_command_proposal", "statement": "DEBUG repair proposed the composite command `test -f ./README.md && rg TODO ./README.md`.", "evidence_ref": "docs/roadmap/done/phase40/phase40c4-runtime-recovery-autonomous-replay.md#workflow-a-command-origin-and-execution-authority"},
+           {"kind": "application_defect", "code": "no_match_search_treated_as_failure", "statement": "rg exit 1 (no matches) entered DEBUG recovery; corrected in 40C-4.", "evidence_ref": "docs/roadmap/done/phase40/phase40c4-runtime-recovery-autonomous-replay.md#workflow-a-command-origin-and-execution-authority"}]},
+        {"case_id": "workflow-a", "slot": "A2", "task_id": null, "not_attempted_reason": "development API failed ownership-checked readiness twice; bounded retries stopped", "root_causes": []},
+        {"case_id": "workflow-b", "slot": "B1", "task_id": null, "not_attempted_reason": "not replayed after runtime readiness failure", "root_causes": []},
+        {"case_id": "workflow-b", "slot": "B2", "task_id": null, "not_attempted_reason": "not replayed after runtime readiness failure", "root_causes": []},
+        {"case_id": "workflow-c", "slot": "C1", "task_id": null, "not_attempted_reason": "not replayed after runtime readiness failure", "root_causes": []},
+        {"case_id": "workflow-c", "slot": "C2", "task_id": null, "not_attempted_reason": "not replayed after runtime readiness failure", "root_causes": []}
+      ]
+    },
+    {
+      "phase": "40C-4",
+      "report": "docs/roadmap/done/phase40/phase40c4-runtime-recovery-autonomous-replay.md",
+      "evidence_dir": "docs/roadmap/reports/evidence/phase40c4",
+      "source_identity": {
+        "entering_head": "855cb68cab1aaca0a02ec9f3d2b9c0e93bc94cc1",
+        "worktree_state": "uncommitted_changes",
+        "committed_as": "d9cea2c5b056e69ff14c00863015bd065cbadeba",
+        "exact_tree": null
+      },
+      "provider": {"model": "qwen3-coder:30b", "backend": "openai_chat_completions", "endpoint": "http://host.docker.internal:11434/v1"},
+      "slots": [
+        {"case_id": "workflow-a", "slot": "A1", "task_id": 18, "project_id": 11, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "incorrect_source_replacement", "statement": "DEBUG repair output rejected (semantic_string_edit_rejected); no source ChangeSet.", "evidence_ref": "docs/roadmap/reports/evidence/phase40c4/workflow-replays.json"}]},
+        {"case_id": "workflow-a", "slot": "A2", "task_id": 19, "project_id": 12, "reported": {"task_status": "FAILED", "independent_acceptance": "failed"},
+         "acceptance": {"record": "docs/roadmap/reports/evidence/phase40c4/workflow-A-attempt-2/independent-acceptance.txt", "format": "key_values_then_pytest", "method": "held ChangeSet applied to an independent fresh-seed copy"},
+         "root_causes": [{"kind": "application_defect", "code": "source_preservation_validation_gap", "statement": "Plan validation accepted a function-only whole-file write that dropped referenced imports; corrected in 40C-5.", "evidence_ref": "docs/roadmap/reports/evidence/phase40c5/root-cause-analysis.json"}]},
+        {"case_id": "workflow-b", "slot": "B1", "task_id": 20, "project_id": 13, "reported": {"task_status": "FAILED", "independent_acceptance": "failed"},
+         "acceptance": {"record": "docs/roadmap/reports/evidence/phase40c4/workflow-B-attempt-1/independent-acceptance.txt", "format": "key_values_then_pytest", "method": "held ChangeSet applied to an independent fresh-seed copy"},
+         "root_causes": [
+           {"kind": "application_defect", "code": "source_preservation_validation_gap", "statement": "Function-only whole-file write dropped referenced helpers; corrected in 40C-5.", "evidence_ref": "docs/roadmap/reports/evidence/phase40c5/root-cause-analysis.json"},
+           {"kind": "model_output", "code": "incomplete_feature_implementation", "statement": "Override-only keys still raise; error does not name the variable.", "evidence_ref": "docs/roadmap/reports/evidence/phase40c5/root-cause-analysis.json"}]},
+        {"case_id": "workflow-b", "slot": "B2", "task_id": 21, "project_id": 14, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "invalid_python_syntax", "statement": "Repaired Plan wrote invalid Python syntax.", "evidence_ref": "docs/roadmap/reports/evidence/phase40c4/workflow-replays.json"}]},
+        {"case_id": "workflow-c", "slot": "C1", "task_id": 22, "project_id": 15, "reported": {"task_status": "DONE", "independent_acceptance": "passed"},
+         "acceptance": {"record": "docs/roadmap/reports/evidence/phase40c4/workflow-C-attempt-1/independent-acceptance.txt", "format": "key_values_then_pytest", "method": "held ChangeSet applied to an independent fresh-seed copy"},
+         "root_causes": []},
+        {"case_id": "workflow-c", "slot": "C2", "task_id": null, "not_attempted_reason": "budget not used after C1 passed independent acceptance", "root_causes": []}
+      ]
+    },
+    {
+      "phase": "40C-5",
+      "report": "docs/roadmap/done/phase40/phase40c5-source-edit-reliability-and-closure.md",
+      "evidence_dir": "docs/roadmap/reports/evidence/phase40c5",
+      "source_identity": {
+        "entering_head": "b8920290cc73fdc36256b11f39724b2ad58aecde",
+        "worktree_state": "uncommitted_changes",
+        "committed_as": "d7bf91f0e58e35a913a5ebfae453a3e278f1e7e6",
+        "exact_tree": null
+      },
+      "provider": {"model": "qwen3-coder:30b", "backend": "openai_chat_completions", "endpoint": "http://host.docker.internal:11434/v1"},
+      "slots": [
+        {"case_id": "workflow-a", "slot": "A1", "task_id": 23, "project_id": 16, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "unsupported_command_proposal", "statement": "Inline python -c and pytest node-id selectors rejected; proposed source kept the original bug.", "evidence_ref": "docs/roadmap/reports/evidence/phase40c5/workflow-replays.json"}]},
+        {"case_id": "workflow-a", "slot": "A2", "task_id": 24, "project_id": 17, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "unsupported_command_proposal", "statement": "Repaired Plan kept unsupported inline python -c inspections (initial Plan also dropped referenced definitions).", "evidence_ref": "docs/roadmap/reports/evidence/phase40c5/workflow-replays.json"}]},
+        {"case_id": "workflow-b", "slot": "B1", "task_id": 25, "project_id": 18, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [{"kind": "model_output", "code": "invalid_python_syntax", "statement": "Function split across two write_file ops.", "evidence_ref": "docs/roadmap/reports/evidence/phase40c5/workflow-replays.json"}]},
+        {"case_id": "workflow-b", "slot": "B2", "task_id": 26, "project_id": 19, "reported": {"task_status": "FAILED", "independent_acceptance": "not_run"},
+         "root_causes": [
+           {"kind": "model_output", "code": "incomplete_feature_implementation", "statement": "Override-only key still raises (2 of 12 tests failed).", "evidence_ref": "docs/roadmap/reports/evidence/phase40c5/workflow-replays.json"},
+           {"kind": "model_output", "code": "wrong_repair_target", "statement": "DEBUG repair targeted configlib/__init__.py with loader.py text.", "evidence_ref": "docs/roadmap/reports/evidence/phase40c5/workflow-replays.json"}]},
+        {"case_id": "workflow-c", "slot": "C1", "task_id": null, "not_attempted_reason": "deliberately not rerun; already accepted in 40C-4", "root_causes": []},
+        {"case_id": "workflow-c", "slot": "C2", "task_id": null, "not_attempted_reason": "deliberately not rerun; already accepted in 40C-4", "root_causes": []}
+      ]
+    }
+  ]
+}
