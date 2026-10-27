@@ -647,11 +647,12 @@ def _attempt_completion_repair(
     _cr_fast_runtime = None
     _cr_fast_profile = None
     _cr_fast_fallback = False
+    _cr_single_model = bool(getattr(settings, "LOW_RESOURCE_SINGLE_MODEL", False))
 
     _cr_configured_backend = getattr(settings, "COMPLETION_REPAIR_BACKEND", None)
     if str(runtime_metadata.get("backend") or "").strip().lower() == "fake":
         _cr_configured_backend = None
-    if _cr_configured_backend:
+    if _cr_configured_backend or _cr_single_model:
         try:
             _cr_fast_runtime = _create_completion_repair_runtime(
                 ctx.db, ctx.session_id, ctx.task_id
@@ -678,8 +679,10 @@ def _attempt_completion_repair(
                 _cr_fast_runtime, "bind_runtime_workspace"
             ):
                 _cr_fast_runtime.bind_runtime_workspace(_parent_context)
-            _cr_fast_profile = _cr_configured_backend
+            _cr_fast_profile = _cr_configured_backend or "single_model"
         except Exception as _cr_fast_err:
+            if _cr_single_model:
+                raise
             logger.warning(
                 "[COMPLETION_REPAIR] Fast runtime unavailable, falling back to default: %s",
                 _cr_fast_err,

@@ -436,3 +436,62 @@ def test_no_full_prompt_or_output_in_telemetry(db_session, tmp_path):
         assert isinstance(md.get("completion_repair_prompt_chars"), int)
         if "completion_repair_output_chars" in md:
             assert isinstance(md["completion_repair_output_chars"], int)
+
+
+def test_single_model_completion_repair_uses_explicit_role_runtime(
+    db_session, tmp_path
+):
+    emitted = []
+
+    def capture_emit(level, msg, *, metadata=None):
+        emitted.append({"level": level, "msg": msg, "metadata": metadata or {}})
+
+    ctx, default_runtime = _seed_ctx(db_session, tmp_path)
+    fast_runtime = _FakeFastRuntime("not json")
+    object.__setattr__(ctx, "emit_live", capture_emit)
+
+    with patch("app.config.settings.LOW_RESOURCE_SINGLE_MODEL", True):
+        with patch("app.config.settings.COMPLETION_REPAIR_BACKEND", None):
+            with patch(
+                "app.services.orchestration.phases.completion_flow._create_completion_repair_runtime",
+                return_value=fast_runtime,
+            ) as create_runtime:
+                _attempt_completion_repair(
+                    ctx=ctx,
+                    completion_validation=_completion_validation(),
+                    save_orchestration_checkpoint_fn=lambda *a, **k: None,
+                )
+
+    create_runtime.assert_called_once_with(db_session, ctx.session_id, ctx.task_id)
+    assert fast_runtime.prompts
+    assert default_runtime.prompts == []
+    telemetry = [
+        event["metadata"]
+        for event in emitted
+        if "completion_repair_fast_profile_selected" in event["metadata"]
+    ]
+    assert telemetry
+    assert telemetry[0]["completion_repair_fast_profile_selected"] is True
+    assert telemetry[0]["completion_repair_runtime_profile"] == "single_model"
+    assert telemetry[0]["completion_repair_fast_profile_fallback"] is False
+
+
+def test_single_model_completion_repair_does_not_fall_back_on_role_resolution_error(
+    db_session, tmp_path
+):
+    ctx, default_runtime = _seed_ctx(db_session, tmp_path)
+
+    with patch("app.config.settings.LOW_RESOURCE_SINGLE_MODEL", True):
+        with patch("app.config.settings.COMPLETION_REPAIR_BACKEND", None):
+            with patch(
+                "app.services.orchestration.phases.completion_flow._create_completion_repair_runtime",
+                side_effect=RuntimeError("completion repair role unavailable"),
+            ):
+                with pytest.raises(RuntimeError, match="completion repair role"):
+                    _attempt_completion_repair(
+                        ctx=ctx,
+                        completion_validation=_completion_validation(),
+                        save_orchestration_checkpoint_fn=lambda *a, **k: None,
+                    )
+
+    assert default_runtime.prompts == []

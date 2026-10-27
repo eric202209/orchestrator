@@ -107,6 +107,37 @@ def test_single_model_profile_rejects_nested_openclaw_backend(db_session, monkey
         resolve_runtime_configuration(db_session, BackendRole.EXECUTION)
 
 
+def test_single_model_completion_repair_ignores_legacy_role_overrides(
+    db_session, monkeypatch
+):
+    _single_model_settings(monkeypatch)
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_BACKEND", "direct_ollama")
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "alternate-model")
+
+    configuration = resolve_runtime_configuration(
+        db_session, BackendRole.COMPLETION_REPAIR
+    )
+
+    assert configuration.backend_name == "openai_chat_completions"
+    assert configuration.model_family == "qwen-local"
+    assert configuration.provider_endpoint == "http://vllm.test:8000/v1"
+    assert configuration.fallback_enabled is False
+
+
+def test_role_based_completion_repair_without_model_fails_closed(
+    db_session, monkeypatch
+):
+    monkeypatch.setattr(settings, "LOW_RESOURCE_SINGLE_MODEL", False)
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "openai_chat_completions")
+    monkeypatch.setattr(
+        settings, "COMPLETION_REPAIR_BACKEND", "openai_chat_completions"
+    )
+    monkeypatch.setattr(settings, "COMPLETION_REPAIR_MODEL", "")
+
+    with pytest.raises(RuntimeCapabilityError, match="COMPLETION_REPAIR_MODEL"):
+        resolve_runtime_configuration(db_session, BackendRole.COMPLETION_REPAIR)
+
+
 @pytest.mark.parametrize(
     "endpoint",
     [
