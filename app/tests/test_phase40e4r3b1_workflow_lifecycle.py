@@ -563,10 +563,13 @@ def test_enforced_resume_is_rejected_before_lifecycle_mutation(r3b, enforced):
 def test_enforced_manual_checkpoint_start_refuses_before_mutation(
     r3b, enforced, monkeypatch, tmp_path
 ):
+    from pathlib import Path
+
     from fastapi import HTTPException
 
     from app.config import settings
     from app.services.session.session_lifecycle_service import start_session_lifecycle
+    from app.services.workspace.checkpoint_service import CheckpointService
 
     _, _, db = r3b
     _, session, _ = _graph(db, status="stopped")
@@ -584,11 +587,75 @@ def test_enforced_manual_checkpoint_start_refuses_before_mutation(
     (checkpoint_root / f"session_{session.id}_autosave.json").write_text(
         '{"context": {"task_id": 1}, "step": 2}'
     )
+    legacy_root = Path(CheckpointService.LEGACY_CHECKPOINT_DIR).resolve()
+    path_type = type(legacy_root)
+    real_exists = path_type.exists
+    legacy_probes = []
+
+    def inaccessible_legacy_root(path):
+        if path == legacy_root:
+            legacy_probes.append(path)
+            raise PermissionError("legacy checkpoint root is not readable")
+        return real_exists(path)
+
+    monkeypatch.setattr(path_type, "exists", inaccessible_legacy_root)
 
     with pytest.raises(HTTPException) as raised:
         asyncio.run(start_session_lifecycle(db, session.id))
 
     assert raised.value.status_code == 409
+    assert raised.value.detail == "cross_generation_resume_unsupported"
+    assert legacy_probes == []
+    db.refresh(session)
+    assert (
+        session.instance_id,
+        session.status,
+        session.is_active,
+        session.resumed_at,
+    ) == before
+
+
+def test_enforced_manual_start_fails_closed_when_checkpoint_root_is_inaccessible(
+    r3b, enforced, monkeypatch, tmp_path
+):
+    from pathlib import Path
+
+    from fastapi import HTTPException
+
+    from app.config import settings
+    from app.services.session.session_lifecycle_service import start_session_lifecycle
+    from app.services.workspace.checkpoint_service import CheckpointService
+
+    _, _, db = r3b
+    _, session, _ = _graph(db, status="stopped")
+    session.execution_mode = "manual"
+    db.commit()
+    before = (
+        session.instance_id,
+        session.status,
+        session.is_active,
+        session.resumed_at,
+    )
+
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    monkeypatch.setattr(settings, "CHECKPOINT_DIR", str(checkpoint_root))
+    legacy_root = Path(CheckpointService.LEGACY_CHECKPOINT_DIR).resolve()
+    path_type = type(legacy_root)
+    real_exists = path_type.exists
+
+    def inaccessible_legacy_root(path):
+        if path == legacy_root:
+            raise PermissionError("legacy checkpoint root is not readable")
+        return real_exists(path)
+
+    monkeypatch.setattr(path_type, "exists", inaccessible_legacy_root)
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(start_session_lifecycle(db, session.id))
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "workflow_budget_checkpoint_state_unavailable"
     db.refresh(session)
     assert (
         session.instance_id,

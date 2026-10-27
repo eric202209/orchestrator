@@ -1331,6 +1331,25 @@ def _load_replayable_resume_checkpoint(
     return None
 
 
+def _session_has_checkpoint_artifacts(checkpoint_root: Path, session_id: int) -> bool:
+    """Check both checkpoint formats without treating permission errors as absence."""
+
+    try:
+        if not checkpoint_root.exists():
+            return False
+        if any(checkpoint_root.glob(f"session_{session_id}_*.json")):
+            return True
+        session_root = checkpoint_root / f"session_{session_id}"
+        if not session_root.exists():
+            return False
+        return any(path.is_file() for path in session_root.rglob("*"))
+    except OSError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="workflow_budget_checkpoint_state_unavailable",
+        ) from exc
+
+
 async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any]:
     """Start a session and queue work if needed."""
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -1348,24 +1367,17 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
             if not configured_checkpoint_dir.is_absolute():
                 configured_checkpoint_dir = Path.cwd() / configured_checkpoint_dir
             configured_checkpoint_dir = configured_checkpoint_dir.resolve()
-            checkpoint_roots = [configured_checkpoint_dir]
-            legacy_checkpoint_dir = Path(
-                CheckpointService.LEGACY_CHECKPOINT_DIR
-            ).resolve()
-            if (
-                legacy_checkpoint_dir != configured_checkpoint_dir
-                and legacy_checkpoint_dir.exists()
-            ):
-                checkpoint_roots.append(legacy_checkpoint_dir)
-            has_checkpoint = any(
-                any(root.glob(f"session_{session.id}_*.json"))
-                or any(
-                    path.is_file()
-                    for path in (root / f"session_{session.id}").rglob("*")
-                )
-                for root in checkpoint_roots
-                if root.exists()
+            has_checkpoint = _session_has_checkpoint_artifacts(
+                configured_checkpoint_dir, session.id
             )
+            if not has_checkpoint:
+                legacy_checkpoint_dir = Path(
+                    CheckpointService.LEGACY_CHECKPOINT_DIR
+                ).resolve()
+                if legacy_checkpoint_dir != configured_checkpoint_dir:
+                    has_checkpoint = _session_has_checkpoint_artifacts(
+                        legacy_checkpoint_dir, session.id
+                    )
             if has_checkpoint:
                 try:
                     require_resume_provenance()
