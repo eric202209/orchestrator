@@ -31,6 +31,7 @@ from app.services.agents.provider_deadline import (
 from app.services.agents.providers import get_runtime_factory
 from app.services.agents.runtime_configuration import (
     BackendRole,
+    InferenceRoutingPolicy,
     RoleRuntimeConfiguration,
 )
 from app.services.agents.single_model_deployment import (
@@ -497,6 +498,21 @@ def _validate_low_resource_runtime_configuration(
             "LOW_RESOURCE_SINGLE_MODEL resolved a role to a non-canonical profile.",
             code="provider_configuration_invalid",
         )
+    if configuration.routing_policy is not InferenceRoutingPolicy.SINGLE_MODEL:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL resolved a role outside the single-model policy.",
+            code="provider_configuration_invalid",
+        )
+    if configuration.provider_endpoint != endpoint.rstrip("/"):
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL resolved a role to a non-canonical endpoint.",
+            code="provider_endpoint_incompatible",
+        )
+    if configuration.fallback_enabled is not False:
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL requires fallback to be disabled.",
+            code="provider_configuration_invalid",
+        )
 
 
 def validate_runtime_provider_contract(
@@ -712,10 +728,12 @@ def low_resource_single_model_runtime_matrix(db: Session) -> dict[str, Any]:
     if not low_resource_single_model_enabled():
         return {
             "enabled": False,
+            "routing_policy": InferenceRoutingPolicy.ROLE_BASED.value,
             "one_runtime": False,
             "one_generation_model": False,
             "one_profile": False,
             "one_endpoint": False,
+            "fallback_enabled": None,
             "errors": ["LOW_RESOURCE_SINGLE_MODEL is disabled"],
         }
 
@@ -760,7 +778,18 @@ def low_resource_single_model_runtime_matrix(db: Session) -> dict[str, Any]:
         errors.append("not every generation role resolved")
     return {
         "enabled": True,
+        "routing_policy": InferenceRoutingPolicy.SINGLE_MODEL.value,
         "roles": roles,
+        "primary": (
+            {
+                "adapter": execution_configuration.backend_name,
+                "endpoint": execution_configuration.provider_endpoint,
+                "model": execution_configuration.model_family,
+            }
+            if execution_configuration is not None
+            else None
+        ),
+        "fallback_enabled": False,
         "generation_backends": sorted(backends),
         "generation_models": sorted(models),
         "generation_profiles": sorted(profiles),
@@ -1079,10 +1108,42 @@ def resolve_runtime_configuration(
             model_family=_role_model_family(db, role, descriptor.name),
         )
 
+    model_family = _role_model_family(db, role, descriptor.name)
+    if low_resource_single_model_enabled() and role in _LOW_RESOURCE_GENERATION_ROLES:
+        endpoint = canonical_generation_base_url(descriptor.name).strip().rstrip("/")
+        if not endpoint:
+            raise RuntimeCapabilityError(
+                "LOW_RESOURCE_SINGLE_MODEL requires one configured generation endpoint.",
+                code="provider_endpoint_incompatible",
+            )
+        parsed_endpoint = urlparse(endpoint)
+        if (
+            parsed_endpoint.scheme not in {"http", "https"}
+            or not parsed_endpoint.netloc
+            or parsed_endpoint.username
+            or parsed_endpoint.password
+            or parsed_endpoint.query
+            or parsed_endpoint.fragment
+        ):
+            raise RuntimeCapabilityError(
+                "LOW_RESOURCE_SINGLE_MODEL endpoint must be an absolute HTTP(S) URL "
+                "without embedded credentials or query data.",
+                code="provider_endpoint_incompatible",
+            )
+        return RoleRuntimeConfiguration(
+            role=role,
+            backend_name=descriptor.name,
+            model_family=model_family,
+            adaptation_profile=adaptation_profile,
+            routing_policy=InferenceRoutingPolicy.SINGLE_MODEL,
+            provider_endpoint=endpoint,
+            fallback_enabled=False,
+        )
+
     return RoleRuntimeConfiguration(
         role=role,
         backend_name=descriptor.name,
-        model_family=_role_model_family(db, role, descriptor.name),
+        model_family=model_family,
         adaptation_profile=adaptation_profile,
     )
 
@@ -1118,6 +1179,13 @@ def create_agent_runtime(
     the legacy backend-only path.
     """
 
+    if role is None and low_resource_single_model_enabled():
+        raise RuntimeCapabilityError(
+            "LOW_RESOURCE_SINGLE_MODEL requires an explicit runtime role; refusing "
+            "legacy unscoped inference routing.",
+            code="provider_configuration_invalid",
+        )
+
     role = _coerce_backend_role(role) if role is not None else None
     runtime_configuration: RoleRuntimeConfiguration | None = None
     if role is not None:
@@ -1126,6 +1194,7 @@ def create_agent_runtime(
             role,
             backend_override=backend_override,
         )
+        _validate_low_resource_runtime_configuration(db, runtime_configuration)
         backend_name = runtime_configuration.backend_name
     elif backend_override:
         backend_name = str(backend_override).strip()

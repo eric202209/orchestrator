@@ -16,6 +16,7 @@ from app.services.agents.providers.openai_chat_adapter import (
 )
 from app.services.agents.runtime_configuration import (
     BackendRole,
+    InferenceRoutingPolicy,
     RoleRuntimeConfiguration,
 )
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
@@ -67,8 +68,20 @@ class _FakeAsyncClient:
 
 def _runtime(monkeypatch) -> OpenAIChatCompletionsRuntime:
     monkeypatch.setattr(settings, "LOW_RESOURCE_SINGLE_MODEL", True)
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "openai_chat_completions")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_chat_completions")
+    monkeypatch.setattr(settings, "EXECUTION_BACKEND", "openai_chat_completions")
     monkeypatch.setattr(settings, "PLANNING_DIRECT_BASE_URL", "http://llama.test/v1")
     monkeypatch.setattr(settings, "PLANNING_DIRECT_API_KEY", "")
+    monkeypatch.setattr(
+        settings, "PLANNING_DIRECT_MODEL", "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf"
+    )
+    monkeypatch.setattr(
+        settings, "PLANNER_MODEL", "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf"
+    )
+    monkeypatch.setattr(
+        settings, "EXECUTION_MODEL", "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf"
+    )
     monkeypatch.setattr(openai_chat_adapter.httpx, "AsyncClient", _FakeAsyncClient)
     return OpenAIChatCompletionsRuntime(
         None,
@@ -78,6 +91,9 @@ def _runtime(monkeypatch) -> OpenAIChatCompletionsRuntime:
             backend_name="openai_chat_completions",
             model_family="Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf",
             adaptation_profile="ollama_default",
+            routing_policy=InferenceRoutingPolicy.SINGLE_MODEL,
+            provider_endpoint="http://llama.test/v1",
+            fallback_enabled=False,
         ),
     )
 

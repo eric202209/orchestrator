@@ -2024,6 +2024,11 @@ class PlannerService:
     ) -> Dict[str, Any]:
         from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
 
+        if low_resource_single_model_enabled():
+            # A single-model policy may retry only through the already
+            # resolved identity; it never escapes to the parent's runtime.
+            allow_registry_fallback = False
+
         db = getattr(runtime_service, "db", None)
         repair_runtime = None
         if db is not None:

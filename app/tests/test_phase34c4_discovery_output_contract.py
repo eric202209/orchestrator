@@ -14,6 +14,7 @@ from app.services.agents.providers.openai_chat_adapter import (
 )
 from app.services.agents.runtime_configuration import (
     BackendRole,
+    InferenceRoutingPolicy,
     RoleRuntimeConfiguration,
 )
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
@@ -31,6 +32,8 @@ class _FakeResponse:
 
     def json(self) -> dict:
         return {
+            "id": "chatcmpl-discovery-fixture",
+            "model": "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf",
             "choices": [
                 {
                     "message": {
@@ -40,7 +43,7 @@ class _FakeResponse:
                         )
                     }
                 }
-            ]
+            ],
         }
 
 
@@ -68,8 +71,20 @@ async def test_discovery_replay_requires_json_object_response_format(
     """RED: the captured C3-like envelope fails the real strict parser."""
 
     monkeypatch.setattr(settings, "LOW_RESOURCE_SINGLE_MODEL", True)
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "openai_chat_completions")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_chat_completions")
+    monkeypatch.setattr(settings, "EXECUTION_BACKEND", "openai_chat_completions")
     monkeypatch.setattr(settings, "PLANNING_DIRECT_BASE_URL", "http://llama.test/v1")
     monkeypatch.setattr(settings, "PLANNING_DIRECT_API_KEY", "")
+    monkeypatch.setattr(
+        settings, "PLANNING_DIRECT_MODEL", "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf"
+    )
+    monkeypatch.setattr(
+        settings, "PLANNER_MODEL", "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf"
+    )
+    monkeypatch.setattr(
+        settings, "EXECUTION_MODEL", "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf"
+    )
     monkeypatch.setattr(openai_chat_adapter.httpx, "AsyncClient", _FakeAsyncClient)
     _FakeAsyncClient.captured = {}
 
@@ -81,6 +96,9 @@ async def test_discovery_replay_requires_json_object_response_format(
             backend_name="openai_chat_completions",
             model_family="Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf",
             adaptation_profile="ollama_default",
+            routing_policy=InferenceRoutingPolicy.SINGLE_MODEL,
+            provider_endpoint="http://llama.test/v1",
+            fallback_enabled=False,
         ),
     )
     prompt = build_discovery_prompt(
@@ -197,8 +215,20 @@ async def test_ordinary_execution_request_does_not_receive_discovery_format(
     monkeypatch,
 ):
     monkeypatch.setattr(settings, "LOW_RESOURCE_SINGLE_MODEL", True)
+    monkeypatch.setattr(settings, "AGENT_BACKEND", "openai_chat_completions")
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "openai_chat_completions")
+    monkeypatch.setattr(settings, "EXECUTION_BACKEND", "openai_chat_completions")
     monkeypatch.setattr(settings, "PLANNING_DIRECT_BASE_URL", "http://llama.test/v1")
     monkeypatch.setattr(settings, "PLANNING_DIRECT_API_KEY", "")
+    monkeypatch.setattr(
+        settings, "PLANNING_DIRECT_MODEL", "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf"
+    )
+    monkeypatch.setattr(
+        settings, "PLANNER_MODEL", "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf"
+    )
+    monkeypatch.setattr(
+        settings, "EXECUTION_MODEL", "Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf"
+    )
     monkeypatch.setattr(openai_chat_adapter.httpx, "AsyncClient", _FakeAsyncClient)
     _FakeAsyncClient.captured = {}
 
@@ -210,6 +240,9 @@ async def test_ordinary_execution_request_does_not_receive_discovery_format(
             backend_name="openai_chat_completions",
             model_family="Qwen2.5-Coder-14B-Instruct-Q5_K_M.gguf",
             adaptation_profile="ollama_default",
+            routing_policy=InferenceRoutingPolicy.SINGLE_MODEL,
+            provider_endpoint="http://llama.test/v1",
+            fallback_enabled=False,
         ),
     )
     await runtime.execute_task(

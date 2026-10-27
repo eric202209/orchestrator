@@ -7,8 +7,10 @@ import hashlib
 import json
 import re
 import time
+import uuid
 from dataclasses import replace
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy.orm import Session
@@ -25,6 +27,7 @@ from app.services.agents.interfaces import (
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
 from app.services.agents.runtime_configuration import (
     BackendRole,
+    InferenceRoutingPolicy,
     RuntimeConfiguration,
 )
 from app.services.agents.single_model_deployment import (
@@ -64,6 +67,23 @@ _STEP_SHAPED_ROLES = frozenset(
         BackendRole.COMPLETION_REPAIR.value,
     }
 )
+
+
+def _safe_endpoint_identity(value: str) -> str:
+    """Return endpoint routing identity without userinfo, query, or fragments."""
+
+    try:
+        parsed = urlsplit(str(value or ""))
+        if not parsed.scheme or not parsed.hostname:
+            return "unresolved"
+        host = parsed.hostname
+        if ":" in host and not host.startswith("["):
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        path = parsed.path if parsed.path in {"", "/", "/v1", "/api"} else "/[redacted]"
+        return f"{parsed.scheme}://{host}{port}{path}"
+    except (TypeError, ValueError):
+        return "unresolved"
 
 
 def _normalize_chat_content_value(value: Any) -> str:
@@ -195,6 +215,7 @@ class OpenAIChatCompletionsRuntime:
         self.task_id = task_id
         self.use_demo_mode = use_demo_mode
         self.runtime_configuration = runtime_configuration
+        self._approved_runtime_configuration = runtime_configuration
         backend_name = (
             runtime_configuration.backend_name
             if runtime_configuration
@@ -345,6 +366,8 @@ class OpenAIChatCompletionsRuntime:
         diagnostic_label: str | None = None,
         diagnostic_metadata: Any = None,
     ) -> str:
+        request_id = uuid.uuid4().hex
+        request_started_at = time.monotonic()
         provider_diagnostics = _provider_bound_prompt_diagnostics(
             user,
             invocation_kind=(
@@ -353,6 +376,80 @@ class OpenAIChatCompletionsRuntime:
                 else "openai_chat_completions"
             ),
         )
+        if low_resource_single_model_enabled():
+            configuration = self.runtime_configuration
+            expected_endpoint = (
+                canonical_generation_base_url(self.backend_descriptor.name)
+                .strip()
+                .rstrip("/")
+            )
+            configured_policy = getattr(
+                configuration,
+                "routing_policy",
+                InferenceRoutingPolicy.ROLE_BASED,
+            )
+            configured_role = getattr(configuration, "role", None)
+            configured_role = getattr(configured_role, "value", configured_role)
+            identity_mismatches = []
+            if configuration is None:
+                identity_mismatches.append("runtime_configuration")
+            if configured_policy is not InferenceRoutingPolicy.SINGLE_MODEL:
+                identity_mismatches.append("routing_policy")
+            if configured_role != self.backend_role:
+                identity_mismatches.append("runtime_role")
+            if (
+                getattr(configuration, "backend_name", None)
+                != self.backend_descriptor.name
+            ):
+                identity_mismatches.append("provider_adapter")
+            if getattr(configuration, "provider_endpoint", None) != expected_endpoint:
+                identity_mismatches.append("provider_endpoint")
+            if getattr(configuration, "fallback_enabled", None) is not False:
+                identity_mismatches.append("fallback_policy")
+            approved_configuration = getattr(
+                self, "_approved_runtime_configuration", None
+            )
+            if configuration is None or approved_configuration is None:
+                identity_mismatches.append("approved_identity_unavailable")
+            else:
+                if configuration.model_family != approved_configuration.model_family:
+                    identity_mismatches.append("model")
+                if configuration.backend_name != approved_configuration.backend_name:
+                    identity_mismatches.append("provider_adapter")
+                if configuration.role != approved_configuration.role:
+                    identity_mismatches.append("runtime_role")
+                if (
+                    configuration.provider_endpoint
+                    != approved_configuration.provider_endpoint
+                ):
+                    identity_mismatches.append("provider_endpoint")
+                if (
+                    configuration.fallback_enabled
+                    is not approved_configuration.fallback_enabled
+                ):
+                    identity_mismatches.append("fallback_policy")
+                if (
+                    configuration.routing_policy
+                    is not approved_configuration.routing_policy
+                ):
+                    identity_mismatches.append("routing_policy")
+            if identity_mismatches:
+                error = AgentRuntimeError(
+                    "Single-model provider dispatch rejected runtime identity mismatch: "
+                    + ", ".join(identity_mismatches)
+                    + "."
+                )
+                error.provider_failure_classification = "provider_configuration_invalid"
+                error.runtime_diagnostics = {
+                    **provider_diagnostics,
+                    "request_id": request_id,
+                    "routing_policy": InferenceRoutingPolicy.SINGLE_MODEL.value,
+                    "provider_adapter": self.backend_descriptor.name,
+                    "identity_status": "mismatch_before_dispatch",
+                    "identity_mismatch_fields": identity_mismatches,
+                    "fallback_enabled": False,
+                }
+                raise error
         headers = {"Content-Type": "application/json"}
         api_key = self._invocation_api_key(invocation_options)
         if api_key:
@@ -427,6 +524,56 @@ class OpenAIChatCompletionsRuntime:
 
         request_url = (
             f"{self._invocation_base_url(invocation_options)}" "/chat/completions"
+        )
+        configured_policy = getattr(
+            self.runtime_configuration,
+            "routing_policy",
+            InferenceRoutingPolicy.ROLE_BASED,
+        )
+        route_policy = getattr(configured_policy, "value", str(configured_policy))
+        route_endpoint = (
+            getattr(self.runtime_configuration, "provider_endpoint", None)
+            if self.runtime_configuration is not None
+            and getattr(self.runtime_configuration, "provider_endpoint", None)
+            else self._invocation_base_url(invocation_options)
+        )
+        backend_descriptor = getattr(self, "backend_descriptor", None)
+        provider_adapter = (
+            getattr(backend_descriptor, "name", None)
+            or getattr(self.runtime_configuration, "backend_name", None)
+            or "openai_chat_completions"
+        )
+        provider_diagnostics.update(
+            {
+                "request_id": request_id,
+                "task_id": getattr(self, "task_id", None),
+                "task_execution_id": getattr(self, "task_execution_id", None),
+                "logical_stage": (
+                    diagnostic_metadata.get("stage")
+                    if isinstance(diagnostic_metadata, dict)
+                    else None
+                )
+                or diagnostic_label,
+                "runtime_role": self.backend_role or "legacy",
+                "routing_policy": route_policy,
+                "provider_adapter": provider_adapter,
+                "endpoint_identity": _safe_endpoint_identity(route_endpoint),
+                "configured_model": self._model_name(),
+                "capability_profile": (
+                    getattr(self.runtime_configuration, "adaptation_profile", None)
+                    if self.runtime_configuration is not None
+                    else None
+                ),
+                "prompt_sha256": hashlib.sha256(
+                    (system + "\0" + user).encode("utf-8")
+                ).hexdigest(),
+                "fallback_enabled": (
+                    False
+                    if route_policy == InferenceRoutingPolicy.SINGLE_MODEL.value
+                    else None
+                ),
+                "completion_status": "started",
+            }
         )
         capture = DiscoveryContractCapture.from_metadata(diagnostic_metadata)
         repair_response_evidence = None
@@ -508,19 +655,19 @@ class OpenAIChatCompletionsRuntime:
                         json=payload,
                     )
                 provider_diagnostics["provider_response_received"] = True
+                response_body = getattr(response, "content", b"") or b""
+                response_headers = getattr(response, "headers", {}) or {}
                 if repair_response_evidence is not None:
                     repair_response_evidence.record_http_response(
                         status_code=getattr(response, "status_code", None),
-                        content_type=(getattr(response, "headers", {}) or {}).get(
-                            "content-type"
-                        ),
-                        raw_body=getattr(response, "content", b"") or b"",
+                        content_type=response_headers.get("content-type"),
+                        raw_body=response_body,
                     )
                 if capture is not None:
                     capture.record_http_response(
                         status_code=response.status_code,
-                        raw_body=response.content,
-                        content_type=response.headers.get("content-type"),
+                        raw_body=response_body,
+                        content_type=response_headers.get("content-type"),
                     )
                 try:
                     body = response.json()
@@ -548,7 +695,6 @@ class OpenAIChatCompletionsRuntime:
                         ),
                     )
                 if repair_response_evidence is not None:
-                    response_headers = getattr(response, "headers", {}) or {}
                     repair_response_evidence.record_envelope(
                         body,
                         request_correlation_id=(
@@ -557,6 +703,49 @@ class OpenAIChatCompletionsRuntime:
                         ),
                     )
                 response.raise_for_status()
+                response_model = (
+                    str(body.get("model") or "").strip()
+                    if isinstance(body, dict)
+                    else ""
+                )
+                provider_diagnostics.update(
+                    {
+                        "provider_response_id": (
+                            str(body.get("id") or "") if isinstance(body, dict) else ""
+                        ),
+                        "provider_response_model": response_model or None,
+                        "provider_response_sha256": hashlib.sha256(
+                            response_body
+                        ).hexdigest(),
+                        "provider_request_correlation_id": (
+                            response_headers.get("x-request-id")
+                            or response_headers.get("request-id")
+                        ),
+                        "request_duration_seconds": round(
+                            time.monotonic() - request_started_at, 3
+                        ),
+                    }
+                )
+                if low_resource_single_model_enabled():
+                    identity_matches = response_model == self._model_name()
+                    provider_diagnostics["model_identity_status"] = (
+                        "response_alias_match"
+                        if identity_matches
+                        else "response_alias_mismatch_or_missing"
+                    )
+                    if not identity_matches:
+                        error = AgentRuntimeError(
+                            "Single-model provider response identity did not match "
+                            "the configured model alias."
+                        )
+                        error.provider_failure_classification = (
+                            "provider_model_unavailable"
+                        )
+                        error.runtime_diagnostics = {
+                            **provider_diagnostics,
+                            "completion_status": "failed",
+                        }
+                        raise error
                 raw_message_content = _raw_chat_completion_content(body)
                 if capture is not None:
                     capture.record_message_content(raw_message_content)
@@ -590,6 +779,14 @@ class OpenAIChatCompletionsRuntime:
                         ),
                     )
         except (httpx.TimeoutException, TimeoutError) as exc:
+            provider_diagnostics.update(
+                {
+                    "request_duration_seconds": round(
+                        time.monotonic() - request_started_at, 3
+                    ),
+                    "completion_status": "timed_out",
+                }
+            )
             if repair_response_evidence is not None:
                 repair_response_evidence.fail(
                     exc,
@@ -623,6 +820,15 @@ class OpenAIChatCompletionsRuntime:
             }
             raise error from exc
         except asyncio.CancelledError as exc:
+            provider_diagnostics.update(
+                {
+                    "request_duration_seconds": round(
+                        time.monotonic() - request_started_at, 3
+                    ),
+                    "completion_status": "cancelled_locally",
+                    "remote_cancellation_verified": False,
+                }
+            )
             if repair_response_evidence is not None:
                 repair_response_evidence.fail(
                     exc,
@@ -636,6 +842,14 @@ class OpenAIChatCompletionsRuntime:
             provider_diagnostics["caller_cancellation_observed"] = True
             raise
         except httpx.HTTPError as exc:
+            provider_diagnostics.update(
+                {
+                    "request_duration_seconds": round(
+                        time.monotonic() - request_started_at, 3
+                    ),
+                    "completion_status": "transport_failed",
+                }
+            )
             if repair_response_evidence is not None:
                 repair_response_evidence.fail(
                     exc,
@@ -655,6 +869,14 @@ class OpenAIChatCompletionsRuntime:
             }
             raise error from exc
         except Exception as exc:
+            provider_diagnostics.update(
+                {
+                    "request_duration_seconds": round(
+                        time.monotonic() - request_started_at, 3
+                    ),
+                    "completion_status": "failed",
+                }
+            )
             if repair_response_evidence is not None:
                 repair_response_evidence.fail(
                     exc,
@@ -687,6 +909,7 @@ class OpenAIChatCompletionsRuntime:
         )
         self._last_runtime_diagnostics = {
             **provider_diagnostics,
+            "completion_status": "completed",
             "provider_response_observability": dict(
                 self._last_response_shape_observability
             ),
@@ -953,4 +1176,6 @@ def _extract_chat_completion_content(body: Any) -> str:
 
 
 def create_runtime(*args, **kwargs) -> OpenAIChatCompletionsRuntime:
-    return OpenAIChatCompletionsRuntime(*args, **kwargs)
+    runtime = OpenAIChatCompletionsRuntime(*args, **kwargs)
+    runtime._approved_runtime_configuration = runtime.runtime_configuration
+    return runtime
