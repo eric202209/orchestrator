@@ -19,6 +19,9 @@ from app.models import (
     TaskExecution,
     TaskExecutionChangeSet,
 )
+from app.services.execution.workflow_lifecycle import (
+    require_no_retained_execution_evidence,
+)
 
 
 def delete_task_owned_graph(db: Session, task_ids: Iterable[int]) -> None:
@@ -26,6 +29,7 @@ def delete_task_owned_graph(db: Session, task_ids: Iterable[int]) -> None:
     task_ids = list(set(task_ids))
     if not task_ids:
         return
+    require_no_retained_execution_evidence(db, task_ids=task_ids)
 
     execution_ids = [
         execution_id

@@ -21,10 +21,22 @@ from dataclasses import dataclass, replace
 import logging
 from typing import Any, Iterator
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models import PlanningSession
+from app.models import (
+    ExecutorLaunchIntent,
+    OneShotAuthorizationClaim,
+    OneShotExecutionAuthorization,
+    PlanningSession,
+    ProviderRequestReservation,
+    Session as SessionModel,
+    Task,
+    TaskExecution,
+    WorkflowBudget,
+    WorkflowTaskExecutionBinding,
+)
 from app.services.execution.workflow_budget import (
     BindingKind,
     BudgetOutcome,
@@ -40,6 +52,7 @@ from app.services.execution.workflow_budget import (
     resolve_planning_session_workflow,
     resolve_task_execution_binding,
     resolve_task_execution_workflow,
+    trusted_utc_now,
     validate_budget_policy,
 )
 
@@ -56,6 +69,174 @@ class WorkflowLifecycleError(RuntimeError):
     def __init__(self, reason: str):
         super().__init__(f"{WORKFLOW_IDENTITY_INVALID}: {reason}")
         self.reason = reason
+
+
+RETAINED_EXECUTION_EVIDENCE_CONFLICT = "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
+
+
+class RetainedExecutionEvidenceConflict(RuntimeError):
+    """A destructive operation targets rows referenced by immutable evidence."""
+
+
+def retained_execution_evidence_exists(
+    db: Session,
+    *,
+    project_ids=(),
+    session_ids=(),
+    task_ids=(),
+    planning_session_ids=(),
+) -> bool:
+    """Check Phase 39/40 evidence references for the requested owned graph."""
+
+    project_ids = set(project_ids)
+    session_ids = set(session_ids)
+    task_ids = set(task_ids)
+    planning_session_ids = set(planning_session_ids)
+    if project_ids:
+        session_ids.update(
+            row[0]
+            for row in db.query(SessionModel.id)
+            .filter(SessionModel.project_id.in_(project_ids))
+            .all()
+        )
+        task_ids.update(
+            row[0]
+            for row in db.query(Task.id).filter(Task.project_id.in_(project_ids)).all()
+        )
+        planning_session_ids.update(
+            row[0]
+            for row in db.query(PlanningSession.id)
+            .filter(PlanningSession.project_id.in_(project_ids))
+            .all()
+        )
+
+    execution_scope = []
+    if session_ids:
+        execution_scope.append(TaskExecution.session_id.in_(session_ids))
+    if task_ids:
+        execution_scope.append(TaskExecution.task_id.in_(task_ids))
+    execution_ids = set()
+    if execution_scope:
+        execution_ids.update(
+            row[0] for row in db.query(TaskExecution.id).filter(or_(*execution_scope))
+        )
+
+    def exists(model, *conditions) -> bool:
+        conditions = [condition for condition in conditions if condition is not None]
+        return (
+            bool(conditions)
+            and db.query(model).filter(or_(*conditions)).first() is not None
+        )
+
+    def direct_project(model):
+        return getattr(model, "project_id").in_(project_ids) if project_ids else None
+
+    def direct_session(model):
+        return getattr(model, "session_id").in_(session_ids) if session_ids else None
+
+    def direct_task(model):
+        return getattr(model, "task_id").in_(task_ids) if task_ids else None
+
+    def direct_execution(model):
+        if execution_ids and hasattr(model, "task_execution_id"):
+            return getattr(model, "task_execution_id").in_(execution_ids)
+        return None
+
+    if exists(
+        OneShotExecutionAuthorization,
+        direct_project(OneShotExecutionAuthorization),
+        direct_session(OneShotExecutionAuthorization),
+        direct_task(OneShotExecutionAuthorization),
+        direct_execution(OneShotExecutionAuthorization),
+    ):
+        return True
+    if exists(
+        ExecutorLaunchIntent,
+        direct_project(ExecutorLaunchIntent),
+        direct_session(ExecutorLaunchIntent),
+        direct_task(ExecutorLaunchIntent),
+        direct_execution(ExecutorLaunchIntent),
+    ):
+        return True
+    if exists(OneShotAuthorizationClaim, direct_execution(OneShotAuthorizationClaim)):
+        return True
+
+    workflow_scope = []
+    if project_ids:
+        workflow_scope.append(WorkflowBudget.project_id.in_(project_ids))
+    if session_ids:
+        workflow_scope.append(WorkflowBudget.session_id.in_(session_ids))
+    if task_ids:
+        workflow_scope.append(WorkflowBudget.task_id.in_(task_ids))
+    if planning_session_ids:
+        workflow_scope.append(
+            WorkflowBudget.planning_session_id.in_(planning_session_ids)
+        )
+    if execution_ids:
+        workflow_scope.append(WorkflowBudget.root_task_execution_id.in_(execution_ids))
+    workflow_ids = set()
+    if workflow_scope:
+        workflow_ids.update(
+            row[0]
+            for row in db.query(WorkflowBudget.workflow_uuid)
+            .filter(or_(*workflow_scope))
+            .all()
+        )
+    binding_scope = []
+    if execution_ids:
+        binding_scope.append(
+            WorkflowTaskExecutionBinding.task_execution_id.in_(execution_ids)
+        )
+    if workflow_ids:
+        binding_scope.append(
+            WorkflowTaskExecutionBinding.workflow_uuid.in_(workflow_ids)
+        )
+    if exists(WorkflowBudget, *workflow_scope):
+        return True
+    if exists(WorkflowTaskExecutionBinding, *binding_scope):
+        return True
+    reservation_scope = []
+    if execution_ids:
+        reservation_scope.append(
+            ProviderRequestReservation.task_execution_id.in_(execution_ids)
+        )
+    if workflow_ids:
+        reservation_scope.append(
+            ProviderRequestReservation.workflow_uuid.in_(workflow_ids)
+        )
+    return exists(ProviderRequestReservation, *reservation_scope)
+
+
+def require_no_retained_execution_evidence(db: Session, **scope) -> None:
+    if retained_execution_evidence_exists(db, **scope):
+        raise RetainedExecutionEvidenceConflict(RETAINED_EXECUTION_EVIDENCE_CONFLICT)
+
+
+def require_resume_provenance() -> None:
+    """Fail closed where continuation lacks an exact durable parent attempt."""
+
+    if enforcement_enabled():
+        raise WorkflowLifecycleError("cross_generation_resume_unsupported")
+
+
+def require_binding_outcome(
+    outcome: BudgetOutcome | None,
+    *,
+    binding_kind: BindingKind | str,
+) -> None:
+    """Require the expected durable binding before an attempt can be published."""
+
+    if not enforcement_enabled():
+        return
+    kind = getattr(binding_kind, "value", binding_kind)
+    accepted = (
+        {BudgetOutcome.CREATED, BudgetOutcome.ALREADY_EXISTS}
+        if kind in {BindingKind.ROOT.value, "PLANNING_ROOT"}
+        else {BudgetOutcome.BOUND, BudgetOutcome.ALREADY_BOUND}
+    )
+    if outcome not in accepted:
+        value = outcome.value if isinstance(outcome, BudgetOutcome) else "UNAVAILABLE"
+        raise WorkflowLifecycleError(f"workflow_binding_failed:{value}")
 
 
 @dataclass(frozen=True)
@@ -248,6 +429,8 @@ def require_dispatch_identity(
         raise WorkflowLifecycleError("attempt_unbound")
     if workflow.status != "OPEN":
         raise WorkflowLifecycleError("workflow_closed")
+    if workflow.deadline_at <= trusted_utc_now():
+        raise WorkflowLifecycleError("workflow_deadline_expired")
     if (
         binding.session_id != getattr(task_execution, "session_id", None)
         or binding.task_id != getattr(task_execution, "task_id", None)
@@ -311,11 +494,13 @@ def planning_identity_scope(
         _PLANNING_IDENTITY.reset(token)
 
 
-def bind_planning_root(db: Session, planning_session_id: int | None) -> None:
+def bind_planning_root(
+    db: Session, planning_session_id: int | None
+) -> BudgetOutcome | None:
     """A committed PlanningSession generation owns one PLANNING_SESSION workflow."""
 
     if not enforcement_enabled() or planning_session_id is None:
-        return
+        return None
     try:
         policy = active_policy(WorkflowKind.PLANNING_SESSION)
         result = create_planning_session_workflow(
@@ -323,10 +508,11 @@ def bind_planning_root(db: Session, planning_session_id: int | None) -> None:
         )
     except Exception as exc:
         logger.warning("[WORKFLOW_BUDGET] planning root failed: %s", exc)
-        return
+        return None
     _log_outcome(
         "bind_planning_root", result.outcome, planning_session_id=planning_session_id
     )
+    return result.outcome
 
 
 def require_planning_identity(
@@ -345,6 +531,8 @@ def require_planning_identity(
         raise WorkflowLifecycleError("planning_unbound")
     if workflow.status != "OPEN":
         raise WorkflowLifecycleError("workflow_closed")
+    if workflow.deadline_at <= trusted_utc_now():
+        raise WorkflowLifecycleError("workflow_deadline_expired")
     current = (
         db.query(PlanningSession.generation_id)
         .filter(PlanningSession.id == planning_session_id)

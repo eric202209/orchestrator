@@ -14,6 +14,7 @@ from typing import Any, Dict
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import (
     LogEntry,
     Session as SessionModel,
@@ -65,7 +66,12 @@ from app.services.orchestration.state.session_state import (
     resolve_session_transition,
     SessionStatus,
 )
-from app.services.execution.workflow_lifecycle import close_session_workflows
+from app.services.execution.workflow_lifecycle import (
+    WorkflowLifecycleError,
+    close_session_workflows,
+    enforcement_enabled,
+    require_resume_provenance,
+)
 from app.services.tasks.service import TaskService
 from app.services.tasks.execution import (
     ProjectExecutionSerializationConflict,
@@ -1201,6 +1207,11 @@ def _maybe_resume_manual_session_work(
         checkpoint_data = None
     resolved_checkpoint_name = None
     resume_has_progress = _checkpoint_has_execution_progress(checkpoint_data)
+    if resume_has_progress:
+        try:
+            require_resume_provenance()
+        except WorkflowLifecycleError as exc:
+            raise HTTPException(status_code=409, detail=exc.reason) from exc
     if checkpoint_data is not None:
         resolved_checkpoint_name = checkpoint_data.get(
             "_resolved_checkpoint_name"
@@ -1325,6 +1336,41 @@ async def start_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+
+    if enforcement_enabled():
+        if normalize_session_status(session.status) == SessionStatus.RUNNING.value:
+            raise HTTPException(
+                status_code=409,
+                detail="workflow_budget_resume_unsupported",
+            )
+        if session.execution_mode == "manual":
+            configured_checkpoint_dir = Path(settings.CHECKPOINT_DIR).expanduser()
+            if not configured_checkpoint_dir.is_absolute():
+                configured_checkpoint_dir = Path.cwd() / configured_checkpoint_dir
+            configured_checkpoint_dir = configured_checkpoint_dir.resolve()
+            checkpoint_roots = [configured_checkpoint_dir]
+            legacy_checkpoint_dir = Path(
+                CheckpointService.LEGACY_CHECKPOINT_DIR
+            ).resolve()
+            if (
+                legacy_checkpoint_dir != configured_checkpoint_dir
+                and legacy_checkpoint_dir.exists()
+            ):
+                checkpoint_roots.append(legacy_checkpoint_dir)
+            has_checkpoint = any(
+                any(root.glob(f"session_{session.id}_*.json"))
+                or any(
+                    path.is_file()
+                    for path in (root / f"session_{session.id}").rglob("*")
+                )
+                for root in checkpoint_roots
+                if root.exists()
+            )
+            if has_checkpoint:
+                try:
+                    require_resume_provenance()
+                except WorkflowLifecycleError as exc:
+                    raise HTTPException(status_code=409, detail=exc.reason) from exc
 
     recovered_orphaned_run = _recover_orphaned_running_session_if_needed(
         db, session=session
@@ -2034,6 +2080,10 @@ async def resume_session_lifecycle(
     session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
+    try:
+        require_resume_provenance()
+    except WorkflowLifecycleError as exc:
+        raise HTTPException(status_code=409, detail=exc.reason) from exc
     previous_status = session.status
     previous_is_active = session.is_active
     previous_resumed_at = session.resumed_at

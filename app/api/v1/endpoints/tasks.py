@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from app.schemas.pagination import paginate
 
 from app.database import get_db
@@ -42,10 +43,21 @@ from app.services.tasks.execution import (
     create_task_execution,
     project_execution_serialization_admission,
 )
-from app.services.execution.workflow_lifecycle import bind_new_root
+from app.services.execution.workflow_lifecycle import (
+    WorkflowLifecycleError,
+    bind_new_root,
+    require_binding_outcome,
+)
 from app.services.tasks.service import TaskService
 from app.task_intent import normalize_task_intent
-from app.services.tasks.task_deletion import delete_task_owned_graph
+from app.services.tasks.task_deletion import (
+    delete_task_owned_graph,
+)
+from app.services.execution.workflow_lifecycle import (
+    RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+    RetainedExecutionEvidenceConflict,
+    retained_execution_evidence_exists,
+)
 from app.services.workspace.system_settings import (
     get_effective_agent_backend,
     get_effective_agent_model_family,
@@ -63,6 +75,69 @@ from app.services.workspace.project_isolation_service import (
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _require_root_binding_before_publish(
+    db: Session,
+    *,
+    session,
+    task,
+    session_task,
+    task_execution,
+) -> None:
+    outcome = bind_new_root(db, task_execution.id)
+    try:
+        require_binding_outcome(outcome, binding_kind="ROOT")
+    except WorkflowLifecycleError as exc:
+        completed_at = datetime.now(timezone.utc)
+        message = f"Workflow identity binding failed: {exc.reason}"
+        task_execution.failure_category = "workflow_binding_failed"
+        mark_execution_failed(
+            task=task,
+            session_task_link=session_task,
+            task_execution=task_execution,
+            error_message=message,
+            completed_at=completed_at,
+        )
+        mark_session_stopped(session, stopped_at=completed_at)
+        db.add(
+            LogEntry(
+                session_id=session.id,
+                session_instance_id=session.instance_id,
+                task_id=task.id,
+                task_execution_id=task_execution.id,
+                level="ERROR",
+                message="Task not published because workflow identity binding failed",
+                log_metadata=json.dumps(
+                    {
+                        "event_type": "workflow_binding_failed",
+                        "failure_category": "workflow_binding_failed",
+                        "binding_outcome": getattr(outcome, "value", None),
+                        "task_execution_id": task_execution.id,
+                    }
+                ),
+            )
+        )
+        db.commit()
+        status_code = (
+            409
+            if any(
+                outcome in exc.reason
+                for outcome in (
+                    "OPEN_WORKFLOW_EXISTS",
+                    "WORKFLOW_INFERENCE_DEADLINE_EXCEEDED",
+                )
+            )
+            else 503
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": "WORKFLOW_BINDING_FAILED",
+                "reason": exc.reason,
+                "task_execution_id": task_execution.id,
+            },
+        ) from exc
 
 
 # Pydantic models for overwrite protection
@@ -247,7 +322,13 @@ def _resume_automatic_chain_after_promotion(
     )
     db.commit()
     # Promotion starts the next Task's own logical run.
-    bind_new_root(db, next_execution.id)
+    _require_root_binding_before_publish(
+        db,
+        session=session,
+        task=next_task,
+        session_task=session_task,
+        task_execution=next_execution,
+    )
     execute_orchestration_task.delay(
         session_id=session.id,
         task_id=next_task.id,
@@ -758,7 +839,13 @@ def _queue_task_retry(
     )
     db.commit()
     # An operator rerun is a new logical run, never an inherited retry.
-    bind_new_root(db, task_execution.id)
+    _require_root_binding_before_publish(
+        db,
+        session=selected_session,
+        task=task,
+        session_task=session_task,
+        task_execution=task_execution,
+    )
 
     try:
         result = execute_orchestration_task.delay(
@@ -1943,8 +2030,31 @@ def delete_task(
 ):
     """Delete a task"""
     task = require_task_read_access(db, task_id, current_user)
-    delete_task_owned_graph(db, [task.id])
-    db.commit()
+    try:
+        delete_task_owned_graph(db, [task.id])
+        db.commit()
+    except RetainedExecutionEvidenceConflict as exc:
+        db.rollback()
+        if retained_execution_evidence_exists(db, task_ids=[task.id]):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                    "message": "Task is retained by execution evidence and cannot be deleted.",
+                },
+            ) from exc
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        if retained_execution_evidence_exists(db, task_ids=[task.id]):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                    "message": "Task is retained by execution evidence and cannot be deleted.",
+                },
+            ) from exc
+        raise
     return None
 
 

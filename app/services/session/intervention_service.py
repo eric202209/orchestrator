@@ -50,6 +50,10 @@ from app.services.workspace.control_state_paths import (
 from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
+from app.services.execution.workflow_lifecycle import (
+    WorkflowLifecycleError,
+    require_resume_provenance,
+)
 from .session_lookup import get_session_or_404
 
 logger = logging.getLogger(__name__)
@@ -58,6 +62,13 @@ INTERVENTION_TYPES = {"guidance", "approval", "information"}
 INTERVENTION_STATUSES = {"pending", "replied", "approved", "denied", "expired"}
 
 _DEFAULT_EXPIRY_MINUTES = 120
+
+
+def _require_resume_provenance_or_conflict() -> None:
+    try:
+        require_resume_provenance()
+    except WorkflowLifecycleError as exc:
+        raise HTTPException(status_code=409, detail=exc.reason) from exc
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -635,6 +646,7 @@ def _dispatch_resume(
     Called after operator reply/approve/deny so the session auto-continues
     without requiring a manual /resume call.
     """
+    _require_resume_provenance_or_conflict()
     try:
         from app.tasks.worker import execute_orchestration_task
 
@@ -705,6 +717,7 @@ def submit_intervention_reply(
 ) -> InterventionRequest:
     """Record operator guidance and transition session back to paused."""
     req = _get_intervention_or_404(db, intervention_id)
+    _require_resume_provenance_or_conflict()
 
     if req.status != "pending":
         raise HTTPException(
@@ -774,6 +787,7 @@ def approve_intervention(
 ) -> InterventionRequest:
     """Approve an approval-type intervention and resume as paused."""
     req = _get_intervention_or_404(db, intervention_id)
+    _require_resume_provenance_or_conflict()
 
     if req.intervention_type != "approval":
         raise HTTPException(
@@ -846,6 +860,7 @@ def deny_intervention(
 ) -> InterventionRequest:
     """Deny an approval-type intervention; session stays paused with context."""
     req = _get_intervention_or_404(db, intervention_id)
+    _require_resume_provenance_or_conflict()
 
     if req.intervention_type != "approval":
         raise HTTPException(

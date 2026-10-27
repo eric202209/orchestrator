@@ -8,8 +8,10 @@ from typing import Any, Callable, Dict, Optional
 
 from app.models import LogEntry, SessionTask, Task, TaskExecution, TaskStatus
 from app.services.execution.workflow_lifecycle import (
+    WorkflowLifecycleError,
     bind_new_root,
     close_task_workflow,
+    require_binding_outcome,
 )
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.diagnostics.outcome_observability import (
@@ -18,6 +20,7 @@ from app.services.orchestration.diagnostics.outcome_observability import (
 )
 from app.services.orchestration.run_state import (
     finalize_attempt_successful_completion,
+    mark_task_attempt_failed,
     mark_task_attempt_pending,
 )
 from app.services.orchestration.state.persistence import append_orchestration_event
@@ -340,6 +343,7 @@ class TaskCompletionFinalizer:
             and get_latest_session_task_link_fn
             and execute_orchestration_task_delay_fn
         ):
+            auto_advance_failure = None
             next_session_task_link = get_latest_session_task_link_fn(
                 db, session_id, next_task.id
             )
@@ -394,14 +398,56 @@ class TaskCompletionFinalizer:
             )
             db.commit()
             # Auto-advance starts the next Task's own logical run.
-            bind_new_root(db, next_task_execution.id)
-            execute_orchestration_task_delay_fn(
-                session_id=session_id,
-                task_id=next_task.id,
-                prompt=next_task.description or next_task.title,
-                timeout_seconds=ctx.timeout_seconds,
-                task_execution_id=next_task_execution.id,
-            )
+            binding_outcome = bind_new_root(db, next_task_execution.id)
+            try:
+                require_binding_outcome(binding_outcome, binding_kind="ROOT")
+            except WorkflowLifecycleError as exc:
+                completed_at = datetime.now(UTC)
+                auto_advance_failure = exc.reason
+                message = f"Workflow identity binding failed: {exc.reason}"
+                next_task_execution.failure_category = "workflow_binding_failed"
+                mark_task_attempt_failed(
+                    task=next_task,
+                    session_task_link=next_session_task_link,
+                    task_execution=next_task_execution,
+                    error_message=message,
+                    completed_at=completed_at,
+                )
+                mark_session_paused(
+                    session,
+                    alert_level="error",
+                    alert_message=message,
+                    paused_at=completed_at,
+                )
+                db.add(
+                    LogEntry(
+                        session_id=session_id,
+                        session_instance_id=session.instance_id,
+                        task_id=next_task.id,
+                        task_execution_id=next_task_execution.id,
+                        level="ERROR",
+                        message="Auto-advance not published because workflow identity binding failed",
+                        log_metadata=json.dumps(
+                            {
+                                "event_type": "workflow_binding_failed",
+                                "failure_category": "workflow_binding_failed",
+                                "binding_outcome": getattr(
+                                    binding_outcome, "value", None
+                                ),
+                                "task_execution_id": next_task_execution.id,
+                            }
+                        ),
+                    )
+                )
+                db.commit()
+            else:
+                execute_orchestration_task_delay_fn(
+                    session_id=session_id,
+                    task_id=next_task.id,
+                    prompt=next_task.description or next_task.title,
+                    timeout_seconds=ctx.timeout_seconds,
+                    task_execution_id=next_task_execution.id,
+                )
 
         append_orchestration_event(
             project_dir=control_state_of(orchestration_state),
@@ -420,6 +466,11 @@ class TaskCompletionFinalizer:
         return {
             "completed_at": completed_at,
             "promoted_workspace_archive_result": promoted_workspace_archive_result,
+            **(
+                {"auto_advance_failure": auto_advance_failure}
+                if "auto_advance_failure" in locals() and auto_advance_failure
+                else {}
+            ),
         }
 
     def _session_failed_task_links(self, session_id: int) -> list[SessionTask]:

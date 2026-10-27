@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import false, or_
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from datetime import datetime, timedelta, timezone
 from app.schemas.pagination import paginate
@@ -31,7 +32,14 @@ from app.services.workspace.project_isolation_service import (
 from app.services.workspace.checkpoint_service import CheckpointService
 from app.services.project.name_formatter import humanize_display_name
 from app.services.tasks.service import TaskService
-from app.services.tasks.task_deletion import delete_task_owned_graph
+from app.services.tasks.task_deletion import (
+    delete_task_owned_graph,
+)
+from app.services.execution.workflow_lifecycle import (
+    RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+    RetainedExecutionEvidenceConflict,
+    retained_execution_evidence_exists,
+)
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.config import settings
 from app.dependencies import get_current_active_user
@@ -43,6 +51,40 @@ from app.services.workspace.workspace_admission import (
 from app.services.project.lifecycle import is_project_retired
 
 router = APIRouter()
+
+
+def _cleanup_checkpoint_artifacts(checkpoint_service, session_ids: list[int]):
+    """Clean checkpoint files after commit and return any retryable failures."""
+
+    pending: dict[int, list[str]] = {}
+    for session_id in session_ids:
+        try:
+            checkpoint_service.delete_all_checkpoints(session_id)
+            verify_cleanup = getattr(
+                checkpoint_service, "checkpoint_artifacts_remaining", None
+            )
+            remaining = verify_cleanup(session_id) if callable(verify_cleanup) else []
+            if remaining:
+                pending[session_id] = remaining
+        except Exception as exc:
+            failures = [f"checkpoint cleanup failed: {exc}"]
+            verify_cleanup = getattr(
+                checkpoint_service, "checkpoint_artifacts_remaining", None
+            )
+            if callable(verify_cleanup):
+                try:
+                    failures.extend(verify_cleanup(session_id))
+                except Exception as verify_exc:
+                    failures.append(f"checkpoint verification failed: {verify_exc}")
+            pending[session_id] = failures
+    try:
+        cleanup_result = checkpoint_service.cleanup_orphaned_checkpoints()
+        if cleanup_result.get("error"):
+            pending[-1] = [cleanup_result["error"]]
+    except Exception as exc:
+        pending[-1] = [f"orphan checkpoint cleanup failed: {exc}"]
+
+    return pending
 
 
 class WorkspaceCleanupRequest(BaseModel):
@@ -190,6 +232,15 @@ def purge_soft_deleted_projects(
     This endpoint is typically called by a scheduled task (Celery beat)
     to clean up old soft-deleted data and prevent database bloat.
     """
+    from app.models import (
+        ExecutionFailureSummary,
+        HumanGuidance,
+        HumanGuidanceRevision,
+        HumanGuidanceUsage,
+        InterventionRequest,
+        KnowledgeUsageLog,
+    )
+
     cutoff_date = datetime.now(timezone.utc) - timedelta(
         days=settings.SOFT_DELETE_RETENTION_DAYS
     )
@@ -241,6 +292,14 @@ def purge_soft_deleted_projects(
         )
 
     purged_count = 0
+    if retained_execution_evidence_exists(db, project_ids=project_ids):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                "message": "One or more projects are retained by execution evidence.",
+            },
+        )
 
     try:
         checkpoint_service = CheckpointService(db)
@@ -249,14 +308,7 @@ def purge_soft_deleted_projects(
             task_ids = task_ids_by_project.get(project_id, [])
             planning_session_ids = planning_session_ids_by_project.get(project_id, [])
 
-            for session_id in session_ids:
-                checkpoint_service.delete_all_checkpoints(session_id)
-
             if session_ids:
-                # Checkpoint cleanup queues audit LogEntry rows. Flush them before
-                # deleting session logs so the cleanup rows cannot be inserted after
-                # this bulk delete during the final commit.
-                db.flush()
                 db.query(LogEntry).filter(LogEntry.session_id.in_(session_ids)).delete(
                     synchronize_session=False
                 )
@@ -308,6 +360,53 @@ def purge_soft_deleted_projects(
                     PlanningSession.id.in_(planning_session_ids)
                 ).delete(synchronize_session=False)
 
+            if task_ids:
+                delete_task_owned_graph(db, task_ids)
+
+            if session_ids:
+                db.query(InterventionRequest).filter(
+                    InterventionRequest.session_id.in_(session_ids)
+                ).delete(synchronize_session=False)
+                db.query(ExecutionFailureSummary).filter(
+                    ExecutionFailureSummary.session_id.in_(session_ids)
+                ).delete(synchronize_session=False)
+                db.query(HumanGuidanceUsage).filter(
+                    HumanGuidanceUsage.session_id.in_(session_ids)
+                ).delete(synchronize_session=False)
+                db.query(KnowledgeUsageLog).filter(
+                    KnowledgeUsageLog.session_id.in_(session_ids)
+                ).delete(synchronize_session=False)
+                db.query(SessionTask).filter(
+                    SessionTask.session_id.in_(session_ids)
+                ).delete(synchronize_session=False)
+                db.query(SessionModel).filter(SessionModel.id.in_(session_ids)).delete(
+                    synchronize_session=False
+                )
+
+            guidance_ids = [
+                guidance_id
+                for (guidance_id,) in db.query(HumanGuidance.id)
+                .filter(HumanGuidance.project_id == project_id)
+                .all()
+            ]
+            if guidance_ids:
+                db.query(HumanGuidanceRevision).filter(
+                    HumanGuidanceRevision.guidance_id.in_(guidance_ids)
+                ).delete(synchronize_session=False)
+            db.query(HumanGuidanceUsage).filter(
+                HumanGuidanceUsage.task_id.in_(task_ids or [-1])
+            ).delete(synchronize_session=False)
+            db.query(KnowledgeUsageLog).filter(
+                KnowledgeUsageLog.task_id.in_(task_ids or [-1])
+            ).delete(synchronize_session=False)
+            db.query(HumanGuidance).filter(
+                HumanGuidance.project_id == project_id
+            ).delete(synchronize_session=False)
+
+            db.query(Plan).filter(Plan.project_id == project_id).delete(
+                synchronize_session=False
+            )
+
             db.query(PermissionRequest).filter(
                 PermissionRequest.project_id == project_id
             ).delete(synchronize_session=False)
@@ -317,11 +416,50 @@ def purge_soft_deleted_projects(
             )
             purged_count += 1
 
-        checkpoint_service.cleanup_orphaned_checkpoints()
         db.commit()
+    except RetainedExecutionEvidenceConflict as exc:
+        db.rollback()
+        if retained_execution_evidence_exists(db, project_ids=project_ids):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                    "message": "One or more projects are retained by execution evidence.",
+                },
+            ) from exc
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        if retained_execution_evidence_exists(db, project_ids=project_ids):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                    "message": "One or more projects are retained by execution evidence.",
+                },
+            ) from exc
+        raise
     except Exception:
         db.rollback()
         raise
+
+    cleanup_pending = _cleanup_checkpoint_artifacts(
+        checkpoint_service,
+        sorted(
+            session_id
+            for session_ids in session_ids_by_project.values()
+            for session_id in session_ids
+        ),
+    )
+    db.commit()
+    if cleanup_pending:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "CHECKPOINT_CLEANUP_PENDING",
+                "sessions": cleanup_pending,
+            },
+        )
 
     return {
         "message": f"Purged {purged_count} soft-deleted projects permanently",
@@ -499,8 +637,7 @@ def delete_project(
     current_user=Depends(get_current_active_user),
 ):
     """Delete a project (soft delete to prevent ID reuse issues)"""
-    from app.models import Session, TaskCheckpoint
-    from app.services.workspace.checkpoint_service import CheckpointService
+    from app.models import TaskCheckpoint
 
     db_project = get_project_for_user(db, project_id, current_user)
 
@@ -515,51 +652,88 @@ def delete_project(
         for (task_id,) in db.query(Task.id).filter(Task.project_id == project_id).all()
     ]
 
-    # Soft delete: mark as deleted instead of hard delete
-    # This prevents database ID reuse issues that cause stale logs
-    db_project.deleted_at = datetime.now(timezone.utc)
-
-    # Also soft delete all sessions for this project
-    db.query(Session).filter(Session.project_id == project_id).update(
-        {
-            "deleted_at": datetime.now(timezone.utc),
-            "is_active": False,
-            "status": "deleted",
-        }
-    )
-
-    db.query(PlanningSession).filter(PlanningSession.project_id == project_id).update(
-        {
-            "status": "cancelled",
-            "current_prompt_id": None,
-            "processing_token": None,
-            "processing_started_at": None,
-            "updated_at": datetime.now(timezone.utc),
-        },
-        synchronize_session=False,
-    )
-
-    if session_ids:
-        checkpoint_service = CheckpointService(db)
-        for session_id in session_ids:
-            checkpoint_service.delete_all_checkpoints(session_id)
-        checkpoint_service.cleanup_orphaned_checkpoints()
-
-        # Flush checkpoint audit rows before removing all logs for these sessions.
-        db.flush()
-        db.query(LogEntry).filter(LogEntry.session_id.in_(session_ids)).delete(
-            synchronize_session=False
+    if retained_execution_evidence_exists(db, project_ids=[project_id]):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                "message": "Project is retained by execution evidence and cannot be deleted.",
+            },
         )
-        db.query(SessionTask).filter(SessionTask.session_id.in_(session_ids)).delete(
-            synchronize_session=False
+
+    checkpoint_service = CheckpointService(db)
+    try:
+        # Soft delete: mark as deleted instead of hard delete. This preserves
+        # the Session rows and their generation history.
+        deleted_at = datetime.now(timezone.utc)
+        db_project.deleted_at = deleted_at
+        db.query(SessionModel).filter(SessionModel.project_id == project_id).update(
+            {
+                "deleted_at": deleted_at,
+                "is_active": False,
+                "status": "deleted",
+            }
         )
-        db.query(TaskCheckpoint).filter(
-            TaskCheckpoint.session_id.in_(session_ids)
-        ).delete(synchronize_session=False)
 
-    if task_ids:
-        delete_task_owned_graph(db, task_ids)
+        db.query(PlanningSession).filter(
+            PlanningSession.project_id == project_id
+        ).update(
+            {
+                "status": "cancelled",
+                "current_prompt_id": None,
+                "processing_token": None,
+                "processing_started_at": None,
+                "updated_at": deleted_at,
+            },
+            synchronize_session=False,
+        )
 
+        if session_ids:
+            db.query(LogEntry).filter(LogEntry.session_id.in_(session_ids)).delete(
+                synchronize_session=False
+            )
+            db.query(SessionTask).filter(
+                SessionTask.session_id.in_(session_ids)
+            ).delete(synchronize_session=False)
+            db.query(TaskCheckpoint).filter(
+                TaskCheckpoint.session_id.in_(session_ids)
+            ).delete(synchronize_session=False)
+
+        if task_ids:
+            delete_task_owned_graph(db, task_ids)
+
+        db.commit()
+    except RetainedExecutionEvidenceConflict as exc:
+        db.rollback()
+        if retained_execution_evidence_exists(db, project_ids=[project_id]):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                    "message": "Project is retained by execution evidence and cannot be deleted.",
+                },
+            ) from exc
+        raise
+    except IntegrityError as exc:
+        db.rollback()
+        if retained_execution_evidence_exists(db, project_ids=[project_id]):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                    "message": "Project is retained by execution evidence and cannot be deleted.",
+                },
+            ) from exc
+        raise
+    except Exception:
+        db.rollback()
+        raise
+
+    cleanup_pending = _cleanup_checkpoint_artifacts(checkpoint_service, session_ids)
     db.commit()
-
+    if cleanup_pending:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "CHECKPOINT_CLEANUP_PENDING", "sessions": cleanup_pending},
+        )
     return {"message": "Project and associated artifacts deleted successfully"}

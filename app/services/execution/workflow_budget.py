@@ -320,6 +320,12 @@ def _trusted_utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def trusted_utc_now() -> datetime:
+    """Return the service clock used for immutable workflow deadlines."""
+
+    return _utc(_trusted_utc_now())
+
+
 def _utc(value: datetime | None) -> datetime | None:
     """SQLite stores UTC text without an offset; restore or normalize UTC."""
 
@@ -582,8 +588,16 @@ def _workflow_values(policy: WorkflowBudgetPolicy, observed_at: datetime) -> dic
     }
 
 
-def _existing_root(row, policy: WorkflowBudgetPolicy) -> WorkflowResult:
+def _existing_root(
+    row, policy: WorkflowBudgetPolicy, observed_at: datetime | None = None
+) -> WorkflowResult:
     if row is not None and _policy_matches(row, policy):
+        effective_now = observed_at or _utc(_trusted_utc_now())
+        if _utc(row.deadline_at) <= effective_now:
+            return WorkflowResult(
+                BudgetOutcome.WORKFLOW_INFERENCE_DEADLINE_EXCEEDED,
+                _workflow_state(row),
+            )
         return WorkflowResult(BudgetOutcome.ALREADY_EXISTS, _workflow_state(row))
     return WorkflowResult(BudgetOutcome.IDENTITY_CONFLICT, _workflow_state(row))
 
@@ -605,10 +619,11 @@ def create_task_execution_workflow(
     new logical Task run. The workflow and its ROOT binding commit together.
     An attempt already bound to any workflow can never become a second root.
 
-    ``exclusive_open_task`` refuses (``OPEN_WORKFLOW_EXISTS``) while the same
-    Task still has an OPEN workflow before its deadline, checked in the same
-    write transaction, so a pause/resume cannot mint a fresh budget. It never
-    inherits that workflow: refusal leaves the attempt unbound.
+    ``exclusive_open_task`` refuses while the same Task has any OPEN workflow,
+    checked in the same write transaction. An expired OPEN workflow is reported
+    as ``WORKFLOW_INFERENCE_DEADLINE_EXCEEDED`` and cannot be bypassed by
+    minting a new root. It never inherits that workflow: refusal leaves the
+    attempt unbound.
     """
 
     _require_enforced(policy, WorkflowKind.TASK_EXECUTION)
@@ -633,7 +648,7 @@ def create_task_execution_workflow(
                     ),
                     False,
                 )
-            return _existing_root(row, policy), False
+            return _existing_root(row, policy, observed_at), False
         attempt = connection.execute(
             select(
                 _TE.c.session_id,
@@ -654,15 +669,17 @@ def create_task_execution_workflow(
                     _WF.c.task_id == attempt.task_id,
                     _WF.c.workflow_kind == WorkflowKind.TASK_EXECUTION.value,
                     _WF.c.status == "OPEN",
-                    _WF.c.deadline_at > observed_at,
                 )
                 .order_by(_WF.c.created_at)
             ).first()
             if live is not None:
+                outcome = (
+                    BudgetOutcome.OPEN_WORKFLOW_EXISTS
+                    if _utc(live.deadline_at) > observed_at
+                    else BudgetOutcome.WORKFLOW_INFERENCE_DEADLINE_EXCEEDED
+                )
                 return (
-                    WorkflowResult(
-                        BudgetOutcome.OPEN_WORKFLOW_EXISTS, _workflow_state(live)
-                    ),
+                    WorkflowResult(outcome, _workflow_state(live)),
                     False,
                 )
         values = _workflow_values(policy, observed_at)
@@ -740,7 +757,7 @@ def create_planning_session_workflow(
         created["generation"] = planning.generation_id
         existing = _generation_workflow(connection, planning.generation_id)
         if existing is not None:
-            return _existing_root(existing, policy), False
+            return _existing_root(existing, policy, observed_at), False
         values = _workflow_values(policy, observed_at)
         values.update(
             project_id=planning.project_id,
@@ -827,6 +844,11 @@ def bind_task_execution_attempt(
         workflow = _load_workflow(connection, parent.workflow_uuid)
         if workflow.status != "OPEN":
             return _result(BudgetOutcome.WORKFLOW_CLOSED, parent), False
+        if _utc(workflow.deadline_at) <= observed_at:
+            return (
+                _result(BudgetOutcome.WORKFLOW_INFERENCE_DEADLINE_EXCEEDED, parent),
+                False,
+            )
         child = connection.execute(
             select(
                 _TE.c.session_id,

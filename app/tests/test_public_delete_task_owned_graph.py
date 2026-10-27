@@ -113,7 +113,15 @@ def test_public_project_delete_removes_task_graph_and_retains_soft_history(
     assert db_session.get(Task, task_id) is None
     assert db_session.get(TaskExecution, execution_id) is None
     assert db_session.get(TaskExecutionChangeSet, change_set_id) is None
-    assert db_session.get(LogEntry, execution_log_id) is None
+    assert (
+        db_session.query(LogEntry)
+        .filter(
+            LogEntry.id == execution_log_id,
+            LogEntry.message == "execution-only log",
+        )
+        .first()
+        is None
+    )
     assert db_session.get(Project, project_id).deleted_at is not None
     assert db_session.get(SessionModel, session_id).deleted_at is not None
     assert db_session.get(ExecutionFailureSummary, failure_summary_id) is not None

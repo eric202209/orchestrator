@@ -89,7 +89,7 @@ CASE_C = GroundingFixture(
         "preserving the current default."
     ),
     expected_path="app/api/v1/endpoints/projects.py",
-    expected_regions=((3894, 5598),),
+    expected_regions=((5543, 7246),),
     known_expected_symbols=("get_projects",),
     notes="Phase35-G1R required conceptual case. Current architecture: APIRouter() at 420-2360.",
 )

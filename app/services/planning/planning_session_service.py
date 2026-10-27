@@ -34,10 +34,16 @@ from app.services.agents.agent_runtime import (
 )
 from app.services.agents.interfaces import AgentRuntimeError
 from app.services.execution.workflow_lifecycle import (
+    RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+    RetainedExecutionEvidenceConflict,
+    WorkflowLifecycleError,
     bind_planning_root,
     close_planning_workflow,
     planning_identity_scope,
+    require_binding_outcome,
+    require_no_retained_execution_evidence,
     require_planning_identity,
+    retained_execution_evidence_exists,
 )
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
@@ -240,7 +246,27 @@ class PlanningSessionService:
             self._persist_protocol_v2_manifest(session, project, initial_message)
         self.db.commit()
         # The committed generation owns its own PLANNING_SESSION workflow.
-        bind_planning_root(self.db, session.id)
+        binding_outcome = bind_planning_root(self.db, session.id)
+        try:
+            require_binding_outcome(binding_outcome, binding_kind="PLANNING_ROOT")
+        except WorkflowLifecycleError as exc:
+            session.status = "failed"
+            session.current_prompt_id = None
+            session.last_error = (
+                f"Planning workflow identity binding failed: {exc.reason}"
+            )
+            session.updated_at = datetime.now(timezone.utc)
+            self.db.commit()
+            raise HTTPException(
+                status_code=(
+                    409 if "WORKFLOW_INFERENCE_DEADLINE_EXCEEDED" in exc.reason else 503
+                ),
+                detail={
+                    "code": "WORKFLOW_BINDING_FAILED",
+                    "reason": exc.reason,
+                    "planning_session_id": session.id,
+                },
+            ) from exc
         self.schedule_processing(session.id)
         self.db.refresh(session)
         return session
@@ -377,6 +403,7 @@ class PlanningSessionService:
             raise HTTPException(
                 status_code=409, detail="Planning session is not waiting for input"
             )
+        self._require_schedulable_workflow(session)
 
         self._add_message(
             session,
@@ -454,6 +481,8 @@ class PlanningSessionService:
                 detail="Failed planning session has no separately authorized stage attempt",
             )
 
+        self._require_schedulable_workflow(session)
+
         self._add_message(
             session,
             "system",
@@ -490,6 +519,7 @@ class PlanningSessionService:
                 status_code=409,
                 detail="Only failed planning sessions can be retried",
             )
+        self._require_schedulable_workflow(session)
         session.status = "active"
         session.last_error = None
         session.processing_token = None
@@ -546,8 +576,38 @@ class PlanningSessionService:
                 status_code=409,
                 detail="Planning session cleanup pending while processing is owned",
             )
-        self.db.delete(session)
-        self.db.commit()
+        try:
+            require_no_retained_execution_evidence(
+                self.db, planning_session_ids=[session.id]
+            )
+            self.db.delete(session)
+            self.db.commit()
+        except RetainedExecutionEvidenceConflict as exc:
+            self.db.rollback()
+            if retained_execution_evidence_exists(
+                self.db, planning_session_ids=[session.id]
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                        "message": "Planning session is retained by execution evidence.",
+                    },
+                ) from exc
+            raise
+        except IntegrityError as exc:
+            self.db.rollback()
+            if retained_execution_evidence_exists(
+                self.db, planning_session_ids=[session.id]
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": RETAINED_EXECUTION_EVIDENCE_CONFLICT,
+                        "message": "Planning session is retained by execution evidence.",
+                    },
+                ) from exc
+            raise
 
     def schedule_processing(
         self,
@@ -577,6 +637,8 @@ class PlanningSessionService:
         if session.status != "active" or session.current_prompt_id is not None:
             self.db.rollback()
             return None
+
+        self._require_schedulable_workflow(session)
 
         if session.processing_token is not None:
             if owner_token != session.processing_token:
@@ -634,6 +696,22 @@ class PlanningSessionService:
                     session_id, generation_id, owner_token, task_id
                 )
         return None
+
+    def _require_schedulable_workflow(self, session: PlanningSession) -> None:
+        """Reject expired or unbound planning generations before mutation/publication."""
+
+        try:
+            require_planning_identity(self.db, session.id, session.generation_id)
+        except WorkflowLifecycleError as exc:
+            self.db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "WORKFLOW_IDENTITY_INVALID",
+                    "reason": exc.reason,
+                    "planning_session_id": session.id,
+                },
+            ) from exc
 
     def process_session(
         self,

@@ -53,7 +53,7 @@ EXPECTED_SESSION_CALLS = {
     },
     "app/services/session/session_runtime_service.py": {
         "mark_session_completed": 1,
-        "mark_session_paused": 4,
+        "mark_session_paused": 5,
         "mark_session_running": 1,
     },
     "app/services/session/intervention_service.py": {
@@ -74,7 +74,7 @@ EXPECTED_SESSION_CALLS = {
     },
     "app/services/orchestration/lifecycle/completion.py": {
         "mark_session_completed": 1,
-        "mark_session_paused": 3,
+        "mark_session_paused": 4,
         "mark_session_running": 1,
     },
     "app/services/orchestration/coordinators/completion_coordinator.py": {
@@ -114,7 +114,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
         "mark_task_attempt_running": 1,
     },
     "app/services/session/session_runtime_service.py": {
-        "mark_task_attempt_failed": 1,
+        "mark_task_attempt_failed": 2,
         "mark_task_attempt_pending": 3,
     },
     "app/services/session/intervention_service.py": {
@@ -128,6 +128,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
         "mark_task_attempt_failed": 1,
     },
     "app/services/orchestration/lifecycle/completion.py": {
+        "mark_task_attempt_failed": 1,
         "mark_task_attempt_pending": 2,
     },
     "app/services/orchestration/coordinators/completion_coordinator.py": {

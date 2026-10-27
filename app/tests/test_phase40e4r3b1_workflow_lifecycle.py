@@ -80,6 +80,44 @@ def r3b(tmp_path: Path):
         engine.dispose()
 
 
+@pytest.fixture
+def r3b_http(r3b):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.api.v1.router import api_router
+    from app.database import get_db
+    from app.dependencies import get_current_active_user
+    from app.models import User
+
+    _, engine, _ = r3b
+    app = FastAPI()
+    app.include_router(api_router, prefix="/api/v1")
+    factory = sessionmaker(autoflush=False, bind=engine)
+
+    def override_db():
+        db = factory()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    user = User(
+        id=1,
+        email="retention-test@example.invalid",
+        hashed_password="unused",
+        is_active=True,
+    )
+    app.dependency_overrides[get_db] = override_db
+    app.dependency_overrides[get_current_active_user] = lambda: user
+    client = TestClient(app, raise_server_exceptions=False)
+    try:
+        yield client
+    finally:
+        client.close()
+        app.dependency_overrides.clear()
+
+
 def _graph(db, *, status: str = "running"):
     project = Project(name=f"R3B1 Project {uuid.uuid4()}")
     db.add(project)
@@ -361,6 +399,298 @@ def test_09_closed_workflow_cannot_be_inherited(r3b, enforced):
     with pytest.raises(wl.WorkflowLifecycleError) as raised:
         _identity(db, parent, session)
     assert raised.value.reason == "workflow_closed"
+
+
+def test_expired_workflow_refuses_binding_and_worker_admission(
+    r3b, enforced, monkeypatch
+):
+    from datetime import datetime, timedelta, timezone
+
+    path, _, db = r3b
+    start = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(wb, "_trusted_utc_now", lambda: start)
+    _, session, task = _graph(db)
+    parent, workflow = _root(db, session, task)
+    deadline = workflow.deadline_at
+    monkeypatch.setattr(wb, "_trusted_utc_now", lambda: deadline)
+
+    child = _attempt(db, session, task, 2)
+    assert (
+        wl.bind_continuation(
+            db,
+            child.id,
+            parent_task_execution_id=parent.id,
+            binding_kind=BindingKind.RECOVERY,
+        )
+        is BudgetOutcome.WORKFLOW_INFERENCE_DEADLINE_EXCEEDED
+    )
+    next_root = _attempt(db, session, task, 3)
+    assert (
+        wl.bind_new_root(db, next_root.id)
+        is BudgetOutcome.WORKFLOW_INFERENCE_DEADLINE_EXCEEDED
+    )
+    with pytest.raises(wl.WorkflowLifecycleError) as raised:
+        _identity(db, parent, session)
+    assert raised.value.reason == "workflow_deadline_expired"
+    assert _workflow_row(path, workflow.workflow_uuid)[0] == "OPEN"
+
+
+def test_concurrent_binding_samples_the_deadline_after_lock(r3b, enforced, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    path, engine, db = r3b
+    _clock = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(wb, "_trusted_utc_now", lambda: _clock)
+    _, session, task = _graph(db)
+    parent, workflow = _root(db, session, task)
+    _set_status(db, parent, TaskStatus.FAILED)
+    before_deadline = _attempt(db, session, task, 2)
+    at_deadline = _attempt(db, session, task, 3)
+    instants = {
+        "before-deadline": workflow.deadline_at - timedelta(microseconds=1),
+        "at-deadline": workflow.deadline_at,
+    }
+    monkeypatch.setattr(
+        wb,
+        "_trusted_utc_now",
+        lambda: instants[threading.current_thread().name],
+    )
+    barrier = threading.Barrier(2)
+    outcomes = {}
+
+    def bind(execution_id):
+        local = _thread_session(engine)
+        try:
+            barrier.wait()
+            outcomes[threading.current_thread().name] = wl.bind_continuation(
+                local,
+                execution_id,
+                parent_task_execution_id=parent.id,
+                binding_kind=BindingKind.RETRY,
+            )
+        finally:
+            local.close()
+
+    threads = [
+        threading.Thread(
+            name="before-deadline", target=bind, args=(before_deadline.id,)
+        ),
+        threading.Thread(name="at-deadline", target=bind, args=(at_deadline.id,)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert outcomes["before-deadline"] is BudgetOutcome.BOUND
+    assert outcomes["at-deadline"] is BudgetOutcome.WORKFLOW_INFERENCE_DEADLINE_EXCEEDED
+    assert wb.resolve_task_execution_binding(db, before_deadline.id) is not None
+    assert wb.resolve_task_execution_binding(db, at_deadline.id) is None
+    assert _workflow_row(path, workflow.workflow_uuid)[0] == "OPEN"
+
+
+def test_expired_planning_workflow_is_not_republished(r3b, enforced, monkeypatch):
+    from datetime import datetime, timezone
+
+    from fastapi import HTTPException
+
+    from app.services.planning.planning_session_service import PlanningSessionService
+
+    path, _, db = r3b
+    project = Project(name=f"Expired planning {uuid.uuid4()}")
+    db.add(project)
+    db.flush()
+    planning = PlanningSession(
+        project_id=project.id,
+        title="expired",
+        prompt="expired",
+        status="failed",
+    )
+    db.add(planning)
+    db.commit()
+    wl.bind_planning_root(db, planning.id)
+    deadline = wb.resolve_planning_session_workflow(db, planning.id).deadline_at
+    monkeypatch.setattr(wb, "_trusted_utc_now", lambda: deadline)
+    dispatcher_calls = []
+    service = PlanningSessionService(db)
+    monkeypatch.setattr(
+        service,
+        "planning_dispatcher",
+        SimpleNamespace(dispatch=lambda **kwargs: dispatcher_calls.append(kwargs)),
+        raising=False,
+    )
+    before_status = planning.status
+
+    with pytest.raises(HTTPException) as raised:
+        service.retry(planning.id)
+
+    assert raised.value.status_code == 409
+    assert raised.value.detail["reason"] == "workflow_deadline_expired"
+    assert dispatcher_calls == []
+    db.expire_all()
+    assert db.get(PlanningSession, planning.id).status == before_status
+    assert _count(path, "workflow_budgets") == 1
+
+
+def test_enforced_resume_is_rejected_before_lifecycle_mutation(r3b, enforced):
+    from fastapi import HTTPException
+
+    from app.services.session.session_lifecycle_service import (
+        resume_session_lifecycle,
+    )
+
+    _, _, db = r3b
+    _, session, _ = _graph(db, status="paused")
+    before = (
+        session.instance_id,
+        session.status,
+        session.is_active,
+        session.resumed_at,
+    )
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(resume_session_lifecycle(db, session.id))
+    assert raised.value.status_code == 409
+    db.refresh(session)
+    assert (
+        session.instance_id,
+        session.status,
+        session.is_active,
+        session.resumed_at,
+    ) == before
+
+
+def test_enforced_manual_checkpoint_start_refuses_before_mutation(
+    r3b, enforced, monkeypatch, tmp_path
+):
+    from fastapi import HTTPException
+
+    from app.config import settings
+    from app.services.session.session_lifecycle_service import start_session_lifecycle
+
+    _, _, db = r3b
+    _, session, _ = _graph(db, status="stopped")
+    session.execution_mode = "manual"
+    db.commit()
+    before = (
+        session.instance_id,
+        session.status,
+        session.is_active,
+        session.resumed_at,
+    )
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    monkeypatch.setattr(settings, "CHECKPOINT_DIR", str(checkpoint_root))
+    (checkpoint_root / f"session_{session.id}_autosave.json").write_text(
+        '{"context": {"task_id": 1}, "step": 2}'
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(start_session_lifecycle(db, session.id))
+
+    assert raised.value.status_code == 409
+    db.refresh(session)
+    assert (
+        session.instance_id,
+        session.status,
+        session.is_active,
+        session.resumed_at,
+    ) == before
+
+
+def test_enforced_intervention_reply_refuses_before_mutation(r3b, enforced):
+    from fastapi import HTTPException
+
+    from app.models import InterventionRequest
+    from app.services.session.intervention_service import submit_intervention_reply
+
+    _, _, db = r3b
+    project, session, task = _graph(db, status="awaiting_input")
+    request = InterventionRequest(
+        session_id=session.id,
+        task_id=task.id,
+        project_id=project.id,
+        intervention_type="guidance",
+        prompt="Need operator input",
+        status="pending",
+    )
+    db.add(request)
+    db.commit()
+    before = (request.status, request.operator_reply, request.replied_at)
+
+    with pytest.raises(HTTPException) as raised:
+        submit_intervention_reply(
+            db,
+            intervention_id=request.id,
+            operator_reply="continue",
+        )
+
+    assert raised.value.status_code == 409
+    db.refresh(request)
+    assert (request.status, request.operator_reply, request.replied_at) == before
+
+
+def test_binding_failure_marks_attempt_failed_and_never_publishes(
+    r3b, enforced, monkeypatch, tmp_path
+):
+    from contextlib import nullcontext
+    from fastapi import HTTPException
+
+    from app.services.session import session_runtime_service as runtime_service
+    from app.tasks import worker
+
+    path, _, db = r3b
+    _, session, task = _graph(db, status="pending")
+    calls = []
+    monkeypatch.setattr(
+        runtime_service,
+        "project_execution_serialization_admission",
+        lambda *_args, **_kwargs: nullcontext(),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "admit_fresh_logical_execution",
+        lambda *_args, **_kwargs: SimpleNamespace(accepted=True),
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "ensure_task_workspace",
+        lambda *_args, **_kwargs: {"workspace_path": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "project_control_state_location",
+        lambda path, *_args, **_kwargs: path,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "append_orchestration_event",
+        lambda **_kwargs: {"event_id": "queued-test"},
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "_maybe_compact_checkpoint_before_dispatch",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        runtime_service,
+        "bind_new_root",
+        lambda *_args, **_kwargs: BudgetOutcome.SCHEMA_UNAVAILABLE,
+    )
+    monkeypatch.setattr(
+        worker.execute_orchestration_task,
+        "delay",
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        runtime_service.queue_task_for_session(db, session, task.id)
+
+    assert raised.value.status_code == 503
+    assert not calls
+    execution = db.query(TaskExecution).one()
+    assert execution.status is TaskStatus.FAILED
+    assert _count(path, "workflow_budgets") == 0
 
 
 def test_10_legacy_unbound_behavior_is_unchanged(r3b):
@@ -793,10 +1123,15 @@ def test_worker_admission_runs_after_claim_and_before_runtime_construction():
         (
             "api/v1/endpoints/tasks.py",
             "_resume_automatic_chain_after_promotion",
-            "bind_new_root",
+            "_require_root_binding_before_publish",
             True,
         ),
-        ("api/v1/endpoints/tasks.py", "_queue_task_retry", "bind_new_root", True),
+        (
+            "api/v1/endpoints/tasks.py",
+            "_queue_task_retry",
+            "_require_root_binding_before_publish",
+            True,
+        ),
         (
             "services/session/session_lifecycle_service.py",
             "stop_session_lifecycle",
@@ -833,6 +1168,48 @@ def _evidence(db):
     return project, session, task, execution, workflow
 
 
+def _one_shot_authorization(db, project, session, task, execution):
+    from datetime import datetime, timedelta, timezone
+
+    from app.models import OneShotExecutionAuthorization
+
+    now = datetime.now(timezone.utc)
+    digest = "a" * 64
+    db.add(
+        OneShotExecutionAuthorization(
+            authorization_uuid=str(uuid.uuid4()),
+            identity_schema_version="one-shot/v1",
+            policy_version="1",
+            project_id=project.id,
+            session_id=session.id,
+            session_instance_id=session.instance_id,
+            task_id=task.id,
+            task_execution_id=execution.id,
+            source_revision_identity="source-revision",
+            source_snapshot_digest=digest,
+            candidate_uuid=str(uuid.uuid4()),
+            candidate_initial_digest=digest,
+            execution_profile_id="test-profile",
+            execution_profile_version="1",
+            operation_scope_id="test-scope",
+            operation_scope_version="1",
+            operation_scope_digest=digest,
+            operator_approval_id="test-approval",
+            operator_identity="operator@test.invalid",
+            operator_approval_decision="APPROVED",
+            operator_approved_at=now,
+            issued_at=now,
+            expires_at=now + timedelta(hours=1),
+            identity_sha256=digest,
+            state="AUTHORIZED",
+            state_changed_at=None,
+            revoked_by=None,
+            created_at=now,
+        )
+    )
+    db.commit()
+
+
 def _evidence_counts(path):
     return tuple(
         _count(path, table)
@@ -857,12 +1234,17 @@ def test_31_task_deletion_without_budget_evidence_succeeds(r3b):
 
 
 def test_32_task_deletion_with_budget_evidence_is_restricted(r3b, enforced):
-    from app.services.tasks.task_deletion import delete_task_owned_graph
+    from app.services.tasks.task_deletion import (
+        delete_task_owned_graph,
+    )
+    from app.services.execution.workflow_lifecycle import (
+        RetainedExecutionEvidenceConflict,
+    )
 
     path, _, db = r3b
     _, _, task, execution, _ = _evidence(db)
     before = _evidence_counts(path)
-    with pytest.raises(IntegrityError):
+    with pytest.raises(RetainedExecutionEvidenceConflict):
         delete_task_owned_graph(db, [task.id])
         db.commit()
     db.rollback()
@@ -893,8 +1275,12 @@ def test_33_project_deletion_with_budget_evidence_is_restricted(
             return 0
 
     monkeypatch.setattr(checkpoint_service, "CheckpointService", _Checkpoints)
-    with pytest.raises(IntegrityError):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as raised:
         projects.delete_project(project.id, db=db, current_user=None)
+    assert raised.value.status_code == 409
+    assert raised.value.detail["code"] == "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
     db.rollback()
     assert _evidence_counts(path) == before
     # The soft-delete half rolled back with it: the request fails as a whole.
@@ -903,6 +1289,7 @@ def test_33_project_deletion_with_budget_evidence_is_restricted(
 
 def test_34_planning_session_deletion_with_budget_evidence_is_restricted(r3b, enforced):
     from app.services.planning.planning_session_service import PlanningSessionService
+    from fastapi import HTTPException
 
     path, _, db = r3b
     project = Project(name=f"R3B1 Planning {uuid.uuid4()}")
@@ -914,8 +1301,10 @@ def test_34_planning_session_deletion_with_budget_evidence_is_restricted(r3b, en
     wl.bind_planning_root(db, planning.id)
     planning.status = "cancelled"
     db.commit()
-    with pytest.raises(IntegrityError):
+    with pytest.raises(HTTPException) as raised:
         PlanningSessionService(db).delete_terminal_session(planning.id)
+    assert raised.value.status_code == 409
+    assert raised.value.detail["code"] == "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
     db.rollback()
     assert _count(path, "planning_sessions") == 1
     assert _count(path, "workflow_budgets") == 1
@@ -961,10 +1350,13 @@ def test_36_audit_evidence_rows_cannot_be_deleted_through_the_orm(r3b, enforced)
 
 def test_37_no_orphaned_reservation_records(r3b, enforced):
     from app.services.tasks.task_deletion import delete_task_owned_graph
+    from app.services.execution.workflow_lifecycle import (
+        RetainedExecutionEvidenceConflict,
+    )
 
     path, _, db = r3b
     _, _, task, _, _ = _evidence(db)
-    with pytest.raises(IntegrityError):
+    with pytest.raises(RetainedExecutionEvidenceConflict):
         delete_task_owned_graph(db, [task.id])
     db.rollback()
     with sqlite3.connect(path) as raw:
@@ -982,18 +1374,237 @@ def test_37_no_orphaned_reservation_records(r3b, enforced):
 
 def test_38_public_task_deletion_refusal_is_deterministic(r3b, enforced, monkeypatch):
     from app.api.v1.endpoints import tasks
+    from fastapi import HTTPException
 
     path, _, db = r3b
     _, _, task, _, _ = _evidence(db)
     monkeypatch.setattr(tasks, "require_task_read_access", lambda db, tid, user: task)
     before = _evidence_counts(path)
-    # Current contract (unresolved retention gate): the endpoint surfaces the
-    # RESTRICT IntegrityError (HTTP 500), identically on every attempt.
+    # The endpoint classifies retained evidence as a stable HTTP conflict.
     for _ in range(2):
-        with pytest.raises(IntegrityError):
+        with pytest.raises(HTTPException) as raised:
             tasks.delete_task(task.id, db=db, current_user=None)
-        db.rollback()
+        assert raised.value.status_code == 409
+        assert raised.value.detail["code"] == "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
         assert _evidence_counts(path) == before
+
+
+def test_task_delete_http_409_for_phase39_evidence(r3b, r3b_http, enforced):
+    path, _, db = r3b
+    project, session, task, execution, _ = _evidence(db)
+    _one_shot_authorization(db, project, session, task, execution)
+
+    response = r3b_http.delete(f"/api/v1/tasks/{task.id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
+    assert _raw(path, "SELECT id FROM tasks") == [(task.id,)]
+    assert _raw(path, "SELECT id FROM task_executions") == [(execution.id,)]
+
+
+def test_task_delete_http_409_for_phase40_evidence(r3b, r3b_http, enforced):
+    path, _, db = r3b
+    _, _, task, execution, _ = _evidence(db)
+
+    response = r3b_http.delete(f"/api/v1/tasks/{task.id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
+    assert _raw(path, "SELECT id FROM tasks") == [(task.id,)]
+    assert _raw(path, "SELECT id FROM task_executions") == [(execution.id,)]
+
+
+def test_project_delete_and_purge_preserve_checkpoint_on_combined_evidence(
+    r3b, r3b_http, enforced, monkeypatch, tmp_path
+):
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import settings
+
+    path, _, db = r3b
+    project, session, task, execution, _ = _evidence(db)
+    _one_shot_authorization(db, project, session, task, execution)
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    monkeypatch.setattr(settings, "CHECKPOINT_DIR", str(checkpoint_root))
+    checkpoint = checkpoint_root / f"session_{session.id}_retained.json"
+    checkpoint.write_text('{"retained": true}')
+
+    response = r3b_http.delete(f"/api/v1/projects/{project.id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
+    assert checkpoint.exists()
+    assert _raw(path, "SELECT deleted_at FROM projects") == [(None,)]
+    assert _raw(path, "SELECT id FROM task_executions") == [(execution.id,)]
+
+    project.deleted_at = datetime.now(timezone.utc) - timedelta(days=365)
+    db.commit()
+    purge_response = r3b_http.delete("/api/v1/projects/purge-soft-deleted")
+    assert purge_response.status_code == 409
+    assert purge_response.json()["detail"]["code"] == (
+        "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
+    )
+    assert checkpoint.exists()
+    assert _raw(path, "SELECT id FROM projects") == [(project.id,)]
+    assert _raw(path, "SELECT id FROM task_executions") == [(execution.id,)]
+
+
+def test_planning_delete_http_409_for_retained_workflow(r3b, r3b_http, enforced):
+    path, _, db = r3b
+    project = Project(name=f"R3B1 Planning HTTP {uuid.uuid4()}")
+    db.add(project)
+    db.flush()
+    planning = PlanningSession(project_id=project.id, title="p", prompt="p")
+    db.add(planning)
+    db.commit()
+    wl.bind_planning_root(db, planning.id)
+    planning.status = "cancelled"
+    db.commit()
+
+    response = r3b_http.delete(f"/api/v1/planning/sessions/{planning.id}")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
+    assert _raw(path, "SELECT id FROM planning_sessions") == [(planning.id,)]
+    assert _count(path, "workflow_budgets") == 1
+
+
+def test_project_purge_integrity_race_rolls_back_before_checkpoint_cleanup(
+    r3b, r3b_http, enforced, monkeypatch, tmp_path
+):
+    from datetime import datetime, timedelta, timezone
+
+    from app.config import settings
+    from app.api.v1.endpoints import projects
+
+    path, _, db = r3b
+    project, session, task, execution, _ = _evidence(db)
+    project.deleted_at = datetime.now(timezone.utc) - timedelta(days=365)
+    db.commit()
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    monkeypatch.setattr(settings, "CHECKPOINT_DIR", str(checkpoint_root))
+    checkpoint = checkpoint_root / f"session_{session.id}_race.json"
+    checkpoint.write_text('{"retained": true}')
+
+    real_exists = projects.retained_execution_evidence_exists
+    calls = 0
+
+    def allow_preflight_once(db, **scope):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return False
+        return real_exists(db, **scope)
+
+    monkeypatch.setattr(
+        projects, "retained_execution_evidence_exists", allow_preflight_once
+    )
+    response = r3b_http.delete("/api/v1/projects/purge-soft-deleted")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "RETAINED_EXECUTION_EVIDENCE_CONFLICT"
+    assert calls >= 2
+    assert checkpoint.exists()
+    assert _raw(path, "SELECT id FROM projects") == [(project.id,)]
+    assert _raw(path, "SELECT id FROM tasks") == [(task.id,)]
+    assert _raw(path, "SELECT id FROM task_executions") == [(execution.id,)]
+
+
+def test_project_purge_without_evidence_commits_before_file_cleanup(
+    r3b, r3b_http, enforced, monkeypatch
+):
+    from datetime import datetime, timedelta, timezone
+
+    from app.api.v1.endpoints import projects
+
+    path, _, db = r3b
+    project, session, _ = _graph(db)
+    session_id = session.id
+    project.deleted_at = datetime.now(timezone.utc) - timedelta(days=365)
+    db.commit()
+    cleanup_calls = []
+
+    class _Checkpoints:
+        def __init__(self, _db):
+            pass
+
+        def delete_all_checkpoints(self, session_id):
+            cleanup_calls.append(session_id)
+            assert _raw(path, "SELECT id FROM projects") == []
+            assert _raw(path, "SELECT id FROM tasks") == []
+            return 0
+
+        def checkpoint_artifacts_remaining(self, _session_id):
+            return []
+
+        def cleanup_orphaned_checkpoints(self):
+            return {}
+
+    monkeypatch.setattr(projects, "CheckpointService", _Checkpoints)
+    response = r3b_http.delete("/api/v1/projects/purge-soft-deleted")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["purged_count"] == 1
+    assert cleanup_calls == [session_id]
+    assert _raw(path, "SELECT id FROM sessions") == []
+    assert _raw(path, "SELECT id FROM projects") == []
+    assert _raw(path, "SELECT id FROM tasks") == []
+
+
+def test_project_delete_reports_postcommit_checkpoint_cleanup_failure(
+    r3b, r3b_http, enforced, monkeypatch, tmp_path
+):
+    from app.api.v1.endpoints import projects
+    from app.config import settings
+
+    path, _, db = r3b
+    project, session, _ = _graph(db)
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    monkeypatch.setattr(settings, "CHECKPOINT_DIR", str(checkpoint_root))
+    checkpoint = checkpoint_root / f"session_{session.id}_pending.json"
+    checkpoint.write_text('{"recoverable": true}')
+
+    class _Checkpoints:
+        def __init__(self, _db):
+            pass
+
+        def delete_all_checkpoints(self, _session_id):
+            raise OSError("simulated filesystem failure")
+
+        def checkpoint_artifacts_remaining(self, _session_id):
+            return [str(checkpoint)]
+
+        def cleanup_orphaned_checkpoints(self):
+            return {}
+
+    monkeypatch.setattr(projects, "CheckpointService", _Checkpoints)
+    response = r3b_http.delete(f"/api/v1/projects/{project.id}")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "CHECKPOINT_CLEANUP_PENDING"
+    assert str(checkpoint) in response.json()["detail"]["sessions"][str(session.id)]
+    assert checkpoint.exists()
+    assert _raw(path, "SELECT deleted_at IS NOT NULL FROM projects") == [(1,)]
+    assert _raw(path, "SELECT deleted_at IS NOT NULL FROM sessions") == [(1,)]
+
+
+def test_project_delete_preserves_unrelated_integrity_error(r3b, r3b_http, monkeypatch):
+    from app.api.v1.endpoints import projects
+
+    path, _, db = r3b
+    project, _, _ = _graph(db)
+
+    def unrelated_integrity_error(*_args, **_kwargs):
+        raise IntegrityError("DELETE", {}, RuntimeError("unrelated constraint"))
+
+    monkeypatch.setattr(projects, "delete_task_owned_graph", unrelated_integrity_error)
+    response = r3b_http.delete(f"/api/v1/projects/{project.id}")
+
+    assert response.status_code == 500
+    assert _raw(path, "SELECT deleted_at FROM projects") == [(None,)]
 
 
 # 9.5 Concurrency -------------------------------------------------------------

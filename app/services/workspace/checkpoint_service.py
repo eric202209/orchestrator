@@ -827,6 +827,30 @@ class CheckpointService:
             )
             return deleted_count
 
+    def checkpoint_artifacts_remaining(self, session_id: int) -> list[str]:
+        """Return checkpoint paths that remain after a cleanup attempt."""
+
+        remaining: list[str] = []
+        for root in self._candidate_checkpoint_roots():
+            try:
+                remaining.extend(
+                    str(path)
+                    for path in root.glob(f"session_{session_id}_*.json")
+                    if path.exists()
+                )
+                for session_dir in self._session_checkpoint_dirs(session_id):
+                    if session_dir.exists():
+                        remaining.extend(
+                            str(path)
+                            for path in session_dir.rglob("*")
+                            if path.is_file()
+                        )
+                        if not any(session_dir.iterdir()):
+                            remaining.append(str(session_dir))
+            except OSError as exc:
+                remaining.append(f"{root}: {exc}")
+        return sorted(set(remaining))
+
     def cleanup_old_checkpoints(
         self, session_id: int, keep_latest: int = 3, max_age_hours: int = 24
     ) -> Dict[str, Any]:

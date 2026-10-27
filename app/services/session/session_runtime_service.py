@@ -60,8 +60,10 @@ from app.task_intent import normalize_task_intent
 from app.services.tasks.service import TaskService
 from app.services.execution.workflow_lifecycle import (
     BindingKind,
+    WorkflowLifecycleError,
     bind_continuation,
     bind_new_root,
+    require_binding_outcome,
 )
 from app.services.tasks.execution import (
     ProjectExecutionSerializationConflict,
@@ -645,14 +647,77 @@ def queue_task_for_session(
     # The attempt is committed; R3A binds it on its own connection. Recovery
     # inherits only from the explicit failed parent; fresh work is a root.
     if continuation_kind == "automatic_recovery":
-        bind_continuation(
+        binding_outcome = bind_continuation(
             db,
             task_execution.id,
             parent_task_execution_id=recovery_parent_task_execution_id,
             binding_kind=BindingKind.RECOVERY,
         )
+        binding_kind = BindingKind.RECOVERY
     elif not e3_continuation_dispatch:
-        bind_new_root(db, task_execution.id)
+        binding_outcome = bind_new_root(db, task_execution.id)
+        binding_kind = BindingKind.ROOT
+    else:
+        binding_outcome = None
+        binding_kind = BindingKind.RECOVERY
+
+    try:
+        require_binding_outcome(binding_outcome, binding_kind=binding_kind)
+    except WorkflowLifecycleError as exc:
+        completed_at = datetime.now(timezone.utc)
+        failure = f"Workflow identity binding failed: {exc.reason}"
+        task_execution.failure_category = "workflow_binding_failed"
+        mark_task_attempt_failed(
+            task=task,
+            session_task_link=session_task_link,
+            task_execution=task_execution,
+            error_message=failure,
+            completed_at=completed_at,
+        )
+        mark_session_paused(
+            session,
+            alert_level="error",
+            alert_message=failure,
+            paused_at=completed_at,
+        )
+        db.add(
+            LogEntry(
+                session_id=session.id,
+                session_instance_id=session.instance_id,
+                task_id=task.id,
+                task_execution_id=task_execution.id,
+                level="ERROR",
+                message="Task not published because workflow identity binding failed",
+                log_metadata=json.dumps(
+                    {
+                        "event_type": "workflow_binding_failed",
+                        "failure_category": "workflow_binding_failed",
+                        "binding_outcome": getattr(binding_outcome, "value", None),
+                        "task_execution_id": task_execution.id,
+                    }
+                ),
+            )
+        )
+        db.commit()
+        status_code = (
+            409
+            if any(
+                outcome in exc.reason
+                for outcome in (
+                    "OPEN_WORKFLOW_EXISTS",
+                    "WORKFLOW_INFERENCE_DEADLINE_EXCEEDED",
+                )
+            )
+            else 503
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": "WORKFLOW_BINDING_FAILED",
+                "reason": exc.reason,
+                "task_execution_id": task_execution.id,
+            },
+        ) from exc
 
     prior_status = task.status
     should_clear_saved_plan = prior_status in (
