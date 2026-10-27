@@ -2274,7 +2274,13 @@ def build_compact_planning_repair_prompt(
     source_materialization: Any = None,
     task_description: str = "",
 ) -> str:
-    if _is_stale_replace_repair(malformed_output, rejection_reasons):
+    stale_replace_failure = _is_stale_replace_repair(
+        malformed_output, rejection_reasons
+    )
+    stale_replace_only_failure = _is_stale_replace_only_repair(
+        malformed_output, rejection_reasons
+    )
+    if stale_replace_only_failure:
         return build_compact_stale_replace_repair_prompt(
             task_description=task_description,
             malformed_output=malformed_output,
@@ -2361,6 +2367,11 @@ def build_compact_planning_repair_prompt(
     )
     validation_guidance_block = _join_optional_blocks(
         render_planner_workspace_identity(workspace_identity),
+        _build_compound_stale_replace_repair_guidance(
+            stale_replace_failure=stale_replace_failure,
+            stale_replace_only_failure=stale_replace_only_failure,
+            has_other_rejection=_has_other_rejection_reason(rejection_reasons),
+        ),
         verification_source_mutation_guidance,
         materialization_preservation_guidance,
         grounded_source_edit_guidance,
@@ -2385,8 +2396,14 @@ def build_compact_planning_repair_prompt(
         else ""
     )
     targeted_source_edit_repair = bool(task_objective_line)
+    compound_stale_repair_guidance = _build_compound_stale_replace_repair_guidance(
+        stale_replace_failure=stale_replace_failure,
+        stale_replace_only_failure=stale_replace_only_failure,
+        has_other_rejection=_has_other_rejection_reason(rejection_reasons),
+    )
     source_edit_repair_contract = (
         f"Operation selection contract: {operation_choice_contract}\n"
+        f"{compound_stale_repair_guidance}\n"
         f"{python_definition_preservation_guidance}\n"
         if targeted_source_edit_repair
         else ""
@@ -3511,7 +3528,64 @@ def _is_stale_replace_repair(
     return (
         "stale_replace_ops_steps" in text
         or "replace_in_file old text not found" in text
+        or "stale_replace:" in text
+        or "replace_in_file.old_text is absent" in text
+        or "replace_in_file target missing" in text
         or "current file excerpt:" in text
+    )
+
+
+def _is_stale_replace_only_repair(
+    malformed_output: str,
+    rejection_reasons: Optional[list[str]],
+) -> bool:
+    """Use the narrow stale-only prompt only when no other rejection exists."""
+
+    if not _is_stale_replace_repair(malformed_output, rejection_reasons):
+        return False
+    reasons = [str(reason or "").strip() for reason in (rejection_reasons or [])]
+    reasons = [reason for reason in reasons if reason]
+    if not reasons:
+        return False
+    return all(_is_stale_replace_rejection_reason(reason) for reason in reasons)
+
+
+def _is_stale_replace_rejection_reason(reason: str) -> bool:
+    lowered = str(reason or "").lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "stale_replace",
+            "replace_in_file old text not found",
+            "replace_in_file.old_text is absent",
+            "replace_in_file target missing",
+        )
+    )
+
+
+def _has_other_rejection_reason(rejection_reasons: Optional[list[str]]) -> bool:
+    reasons = [str(reason or "").strip() for reason in (rejection_reasons or [])]
+    return any(
+        reason and not _is_stale_replace_rejection_reason(reason) for reason in reasons
+    )
+
+
+def _build_compound_stale_replace_repair_guidance(
+    *,
+    stale_replace_failure: bool,
+    stale_replace_only_failure: bool,
+    has_other_rejection: bool,
+) -> str:
+    if (
+        not stale_replace_failure
+        or stale_replace_only_failure
+        or not has_other_rejection
+    ):
+        return ""
+    return (
+        "Compound validator repair: correct every listed rejection, including "
+        "the stale replace finding; do not limit the repair to that operation. "
+        "Do not reuse missing old text or invent an anchor."
     )
 
 
