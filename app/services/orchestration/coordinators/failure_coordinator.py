@@ -43,6 +43,7 @@ from app.services.orchestration.lifecycle.transitions import (
     schedule_continuation,
 )
 from app.services.tasks.execution import create_task_execution
+from app.services.execution.workflow_lifecycle import close_task_workflow
 from app.services.orchestration.state.persistence import (
     record_live_log,
     save_orchestration_checkpoint,
@@ -128,6 +129,13 @@ def _finalize_logical_failure_fenced(
             expected_task_execution_id=expected_task_execution_id,
             commit=commit,
         )
+        if commit:
+            # Authoritative terminal failure is durable; R3A writes after it.
+            close_task_workflow(
+                db,
+                getattr(task_execution, "id", None),
+                reason="logical_failure",
+            )
         return True
     except LifecycleTransitionError as fence_error:
         db.rollback()
@@ -1012,6 +1020,9 @@ class FailureCoordinator:
                     continuation_kind="automatic_recovery",
                     continuation_retry_count=retry_count + 1,
                     recovery_error_message=recovery_error_message,
+                    recovery_parent_task_execution_id=getattr(
+                        task_execution, "id", None
+                    ),
                 )
                 if (
                     recovery_started
@@ -1145,6 +1156,7 @@ class FailureCoordinator:
                 task_id,
             )
 
+        terminal_workflow_execution_id = None
         if session and not operator_pause_requested:
             current_session_status = status_value(getattr(session, "status", None))
             continuation_is_pending = (
@@ -1214,8 +1226,13 @@ class FailureCoordinator:
                     # Same transaction as the fence, so the operator alert the
                     # legacy pause used to carry lands only for the owner.
                     set_session_alert(session, "error", alert_message[:2000])
+                if finalized:
+                    terminal_workflow_execution_id = getattr(task_execution, "id", None)
 
         db.commit()
+        close_task_workflow(
+            db, terminal_workflow_execution_id, reason="logical_failure"
+        )
         write_project_state_snapshot_fn(db, project, task, session_id)
 
         if session:

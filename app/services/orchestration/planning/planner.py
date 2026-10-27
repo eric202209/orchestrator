@@ -2023,6 +2023,9 @@ class PlannerService:
         response_evidence_correlation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
+        from app.services.execution.workflow_lifecycle import (
+            propagate_workflow_identity,
+        )
 
         if low_resource_single_model_enabled():
             # A single-model policy may retry only through the already
@@ -2051,6 +2054,9 @@ class PlannerService:
                         attribute,
                         getattr(runtime_service, attribute),
                     )
+            propagate_workflow_identity(
+                runtime_service, repair_runtime, BackendRole.REPAIR
+            )
             runtime_context = getattr(runtime_service, "runtime_executor_context", None)
             if runtime_context is not None and hasattr(
                 repair_runtime, "bind_runtime_workspace"
@@ -2114,6 +2120,9 @@ class PlannerService:
                             attribute,
                             getattr(runtime_service, attribute),
                         )
+                propagate_workflow_identity(
+                    runtime_service, fallback_runtime, BackendRole.REPAIR
+                )
 
             fallback_bound = False
             runtime_context = getattr(runtime_service, "runtime_executor_context", None)

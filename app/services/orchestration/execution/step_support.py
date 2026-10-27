@@ -298,6 +298,9 @@ def repair_step_commands_with_self_correction(
                 BackendRole,
                 create_agent_runtime,
             )
+            from app.services.execution.workflow_lifecycle import (
+                propagate_workflow_identity,
+            )
 
             runtime_context = getattr(runtime_service, "runtime_executor_context", None)
             if getattr(runtime_service, "execution_cwd_override", None) and (
@@ -322,6 +325,9 @@ def repair_step_commands_with_self_correction(
                                 attribute,
                                 getattr(runtime_service, attribute),
                             )
+                    propagate_workflow_identity(
+                        runtime_service, fallback_runtime, BackendRole.DEBUG_REPAIR
+                    )
                     if runtime_context is not None and hasattr(
                         fallback_runtime, "bind_runtime_workspace"
                     ):

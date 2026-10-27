@@ -106,6 +106,16 @@ class Settings(BaseSettings):
     ONE_SHOT_SUPERVISOR_SOCKET: Optional[str] = None
     ONE_SHOT_SUPERVISOR_UID: Optional[str] = None
 
+    # Phase 40E-4R3B-1 workflow budget lifecycle binding. Disabled by default:
+    # no workflow is created and every attempt stays LEGACY_UNENFORCED. When
+    # enabled, the policy fields must form a valid R3A policy or every
+    # lifecycle boundary fails closed; nothing here is a default budget.
+    WORKFLOW_BUDGET_ENFORCEMENT_ENABLED: bool = False
+    WORKFLOW_BUDGET_POLICY_ID: str = ""
+    WORKFLOW_BUDGET_POLICY_VERSION: str = ""
+    WORKFLOW_BUDGET_MAX_REQUESTS: int = 0
+    WORKFLOW_BUDGET_MAX_DURATION_SECONDS: int = 0
+
     @field_validator("DATABASE_URL")
     @classmethod
     def normalize_database_url(cls, value: str) -> str:

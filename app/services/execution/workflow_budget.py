@@ -5,8 +5,9 @@ snapshot, one absolute ``deadline_at``, and one cumulative reservation
 counter. Every write runs on a dedicated SQLite connection whose first
 statement is ``BEGIN IMMEDIATE``; the trusted clock is sampled only after the
 write lock is held, and each transaction commits before returning. Nothing
-here performs network I/O, and no API, Worker, or provider adapter path calls
-this module yet (R3B integrates it).
+here performs network I/O, and no provider adapter path calls this module
+(R3B-2 integrates reservations). R3B-1 lifecycle binding reaches it only
+through ``workflow_lifecycle`` and only while enforcement is enabled.
 
 Guarantee: at-most-budgeted local dispatch authorization with conservative
 accounting. A committed ``DISPATCH_STARTED`` marker cannot prove the provider
@@ -35,6 +36,7 @@ from app.models import (
     ProviderRequestReservation,
     Session as SessionModel,
     TaskExecution,
+    TaskStatus,
     WorkflowBudget,
     WorkflowTaskExecutionBinding,
 )
@@ -119,6 +121,8 @@ class BudgetOutcome(str, Enum):
     IDEMPOTENCY_CONFLICT = "IDEMPOTENCY_CONFLICT"
     INVALID_TRANSITION = "INVALID_TRANSITION"
     TERMINAL_CONFLICT = "TERMINAL_CONFLICT"
+    ATTEMPT_ACTIVE = "ATTEMPT_ACTIVE"
+    OPEN_WORKFLOW_EXISTS = "OPEN_WORKFLOW_EXISTS"
     DATABASE_BUSY = "DATABASE_BUSY"
     COMMIT_UNCERTAIN = "COMMIT_UNCERTAIN"
     SCHEMA_UNAVAILABLE = "SCHEMA_UNAVAILABLE"
@@ -191,6 +195,18 @@ class BindingResult:
     workflow_uuid: str | None = None
     binding_kind: str | None = None
     reconciled: bool = False
+
+
+@dataclass(frozen=True)
+class BindingState:
+    task_execution_id: int
+    workflow_uuid: str
+    binding_kind: str
+    parent_task_execution_id: int | None
+    session_id: int
+    session_instance_id: str
+    task_id: int
+    attempt_number: int
 
 
 @dataclass(frozen=True)
@@ -581,12 +597,18 @@ def create_task_execution_workflow(
     policy: WorkflowBudgetPolicy,
     *,
     root_task_execution_id: int,
+    exclusive_open_task: bool = False,
 ) -> WorkflowResult:
     """Create, or idempotently return, the workflow rooted at one attempt.
 
     The root is an explicit decision by the caller: the first attempt of a
     new logical Task run. The workflow and its ROOT binding commit together.
     An attempt already bound to any workflow can never become a second root.
+
+    ``exclusive_open_task`` refuses (``OPEN_WORKFLOW_EXISTS``) while the same
+    Task still has an OPEN workflow before its deadline, checked in the same
+    write transaction, so a pause/resume cannot mint a fresh budget. It never
+    inherits that workflow: refusal leaves the attempt unbound.
     """
 
     _require_enforced(policy, WorkflowKind.TASK_EXECUTION)
@@ -625,6 +647,24 @@ def create_task_execution_workflow(
         ).first()
         if attempt is None or not attempt.instance_id:
             return WorkflowResult(BudgetOutcome.IDENTITY_CONFLICT), False
+        if exclusive_open_task:
+            live = connection.execute(
+                select(_WF)
+                .where(
+                    _WF.c.task_id == attempt.task_id,
+                    _WF.c.workflow_kind == WorkflowKind.TASK_EXECUTION.value,
+                    _WF.c.status == "OPEN",
+                    _WF.c.deadline_at > observed_at,
+                )
+                .order_by(_WF.c.created_at)
+            ).first()
+            if live is not None:
+                return (
+                    WorkflowResult(
+                        BudgetOutcome.OPEN_WORKFLOW_EXISTS, _workflow_state(live)
+                    ),
+                    False,
+                )
         values = _workflow_values(policy, observed_at)
         values.update(
             project_id=attempt.project_id,
@@ -910,6 +950,49 @@ def resolve_planning_session_workflow(
     return _workflow_state(_fresh_read(_read_engine(db), read))
 
 
+def resolve_task_execution_binding(
+    db: Session, task_execution_id: int
+) -> BindingState | None:
+    """Read-only binding snapshot; ``None`` means the attempt is unbound."""
+
+    _require_id(task_execution_id, "task_execution_id")
+    row = _fresh_read(
+        _read_engine(db),
+        lambda connection: _load_binding(connection, task_execution_id),
+    )
+    if row is None:
+        return None
+    return BindingState(
+        task_execution_id=row.task_execution_id,
+        workflow_uuid=row.workflow_uuid,
+        binding_kind=row.binding_kind,
+        parent_task_execution_id=row.parent_task_execution_id,
+        session_id=row.session_id,
+        session_instance_id=row.session_instance_id,
+        task_id=row.task_id,
+        attempt_number=row.attempt_number,
+    )
+
+
+def open_session_workflow_uuids(db: Session, session_id: int) -> tuple[str, ...]:
+    """OPEN TASK_EXECUTION workflows owned by one Session, oldest first."""
+
+    _require_id(session_id, "session_id")
+
+    def read(connection: Connection):
+        return connection.execute(
+            select(_WF.c.workflow_uuid)
+            .where(
+                _WF.c.session_id == session_id,
+                _WF.c.workflow_kind == WorkflowKind.TASK_EXECUTION.value,
+                _WF.c.status == "OPEN",
+            )
+            .order_by(_WF.c.created_at, _WF.c.workflow_uuid)
+        ).all()
+
+    return tuple(row.workflow_uuid for row in _fresh_read(_read_engine(db), read))
+
+
 def budget_enforcement_status(db: Session, *, task_execution_id: int) -> str:
     """``ENFORCED`` only when a durable ENFORCED budget owns the attempt."""
 
@@ -918,8 +1001,15 @@ def budget_enforcement_status(db: Session, *, task_execution_id: int) -> str:
     return ENFORCED
 
 
-def close_workflow(db: Session, workflow_uuid: str) -> WorkflowResult:
-    """OPEN→CLOSED: no further reservations or attempt bindings are accepted."""
+def close_workflow(
+    db: Session, workflow_uuid: str, *, require_quiescent: bool = False
+) -> WorkflowResult:
+    """OPEN→CLOSED: no further reservations or attempt bindings are accepted.
+
+    ``require_quiescent`` refuses (``ATTEMPT_ACTIVE``) while any bound attempt
+    is PENDING or RUNNING, checked inside the same write transaction, so a
+    pending retry, recovery, or in-attempt Completion Repair keeps it OPEN.
+    """
 
     _require_label(workflow_uuid, "workflow_uuid")
     engine = _engine(db)
@@ -933,6 +1023,22 @@ def close_workflow(db: Session, workflow_uuid: str) -> WorkflowResult:
                 WorkflowResult(BudgetOutcome.ALREADY_CLOSED, _workflow_state(row)),
                 False,
             )
+        if require_quiescent:
+            active = connection.execute(
+                select(func.count())
+                .select_from(_BIND.join(_TE, _TE.c.id == _BIND.c.task_execution_id))
+                .where(
+                    _BIND.c.workflow_uuid == workflow_uuid,
+                    _TE.c.status.in_(
+                        (TaskStatus.PENDING.name, TaskStatus.RUNNING.name)
+                    ),
+                )
+            ).scalar_one()
+            if active:
+                return (
+                    WorkflowResult(BudgetOutcome.ATTEMPT_ACTIVE, _workflow_state(row)),
+                    False,
+                )
         connection.execute(
             update(_WF)
             .where(_WF.c.workflow_uuid == workflow_uuid, _WF.c.status == "OPEN")

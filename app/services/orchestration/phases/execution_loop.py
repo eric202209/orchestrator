@@ -2493,6 +2493,9 @@ def execute_step_loop(
                 BackendRole,
                 create_agent_runtime,
             )
+            from app.services.execution.workflow_lifecycle import (
+                propagate_workflow_identity,
+            )
 
             candidate = create_agent_runtime(
                 ctx.db,
@@ -2507,6 +2510,9 @@ def execute_step_loop(
                     candidate, attribute
                 ):
                     setattr(candidate, attribute, getattr(runtime_service, attribute))
+            propagate_workflow_identity(
+                runtime_service, candidate, BackendRole.DEBUG_REPAIR
+            )
             runtime_context = getattr(runtime_service, "runtime_executor_context", None)
             if runtime_context is not None:
                 debug_repair_runtime_context = runtime_context

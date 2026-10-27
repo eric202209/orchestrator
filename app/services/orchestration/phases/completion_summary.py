@@ -79,18 +79,27 @@ def build_workspace_evidence_block(
     return "\n".join(lines)
 
 
-async def _call_planning_lane(prompt: str, *, db: Any = None) -> str:
-    """Invoke the completion-summary repair lane through the role registry."""
+async def _call_planning_lane(
+    prompt: str, *, db: Any = None, owner_runtime: Any = None
+) -> str:
+    """Invoke the completion-summary repair lane through the role registry.
+
+    The summary is Task-scoped: its canonical owner is the attempt whose
+    runtime (``owner_runtime``) produced the completion, never the most
+    recent TaskExecution and never a separate budget.
+    """
 
     if db is None:
         raise RuntimeError(
             "Completion summary requires a database-backed repair runtime"
         )
     from app.services.agents.agent_runtime import BackendRole, create_agent_runtime
+    from app.services.execution.workflow_lifecycle import propagate_workflow_identity
 
     runtime = create_agent_runtime(
         db, session_id=None, task_id=None, role=BackendRole.REPAIR
     )
+    propagate_workflow_identity(owner_runtime, runtime, BackendRole.REPAIR)
     result = await runtime.invoke_prompt(
         prompt,
         timeout_seconds=SUMMARY_TIMEOUT_SECONDS,
@@ -152,7 +161,11 @@ def _generate_task_summary_with_fallback(
     try:
         output = asyncio.run(
             asyncio.wait_for(
-                _call_planning_lane(summary_prompt, db=ctx.db),
+                _call_planning_lane(
+                    summary_prompt,
+                    db=ctx.db,
+                    owner_runtime=getattr(ctx, "runtime_service", None),
+                ),
                 timeout=float(SUMMARY_TIMEOUT_SECONDS),
             )
         )

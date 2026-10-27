@@ -65,6 +65,7 @@ from app.services.orchestration.state.session_state import (
     resolve_session_transition,
     SessionStatus,
 )
+from app.services.execution.workflow_lifecycle import close_session_workflows
 from app.services.tasks.service import TaskService
 from app.services.tasks.execution import (
     ProjectExecutionSerializationConflict,
@@ -1780,6 +1781,8 @@ async def stop_session_lifecycle(
             )
         )
         db.commit()
+        # Stop terminalized every attempt; the Session's logical runs end.
+        close_session_workflows(db, session_id, reason="session_stopped")
 
         db.add(
             LogEntry(

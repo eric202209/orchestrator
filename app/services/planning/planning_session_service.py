@@ -33,6 +33,12 @@ from app.services.agents.agent_runtime import (
     runtime_reports_context_overflow,
 )
 from app.services.agents.interfaces import AgentRuntimeError
+from app.services.execution.workflow_lifecycle import (
+    bind_planning_root,
+    close_planning_workflow,
+    planning_identity_scope,
+    require_planning_identity,
+)
 from app.services.model_adaptation import render_prompt_for_profile
 from app.services.model_adaptation.schemas import PromptEnvelope
 from app.services.engineering_context import (
@@ -233,6 +239,8 @@ class PlanningSessionService:
             self.db.flush()
             self._persist_protocol_v2_manifest(session, project, initial_message)
         self.db.commit()
+        # The committed generation owns its own PLANNING_SESSION workflow.
+        bind_planning_root(self.db, session.id)
         self.schedule_processing(session.id)
         self.db.refresh(session)
         return session
@@ -511,6 +519,7 @@ class PlanningSessionService:
             self.db.commit()
             self.db.refresh(session)
             self._revoke_processing_task(processing_task_id)
+            close_planning_workflow(self.db, session.id, reason="planning_cancelled")
         return session
 
     def delete_terminal_session(self, session_id: int) -> None:
@@ -653,23 +662,33 @@ class PlanningSessionService:
         session = claim
         try:
             project = session.project
-            if session.protocol_version == PROTOCOL_V2:
-                self._advance_protocol_v2(
-                    session,
-                    generation_id=generation_id,
-                    owner_token=owner_token,
-                )
-            else:
-                self._advance_or_finalize(
-                    session,
-                    project,
-                    generation_id=generation_id,
-                    owner_token=owner_token,
-                )
+            # Enforced: this generation must own an OPEN workflow before any
+            # provider request; disabled returns None without a query.
+            workflow_identity = require_planning_identity(
+                self.db, session.id, generation_id
+            )
+            with planning_identity_scope(workflow_identity):
+                if session.protocol_version == PROTOCOL_V2:
+                    self._advance_protocol_v2(
+                        session,
+                        generation_id=generation_id,
+                        owner_token=owner_token,
+                    )
+                else:
+                    self._advance_or_finalize(
+                        session,
+                        project,
+                        generation_id=generation_id,
+                        owner_token=owner_token,
+                    )
             self._assert_owner(session.id, generation_id, owner_token)
             self._clear_processing_lease(session)
             self.db.commit()
             self.db.refresh(session)
+            if session.status == "completed":
+                close_planning_workflow(
+                    self.db, session.id, reason="planning_completed"
+                )
             return session
         except StalePlanningOwnerError as exc:
             self.db.rollback()
@@ -697,6 +716,7 @@ class PlanningSessionService:
                 self._clear_processing_lease(session)
                 self.db.commit()
                 self.db.refresh(session)
+                close_planning_workflow(self.db, session.id, reason="planning_failed")
                 return session
             except StalePlanningOwnerError as stale:
                 self.db.rollback()

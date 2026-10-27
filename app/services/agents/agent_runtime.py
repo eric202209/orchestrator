@@ -1311,6 +1311,14 @@ def invoke_runtime_prompt(
         runtime.project_id = project_id
     if task_execution_id is not None and hasattr(runtime, "task_execution_id"):
         runtime.task_execution_id = task_execution_id
+    # Interactive Planning carries its claimed generation's workflow identity
+    # in a scope; outside that scope (or while disabled) this is a no-op.
+    from app.services.execution.workflow_lifecycle import (
+        attach_workflow_identity,
+        current_planning_identity,
+    )
+
+    attach_workflow_identity(runtime, current_planning_identity(), role)
     configuration = getattr(runtime, "runtime_configuration", None)
     descriptor = getattr(runtime, "backend_descriptor", None)
     diagnostics_context = {

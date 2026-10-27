@@ -7,6 +7,10 @@ from datetime import UTC, datetime
 from typing import Any, Callable, Dict, Optional
 
 from app.models import LogEntry, SessionTask, Task, TaskExecution, TaskStatus
+from app.services.execution.workflow_lifecycle import (
+    bind_new_root,
+    close_task_workflow,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.diagnostics.outcome_observability import (
     bounded_exception_message,
@@ -278,6 +282,8 @@ class TaskCompletionFinalizer:
             "success",
             {"authoritative_success_recorded": True},
         )
+        # The success is durable, so this Task's logical run is finished.
+        close_task_workflow(db, ctx.task_execution_id, reason="task_succeeded")
         try:
             write_project_state_snapshot_fn(db, project, task, session_id)
         except Exception as snapshot_error:
@@ -387,6 +393,8 @@ class TaskCompletionFinalizer:
                 )
             )
             db.commit()
+            # Auto-advance starts the next Task's own logical run.
+            bind_new_root(db, next_task_execution.id)
             execute_orchestration_task_delay_fn(
                 session_id=session_id,
                 task_id=next_task.id,

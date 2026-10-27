@@ -1174,7 +1174,7 @@ def test_budget_module_has_no_provider_or_network_path(r3a, monkeypatch):
     reconcile_stale_reservations(db, stale_after_seconds=1)
     assert _counter(path, workflow.workflow_uuid) == 1
 
-    # No application module outside the tests imports the service yet.
+    # R3B-1: only the lifecycle adapter imports the service; no provider path.
     app_root = Path(wb.__file__).resolve().parents[2]
 
     def imports_service(candidate: Path) -> bool:
@@ -1198,7 +1198,7 @@ def test_budget_module_has_no_provider_or_network_path(r3a, monkeypatch):
         for candidate in app_root.rglob("*.py")
         if "tests" not in candidate.parts and imports_service(candidate)
     ]
-    assert callers == []
+    assert callers == ["services/execution/workflow_lifecycle.py"]
 
 
 # Policy -----------------------------------------------------------------------

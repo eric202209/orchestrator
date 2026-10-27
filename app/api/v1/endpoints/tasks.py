@@ -42,6 +42,7 @@ from app.services.tasks.execution import (
     create_task_execution,
     project_execution_serialization_admission,
 )
+from app.services.execution.workflow_lifecycle import bind_new_root
 from app.services.tasks.service import TaskService
 from app.task_intent import normalize_task_intent
 from app.services.tasks.task_deletion import delete_task_owned_graph
@@ -245,6 +246,8 @@ def _resume_automatic_chain_after_promotion(
         )
     )
     db.commit()
+    # Promotion starts the next Task's own logical run.
+    bind_new_root(db, next_execution.id)
     execute_orchestration_task.delay(
         session_id=session.id,
         task_id=next_task.id,
@@ -754,6 +757,8 @@ def _queue_task_retry(
         )
     )
     db.commit()
+    # An operator rerun is a new logical run, never an inherited retry.
+    bind_new_root(db, task_execution.id)
 
     try:
         result = execute_orchestration_task.delay(

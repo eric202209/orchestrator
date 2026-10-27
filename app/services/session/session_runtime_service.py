@@ -58,6 +58,11 @@ from app.services.workspace.project_isolation_service import (
 from app.services.orchestration.prompt_templates import OrchestrationState
 from app.task_intent import normalize_task_intent
 from app.services.tasks.service import TaskService
+from app.services.execution.workflow_lifecycle import (
+    BindingKind,
+    bind_continuation,
+    bind_new_root,
+)
 from app.services.tasks.execution import (
     ProjectExecutionSerializationConflict,
     create_task_execution,
@@ -484,6 +489,7 @@ def queue_task_for_session(
     continuation_retry_count: Optional[int] = None,
     continuation_retry_eta: Optional[datetime] = None,
     recovery_error_message: Optional[str] = None,
+    recovery_parent_task_execution_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     from app.tasks.worker import execute_orchestration_task
 
@@ -635,6 +641,18 @@ def queue_task_for_session(
     except ProjectExecutionSerializationConflict as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # The attempt is committed; R3A binds it on its own connection. Recovery
+    # inherits only from the explicit failed parent; fresh work is a root.
+    if continuation_kind == "automatic_recovery":
+        bind_continuation(
+            db,
+            task_execution.id,
+            parent_task_execution_id=recovery_parent_task_execution_id,
+            binding_kind=BindingKind.RECOVERY,
+        )
+    elif not e3_continuation_dispatch:
+        bind_new_root(db, task_execution.id)
 
     prior_status = task.status
     should_clear_saved_plan = prior_status in (

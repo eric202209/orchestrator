@@ -36,6 +36,11 @@ from app.services import (
 )
 from app.config import settings
 from app.services.execution.process_identity import current_worker_identity
+from app.services.execution.workflow_lifecycle import (
+    attach_workflow_identity,
+    close_task_workflow,
+    require_dispatch_identity,
+)
 
 
 def _runtime_worker_identity() -> tuple[str, str, str, int]:
@@ -1333,6 +1338,9 @@ def execute_orchestration_task(
                         failure_reason=capacity_failure_reason,
                     )
                     db.commit()
+                    close_task_workflow(
+                        db, task_execution_id, reason="backend_capacity_exhausted"
+                    )
                     return {
                         "status": "failed",
                         "reason": "backend_capacity_limit",
@@ -1580,6 +1588,14 @@ def execute_orchestration_task(
         # later lifecycle handoff is fenced on this exact value so an old
         # worker cannot reconcile a newer Session generation.
         _claimed_session_instance_id = session.instance_id
+        # Phase 40E-4R3B-1: under enforcement the claimed attempt must own an
+        # OPEN workflow bound in this generation, refused before any provider
+        # request (retry-exempt). Disabled: None, with no database access.
+        _workflow_identity = require_dispatch_identity(
+            db,
+            task_execution=task_execution,
+            session_instance_id=_claimed_session_instance_id,
+        )
 
         claimed_details = _build_claimed_details(
             session_instance_id=session.instance_id,
@@ -2077,6 +2093,9 @@ def execute_orchestration_task(
         )
         if hasattr(runtime_service, "task_execution_id"):
             runtime_service.task_execution_id = task_execution_id
+        attach_workflow_identity(
+            runtime_service, _workflow_identity, BackendRole.EXECUTION
+        )
         # Phase 23C/23D (F15): single resolved runtime path -- the execution
         # runtime must use the same Runtime Executor Context path already
         # set on orchestration_state.project_dir, not re-derive its own.
@@ -2111,6 +2130,9 @@ def execute_orchestration_task(
             )
             if hasattr(planning_runtime_service, "task_execution_id"):
                 planning_runtime_service.task_execution_id = task_execution_id
+            attach_workflow_identity(
+                planning_runtime_service, _workflow_identity, BackendRole.PLANNING
+            )
             # Planning is a separate role-owned runtime and must receive the
             # same immutable Runtime Executor Context as execution. Without
             # this binding, execute_task_with_streaming re-derived the
@@ -3255,6 +3277,9 @@ def execute_orchestration_task(
                         alert_message=failure_reason[:2000],
                     )
             db.commit()
+            if failure_reason == TerminalReason.VERIFICATION_FAILED:
+                # Terminal; a paused Session keeps its workflow OPEN.
+                close_task_workflow(db, task_execution_id, reason="verification_failed")
         elif step_loop_result.get("status") == "completed":
             _emit_task1_product_event(
                 "task1_execution_succeeded",

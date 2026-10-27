@@ -159,6 +159,9 @@ DEFAULT_AFFECTED_MODULES = (
     "app.services.execution.one_shot_authorization",
     # F2: the Worker's trusted Supervisor adapter.
     "app.services.execution.one_shot_supervisor_client",
+    # 40E-4R3B-1: Worker admission/lifecycle binding and its R3A service.
+    "app.services.execution.workflow_lifecycle",
+    "app.services.execution.workflow_budget",
     "app.tasks.worker_support.workspace",
     "app.services.orchestration.events.event_types",
     "app.services.orchestration.error_handler",

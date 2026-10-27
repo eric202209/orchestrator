@@ -679,6 +679,18 @@ def _attempt_completion_repair(
                 _cr_fast_runtime, "bind_runtime_workspace"
             ):
                 _cr_fast_runtime.bind_runtime_workspace(_parent_context)
+            # Completion Repair runs inside the parent attempt and keeps its
+            # TaskExecution and workflow identity.
+            from app.services.agents.agent_runtime import BackendRole
+            from app.services.execution.workflow_lifecycle import (
+                propagate_workflow_identity,
+            )
+
+            propagate_workflow_identity(
+                getattr(ctx, "runtime_service", None),
+                _cr_fast_runtime,
+                BackendRole.COMPLETION_REPAIR,
+            )
             _cr_fast_profile = _cr_configured_backend or "single_model"
         except Exception as _cr_fast_err:
             if _cr_single_model:
