@@ -5195,3 +5195,243 @@ def _guard_one_shot_claim_update(mapper, connection, target):
 @event.listens_for(OneShotAuthorizationClaim, "before_delete")
 def _guard_one_shot_claim_delete(mapper, connection, target):
     raise RuntimeError("OneShotAuthorizationClaim evidence is retained")
+
+
+class WorkflowBudget(Base):
+    """Durable provider-request budget owner for one logical workflow (R3A).
+
+    A ``TASK_EXECUTION`` workflow is rooted at the first TaskExecution of one
+    Task run within one Session generation; retries and recoveries bind to it
+    explicitly. A ``PLANNING_SESSION`` workflow is rooted at one immutable
+    PlanningSession generation. The policy snapshot and ``deadline_at`` are
+    fixed at creation; only ``reserved_requests`` (+1 per reservation) and the
+    OPEN→CLOSED status may change. No production path creates these rows yet.
+    """
+
+    __tablename__ = "workflow_budgets"
+
+    workflow_uuid = Column(String(36), primary_key=True)
+    workflow_kind = Column(String(32), nullable=False)
+    project_id = Column(
+        Integer, ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False
+    )
+    session_id = Column(
+        Integer, ForeignKey("sessions.id", ondelete="RESTRICT"), nullable=True
+    )
+    session_instance_id = Column(String(36), nullable=True)
+    task_id = Column(
+        Integer, ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=True
+    )
+    root_task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    planning_session_id = Column(
+        Integer,
+        ForeignKey("planning_sessions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    planning_generation_id = Column(String(36), nullable=True)
+    policy_id = Column(String(64), nullable=False)
+    policy_version = Column(String(32), nullable=False)
+    enforcement_mode = Column(String(16), nullable=False)
+    max_requests = Column(Integer, nullable=False)
+    max_duration_seconds = Column(Integer, nullable=False)
+    reserved_requests = Column(Integer, nullable=False, default=0)
+    status = Column(String(16), nullable=False)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    deadline_at = Column(DateTime(timezone=True), nullable=False)
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "root_task_execution_id", name="uq_workflow_budgets_root_execution"
+        ),
+        UniqueConstraint(
+            "planning_generation_id", name="uq_workflow_budgets_planning_generation"
+        ),
+        CheckConstraint(
+            "workflow_kind IN ('TASK_EXECUTION', 'PLANNING_SESSION')",
+            name="ck_workflow_budgets_kind",
+        ),
+        CheckConstraint(
+            "(workflow_kind = 'TASK_EXECUTION' AND session_id IS NOT NULL AND "
+            "session_instance_id IS NOT NULL AND task_id IS NOT NULL AND "
+            "root_task_execution_id IS NOT NULL AND planning_session_id IS NULL AND "
+            "planning_generation_id IS NULL) OR "
+            "(workflow_kind = 'PLANNING_SESSION' AND session_id IS NULL AND "
+            "session_instance_id IS NULL AND task_id IS NULL AND "
+            "root_task_execution_id IS NULL AND planning_session_id IS NOT NULL AND "
+            "planning_generation_id IS NOT NULL)",
+            name="ck_workflow_budgets_root_shape",
+        ),
+        CheckConstraint(
+            "enforcement_mode = 'ENFORCED'",
+            name="ck_workflow_budgets_enforced",
+        ),
+        CheckConstraint(
+            "max_requests >= 1 AND max_requests <= 1000",
+            name="ck_workflow_budgets_max_requests",
+        ),
+        CheckConstraint(
+            "max_duration_seconds >= 1 AND max_duration_seconds <= 604800",
+            name="ck_workflow_budgets_max_duration",
+        ),
+        CheckConstraint(
+            "reserved_requests >= 0 AND reserved_requests <= max_requests",
+            name="ck_workflow_budgets_reserved_bounds",
+        ),
+        CheckConstraint(
+            "deadline_at > created_at",
+            name="ck_workflow_budgets_deadline_after_create",
+        ),
+        CheckConstraint(
+            "(status = 'OPEN' AND closed_at IS NULL) OR "
+            "(status = 'CLOSED' AND closed_at IS NOT NULL)",
+            name="ck_workflow_budgets_status_shape",
+        ),
+        Index("ix_workflow_budgets_session_task", "session_id", "task_id"),
+        Index("ix_workflow_budgets_planning_session", "planning_session_id"),
+    )
+
+
+class WorkflowTaskExecutionBinding(Base):
+    """Immutable membership of one TaskExecution attempt in one workflow.
+
+    ROOT is written with the workflow; RETRY/RECOVERY bind a later attempt of
+    the same Session generation and Task to its parent's workflow, so a new
+    attempt never creates a fresh budget owner by itself.
+    """
+
+    __tablename__ = "workflow_task_execution_bindings"
+
+    task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    workflow_uuid = Column(
+        String(36),
+        ForeignKey("workflow_budgets.workflow_uuid", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    binding_kind = Column(String(16), nullable=False)
+    parent_task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    session_id = Column(Integer, nullable=False)
+    session_instance_id = Column(String(36), nullable=False)
+    task_id = Column(Integer, nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    bound_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "binding_kind IN ('ROOT', 'RETRY', 'RECOVERY')",
+            name="ck_workflow_bindings_kind",
+        ),
+        CheckConstraint(
+            "(binding_kind = 'ROOT' AND parent_task_execution_id IS NULL) OR "
+            "(binding_kind != 'ROOT' AND parent_task_execution_id IS NOT NULL AND "
+            "parent_task_execution_id != task_execution_id)",
+            name="ck_workflow_bindings_parent_shape",
+        ),
+        Index("ix_workflow_bindings_workflow", "workflow_uuid"),
+    )
+
+
+class ProviderRequestReservation(Base):
+    """One durable provider-request allowance consumed before dispatch.
+
+    Reservations are never deleted or refunded. ``DISPATCH_STARTED`` is a
+    local dispatch authorization committed before the network call; it cannot
+    prove the provider received the request, so ambiguous outcomes stay
+    consumed and are recorded as ``OUTCOME_UNKNOWN``.
+    """
+
+    __tablename__ = "provider_request_reservations"
+
+    reservation_uuid = Column(String(36), primary_key=True)
+    workflow_uuid = Column(
+        String(36),
+        ForeignKey("workflow_budgets.workflow_uuid", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    request_ordinal = Column(Integer, nullable=False)
+    idempotency_key = Column(String(128), nullable=False)
+    stage = Column(String(64), nullable=False)
+    runtime_role = Column(String(64), nullable=False)
+    task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    retry_of_reservation_uuid = Column(
+        String(36),
+        ForeignKey(
+            "provider_request_reservations.reservation_uuid", ondelete="RESTRICT"
+        ),
+        nullable=True,
+    )
+    status = Column(String(24), nullable=False)
+    outcome_code = Column(String(64), nullable=True)
+    reserved_at = Column(DateTime(timezone=True), nullable=False)
+    dispatch_started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_uuid",
+            "request_ordinal",
+            name="uq_provider_reservations_workflow_ordinal",
+        ),
+        UniqueConstraint(
+            "workflow_uuid",
+            "idempotency_key",
+            name="uq_provider_reservations_idempotency_key",
+        ),
+        CheckConstraint(
+            "request_ordinal >= 1", name="ck_provider_reservations_ordinal"
+        ),
+        CheckConstraint(
+            "length(idempotency_key) >= 1", name="ck_provider_reservations_key"
+        ),
+        CheckConstraint(
+            "status IN ('RESERVED', 'DISPATCH_STARTED', 'COMPLETED', 'FAILED', "
+            "'TIMED_OUT', 'CANCELLED', 'OUTCOME_UNKNOWN')",
+            name="ck_provider_reservations_status",
+        ),
+        CheckConstraint(
+            "(status = 'RESERVED' AND dispatch_started_at IS NULL AND "
+            "completed_at IS NULL) OR "
+            "(status = 'DISPATCH_STARTED' AND dispatch_started_at IS NOT NULL AND "
+            "completed_at IS NULL) OR "
+            "(status IN ('COMPLETED', 'FAILED', 'TIMED_OUT', 'OUTCOME_UNKNOWN') AND "
+            "dispatch_started_at IS NOT NULL AND completed_at IS NOT NULL) OR "
+            "(status = 'CANCELLED' AND completed_at IS NOT NULL)",
+            name="ck_provider_reservations_status_shape",
+        ),
+        Index("ix_provider_reservations_workflow_status", "workflow_uuid", "status"),
+        Index("ix_provider_reservations_status_reserved", "status", "reserved_at"),
+        Index("ix_provider_reservations_task_execution", "task_execution_id"),
+    )
+
+
+# Workflow budget rows are written only through Core statements in
+# app.services.execution.workflow_budget; ORM writes would bypass its
+# transaction contract.
+@event.listens_for(WorkflowBudget, "before_update")
+@event.listens_for(WorkflowTaskExecutionBinding, "before_update")
+@event.listens_for(ProviderRequestReservation, "before_update")
+def _guard_workflow_budget_orm_update(mapper, connection, target):
+    raise RuntimeError(f"{type(target).__name__} is written only by its service")
+
+
+@event.listens_for(WorkflowBudget, "before_delete")
+@event.listens_for(WorkflowTaskExecutionBinding, "before_delete")
+@event.listens_for(ProviderRequestReservation, "before_delete")
+def _guard_workflow_budget_orm_delete(mapper, connection, target):
+    raise RuntimeError(f"{type(target).__name__} evidence is retained")

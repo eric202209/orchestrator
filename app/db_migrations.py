@@ -16,7 +16,7 @@ import re
 import unicodedata
 import uuid
 
-from sqlalchemy import inspect, text
+from sqlalchemy import CheckConstraint, UniqueConstraint, inspect, text
 from sqlalchemy.engine import Engine
 
 MigrationFn = Callable[[Engine], None]
@@ -5691,6 +5691,378 @@ def _migration_058_one_shot_atomic_claim(engine: Engine) -> None:
     _verify_058_one_shot_atomic_claim(engine)
 
 
+_WORKFLOW_BUDGET_GUARDED_COLUMNS = (
+    "workflow_uuid",
+    "workflow_kind",
+    "project_id",
+    "session_id",
+    "session_instance_id",
+    "task_id",
+    "root_task_execution_id",
+    "planning_session_id",
+    "planning_generation_id",
+    "policy_id",
+    "policy_version",
+    "enforcement_mode",
+    "max_requests",
+    "max_duration_seconds",
+    "created_at",
+    "deadline_at",
+)
+_RESERVATION_GUARDED_COLUMNS = (
+    "reservation_uuid",
+    "workflow_uuid",
+    "request_ordinal",
+    "idempotency_key",
+    "stage",
+    "runtime_role",
+    "task_execution_id",
+    "retry_of_reservation_uuid",
+    "reserved_at",
+)
+_059_TABLES = (
+    "workflow_budgets",
+    "workflow_task_execution_bindings",
+    "provider_request_reservations",
+)
+
+
+def _059_trigger_statements() -> dict[str, str]:
+    """R3A guards: immutable policy/deadline, +1 counter, retained evidence.
+
+    Guards reference only the three R3A tables. SQLite re-validates every
+    trigger on ``ALTER TABLE``, so a trigger naming a core table that a
+    partial historical schema lacks would break unrelated later migrations.
+    Root/attempt existence is enforced by the RESTRICT foreign keys; matching
+    the live Session generation and attempt number is the service's check.
+    """
+
+    glob = _SQLITE_DATETIME_GLOB
+    return {
+        "trg_workflow_budget_insert_guard": f"""
+        CREATE TRIGGER trg_workflow_budget_insert_guard
+        BEFORE INSERT ON workflow_budgets
+        WHEN NOT (
+            NEW.reserved_requests = 0 AND
+            NEW.status = 'OPEN' AND
+            NEW.created_at GLOB '{glob}' AND
+            NEW.deadline_at GLOB '{glob}'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'workflow budget must start OPEN and unconsumed');
+        END
+        """,
+        "trg_workflow_budget_update_guard": f"""
+        CREATE TRIGGER trg_workflow_budget_update_guard
+        BEFORE UPDATE ON workflow_budgets
+        WHEN
+            {_identity_changed_sql(_WORKFLOW_BUDGET_GUARDED_COLUMNS)} OR
+            NOT (
+                (
+                    NEW.status = OLD.status AND
+                    NEW.closed_at IS OLD.closed_at AND
+                    OLD.status = 'OPEN' AND
+                    NEW.reserved_requests = OLD.reserved_requests + 1
+                ) OR (
+                    OLD.status = 'OPEN' AND
+                    NEW.status = 'CLOSED' AND
+                    NEW.closed_at GLOB '{glob}' AND
+                    NEW.reserved_requests = OLD.reserved_requests
+                )
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'workflow budget policy/deadline is immutable');
+        END
+        """,
+        "trg_workflow_budget_no_delete": """
+        CREATE TRIGGER trg_workflow_budget_no_delete
+        BEFORE DELETE ON workflow_budgets
+        BEGIN
+            SELECT RAISE(ABORT, 'workflow budget evidence is retained');
+        END
+        """,
+        "trg_workflow_binding_insert_guard": f"""
+        CREATE TRIGGER trg_workflow_binding_insert_guard
+        BEFORE INSERT ON workflow_task_execution_bindings
+        WHEN NOT (
+            NEW.bound_at GLOB '{glob}' AND
+            EXISTS (
+                SELECT 1 FROM workflow_budgets AS w
+                WHERE w.workflow_uuid = NEW.workflow_uuid
+                  AND w.workflow_kind = 'TASK_EXECUTION'
+                  AND w.status = 'OPEN'
+                  AND w.session_id = NEW.session_id
+                  AND w.session_instance_id = NEW.session_instance_id
+                  AND w.task_id = NEW.task_id
+            ) AND
+            (
+                (
+                    NEW.binding_kind = 'ROOT' AND
+                    EXISTS (
+                        SELECT 1 FROM workflow_budgets AS w
+                        WHERE w.workflow_uuid = NEW.workflow_uuid
+                          AND w.root_task_execution_id = NEW.task_execution_id
+                    )
+                ) OR (
+                    NEW.binding_kind IN ('RETRY', 'RECOVERY') AND
+                    EXISTS (
+                        SELECT 1 FROM workflow_task_execution_bindings AS p
+                        WHERE p.task_execution_id = NEW.parent_task_execution_id
+                          AND p.workflow_uuid = NEW.workflow_uuid
+                          AND p.attempt_number < NEW.attempt_number
+                    )
+                )
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'workflow attempt binding is invalid');
+        END
+        """,
+        "trg_workflow_binding_immutable": """
+        CREATE TRIGGER trg_workflow_binding_immutable
+        BEFORE UPDATE ON workflow_task_execution_bindings
+        BEGIN
+            SELECT RAISE(ABORT, 'workflow attempt binding is immutable');
+        END
+        """,
+        "trg_workflow_binding_no_delete": """
+        CREATE TRIGGER trg_workflow_binding_no_delete
+        BEFORE DELETE ON workflow_task_execution_bindings
+        BEGIN
+            SELECT RAISE(ABORT, 'workflow attempt binding evidence is retained');
+        END
+        """,
+        "trg_provider_reservation_insert_guard": f"""
+        CREATE TRIGGER trg_provider_reservation_insert_guard
+        BEFORE INSERT ON provider_request_reservations
+        WHEN NOT (
+            NEW.status = 'RESERVED' AND
+            NEW.dispatch_started_at IS NULL AND
+            NEW.completed_at IS NULL AND
+            NEW.outcome_code IS NULL AND
+            NEW.reserved_at GLOB '{glob}' AND
+            EXISTS (
+                SELECT 1 FROM workflow_budgets AS w
+                WHERE w.workflow_uuid = NEW.workflow_uuid
+                  AND w.status = 'OPEN'
+                  AND w.reserved_requests = NEW.request_ordinal
+                  AND NEW.reserved_at < w.deadline_at
+                  AND (
+                      (
+                          w.workflow_kind = 'TASK_EXECUTION' AND
+                          EXISTS (
+                              SELECT 1 FROM workflow_task_execution_bindings AS b
+                              WHERE b.task_execution_id = NEW.task_execution_id
+                                AND b.workflow_uuid = NEW.workflow_uuid
+                          )
+                      ) OR (
+                          w.workflow_kind = 'PLANNING_SESSION' AND
+                          NEW.task_execution_id IS NULL
+                      )
+                  )
+            ) AND
+            (
+                NEW.retry_of_reservation_uuid IS NULL OR
+                EXISTS (
+                    SELECT 1 FROM provider_request_reservations AS r
+                    WHERE r.reservation_uuid = NEW.retry_of_reservation_uuid
+                      AND r.workflow_uuid = NEW.workflow_uuid
+                )
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'provider request reservation was not consumed');
+        END
+        """,
+        "trg_provider_reservation_transition_guard": f"""
+        CREATE TRIGGER trg_provider_reservation_transition_guard
+        BEFORE UPDATE ON provider_request_reservations
+        WHEN
+            {_identity_changed_sql(_RESERVATION_GUARDED_COLUMNS)} OR
+            NOT (
+                (
+                    OLD.status = 'RESERVED' AND
+                    NEW.status = 'DISPATCH_STARTED' AND
+                    NEW.outcome_code IS NULL AND
+                    NEW.completed_at IS NULL AND
+                    NEW.dispatch_started_at GLOB '{glob}' AND
+                    EXISTS (
+                        SELECT 1 FROM workflow_budgets AS w
+                        WHERE w.workflow_uuid = NEW.workflow_uuid
+                          AND w.status = 'OPEN'
+                          AND NEW.dispatch_started_at < w.deadline_at
+                    )
+                ) OR (
+                    OLD.status = 'RESERVED' AND
+                    NEW.status = 'CANCELLED' AND
+                    NEW.dispatch_started_at IS NULL AND
+                    NEW.completed_at GLOB '{glob}'
+                ) OR (
+                    OLD.status = 'DISPATCH_STARTED' AND
+                    NEW.status IN (
+                        'COMPLETED', 'FAILED', 'TIMED_OUT', 'CANCELLED',
+                        'OUTCOME_UNKNOWN'
+                    ) AND
+                    NEW.dispatch_started_at IS OLD.dispatch_started_at AND
+                    NEW.completed_at GLOB '{glob}'
+                )
+            )
+        BEGIN
+            SELECT RAISE(ABORT, 'provider request reservation transition is invalid');
+        END
+        """,
+        "trg_provider_reservation_no_delete": """
+        CREATE TRIGGER trg_provider_reservation_no_delete
+        BEFORE DELETE ON provider_request_reservations
+        BEGIN
+            SELECT RAISE(ABORT, 'provider request reservation evidence is retained');
+        END
+        """,
+    }
+
+
+def _verify_059_tables(connection) -> None:
+    from app.models import (
+        ProviderRequestReservation,
+        WorkflowBudget,
+        WorkflowTaskExecutionBinding,
+    )
+
+    inspector = inspect(connection)
+    if not set(_059_TABLES) <= set(inspector.get_table_names()):
+        raise RuntimeError("059 workflow budget schema is missing a required table")
+    for model in (
+        WorkflowBudget,
+        WorkflowTaskExecutionBinding,
+        ProviderRequestReservation,
+    ):
+        table = model.__table__
+        name = table.name
+        columns = {column["name"]: column for column in inspector.get_columns(name)}
+        for column in table.columns:
+            stored = columns.get(column.name)
+            if stored is None or bool(stored.get("nullable", True)) != bool(
+                column.nullable and not column.primary_key
+            ):
+                raise RuntimeError(
+                    f"059 schema has an invalid column {name}.{column.name}"
+                )
+        expected_unique = {
+            constraint.name
+            for constraint in table.constraints
+            if isinstance(constraint, UniqueConstraint)
+        }
+        actual_unique = {
+            constraint.get("name")
+            for constraint in inspector.get_unique_constraints(name)
+        }
+        expected_checks = {
+            constraint.name
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint)
+        }
+        actual_checks = {
+            constraint.get("name")
+            for constraint in inspector.get_check_constraints(name)
+        }
+        expected_indexes = {index.name for index in table.indexes}
+        actual_indexes = {index["name"] for index in inspector.get_indexes(name)}
+        if not (
+            expected_unique <= actual_unique
+            and expected_checks <= actual_checks
+            and expected_indexes <= actual_indexes
+        ):
+            raise RuntimeError(f"059 schema has missing constraints on {name}")
+        expected_keys = {
+            (fk.parent.name, fk.column.table.name, fk.column.name)
+            for fk in table.foreign_keys
+        }
+        actual_keys = set()
+        for foreign_key in inspector.get_foreign_keys(name):
+            ondelete = (foreign_key.get("options") or {}).get("ondelete")
+            if ondelete is None or ondelete.upper() != "RESTRICT":
+                raise RuntimeError(f"059 schema has a non-restrictive key on {name}")
+            actual_keys.add(
+                (
+                    (foreign_key.get("constrained_columns") or [None])[0],
+                    foreign_key.get("referred_table"),
+                    (foreign_key.get("referred_columns") or [None])[0],
+                )
+            )
+        if actual_keys != expected_keys:
+            raise RuntimeError(f"059 schema has incomplete foreign keys on {name}")
+
+
+def _verify_059_workflow_provider_request_budget(engine: Engine) -> None:
+    """Verify the R3A tables, constraints, RESTRICT keys, and exact guards."""
+
+    with engine.connect() as connection:
+        if engine.dialect.name == "sqlite":
+            # SQLite PRAGMAs answer from a connection's cached schema without
+            # checking the schema cookie; a pooled connection that last loaded
+            # the schema before 059's DDL would report no indexes. A real read
+            # of sqlite_master reloads it; all reflection uses this connection.
+            connection.exec_driver_sql("SELECT COUNT(*) FROM sqlite_master").scalar()
+        _verify_059_tables(connection)
+
+    if engine.dialect.name != "sqlite":
+        return
+    expected = _059_trigger_statements()
+    with engine.connect() as connection:
+        rows = connection.exec_driver_sql(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+            "AND tbl_name IN (?, ?, ?)",
+            _059_TABLES,
+        ).fetchall()
+    stored = {row[0]: " ".join((row[1] or "").split()) for row in rows}
+    if stored != {name: " ".join(sql.split()) for name, sql in expected.items()}:
+        raise RuntimeError("059 workflow budget guard triggers are missing or invalid")
+
+
+def _migration_059_workflow_provider_request_budget(engine: Engine) -> None:
+    """Create the additive R3A budget tables and SQLite guards atomically."""
+
+    from app.models import (
+        ProviderRequestReservation,
+        WorkflowBudget,
+        WorkflowTaskExecutionBinding,
+    )
+
+    tables = (
+        WorkflowBudget.__table__,
+        WorkflowTaskExecutionBinding.__table__,
+        ProviderRequestReservation.__table__,
+    )
+    if engine.dialect.name != "sqlite":
+        with engine.begin() as connection:
+            for table in tables:
+                table.create(connection, checkfirst=True)
+        _verify_059_workflow_provider_request_budget(engine)
+        return
+
+    # pysqlite does not open a transaction for DDL; one explicit write
+    # transaction keeps a failed upgrade from leaving partial guards behind.
+    with engine.connect() as connection:
+        connection.execution_options(isolation_level="AUTOCOMMIT")
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            for table in tables:
+                table.create(connection, checkfirst=True)
+            for statement in _059_trigger_statements().values():
+                connection.exec_driver_sql(statement)
+            connection.exec_driver_sql("COMMIT")
+        except BaseException:
+            try:
+                if connection.connection.dbapi_connection.in_transaction:
+                    connection.exec_driver_sql("ROLLBACK")
+            except Exception:
+                # Closing the DBAPI connection discards any open transaction;
+                # keep the original migration error as the one raised.
+                connection.invalidate()
+            raise
+    _verify_059_workflow_provider_request_budget(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -5999,6 +6371,15 @@ MIGRATIONS: tuple[Migration, ...] = (
         ),
         upgrade=_migration_058_one_shot_atomic_claim,
         verify=_verify_058_one_shot_atomic_claim,
+    ),
+    Migration(
+        version="059_workflow_provider_request_budget",
+        description=(
+            "Add durable workflow budget owner, attempt bindings, and "
+            "provider-request reservations"
+        ),
+        upgrade=_migration_059_workflow_provider_request_budget,
+        verify=_verify_059_workflow_provider_request_budget,
     ),
 )
 
