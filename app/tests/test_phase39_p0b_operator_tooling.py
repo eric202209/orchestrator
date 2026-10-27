@@ -2670,10 +2670,10 @@ class GateATests(PinOwnerTestCase):
 
 
 class ApprovedModuleSetTests(unittest.TestCase):
-    def test_approved_module_allowlist_is_exactly_155(self) -> None:
+    def test_approved_module_allowlist_is_exactly_157(self) -> None:
         names = tooling._canonical_module_names(tooling.APPROVED)
-        self.assertEqual(len(names), 155)
-        self.assertEqual(len(set(names)), 155)
+        self.assertEqual(len(names), 157)
+        self.assertEqual(len(set(names)), 157)
 
 
 if __name__ == "__main__":
