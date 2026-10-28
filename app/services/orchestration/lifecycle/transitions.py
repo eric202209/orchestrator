@@ -57,6 +57,7 @@ _REVOCATION_STATUSES = frozenset({"paused", "stopped", "cancelled", "canceled"})
 # The two nonterminal phases in which an autonomous continuation, rather than an
 # operator or the scheduler, owns the current generation.
 _CONTINUATION_OWNED_STATUSES = frozenset({"recovering", "retry_pending"})
+_SAME_ATTEMPT_TRANSPORT_RETRY_KINDS = frozenset({"celery_retry", "backend_capacity"})
 
 
 class LifecycleTransitionError(ValueError):
@@ -65,6 +66,29 @@ class LifecycleTransitionError(ValueError):
     def __init__(self, reason: str):
         self.reason = reason
         super().__init__(reason)
+
+
+def continuation_transport_retry_count_matches(
+    continuation_kind: str | None,
+    marker_retry_count: Any,
+    delivery_retry_count: Any,
+) -> bool:
+    """Check transport parity only for managed same-attempt continuations.
+
+    Fresh automatic recovery has a logical marker count but starts a new
+    Celery delivery at retry count zero, so it deliberately does not use this
+    equality rule.
+    """
+
+    if continuation_kind not in _SAME_ATTEMPT_TRANSPORT_RETRY_KINDS:
+        return True
+    return (
+        type(marker_retry_count) is int
+        and marker_retry_count >= 0
+        and type(delivery_retry_count) is int
+        and delivery_retry_count >= 0
+        and marker_retry_count == delivery_retry_count
+    )
 
 
 def begin_atomic_claim_transaction(db: DbSession) -> None:
@@ -97,6 +121,7 @@ class ContinuationIdentity:
     task_execution_id: int | None = None
     retry_count: int = 0
     celery_task_id: str | None = None
+    delivery_retry_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -974,7 +999,10 @@ def claim_continuation(
     db.flush()
 
     session = (
-        db.query(SessionModel).filter(SessionModel.id == identity.session_id).first()
+        db.query(SessionModel)
+        .populate_existing()
+        .filter(SessionModel.id == identity.session_id)
+        .first()
     )
     if session is None:
         return _result_rejected(
@@ -985,6 +1013,7 @@ def claim_continuation(
         )
     execution = (
         db.query(TaskExecution)
+        .populate_existing()
         .filter(
             TaskExecution.id == identity.task_execution_id,
             TaskExecution.session_id == identity.session_id,
@@ -998,6 +1027,36 @@ def claim_continuation(
             task_id=identity.continuation_task_id,
             task_execution_id=identity.task_execution_id,
             reason="continuation_attempt_not_pending",
+        )
+    if (
+        normalize_session_status(getattr(session, "status", None)) != "retry_pending"
+        or session.instance_id != identity.instance_id
+        or session.continuation_task_id != identity.continuation_task_id
+        or (
+            session.continuation_task_execution_id is not None
+            and session.continuation_task_execution_id != identity.task_execution_id
+        )
+        or session.continuation_kind != kind
+        or session.continuation_retry_count != count
+    ):
+        return _result_rejected(
+            session_id=identity.session_id,
+            task_id=identity.continuation_task_id,
+            task_execution_id=identity.task_execution_id,
+            reason="stale_or_duplicate_continuation",
+        )
+    managed_same_attempt = (
+        execution.dispatch_state is not None
+        and kind in _SAME_ATTEMPT_TRANSPORT_RETRY_KINDS
+    )
+    if managed_same_attempt and not continuation_transport_retry_count_matches(
+        kind, session.continuation_retry_count, identity.delivery_retry_count
+    ):
+        return _result_rejected(
+            session_id=identity.session_id,
+            task_id=identity.continuation_task_id,
+            task_execution_id=identity.task_execution_id,
+            reason="continuation_transport_retry_count_mismatch",
         )
     if execution.dispatch_state is not None:
         if (
@@ -1066,22 +1125,30 @@ def claim_continuation(
         )
 
     changed_at = _now(changed_at)
+    claim_filters = [
+        SessionModel.id == identity.session_id,
+        SessionModel.status == "retry_pending",
+        SessionModel.instance_id == identity.instance_id,
+        SessionModel.continuation_task_id == identity.continuation_task_id,
+        SessionModel.continuation_kind == kind,
+        SessionModel.continuation_retry_count == count,
+        (
+            SessionModel.continuation_task_execution_id == identity.task_execution_id
+            if getattr(session, "continuation_task_execution_id", None) is not None
+            else SessionModel.continuation_task_execution_id.is_(None)
+        ),
+    ]
+    if managed_same_attempt:
+        # Recheck the delivery counter in the same conditional UPDATE that
+        # consumes the marker. This complements the refreshed read above and
+        # prevents a concurrent marker rotation from authorizing a stale
+        # request counter on databases without SQLite's BEGIN IMMEDIATE lock.
+        claim_filters.append(
+            SessionModel.continuation_retry_count == identity.delivery_retry_count
+        )
     updated = (
         db.query(SessionModel)
-        .filter(
-            SessionModel.id == identity.session_id,
-            SessionModel.status == "retry_pending",
-            SessionModel.instance_id == identity.instance_id,
-            SessionModel.continuation_task_id == identity.continuation_task_id,
-            SessionModel.continuation_kind == kind,
-            SessionModel.continuation_retry_count == count,
-            (
-                SessionModel.continuation_task_execution_id
-                == identity.task_execution_id
-                if getattr(session, "continuation_task_execution_id", None) is not None
-                else SessionModel.continuation_task_execution_id.is_(None)
-            ),
-        )
+        .filter(*claim_filters)
         .update(
             {
                 SessionModel.status: "running",
@@ -1218,6 +1285,7 @@ def validate_continuation(
         db.flush()
         session = (
             db.query(SessionModel)
+            .populate_existing()
             .filter(SessionModel.id == identity.session_id)
             .first()
         )
@@ -1248,6 +1316,7 @@ def validate_continuation(
             )
         execution = (
             db.query(TaskExecution)
+            .populate_existing()
             .filter(
                 TaskExecution.id == identity.task_execution_id,
                 TaskExecution.session_id == identity.session_id,
@@ -1261,6 +1330,21 @@ def validate_continuation(
                 task_id=identity.continuation_task_id,
                 task_execution_id=identity.task_execution_id,
                 reason="continuation_attempt_not_pending",
+            )
+        if (
+            execution.dispatch_state is not None
+            and identity.delivery_retry_count is not None
+            and not continuation_transport_retry_count_matches(
+                kind,
+                session.continuation_retry_count,
+                identity.delivery_retry_count,
+            )
+        ):
+            return _result_rejected(
+                session_id=identity.session_id,
+                task_id=identity.continuation_task_id,
+                task_execution_id=identity.task_execution_id,
+                reason="continuation_transport_retry_count_mismatch",
             )
         if any(
             row.id != execution.id

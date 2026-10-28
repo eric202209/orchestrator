@@ -383,12 +383,12 @@ from app.services.orchestration.state.session_state import (
     mark_session_running,
 )
 from app.services.orchestration.lifecycle.transitions import (
-    ContinuationIdentity,
     LifecycleTransitionError,
+    begin_atomic_claim_transaction,
+    continuation_transport_retry_count_matches,
     finalize_logical_failure,
     revoke_autonomous_continuation,
     schedule_continuation,
-    validate_continuation,
 )
 from app.services.orchestration.lifecycle.terminal_handoff import (
     terminal_attempt_handoff_from_planning_result,
@@ -866,6 +866,7 @@ def execute_orchestration_task(
     )
     continuation_claimed = False
     capacity_retry_scheduled = False
+    capacity_claim_result = None
 
     # Phase 23D-3: if this worker process is force-terminated (SIGTERM, e.g.
     # via the intervention/pause path's `revoke_session_celery_tasks
@@ -1185,10 +1186,51 @@ def execute_orchestration_task(
         claim_ok = False
         claim_reason = "unclaimed"
         claim_started_at = None
+        delivery_retry_count = getattr(getattr(self, "request", None), "retries", 0)
 
-        # Capacity admission happens before logical execution claim.  A
-        # capacity-blocked delivery therefore remains pending/retry_pending
-        # instead of exposing Session=running while it only waits for a slot.
+        # Refuse a managed retry-count mismatch before asking the capacity
+        # backend for a slot. The atomic continuation claim below repeats this
+        # comparison against the refreshed durable Session marker.
+        if (
+            is_e3_continuation_dispatch
+            and task_execution is not None
+            and task_execution.dispatch_state is not None
+            and not continuation_transport_retry_count_matches(
+                continuation_kind,
+                continuation_retry_count,
+                delivery_retry_count,
+            )
+        ):
+            db.rollback()
+            return _emit_dispatch_rejected(
+                reason="continuation_transport_retry_count_mismatch",
+                log_message=(
+                    "[ORCHESTRATION] Rejected managed continuation with mismatched "
+                    "Celery transport retry count"
+                ),
+                db=db,
+                session=session,
+                session_id=session_id,
+                task_id=task_id,
+                task_execution_id=task_execution_id,
+                dispatch_project_dir=dispatch_project_dir,
+                expected_session_instance_id=expected_session_instance_id,
+                celery_task_id=getattr(getattr(self, "request", None), "id", None),
+                queue_latency_seconds=queue_latency_seconds,
+                queued_event=queued_event,
+                emit_live=emit_live,
+                runtime_selection=runtime_selection,
+                continuation_dispatch=True,
+                continuation_task_id=continuation_task_id,
+                continuation_kind=continuation_kind,
+                continuation_retry_count=continuation_retry_count,
+                continuation_transport_retry_count=delivery_retry_count,
+            )
+
+        # Capacity admission precedes the committed logical claim. A
+        # continuation tentatively claims inside an uncommitted transaction
+        # while checking the slot, so a marker cannot rotate between admission
+        # and claim; a blocked slot rolls the tentative claim back.
         _capacity_backend = _capacity_admission_backend(_resolved_execution_backend)
         _capacity_governed = (
             _capacity_backend is not None
@@ -1196,22 +1238,34 @@ def execute_orchestration_task(
         )
         if _capacity_governed:
             if is_e3_continuation_dispatch:
-                _continuation_identity = ContinuationIdentity(
+                # Discard Worker identity/configuration reads and begin the
+                # claim transaction before resource acquisition. This makes
+                # the marker check authoritative through the capacity
+                # decision, not just a potentially stale ORM preflight.
+                db.rollback()
+                begin_atomic_claim_transaction(db)
+                capacity_claim_result = _claim_continuation_for_worker(
+                    db=db,
                     session_id=session_id,
+                    task_id=task_id,
                     instance_id=expected_session_instance_id,
                     continuation_task_id=continuation_task_id,
                     continuation_kind=continuation_kind,
                     task_execution_id=task_execution_id,
                     retry_count=continuation_retry_count,
+                    celery_task_id=getattr(getattr(self, "request", None), "id", None),
+                    delivery_retry_count=delivery_retry_count,
+                    commit=False,
                 )
-                _preflight = validate_continuation(db, _continuation_identity)
-                if not _preflight.accepted:
+                if not capacity_claim_result.accepted:
                     db.rollback()
+                    _refusal_reason = capacity_claim_result.reason
+                    capacity_claim_result = None
                     return _emit_dispatch_rejected(
-                        reason=_preflight.reason,
+                        reason=_refusal_reason,
                         log_message=(
                             "[ORCHESTRATION] Rejected capacity continuation before "
-                            f"slot acquisition: {_preflight.reason}"
+                            f"slot acquisition: {_refusal_reason}"
                         ),
                         db=db,
                         session=session,
@@ -1231,6 +1285,7 @@ def execute_orchestration_task(
                         continuation_task_id=continuation_task_id,
                         continuation_kind=continuation_kind,
                         continuation_retry_count=continuation_retry_count,
+                        continuation_transport_retry_count=delivery_retry_count,
                     )
 
             try:
@@ -1271,6 +1326,11 @@ def execute_orchestration_task(
                 _backend_slot_acquired = True  # preserve existing fail-open policy
 
             if not _backend_slot_acquired:
+                if capacity_claim_result is not None:
+                    # Restore retry_pending/PENDING state before scheduling the
+                    # durable capacity continuation.
+                    db.rollback()
+                    capacity_claim_result = None
                 if task_execution is not None:
                     update_execution_failure_metadata(
                         db,
@@ -1541,7 +1601,21 @@ def execute_orchestration_task(
                     kwargs=capacity_retry_kwargs,
                 )
 
-        if is_e3_continuation_dispatch:
+        if capacity_claim_result is not None:
+            db.commit()
+            claim_ok = True
+            claim_reason = capacity_claim_result.reason
+            continuation_claimed = True
+            capacity_claim_result = None
+            session = (
+                db.query(SessionModel).filter(SessionModel.id == session_id).first()
+            )
+            task = db.query(Task).filter(Task.id == task_id).first()
+            task_execution = get_task_execution(db, task_execution_id)
+            session_task_link = _get_latest_session_task_link(db, session_id, task_id)
+            claim_started_at = datetime.now(timezone.utc)
+
+        if is_e3_continuation_dispatch and not claim_ok:
             claim_result = _claim_continuation_for_worker(
                 db=db,
                 session_id=session_id,
@@ -1552,6 +1626,7 @@ def execute_orchestration_task(
                 task_execution_id=task_execution_id,
                 retry_count=continuation_retry_count,
                 celery_task_id=getattr(getattr(self, "request", None), "id", None),
+                delivery_retry_count=delivery_retry_count,
             )
             claim_ok = claim_result.accepted
             claim_reason = claim_result.reason
@@ -1566,7 +1641,7 @@ def execute_orchestration_task(
                     db, session_id, task_id
                 )
                 claim_started_at = datetime.now(timezone.utc)
-        else:
+        elif not is_e3_continuation_dispatch:
             for claim_attempt in range(1):
                 session = (
                     db.query(SessionModel).filter(SessionModel.id == session_id).first()
@@ -1642,6 +1717,7 @@ def execute_orchestration_task(
                 continuation_task_id=continuation_task_id,
                 continuation_kind=continuation_kind,
                 continuation_retry_count=continuation_retry_count,
+                continuation_transport_retry_count=delivery_retry_count,
             )
 
         # ER4: freeze the generation this dispatch actually claimed. Every

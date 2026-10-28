@@ -174,6 +174,8 @@ def _claim_continuation_for_worker(
     task_execution_id: Optional[int],
     retry_count: Optional[int],
     celery_task_id: Optional[str] = None,
+    delivery_retry_count: Optional[int] = None,
+    commit: bool = True,
     task_id: Optional[int] = None,
 ) -> TransitionResult:
     """Route an E3 delivery through the strict E2 continuation fence."""
@@ -231,8 +233,9 @@ def _claim_continuation_for_worker(
         task_execution_id=task_execution_id,
         retry_count=retry_count,
         celery_task_id=celery_task_id,
+        delivery_retry_count=delivery_retry_count,
     )
-    return claim_continuation(db, identity, commit=True)
+    return claim_continuation(db, identity, commit=commit)
 
 
 def _claim_queued_task_for_worker(
@@ -474,6 +477,7 @@ def _emit_dispatch_rejected(
     continuation_task_id: Optional[int] = None,
     continuation_kind: Optional[str] = None,
     continuation_retry_count: Optional[int] = None,
+    continuation_transport_retry_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     runtime_identity = runtime_selection or _runtime_selection_details(
         db,
@@ -505,6 +509,7 @@ def _emit_dispatch_rejected(
                     if continuation_identity is not None
                     else continuation_retry_count
                 ),
+                "continuation_transport_retry_count": continuation_transport_retry_count,
                 "task_execution_id": (
                     continuation_identity.task_execution_id
                     if continuation_identity is not None

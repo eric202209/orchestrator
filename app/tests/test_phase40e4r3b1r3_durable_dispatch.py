@@ -970,6 +970,7 @@ def test_same_te_e3_retry_reopens_only_after_durable_continuation_marker(
         task_execution_id=identity.task_execution_id,
         retry_count=identity.retry_count,
         celery_task_id=stable_id,
+        delivery_retry_count=identity.retry_count,
     )
     from app.services.orchestration.lifecycle.transitions import claim_continuation
 
@@ -1818,6 +1819,10 @@ class _ProcessCrash(BaseException):
     """Stands in for the Worker process dying around broker I/O."""
 
 
+class _RuntimeReached(BaseException):
+    """Stop a Worker delivery at the first real runtime-construction boundary."""
+
+
 @pytest.fixture
 def broker(monkeypatch):
     """Capture Celery ``Task.retry`` publications at the Signature boundary."""
@@ -2380,6 +2385,7 @@ def test_c2_lost_broker_ack_republishes_same_invocation_and_one_claim_wins(
             task_execution_id=delivered["task_execution_id"],
             retry_count=delivered["continuation_retry_count"],
             celery_task_id=stable_id,
+            delivery_retry_count=delivered["continuation_retry_count"],
         )
 
     first_db, second_db = factory(), factory()
@@ -2501,6 +2507,7 @@ def test_c2_stale_retry_count_delivery_is_refused_before_runtime(
         task_execution_id=execution_id,
         retry_count=1,
         celery_task_id=stable_id,
+        delivery_retry_count=1,
     ).accepted
     db.expire_all()
     second = celery_delivery(celery_id=stable_id, kwargs=count_one, retries=1)
@@ -2885,7 +2892,7 @@ def _dispatcher_republish(db, engine, execution_id, *, fail=None):
     return result, sent
 
 
-def _claim_delivery(db, kwargs, celery_task_id):
+def _claim_delivery(db, kwargs, celery_task_id, *, retries=None):
     from app.tasks.worker_support.dispatch import _claim_continuation_for_worker
 
     claimed = _claim_continuation_for_worker(
@@ -2897,6 +2904,9 @@ def _claim_delivery(db, kwargs, celery_task_id):
         task_execution_id=kwargs["task_execution_id"],
         retry_count=kwargs["continuation_retry_count"],
         celery_task_id=celery_task_id,
+        delivery_retry_count=(
+            kwargs["continuation_retry_count"] if retries is None else retries
+        ),
     )
     db.expire_all()
     return claimed
@@ -2949,6 +2959,43 @@ def _marker(db, session_id):
         current.continuation_kind,
         current.continuation_retry_count,
         current.continuation_task_execution_id,
+    )
+
+
+def _managed_same_attempt_continuation(db, *, kind, count):
+    if kind == "celery_retry":
+        project, session, task, link, execution = _claimed_managed_attempt(db)
+        enter_recovering(
+            db,
+            session,
+            task_execution=execution,
+            continuation_kind=kind,
+            retry_count=count,
+        )
+    else:
+        project = None
+        session, task, link, execution = _ready_managed_root(db)
+    identity = schedule_continuation(
+        db,
+        session,
+        task_execution=execution,
+        continuation_task_id=task.id,
+        continuation_kind=kind,
+        retry_count=count,
+    )
+    db.commit()
+    args, reason = workflow.managed_continuation_retry_arguments(db, execution)
+    assert reason is None
+    assert args is not None
+    assert identity.retry_count == count
+    return project, session, task, link, execution, args
+
+
+def _persisted_row_snapshot(db, model, row_id):
+    db.expire_all()
+    row = db.query(model).filter(model.id == row_id).one()
+    return tuple(
+        (column.key, getattr(row, column.key)) for column in model.__table__.columns
     )
 
 
@@ -3274,7 +3321,7 @@ def test_c2r1_restarted_reconciler_recovers_same_retry_counter(
 def test_c2r1_wrong_transport_counter_cannot_claim_capacity_continuation(
     dispatch_db, broker, celery_delivery, monkeypatch
 ):
-    """Test J: the capacity fence still rejects a reset counter."""
+    """Test J: the Worker fence rejects a reset counter before capacity work."""
 
     _, _, _, db = dispatch_db
     session, task, _, execution = _ready_managed_root(db)
@@ -3296,10 +3343,522 @@ def test_c2r1_wrong_transport_counter_cannot_claim_capacity_continuation(
         retries=0,
     )
 
-    assert outcome["reason"] == "capacity_retry_count_mismatch"
+    assert outcome["reason"] == "continuation_transport_retry_count_mismatch"
     assert len(broker.sent) == 1
     assert _marker(db, session.id) == marker
     assert not runtime_calls
+
+
+@pytest.mark.parametrize(
+    "kind,marker_count,transport_count",
+    [
+        ("celery_retry", 2, 0),
+        ("celery_retry", 2, 1),
+        ("celery_retry", 2, 3),
+        ("celery_retry", 3, 0),
+        ("backend_capacity", 2, 0),
+        ("backend_capacity", 2, 1),
+        ("backend_capacity", 2, 3),
+    ],
+)
+def test_c2r3_worker_rejects_managed_transport_counter_mismatch_before_side_effects(
+    dispatch_db,
+    broker,
+    celery_delivery,
+    monkeypatch,
+    kind,
+    marker_count,
+    transport_count,
+):
+    """C2R2-F01: mismatch refusal leaves the exact managed attempt untouched."""
+
+    _, _, _, db = dispatch_db
+    _, session, task, link, execution, kwargs = _managed_same_attempt_continuation(
+        db, kind=kind, count=marker_count
+    )
+    stable_id = execution.dispatch_celery_task_id
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=False)
+    from app.tasks import worker as worker_module
+
+    capacity_backend_calls = []
+    slot_calls = []
+    backend = SimpleNamespace(
+        name="fixture",
+        capabilities=SimpleNamespace(max_parallel_sessions=1),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "_capacity_admission_backend",
+        lambda name: capacity_backend_calls.append(name) or backend,
+    )
+    monkeypatch.setattr(
+        "app.services.agents.backend_concurrency.make_redis_client",
+        lambda: slot_calls.append("redis") or object(),
+    )
+    monkeypatch.setattr(
+        "app.services.agents.backend_concurrency.acquire_backend_slot",
+        lambda *_a, **_k: slot_calls.append("acquire") or False,
+    )
+
+    before = {
+        "session": _persisted_row_snapshot(db, SessionModel, session.id),
+        "task": _persisted_row_snapshot(db, Task, task.id),
+        "link": _persisted_row_snapshot(db, SessionTask, link.id),
+        "execution": _persisted_row_snapshot(db, TaskExecution, execution.id),
+    }
+    attempt_count_before = (
+        db.query(TaskExecution).filter_by(session_id=session.id).count()
+    )
+    outcome = _run_delivery(
+        celery_delivery,
+        celery_id=stable_id,
+        kwargs=kwargs,
+        retries=transport_count,
+    )
+
+    assert outcome == {
+        "status": "ignored",
+        "reason": "continuation_transport_retry_count_mismatch",
+    }
+    assert capacity_backend_calls == []
+    assert slot_calls == []
+    assert not runtime_calls
+    assert broker.sent == []
+    assert _persisted_row_snapshot(db, SessionModel, session.id) == before["session"]
+    assert _persisted_row_snapshot(db, Task, task.id) == before["task"]
+    assert _persisted_row_snapshot(db, SessionTask, link.id) == before["link"]
+    assert (
+        _persisted_row_snapshot(db, TaskExecution, execution.id) == before["execution"]
+    )
+    assert (
+        db.query(TaskExecution).filter_by(session_id=session.id).count()
+        == attempt_count_before
+    )
+    assert _marker(db, session.id) == (
+        "retry_pending",
+        kind,
+        marker_count,
+        execution.id,
+    )
+
+
+@pytest.mark.parametrize(
+    "kind,marker_count",
+    [("celery_retry", 2), ("celery_retry", 3), ("backend_capacity", 2)],
+)
+def test_c2r3_correct_managed_counter_claims_before_runtime_construction(
+    dispatch_db, broker, celery_delivery, monkeypatch, kind, marker_count
+):
+    """The new admission fence preserves correct-counter execution claims."""
+
+    _, _, _, db = dispatch_db
+    _, session, task, link, execution, kwargs = _managed_same_attempt_continuation(
+        db, kind=kind, count=marker_count
+    )
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+    from app.tasks import worker as worker_module
+
+    backend = SimpleNamespace(
+        name="fixture",
+        capabilities=SimpleNamespace(max_parallel_sessions=1),
+    )
+    monkeypatch.setattr(
+        worker_module, "_capacity_admission_backend", lambda *_: backend
+    )
+    monkeypatch.setattr(
+        "app.services.agents.backend_concurrency.acquire_backend_slot",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        worker_module, "_release_backend_slot_safely", lambda *_a, **_k: None
+    )
+
+    def stop_at_runtime(*args, **kwargs):
+        runtime_calls.append((args, kwargs))
+        raise _RuntimeReached()
+
+    monkeypatch.setattr(worker_module, "create_agent_runtime", stop_at_runtime)
+    with pytest.raises(_RuntimeReached):
+        _run_delivery(
+            celery_delivery,
+            celery_id=execution.dispatch_celery_task_id,
+            kwargs=kwargs,
+            retries=marker_count,
+        )
+
+    assert runtime_calls
+    assert broker.sent == []
+    assert _marker(db, session.id) == ("running", None, 0, None)
+    db.expire_all()
+    assert db.query(Task).filter_by(id=task.id).one().status is TaskStatus.RUNNING
+    assert (
+        db.query(SessionTask).filter_by(id=link.id).one().status is TaskStatus.RUNNING
+    )
+    claimed = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert claimed.status is TaskStatus.RUNNING
+    assert claimed.dispatch_state == "CLAIMED"
+
+
+def test_c2r3_correct_capacity_counter_preserves_capacity_retry_publication(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    _, _, _, db = dispatch_db
+    _, session, _, _, execution, kwargs = _managed_same_attempt_continuation(
+        db, kind="backend_capacity", count=2
+    )
+    _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+
+    outcome = _run_delivery(
+        celery_delivery,
+        celery_id=execution.dispatch_celery_task_id,
+        kwargs=kwargs,
+        retries=2,
+    )
+
+    assert outcome is None
+    assert broker.sent[-1]["options"]["retries"] == 3
+    assert broker.sent[-1]["kwargs"]["continuation_retry_count"] == 3
+    assert _marker(db, session.id) == (
+        "retry_pending",
+        "backend_capacity",
+        3,
+        execution.id,
+    )
+
+
+def test_c2r3_mismatched_delivery_cannot_bypass_exhausted_e3_retry_budget(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """The exact C2R2 high-severity count=3/request=0 case is refused."""
+
+    _, _, _, db = dispatch_db
+    _, session, task, link, execution, kwargs = _managed_same_attempt_continuation(
+        db, kind="celery_retry", count=3
+    )
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=False)
+    before = (
+        _persisted_row_snapshot(db, SessionModel, session.id),
+        _persisted_row_snapshot(db, Task, task.id),
+        _persisted_row_snapshot(db, SessionTask, link.id),
+        _persisted_row_snapshot(db, TaskExecution, execution.id),
+    )
+    attempt_count_before = (
+        db.query(TaskExecution).filter_by(session_id=session.id).count()
+    )
+
+    result = _run_delivery(
+        celery_delivery,
+        celery_id=execution.dispatch_celery_task_id,
+        kwargs=kwargs,
+        retries=0,
+    )
+
+    assert result["reason"] == "continuation_transport_retry_count_mismatch"
+    assert _marker(db, session.id) == (
+        "retry_pending",
+        "celery_retry",
+        3,
+        execution.id,
+    )
+    assert (
+        _persisted_row_snapshot(db, SessionModel, session.id),
+        _persisted_row_snapshot(db, Task, task.id),
+        _persisted_row_snapshot(db, SessionTask, link.id),
+        _persisted_row_snapshot(db, TaskExecution, execution.id),
+    ) == before
+    assert (
+        db.query(TaskExecution).filter_by(session_id=session.id).count()
+        == attempt_count_before
+    )
+    assert not runtime_calls
+    assert broker.sent == []
+
+
+def test_c2r3_atomic_claim_reloads_marker_rotated_after_worker_precheck(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """A stale precheck/ORM marker cannot authorize the final atomic claim."""
+
+    _, _, factory, db = dispatch_db
+    _, session, task, _, execution, kwargs = _managed_same_attempt_continuation(
+        db, kind="celery_retry", count=2
+    )
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=False)
+    from app.tasks import worker as worker_module
+
+    rotation_calls = []
+
+    def rotate_marker(_backend_name):
+        other = factory()
+        try:
+            current_session = other.query(SessionModel).filter_by(id=session.id).one()
+            current_execution = (
+                other.query(TaskExecution).filter_by(id=execution.id).one()
+            )
+            schedule_continuation(
+                other,
+                current_session,
+                task_execution=current_execution,
+                continuation_task_id=task.id,
+                continuation_kind="celery_retry",
+                retry_count=3,
+            )
+            other.commit()
+            rotation_calls.append(True)
+        finally:
+            other.close()
+        return None
+
+    monkeypatch.setattr(worker_module, "_capacity_admission_backend", rotate_marker)
+    result = _run_delivery(
+        celery_delivery,
+        celery_id=execution.dispatch_celery_task_id,
+        kwargs=kwargs,
+        retries=2,
+    )
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "stale_or_duplicate_continuation"
+    assert rotation_calls == [True]
+    assert _marker(db, session.id) == (
+        "retry_pending",
+        "celery_retry",
+        3,
+        execution.id,
+    )
+    assert not runtime_calls
+    assert broker.sent == []
+    db.expire_all()
+    current_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert current_execution.status is TaskStatus.PENDING
+    assert current_execution.dispatch_state == "READY"
+
+
+def test_c2r3_capacity_preflight_refreshes_marker_before_slot_acquisition(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """A marker rotated after Worker reads is visible before capacity acquisition."""
+
+    _, _, factory, db = dispatch_db
+    _, session, task, _, execution, kwargs = _managed_same_attempt_continuation(
+        db, kind="celery_retry", count=2
+    )
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+    from app.tasks import worker as worker_module
+
+    backend = SimpleNamespace(
+        name="fixture",
+        capabilities=SimpleNamespace(max_parallel_sessions=1),
+    )
+    slot_calls = []
+    rotation_calls = []
+
+    def rotate_marker(_backend_name):
+        other = factory()
+        try:
+            current_session = other.query(SessionModel).filter_by(id=session.id).one()
+            current_execution = (
+                other.query(TaskExecution).filter_by(id=execution.id).one()
+            )
+            schedule_continuation(
+                other,
+                current_session,
+                task_execution=current_execution,
+                continuation_task_id=task.id,
+                continuation_kind="celery_retry",
+                retry_count=3,
+            )
+            other.commit()
+            rotation_calls.append(True)
+        finally:
+            other.close()
+        return backend
+
+    monkeypatch.setattr(worker_module, "_capacity_admission_backend", rotate_marker)
+    monkeypatch.setattr(
+        "app.services.agents.backend_concurrency.make_redis_client",
+        lambda: slot_calls.append("redis") or object(),
+    )
+    monkeypatch.setattr(
+        "app.services.agents.backend_concurrency.acquire_backend_slot",
+        lambda *_a, **_k: slot_calls.append("acquire") or False,
+    )
+
+    result = _run_delivery(
+        celery_delivery,
+        celery_id=execution.dispatch_celery_task_id,
+        kwargs=kwargs,
+        retries=2,
+    )
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "stale_or_duplicate_continuation"
+    assert rotation_calls == [True]
+    assert slot_calls == []
+    assert not runtime_calls
+    assert broker.sent == []
+    assert _marker(db, session.id) == (
+        "retry_pending",
+        "celery_retry",
+        3,
+        execution.id,
+    )
+    db.expire_all()
+    current_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert current_execution.status is TaskStatus.PENDING
+    assert current_execution.dispatch_state == "READY"
+
+
+def test_c2r3_concurrent_correct_and_incorrect_claims_preserve_valid_delivery(
+    dispatch_db,
+):
+    """Independent DB sessions admit the valid delivery and reject the mismatch."""
+
+    _, _, factory, db = dispatch_db
+    _, session, task, _, execution, kwargs = _managed_same_attempt_continuation(
+        db, kind="celery_retry", count=2
+    )
+    stable_id = execution.dispatch_celery_task_id
+    barrier = threading.Barrier(2)
+
+    def claim_from_independent_connection(transport_count):
+        from app.services.orchestration.lifecycle.transitions import claim_continuation
+
+        connection = factory()
+        try:
+            identity = ContinuationIdentity(
+                session_id=kwargs["session_id"],
+                instance_id=kwargs["expected_session_instance_id"],
+                continuation_task_id=kwargs["continuation_task_id"],
+                continuation_kind=kwargs["continuation_kind"],
+                task_execution_id=kwargs["task_execution_id"],
+                retry_count=kwargs["continuation_retry_count"],
+                celery_task_id=stable_id,
+                delivery_retry_count=transport_count,
+            )
+            barrier.wait(timeout=10)
+            return claim_continuation(connection, identity, commit=True)
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        incorrect_future = pool.submit(claim_from_independent_connection, 0)
+        correct_future = pool.submit(claim_from_independent_connection, 2)
+        incorrect = incorrect_future.result(timeout=30)
+        correct = correct_future.result(timeout=30)
+
+    assert correct.accepted is True
+    assert incorrect.accepted is False
+    db.expire_all()
+    assert _marker(db, session.id) == ("running", None, 0, None)
+    current_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert current_execution.status is TaskStatus.RUNNING
+    assert current_execution.dispatch_state == "CLAIMED"
+
+
+def test_c2r3_managed_initial_root_remains_admissible_at_transport_zero(
+    dispatch_db, celery_delivery, monkeypatch
+):
+    _, _, _, db = dispatch_db
+    session, task, link, execution = _ready_managed_root(db)
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=False)
+    from app.tasks import worker as worker_module
+
+    def stop_at_runtime(*args, **kwargs):
+        runtime_calls.append((args, kwargs))
+        raise _RuntimeReached()
+
+    monkeypatch.setattr(worker_module, "create_agent_runtime", stop_at_runtime)
+    with pytest.raises(_RuntimeReached):
+        _run_delivery(
+            celery_delivery,
+            celery_id=execution.dispatch_celery_task_id,
+            kwargs=_request_kwargs(session, task, execution),
+            retries=0,
+        )
+
+    assert runtime_calls
+    db.expire_all()
+    assert db.query(Task).filter_by(id=task.id).one().status is TaskStatus.RUNNING
+    assert (
+        db.query(SessionTask).filter_by(id=link.id).one().status is TaskStatus.RUNNING
+    )
+    claimed = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert claimed.status is TaskStatus.RUNNING
+    assert claimed.dispatch_state == "CLAIMED"
+
+
+def test_c2r3_automatic_recovery_keeps_logical_count_separate_from_transport(
+    dispatch_db, celery_delivery, monkeypatch
+):
+    """A fresh managed recovery may have a logical count while transport is 0."""
+
+    _, _, _, db = dispatch_db
+    _, session, task, link, parent = _graph(db)
+    parent.status = TaskStatus.FAILED
+    child = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=2,
+        status=TaskStatus.PENDING,
+    )
+    db.add(child)
+    db.commit()
+    assert workflow.configure_task_execution_dispatch(
+        db,
+        task_execution=child,
+        session=session,
+        task=task,
+        dispatch_kind="RECOVERY",
+        parent_task_execution_id=parent.id,
+        prompt=task.description,
+        timeout_seconds=1800,
+        context={"planner_contract": {"schema": "bounded-v1"}},
+        continuation_task_id=task.id,
+        continuation_kind="automatic_recovery",
+        continuation_retry_count=1,
+    )
+    child.dispatch_state = "READY"
+    session.status = "recovering"
+    schedule_continuation(
+        db,
+        session,
+        task_execution=child,
+        continuation_task_id=task.id,
+        continuation_kind="automatic_recovery",
+        retry_count=1,
+    )
+    db.commit()
+    kwargs = _request_kwargs(
+        session,
+        task,
+        child,
+        continuation_task_id=task.id,
+        continuation_kind="automatic_recovery",
+        continuation_retry_count=1,
+    )
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=False)
+    from app.tasks import worker as worker_module
+
+    def stop_at_runtime(*args, **runtime_kwargs):
+        runtime_calls.append((args, runtime_kwargs))
+        raise _RuntimeReached()
+
+    monkeypatch.setattr(worker_module, "create_agent_runtime", stop_at_runtime)
+    with pytest.raises(_RuntimeReached):
+        _run_delivery(
+            celery_delivery,
+            celery_id=child.dispatch_celery_task_id,
+            kwargs=kwargs,
+            retries=0,
+        )
+
+    assert runtime_calls
+    assert _marker(db, session.id) == ("running", None, 0, None)
+    db.expire_all()
+    claimed = db.query(TaskExecution).filter_by(id=child.id).one()
+    assert claimed.status is TaskStatus.RUNNING
+    assert claimed.dispatch_state == "CLAIMED"
 
 
 def test_c2r1_automatic_recovery_is_first_delivery_then_capacity_counts(
