@@ -4096,3 +4096,686 @@ def test_c2r1_legacy_unmanaged_e8_retry_counter_is_unchanged(dispatch_db, monkey
     assert published[0]["retries"] == 1
     assert "task_id" not in published[0]
     assert execution.dispatch_state is None
+
+
+class _C2R3CCapacityRedis:
+    """In-process Redis script fixture for uncertain slot acquisition tests."""
+
+    def __init__(
+        self,
+        *,
+        acquire_error=None,
+        raise_after_mutation=False,
+        release_error=None,
+        before_acquire_return=None,
+    ):
+        self.acquire_error = acquire_error
+        self.raise_after_mutation = raise_after_mutation
+        self.release_error = release_error
+        self.before_acquire_return = before_acquire_return
+        self.members = set()
+        self.owners = {}
+        self.acquisitions = []
+        self.releases = []
+
+    def smembers(self, key):
+        return (
+            set(self.members)
+            if key.startswith("orchestrator:backend_slots:")
+            else set()
+        )
+
+    def hgetall(self, key):
+        return (
+            dict(self.owners)
+            if key.startswith("orchestrator:backend_slot_owners:")
+            else {}
+        )
+
+    def eval(self, script, key_count, *args):
+        keys = [str(value) for value in args[:key_count]]
+        values = [str(value) for value in args[key_count:]]
+        if "SISMEMBER" in script:
+            slot_key, owner_key = keys
+            member, max_slots, _lease_seconds, owner_evidence = (
+                values[0],
+                int(values[1]),
+                int(values[2]),
+                values[3],
+            )
+            self.acquisitions.append(
+                {
+                    "backend_id": slot_key.rsplit(":", 1)[-1],
+                    "session_id": member,
+                    "max_slots": max_slots,
+                    "owner_evidence": owner_evidence,
+                }
+            )
+            if self.acquire_error is not None and not self.raise_after_mutation:
+                raise self.acquire_error
+            if (
+                getattr(self, "capacity_unavailable", False)
+                and member not in self.members
+            ):
+                if self.before_acquire_return is not None:
+                    self.before_acquire_return()
+                return 0
+            if member not in self.members and len(self.members) >= max_slots:
+                if self.before_acquire_return is not None:
+                    self.before_acquire_return()
+                return 0
+            self.members.add(member)
+            self.owners[member] = owner_evidence
+            if self.before_acquire_return is not None:
+                self.before_acquire_return()
+            if self.acquire_error is not None:
+                raise self.acquire_error
+            return 1
+
+        slot_key, owner_key = keys
+        member, expected_owner_evidence = values
+        current_owner_evidence = self.owners.get(member)
+        self.releases.append(
+            {
+                "backend_id": slot_key.rsplit(":", 1)[-1],
+                "session_id": member,
+                "expected_owner_evidence": expected_owner_evidence,
+                "current_owner_evidence": current_owner_evidence,
+            }
+        )
+        if self.release_error is not None:
+            raise self.release_error
+        if expected_owner_evidence == "":
+            if current_owner_evidence is not None:
+                return 0
+        elif current_owner_evidence != expected_owner_evidence:
+            return 0
+        self.members.discard(member)
+        self.owners.pop(member, None)
+        return 1
+
+
+def _c2r3c_prepare_capacity_delivery(
+    db, monkeypatch, *, kind="backend_capacity", redis=None
+):
+    from app.services.agents.backend_concurrency import (
+        acquire_backend_slot as production_acquire_backend_slot,
+    )
+    from app.tasks import worker as worker_module
+
+    _, session, task, link, execution, kwargs = _managed_same_attempt_continuation(
+        db, kind=kind, count=2
+    )
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+    redis = redis or _C2R3CCapacityRedis()
+    monkeypatch.setattr(
+        "app.services.agents.backend_concurrency.make_redis_client",
+        lambda: redis,
+    )
+    monkeypatch.setattr(
+        "app.services.agents.backend_concurrency.acquire_backend_slot",
+        production_acquire_backend_slot,
+    )
+    return (
+        worker_module,
+        session,
+        task,
+        link,
+        execution,
+        kwargs,
+        runtime_calls,
+        redis,
+    )
+
+
+def _assert_c2r3c_pending_continuation(db, session, task, link, execution, kind):
+    db.expire_all()
+    current_session = db.query(SessionModel).filter_by(id=session.id).one()
+    current_task = db.query(Task).filter_by(id=task.id).one()
+    current_link = db.query(SessionTask).filter_by(id=link.id).one()
+    current_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert current_session.status == "retry_pending"
+    assert current_session.continuation_kind == kind
+    assert current_session.continuation_retry_count == 2
+    assert current_session.continuation_task_execution_id == execution.id
+    assert current_task.status is TaskStatus.PENDING
+    assert current_link.status is TaskStatus.PENDING
+    assert current_execution.status is TaskStatus.PENDING
+    assert current_execution.dispatch_state == "READY"
+    assert db.query(TaskExecution).filter_by(session_id=session.id).count() == 1
+    return current_session, current_execution
+
+
+@pytest.mark.parametrize("kind", ["celery_retry", "backend_capacity"])
+@pytest.mark.parametrize("exception_kind", ["timeout", "redis_connection", "generic"])
+def test_c2r3c_managed_capacity_acquisition_exception_fails_closed(
+    dispatch_db, broker, celery_delivery, monkeypatch, caplog, kind, exception_kind
+):
+    from redis.exceptions import ConnectionError as RedisConnectionError
+    from app.models import LogEntry
+
+    _, _, _, db = dispatch_db
+    errors = {
+        "timeout": TimeoutError("injected Redis timeout before mutation"),
+        "redis_connection": RedisConnectionError(
+            "injected Redis connection failure before mutation"
+        ),
+        "generic": Exception("injected generic acquisition failure before mutation"),
+    }
+    redis = _C2R3CCapacityRedis(acquire_error=errors[exception_kind])
+    (
+        _,
+        session,
+        task,
+        link,
+        execution,
+        kwargs,
+        runtime_calls,
+        redis,
+    ) = _c2r3c_prepare_capacity_delivery(db, monkeypatch, kind=kind, redis=redis)
+    stable_task_id = execution.dispatch_celery_task_id
+    persisted_invocation = execution.dispatch_invocation
+
+    result = _run_delivery(
+        celery_delivery,
+        celery_id=stable_task_id,
+        kwargs=kwargs,
+        retries=2,
+    )
+
+    assert result == {
+        "status": "ignored",
+        "reason": "managed_capacity_acquisition_uncertain",
+    }
+    assert runtime_calls == []
+    assert broker.sent == []
+    assert redis.members == set()
+    assert redis.acquisitions[0]["session_id"] == str(session.id)
+    assert len(redis.releases) == 1
+    assert redis.releases[0]["current_owner_evidence"] is None
+    current_session, current_execution = _assert_c2r3c_pending_continuation(
+        db, session, task, link, execution, kind
+    )
+    assert current_execution.dispatch_celery_task_id == stable_task_id
+    assert current_execution.dispatch_invocation == persisted_invocation
+    log = (
+        db.query(LogEntry)
+        .filter_by(session_id=session.id, task_execution_id=execution.id)
+        .order_by(LogEntry.id.desc())
+        .first()
+    )
+    assert log is not None
+    assert "managed_capacity_acquisition_uncertain" in log.log_metadata
+    assert "cleanup=owner_not_confirmed_or_slot_absent" in log.log_metadata
+    assert current_session.continuation_retry_count == 2
+    assert "managed_capacity_acquisition_uncertain" in caplog.text
+
+
+def test_c2r3c_timeout_after_mutation_releases_only_matching_owner(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    _, _, _, db = dispatch_db
+    redis = _C2R3CCapacityRedis(
+        acquire_error=TimeoutError("response lost after Redis mutation"),
+        raise_after_mutation=True,
+    )
+    (
+        _,
+        session,
+        task,
+        link,
+        execution,
+        kwargs,
+        runtime_calls,
+        redis,
+    ) = _c2r3c_prepare_capacity_delivery(db, monkeypatch, redis=redis)
+    stable_task_id = execution.dispatch_celery_task_id
+
+    result = _run_delivery(
+        celery_delivery,
+        celery_id=stable_task_id,
+        kwargs=kwargs,
+        retries=2,
+    )
+
+    assert result["reason"] == "managed_capacity_acquisition_uncertain"
+    assert runtime_calls == []
+    assert broker.sent == []
+    assert len(redis.acquisitions) == 1
+    assert len(redis.releases) == 1
+    assert (
+        redis.releases[0]["expected_owner_evidence"]
+        == redis.releases[0]["current_owner_evidence"]
+    )
+    assert redis.members == set()
+    assert redis.owners == {}
+    _assert_c2r3c_pending_continuation(
+        db, session, task, link, execution, "backend_capacity"
+    )
+
+
+def test_c2r3c_cleanup_failure_is_diagnostic_and_e8_reuses_pending_identity(
+    dispatch_db, broker, celery_delivery, monkeypatch, caplog
+):
+    import json
+    from app.services.execution.workflow_lifecycle import (
+        reconcile_task_execution_dispatches,
+    )
+    from app.models import LogEntry
+
+    _, engine, _, db = dispatch_db
+    redis = _C2R3CCapacityRedis(
+        acquire_error=TimeoutError("response lost after Redis mutation"),
+        raise_after_mutation=True,
+        release_error=RuntimeError("injected release script failure"),
+    )
+    (
+        _,
+        session,
+        task,
+        link,
+        execution,
+        kwargs,
+        runtime_calls,
+        redis,
+    ) = _c2r3c_prepare_capacity_delivery(db, monkeypatch, redis=redis)
+    stable_task_id = execution.dispatch_celery_task_id
+    persisted_invocation = execution.dispatch_invocation
+
+    result = _run_delivery(
+        celery_delivery,
+        celery_id=stable_task_id,
+        kwargs=kwargs,
+        retries=2,
+    )
+
+    assert result["reason"] == "managed_capacity_acquisition_uncertain"
+    assert runtime_calls == []
+    assert broker.sent == []
+    assert redis.members == {str(session.id)}
+    retained_owner = redis.owners[str(session.id)]
+    log = (
+        db.query(LogEntry)
+        .filter_by(session_id=session.id, task_execution_id=execution.id)
+        .order_by(LogEntry.id.desc())
+        .first()
+    )
+    assert log is not None
+    assert "cleanup=release_error" in log.log_metadata
+    assert "injected release script failure" in caplog.text
+    _assert_c2r3c_pending_continuation(
+        db, session, task, link, execution, "backend_capacity"
+    )
+
+    # Existing stale-slot reconciliation retains ambiguous pending ownership;
+    # E8 remains the recovery path for the unchanged READY attempt.
+    from datetime import datetime, timedelta
+    from app.services.agents.backend_slot_reconciliation import (
+        reconcile_backend_slots,
+    )
+
+    acquired_at = datetime.fromisoformat(json.loads(retained_owner)["acquired_at"])
+    reconciliation = reconcile_backend_slots(
+        db,
+        redis,
+        "fixture",
+        now=acquired_at + timedelta(seconds=3600),
+    )
+    assert reconciliation["ambiguous"] == 1
+    assert redis.members == {str(session.id)}
+
+    _make_due(engine, execution.id)
+    publications = []
+    dispatch_result = reconcile_task_execution_dispatches(
+        db,
+        task_execution_id=execution.id,
+        publisher=lambda **record: publications.append(record),
+    )
+    assert dispatch_result["published_count"] == 1
+    assert publications[0]["task_id"] == stable_task_id
+    assert publications[0]["kwargs"] == kwargs
+    assert publications[0]["retries"] == 2
+    assert broker.sent == []
+
+    redis.acquire_error = None
+    redis.release_error = None
+    from app.tasks import worker as worker_module
+
+    def stop_at_runtime(*args, **call_kwargs):
+        runtime_calls.append((args, call_kwargs))
+        raise _RuntimeReached()
+
+    monkeypatch.setattr(worker_module, "create_agent_runtime", stop_at_runtime)
+    delivery = celery_delivery(
+        celery_id=stable_task_id,
+        kwargs=publications[0]["kwargs"],
+        retries=publications[0]["retries"],
+    )
+    with pytest.raises(_RuntimeReached):
+        delivery.run(**publications[0]["kwargs"])
+
+    assert len(runtime_calls) == 1
+    assert redis.members == set()
+    assert redis.owners == {}
+    db.expire_all()
+    current_session = db.query(SessionModel).filter_by(id=session.id).one()
+    current_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert current_session.status == "running"
+    assert current_session.continuation_kind is None
+    assert current_session.continuation_retry_count == 0
+    assert current_execution.status is TaskStatus.RUNNING
+    assert current_execution.dispatch_state == "CLAIMED"
+    assert current_execution.dispatch_celery_task_id == stable_task_id
+    assert current_execution.dispatch_invocation == persisted_invocation
+    assert db.query(TaskExecution).filter_by(session_id=session.id).count() == 1
+
+
+def test_c2r3c_acquired_slot_is_fenced_when_sqlite_commit_fails(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    from app.services.agents.backend_concurrency import (
+        acquire_backend_slot,
+        build_owner_evidence,
+    )
+
+    _, _, _, db = dispatch_db
+    redis = _C2R3CCapacityRedis()
+    (
+        _,
+        session,
+        task,
+        link,
+        execution,
+        kwargs,
+        runtime_calls,
+        redis,
+    ) = _c2r3c_prepare_capacity_delivery(db, monkeypatch, redis=redis)
+    monkeypatch.setattr(settings, "LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS", 2)
+    other_owner = build_owner_evidence(
+        session_id=999,
+        task_execution_id=999,
+        owner_token="unrelated-owner",
+    )
+    assert (
+        acquire_backend_slot(
+            redis,
+            "fixture",
+            999,
+            max_slots=2,
+            owner_evidence=other_owner,
+        )
+        is True
+    )
+    commit_failures = {"count": 0}
+
+    def fail_first_commit(_session):
+        if commit_failures["count"] == 0:
+            commit_failures["count"] += 1
+            event.remove(db, "before_commit", fail_first_commit)
+            raise RuntimeError("injected SQLite commit failure")
+
+    def fail_commit_after_acquisition():
+        event.listen(db, "before_commit", fail_first_commit)
+
+    redis.before_acquire_return = fail_commit_after_acquisition
+    stable_task_id = execution.dispatch_celery_task_id
+
+    result = _run_delivery(
+        celery_delivery,
+        celery_id=stable_task_id,
+        kwargs=kwargs,
+        retries=2,
+    )
+
+    assert commit_failures["count"] == 1
+    assert result["reason"] == "continuation_claim_not_completed"
+    assert runtime_calls == []
+    assert broker.sent == []
+    assert redis.members == {"999"}
+    assert set(redis.owners) == {"999"}
+    current_session, current_execution = _assert_c2r3c_pending_continuation(
+        db, session, task, link, execution, "backend_capacity"
+    )
+    assert current_execution.dispatch_state == "READY"
+    assert current_session.continuation_retry_count == 2
+
+
+def test_c2r3c_confirmed_capacity_reaches_runtime_and_releases_its_slot(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    _, _, _, db = dispatch_db
+    redis = _C2R3CCapacityRedis()
+    (
+        worker_module,
+        session,
+        task,
+        link,
+        execution,
+        kwargs,
+        runtime_calls,
+        redis,
+    ) = _c2r3c_prepare_capacity_delivery(db, monkeypatch, redis=redis)
+    stable_task_id = execution.dispatch_celery_task_id
+
+    def stop_at_runtime(*args, call_kwargs=None, **kwargs):
+        runtime_calls.append((args, kwargs))
+        raise _RuntimeReached()
+
+    monkeypatch.setattr(worker_module, "create_agent_runtime", stop_at_runtime)
+    delivery = celery_delivery(celery_id=stable_task_id, kwargs=kwargs, retries=2)
+    with pytest.raises(_RuntimeReached):
+        delivery.run(**kwargs)
+
+    assert len(redis.acquisitions) == 1
+    assert len(redis.releases) == 1
+    assert (
+        redis.releases[0]["expected_owner_evidence"]
+        == redis.releases[0]["current_owner_evidence"]
+    )
+    assert runtime_calls
+    assert redis.members == set()
+    assert redis.owners == {}
+    assert broker.sent == []
+    db.expire_all()
+    assert _marker(db, session.id) == ("running", None, 0, None)
+    current_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert current_execution.status is TaskStatus.RUNNING
+    assert current_execution.dispatch_state == "CLAIMED"
+
+
+def test_c2r3c_runtime_construction_error_still_fenced_releases_slot(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    _, _, _, db = dispatch_db
+    redis = _C2R3CCapacityRedis()
+    (
+        worker_module,
+        session,
+        _task,
+        _link,
+        execution,
+        kwargs,
+        runtime_calls,
+        redis,
+    ) = _c2r3c_prepare_capacity_delivery(db, monkeypatch, redis=redis)
+    stable_task_id = execution.dispatch_celery_task_id
+
+    def fail_runtime_construction(*args, **call_kwargs):
+        runtime_calls.append((args, call_kwargs))
+        raise RuntimeError("injected runtime construction failure")
+
+    monkeypatch.setattr(
+        worker_module, "create_agent_runtime", fail_runtime_construction
+    )
+    _run_delivery(
+        celery_delivery,
+        celery_id=stable_task_id,
+        kwargs=kwargs,
+        retries=2,
+    )
+
+    assert len(runtime_calls) == 1
+    assert len(redis.acquisitions) == 1
+    assert len(redis.releases) == 1
+    assert redis.members == set()
+    assert redis.owners == {}
+
+
+def test_c2r3c_sqlite_writer_reservation_is_released_after_bounded_capacity_wait(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    _, engine, _, db = dispatch_db
+    acquired_by_second_writer = Event()
+    executor = ThreadPoolExecutor(max_workers=1)
+
+    def wait_for_writer_release():
+        started = time.monotonic()
+        with engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            acquired_by_second_writer.set()
+            connection.rollback()
+        return time.monotonic() - started
+
+    future_holder = {}
+
+    def bounded_backend_wait():
+        future_holder["future"] = executor.submit(wait_for_writer_release)
+        time.sleep(0.15)
+        assert not acquired_by_second_writer.is_set()
+
+    redis = _C2R3CCapacityRedis(before_acquire_return=bounded_backend_wait)
+    (
+        _,
+        session,
+        task,
+        link,
+        execution,
+        kwargs,
+        runtime_calls,
+        redis,
+    ) = _c2r3c_prepare_capacity_delivery(db, monkeypatch, redis=redis)
+    redis.capacity_unavailable = True
+    try:
+        result = _run_delivery(
+            celery_delivery,
+            celery_id=execution.dispatch_celery_task_id,
+            kwargs=kwargs,
+            retries=2,
+        )
+        assert result is None
+        assert acquired_by_second_writer.wait(timeout=2)
+        assert future_holder["future"].result(timeout=2) >= 0.1
+        assert runtime_calls == []
+        assert redis.members == set()
+        # Existing capacity-unavailable publication remains the recovery
+        # transition and preserves its bounded retry counter.
+        assert broker.sent[-1]["options"]["retries"] == 3
+    finally:
+        executor.shutdown(wait=True)
+
+
+def test_c2r3c_losing_delivery_cannot_release_winning_owner_slot(dispatch_db):
+    import json
+    from app.services.agents.backend_concurrency import (
+        acquire_backend_slot,
+        build_owner_evidence,
+        release_backend_slot_if_owner,
+    )
+    from app.services.orchestration.lifecycle.transitions import (
+        ContinuationIdentity,
+        begin_atomic_claim_transaction,
+        claim_continuation,
+    )
+
+    _, _, factory, db_one = dispatch_db
+    _, session, task, _link, execution, _kwargs = _managed_same_attempt_continuation(
+        db_one, kind="backend_capacity", count=2
+    )
+    db_two = factory()
+    redis = _C2R3CCapacityRedis()
+    identity = ContinuationIdentity(
+        session_id=session.id,
+        instance_id=session.instance_id,
+        continuation_task_id=task.id,
+        continuation_kind="backend_capacity",
+        task_execution_id=execution.id,
+        retry_count=2,
+        celery_task_id=execution.dispatch_celery_task_id,
+        delivery_retry_count=2,
+    )
+    winner_evidence = build_owner_evidence(
+        session_id=session.id,
+        task_execution_id=execution.id,
+        owner_token="delivery-one-wins",
+    )
+    loser_evidence = build_owner_evidence(
+        session_id=session.id,
+        task_execution_id=execution.id,
+        owner_token="delivery-two-loses",
+    )
+    try:
+        begin_atomic_claim_transaction(db_one)
+        winner = claim_continuation(db_one, identity, commit=False)
+        assert winner.accepted is True
+        assert (
+            acquire_backend_slot(
+                redis,
+                "fixture",
+                session.id,
+                max_slots=2,
+                owner_evidence=winner_evidence,
+            )
+            is True
+        )
+        db_one.commit()
+
+        begin_atomic_claim_transaction(db_two)
+        loser = claim_continuation(db_two, identity, commit=False)
+        assert loser.accepted is False
+        db_two.rollback()
+        assert (
+            release_backend_slot_if_owner(
+                redis,
+                "fixture",
+                session.id,
+                json.dumps(loser_evidence, sort_keys=True),
+            )
+            is False
+        )
+        assert redis.members == {str(session.id)}
+        assert redis.owners[str(session.id)] == json.dumps(
+            winner_evidence, sort_keys=True
+        )
+
+        unrelated_evidence = build_owner_evidence(
+            session_id=999,
+            task_execution_id=999,
+            owner_token="unrelated-owner",
+        )
+        assert (
+            acquire_backend_slot(
+                redis,
+                "fixture",
+                999,
+                max_slots=2,
+                owner_evidence=unrelated_evidence,
+            )
+            is True
+        )
+        winner_owner = json.dumps(winner_evidence, sort_keys=True)
+        assert (
+            release_backend_slot_if_owner(redis, "fixture", session.id, winner_owner)
+            is True
+        )
+        assert (
+            release_backend_slot_if_owner(redis, "fixture", session.id, winner_owner)
+            is False
+        )
+        assert redis.members == {"999"}
+    finally:
+        db_two.close()
+        db_one.rollback()

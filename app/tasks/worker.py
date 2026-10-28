@@ -425,19 +425,39 @@ def _release_backend_slot_safely(
     *,
     session_id: int,
     task_execution_id: Optional[int],
-) -> None:
-    """Release this dispatch's slot without masking terminal task cleanup."""
-    from app.services.agents.backend_concurrency import release_backend_slot
+    expected_owner_evidence: Optional[str] = None,
+) -> Optional[bool]:
+    """Release this dispatch's slot only while its owner evidence still matches."""
+    from app.services.agents.backend_concurrency import (
+        release_backend_slot_if_owner,
+    )
 
-    released = release_backend_slot(redis_client, backend_id, session_id)
+    try:
+        released = release_backend_slot_if_owner(
+            redis_client,
+            backend_id,
+            session_id,
+            expected_owner_evidence,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[ORCHESTRATION] Backend slot release raised for backend=%s "
+            "session_id=%s task_execution_id=%s: %s",
+            backend_id,
+            session_id,
+            task_execution_id,
+            exc,
+        )
+        return None
     if released is False:
         logger.warning(
-            "[ORCHESTRATION] Failed to release backend slot for backend=%s "
-            "session_id=%s task_execution_id=%s",
+            "[ORCHESTRATION] Backend slot release failed or was ownership-fenced "
+            "for backend=%s session_id=%s task_execution_id=%s",
             backend_id,
             session_id,
             task_execution_id,
         )
+    return released
 
 
 MAX_SUBFOLDER_COLLISION_ATTEMPTS = 999
@@ -838,6 +858,8 @@ def execute_orchestration_task(
     _backend_slot_acquired: bool = False
     _backend_slot_backend_id: Optional[str] = None
     _backend_slot_redis = None
+    _backend_slot_owner_evidence: Optional[str] = None
+    _backend_slot_acquisition_attempted = False
     _resolved_execution_backend: str = settings.AGENT_BACKEND
     planning_runtime_service = None
     active_failure_phase: Optional[str] = None
@@ -867,6 +889,7 @@ def execute_orchestration_task(
     continuation_claimed = False
     capacity_retry_scheduled = False
     capacity_claim_result = None
+    capacity_acquisition_uncertain = False
 
     # Phase 23D-3: if this worker process is force-terminated (SIGTERM, e.g.
     # via the intervention/pause path's `revoke_session_celery_tasks
@@ -889,6 +912,7 @@ def execute_orchestration_task(
                 _backend_slot_backend_id,
                 session_id=session_id,
                 task_execution_id=task_execution_id,
+                expected_owner_evidence=_backend_slot_owner_evidence,
             )
         for _bound_runtime_service in (runtime_service, planning_runtime_service):
             if _bound_runtime_service is not None and hasattr(
@@ -1187,6 +1211,12 @@ def execute_orchestration_task(
         claim_reason = "unclaimed"
         claim_started_at = None
         delivery_retry_count = getattr(getattr(self, "request", None), "retries", 0)
+        managed_same_attempt_capacity_continuation = (
+            is_e3_continuation_dispatch
+            and task_execution is not None
+            and task_execution.dispatch_state is not None
+            and continuation_kind in {"celery_retry", "backend_capacity"}
+        )
 
         # Refuse a managed retry-count mismatch before asking the capacity
         # backend for a slot. The atomic continuation claim below repeats this
@@ -1303,6 +1333,17 @@ def execute_orchestration_task(
                     _slot_process_start_identity,
                     _slot_worker_pid,
                 ) = _runtime_worker_identity()
+                _slot_owner_evidence = build_owner_evidence(
+                    session_id=session_id,
+                    task_execution_id=task_execution_id,
+                    worker_hostname=_slot_worker_hostname,
+                    worker_pid=_slot_worker_pid,
+                    worker_process_start_identity=_slot_process_start_identity,
+                )
+                _backend_slot_owner_evidence = json.dumps(
+                    _slot_owner_evidence, sort_keys=True
+                )
+                _backend_slot_acquisition_attempted = True
                 _backend_slot_acquired = acquire_backend_slot(
                     _backend_slot_redis,
                     _capacity_backend.name,
@@ -1310,15 +1351,64 @@ def execute_orchestration_task(
                     max_slots=settings.LOCAL_OPENCLAW_MAX_PARALLEL_SESSIONS,
                     # Phase 22B-1X1: retain the existing owner evidence so a
                     # force-terminated worker's slot can be reconciled.
-                    owner_evidence=build_owner_evidence(
-                        session_id=session_id,
-                        task_execution_id=task_execution_id,
-                        worker_hostname=_slot_worker_hostname,
-                        worker_pid=_slot_worker_pid,
-                        worker_process_start_identity=_slot_process_start_identity,
-                    ),
+                    owner_evidence=_slot_owner_evidence,
                 )
+                _backend_slot_acquisition_attempted = False
             except Exception as _redis_exc:
+                if managed_same_attempt_capacity_continuation:
+                    rollback_status = "rolled_back"
+                    try:
+                        # The continuation claim is tentative until Redis
+                        # positively confirms capacity. Release SQLite's writer
+                        # reservation before attempting owner-fenced cleanup.
+                        db.rollback()
+                    except Exception as _rollback_exc:
+                        rollback_status = (
+                            f"rollback_error:{_rollback_exc.__class__.__name__}"
+                        )
+                    capacity_claim_result = None
+                    _backend_slot_acquired = False
+                    cleanup_status = "not_needed_before_slot_acquisition"
+                    if (
+                        _backend_slot_acquisition_attempted
+                        and _backend_slot_redis is not None
+                        and _backend_slot_backend_id
+                        and _backend_slot_owner_evidence is not None
+                    ):
+                        try:
+                            released = _release_backend_slot_safely(
+                                _backend_slot_redis,
+                                _backend_slot_backend_id,
+                                session_id=session_id,
+                                task_execution_id=task_execution_id,
+                                expected_owner_evidence=_backend_slot_owner_evidence,
+                            )
+                            cleanup_status = (
+                                "released"
+                                if released is True
+                                else (
+                                    "release_error"
+                                    if released is None
+                                    else "owner_not_confirmed_or_slot_absent"
+                                )
+                            )
+                        except Exception as _cleanup_exc:
+                            cleanup_status = (
+                                f"release_error:{_cleanup_exc.__class__.__name__}"
+                            )
+                    _backend_slot_acquisition_attempted = False
+                    capacity_acquisition_uncertain = True
+                    failure_message = (
+                        "managed_capacity_acquisition_uncertain: "
+                        f"backend={_backend_slot_backend_id or _resolved_execution_backend}; "
+                        f"rollback={rollback_status}; cleanup={cleanup_status}; "
+                        f"redis_error={_redis_exc.__class__.__name__}: {_redis_exc}"
+                    )
+                    logger.error(
+                        "[ORCHESTRATION] %s",
+                        failure_message,
+                    )
+                    raise RuntimeError(failure_message) from _redis_exc
                 logger.warning(
                     "[ORCHESTRATION] Redis slot acquisition error (non-fatal, proceeding): %s",
                     _redis_exc,
@@ -3563,7 +3653,11 @@ def execute_orchestration_task(
             )
             return {
                 "status": "ignored",
-                "reason": "continuation_claim_not_completed",
+                "reason": (
+                    "managed_capacity_acquisition_uncertain"
+                    if capacity_acquisition_uncertain
+                    else "continuation_claim_not_completed"
+                ),
             }
         try:
             _fail_cat = classify_failure(
@@ -3774,6 +3868,7 @@ def execute_orchestration_task(
                     _backend_slot_backend_id,
                     session_id=session_id,
                     task_execution_id=task_execution_id,
+                    expected_owner_evidence=_backend_slot_owner_evidence,
                 )
             except Exception as _rel_exc:
                 logger.warning(
