@@ -893,6 +893,14 @@ def resolve_continuation_identity(
     if not instance_id:
         return None
     exact_execution_id = getattr(session, "continuation_task_execution_id", None)
+    if exact_execution_id is None:
+        from app.services.execution.workflow_lifecycle import enforcement_enabled
+
+        if enforcement_enabled():
+            # Historical markers may infer the latest attempt only while the
+            # legacy dispatch contract is active. Enforced E8 requires the
+            # persisted continuation attempt identity.
+            return None
     execution_query = db.query(TaskExecution).filter(
         TaskExecution.session_id == session_id,
         TaskExecution.task_id == task_id,
@@ -1006,9 +1014,11 @@ def claim_continuation(
             )
     try:
         from app.services.execution.workflow_lifecycle import (
+            require_managed_dispatch_contract,
             validate_existing_dispatch_binding,
         )
 
+        require_managed_dispatch_contract(execution)
         validate_existing_dispatch_binding(
             db,
             task_execution=execution,

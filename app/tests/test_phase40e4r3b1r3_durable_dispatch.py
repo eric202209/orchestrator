@@ -150,8 +150,14 @@ def _claim_in_subprocess(
     generation,
     celery_id,
     result_queue,
+    enforced=False,
 ):
-    settings.WORKFLOW_BUDGET_ENFORCEMENT_ENABLED = False
+    settings.WORKFLOW_BUDGET_ENFORCEMENT_ENABLED = enforced
+    if enforced:
+        settings.WORKFLOW_BUDGET_POLICY_ID = "dispatch-test"
+        settings.WORKFLOW_BUDGET_POLICY_VERSION = "1"
+        settings.WORKFLOW_BUDGET_MAX_REQUESTS = 3
+        settings.WORKFLOW_BUDGET_MAX_DURATION_SECONDS = 1800
     engine = _engine(Path(database_path))
     db = _factory(engine)()
     try:
@@ -518,10 +524,20 @@ def test_uncertain_publication_reuses_exact_id_and_duplicate_claim_is_fenced(
     assert db.query(Task).filter_by(id=task.id).one().status is TaskStatus.RUNNING
 
 
-def test_two_processes_admit_only_one_exact_worker_claim(dispatch_db):
+def test_two_processes_admit_only_one_exact_worker_claim(dispatch_db, monkeypatch):
     path, _, _, db = dispatch_db
+    _enable_budget(monkeypatch)
     _, session, task, _, execution = _graph(db)
     assert _configure(db, session, task, execution)
+    db.commit()
+    assert (
+        workflow.bind_new_root(
+            db,
+            execution.id,
+            expected_session_instance_id=session.instance_id,
+        )
+        is BudgetOutcome.CREATED
+    )
     execution.dispatch_state = "READY"
     db.commit()
 
@@ -538,6 +554,7 @@ def test_two_processes_admit_only_one_exact_worker_claim(dispatch_db):
                 session.instance_id,
                 execution.dispatch_celery_task_id,
                 result_queue,
+                True,
             ),
         )
         for _ in range(2)
@@ -1027,6 +1044,579 @@ def test_e8_routes_managed_continuation_through_same_te_dispatch(
     assert result["republished_session_ids"] == [session.id]
     assert identity.task_execution_id == execution.id
     assert db.query(TaskExecution).filter_by(session_id=session.id).count() == 1
+
+
+def _bound_unmanaged_root(dispatch_db, monkeypatch, *, session_status="running"):
+    _enable_budget(monkeypatch)
+    _, _, _, db = dispatch_db
+    _, session, task, link, execution = _graph(db, session_status=session_status)
+    assert execution.dispatch_state is None
+    assert execution.dispatch_celery_task_id is None
+    assert (
+        workflow.bind_new_root(
+            db,
+            execution.id,
+            expected_session_instance_id=session.instance_id,
+        )
+        is BudgetOutcome.CREATED
+    )
+    return db, session, task, link, execution
+
+
+def _schedule_unmanaged_continuation(db, session, task, link, execution):
+    now = datetime.now(timezone.utc)
+    execution.status = TaskStatus.RUNNING
+    task.status = TaskStatus.RUNNING
+    link.status = TaskStatus.RUNNING
+    session.status = "running"
+    db.commit()
+    enter_recovering(
+        db,
+        session,
+        task_execution=execution,
+        continuation_kind="celery_retry",
+        retry_count=1,
+        changed_at=now,
+    )
+    identity = schedule_continuation(
+        db,
+        session,
+        task_execution=execution,
+        continuation_task_id=task.id,
+        continuation_kind="celery_retry",
+        retry_count=1,
+        retry_eta=now - timedelta(minutes=2),
+        changed_at=now,
+    )
+    db.commit()
+    assert execution.dispatch_state is None
+    assert execution.dispatch_celery_task_id is None
+    return identity
+
+
+def test_enforced_worker_refuses_r3a_bound_unmanaged_attempt_without_mutation(
+    dispatch_db, monkeypatch
+):
+    db, session, task, link, execution = _bound_unmanaged_root(dispatch_db, monkeypatch)
+    binding_before = r3a.resolve_task_execution_binding(db, execution.id)
+    workflow_before = workflow.resolve_task_execution_workflow(db, execution.id)
+    task_execution_count = db.query(TaskExecution).filter_by(task_id=task.id).count()
+    identity_before = (
+        binding_before.workflow_uuid,
+        binding_before.session_instance_id,
+        workflow_before.deadline_at,
+        workflow_before.reserved_requests,
+    )
+
+    result = _claim_queued_task_for_worker(
+        db=db,
+        session=session,
+        task=task,
+        session_task_link=link,
+        expected_session_instance_id=session.instance_id,
+        task_execution_id=execution.id,
+        celery_task_id=None,
+    )
+
+    assert result[0] is False, result
+    assert result[1] == "workflow_identity_refused:dispatch_contract_required"
+    db.expire_all()
+    assert (
+        db.query(TaskExecution).filter_by(id=execution.id).one().status
+        is TaskStatus.PENDING
+    )
+    assert (
+        db.query(TaskExecution).filter_by(id=execution.id).one().dispatch_state is None
+    )
+    assert (
+        db.query(TaskExecution).filter_by(task_id=task.id).count()
+        == task_execution_count
+    )
+    assert db.query(Task).filter_by(id=task.id).one().status is TaskStatus.PENDING
+    assert (
+        db.query(SessionTask).filter_by(id=link.id).one().status is TaskStatus.PENDING
+    )
+    assert db.query(SessionModel).filter_by(id=session.id).one().status == "running"
+    binding_after = r3a.resolve_task_execution_binding(db, execution.id)
+    workflow_after = workflow.resolve_task_execution_workflow(db, execution.id)
+    assert (
+        binding_after.workflow_uuid,
+        binding_after.session_instance_id,
+        workflow_after.deadline_at,
+        workflow_after.reserved_requests,
+    ) == identity_before
+
+
+def test_unmanaged_worker_delivery_returns_before_runtime_construction(
+    dispatch_db, monkeypatch
+):
+    db, session, task, _link, execution = _bound_unmanaged_root(
+        dispatch_db, monkeypatch
+    )
+    from types import SimpleNamespace
+
+    from app.tasks import worker as worker_module
+
+    runtime_calls = []
+    config = SimpleNamespace(backend_name="fixture")
+    monkeypatch.setattr(worker_module, "get_db_session", lambda: db)
+    monkeypatch.setattr(
+        worker_module, "_route_one_shot_if_requested", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        worker_module, "resolve_runtime_configuration", lambda *a, **k: config
+    )
+    monkeypatch.setattr(
+        worker_module, "validate_runtime_provider_contract", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "build_runtime_identity_projection",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(worker_module, "_runtime_selection_details", lambda *a, **k: {})
+    monkeypatch.setattr(
+        worker_module,
+        "_start_task_invocation_provenance",
+        lambda *a, **k: (None, None),
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "register_forced_termination_cleanup",
+        lambda *_: lambda: None,
+    )
+    monkeypatch.setattr(worker_module, "_capacity_admission_backend", lambda *_: None)
+    monkeypatch.setattr(
+        worker_module, "_should_force_review_execution_profile", lambda *a: False
+    )
+    monkeypatch.setattr(
+        worker_module, "_should_execute_in_canonical_project_root", lambda *a: False
+    )
+    monkeypatch.setattr(
+        worker_module, "_should_reject_stale_dispatch_claim", lambda **_: None
+    )
+    monkeypatch.setattr(
+        worker_module,
+        "create_agent_runtime",
+        lambda *a, **k: runtime_calls.append((a, k)),
+    )
+
+    result = worker_module.execute_orchestration_task.run(
+        session_id=session.id,
+        task_id=task.id,
+        prompt=task.description,
+        expected_session_instance_id=session.instance_id,
+        task_execution_id=execution.id,
+    )
+
+    assert result["status"] == "ignored"
+    assert result["reason"] == "workflow_identity_refused:dispatch_contract_required"
+    assert not runtime_calls
+    db.expire_all()
+    assert (
+        db.query(TaskExecution).filter_by(id=execution.id).one().status
+        is TaskStatus.PENDING
+    )
+    assert db.query(Task).filter_by(id=task.id).one().status is TaskStatus.PENDING
+    assert db.query(SessionModel).filter_by(id=session.id).one().status == "running"
+
+
+def test_enforced_e8_refuses_r3a_bound_unmanaged_continuation_before_publish(
+    dispatch_db, monkeypatch
+):
+    db, session, task, link, execution = _bound_unmanaged_root(
+        dispatch_db, monkeypatch, session_status="recovering"
+    )
+    _schedule_unmanaged_continuation(db, session, task, link, execution)
+    workflow_before = workflow.resolve_task_execution_workflow(db, execution.id)
+    binding_before = r3a.resolve_task_execution_binding(db, execution.id)
+    task_execution_count = db.query(TaskExecution).filter_by(task_id=task.id).count()
+    published = []
+
+    class Result:
+        id = "unexpected-legacy-publication"
+
+    from app.tasks import worker as worker_module
+
+    monkeypatch.setattr(
+        worker_module.execute_orchestration_task,
+        "apply_async",
+        lambda **kwargs: published.append(kwargs) or Result(),
+    )
+    result = e8.reconcile_stranded_continuations(
+        db,
+        now=datetime.now(timezone.utc),
+        grace_seconds=0,
+        suppression_seconds=0,
+        delivery_probe=lambda _: e8.DeliveryProbeResult(present=False),
+        use_project_lock=False,
+    )
+
+    assert not published
+    assert result["counts"][e8.DISPATCH_CONTRACT_REQUIRED] == 1
+    assert result["decisions"][0]["reason"] == "dispatch_contract_required"
+    db.expire_all()
+    assert (
+        db.query(TaskExecution).filter_by(task_id=task.id).count()
+        == task_execution_count
+    )
+    current_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    current_session = db.query(SessionModel).filter_by(id=session.id).one()
+    assert current_execution.status is TaskStatus.PENDING
+    assert current_execution.dispatch_state is None
+    assert current_session.status == "retry_pending"
+    assert current_session.continuation_task_execution_id == execution.id
+    workflow_after = workflow.resolve_task_execution_workflow(db, execution.id)
+    binding_after = r3a.resolve_task_execution_binding(db, execution.id)
+    assert workflow_after.workflow_uuid == workflow_before.workflow_uuid
+    assert workflow_after.deadline_at == workflow_before.deadline_at
+    assert workflow_after.reserved_requests == workflow_before.reserved_requests
+    assert binding_after.workflow_uuid == binding_before.workflow_uuid
+
+
+def test_disabled_worker_keeps_r3a_bound_unmanaged_claim_compatible(
+    dispatch_db, monkeypatch
+):
+    db, session, task, link, execution = _bound_unmanaged_root(dispatch_db, monkeypatch)
+    monkeypatch.setattr(settings, "WORKFLOW_BUDGET_ENFORCEMENT_ENABLED", False)
+
+    result = _claim_queued_task_for_worker(
+        db=db,
+        session=session,
+        task=task,
+        session_task_link=link,
+        expected_session_instance_id=session.instance_id,
+        task_execution_id=execution.id,
+        celery_task_id=None,
+    )
+
+    assert result[0] is True
+    db.expire_all()
+    claimed = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert claimed.status is TaskStatus.RUNNING
+    assert claimed.dispatch_state is None
+    assert claimed.dispatch_celery_task_id is None
+    assert db.query(Task).filter_by(id=task.id).one().status is TaskStatus.RUNNING
+    assert (
+        db.query(SessionTask).filter_by(id=link.id).one().status is TaskStatus.RUNNING
+    )
+    assert db.query(SessionModel).filter_by(id=session.id).one().status == "running"
+
+
+def test_enforced_managed_worker_claim_succeeds(dispatch_db, monkeypatch):
+    _enable_budget(monkeypatch)
+    _, _, _, db = dispatch_db
+    _, session, task, link, execution = _graph(db)
+    assert _configure(db, session, task, execution)
+    db.commit()
+    assert (
+        workflow.bind_new_root(
+            db,
+            execution.id,
+            expected_session_instance_id=session.instance_id,
+        )
+        is BudgetOutcome.CREATED
+    )
+    execution.dispatch_state = "READY"
+    db.commit()
+
+    result = _claim_queued_task_for_worker(
+        db=db,
+        session=session,
+        task=task,
+        session_task_link=link,
+        expected_session_instance_id=session.instance_id,
+        task_execution_id=execution.id,
+        celery_task_id=execution.dispatch_celery_task_id,
+    )
+
+    assert result[0] is True
+    db.expire_all()
+    claimed = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert claimed.status is TaskStatus.RUNNING
+    assert claimed.dispatch_state == "CLAIMED"
+
+
+def test_enforced_managed_duplicate_does_not_mutate_winning_claim(
+    dispatch_db, monkeypatch
+):
+    _enable_budget(monkeypatch)
+    _, _, _, db = dispatch_db
+    _, session, task, link, execution = _graph(db)
+    assert _configure(db, session, task, execution)
+    db.commit()
+    assert (
+        workflow.bind_new_root(
+            db,
+            execution.id,
+            expected_session_instance_id=session.instance_id,
+        )
+        is BudgetOutcome.CREATED
+    )
+    execution.dispatch_state = "READY"
+    db.commit()
+    args = {
+        "db": db,
+        "session": session,
+        "task": task,
+        "session_task_link": link,
+        "expected_session_instance_id": session.instance_id,
+        "task_execution_id": execution.id,
+        "celery_task_id": execution.dispatch_celery_task_id,
+    }
+
+    winner = _claim_queued_task_for_worker(**args)
+    db.expire_all()
+    winning_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    winning_link = db.query(SessionTask).filter_by(id=link.id).one()
+    winning_session = db.query(SessionModel).filter_by(id=session.id).one()
+    winning_snapshot = (
+        winning_execution.status,
+        winning_execution.dispatch_state,
+        winning_execution.started_at,
+        winning_execution.dispatch_claimed_at,
+        winning_link.status,
+        winning_link.started_at,
+        winning_session.status,
+        winning_session.lifecycle_updated_at,
+    )
+    duplicate = _claim_queued_task_for_worker(**args)
+    db.expire_all()
+
+    assert winner[0] is True
+    assert duplicate[0] is False
+    assert duplicate[1] == "task_not_claimable:running"
+    current_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    current_link = db.query(SessionTask).filter_by(id=link.id).one()
+    current_session = db.query(SessionModel).filter_by(id=session.id).one()
+    assert (
+        current_execution.status,
+        current_execution.dispatch_state,
+        current_execution.started_at,
+        current_execution.dispatch_claimed_at,
+        current_link.status,
+        current_link.started_at,
+        current_session.status,
+        current_session.lifecycle_updated_at,
+    ) == winning_snapshot
+
+
+def test_enforced_e3_claim_refuses_unmanaged_bound_attempt(dispatch_db, monkeypatch):
+    db, session, task, link, execution = _bound_unmanaged_root(dispatch_db, monkeypatch)
+    identity = _schedule_unmanaged_continuation(db, session, task, link, execution)
+
+    from app.services.orchestration.lifecycle.transitions import claim_continuation
+
+    result = claim_continuation(db, identity, commit=True)
+    db.rollback()
+
+    assert result.accepted is False
+    assert result.reason == "workflow_identity_refused:dispatch_contract_required"
+    db.expire_all()
+    assert (
+        db.query(TaskExecution).filter_by(id=execution.id).one().status
+        is TaskStatus.PENDING
+    )
+    assert (
+        db.query(TaskExecution).filter_by(id=execution.id).one().dispatch_state is None
+    )
+    assert db.query(Task).filter_by(id=task.id).one().status is TaskStatus.PENDING
+    assert (
+        db.query(SessionTask).filter_by(id=link.id).one().status is TaskStatus.PENDING
+    )
+    current_session = db.query(SessionModel).filter_by(id=session.id).one()
+    assert current_session.status == "retry_pending"
+    assert current_session.continuation_task_execution_id == execution.id
+
+
+def test_enforced_e8_refuses_historical_marker_without_exact_attempt_id(
+    dispatch_db, monkeypatch
+):
+    db, session, task, link, execution = _bound_unmanaged_root(
+        dispatch_db, monkeypatch, session_status="recovering"
+    )
+    _schedule_unmanaged_continuation(db, session, task, link, execution)
+    session.continuation_task_execution_id = None
+    db.commit()
+    published = []
+
+    result = e8.reconcile_stranded_continuations(
+        db,
+        now=datetime.now(timezone.utc),
+        grace_seconds=0,
+        suppression_seconds=0,
+        delivery_probe=lambda _: e8.DeliveryProbeResult(present=False),
+        publish=lambda *_: published.append(True),
+        use_project_lock=False,
+    )
+
+    assert not published
+    assert result["counts"][e8.DISPATCH_CONTRACT_REQUIRED] == 1
+    assert (
+        result["decisions"][0]["reason"]
+        == "continuation_task_execution_identity_missing"
+    )
+    db.expire_all()
+    current_session = db.query(SessionModel).filter_by(id=session.id).one()
+    assert current_session.status == "retry_pending"
+    assert current_session.continuation_task_execution_id is None
+    assert (
+        db.query(TaskExecution).filter_by(id=execution.id).one().status
+        is TaskStatus.PENDING
+    )
+
+
+def test_disabled_e8_preserves_unmanaged_fallback_publication(dispatch_db, monkeypatch):
+    db, session, task, link, execution = _bound_unmanaged_root(
+        dispatch_db, monkeypatch, session_status="recovering"
+    )
+    _schedule_unmanaged_continuation(db, session, task, link, execution)
+    session.continuation_task_execution_id = None
+    db.commit()
+    monkeypatch.setattr(settings, "WORKFLOW_BUDGET_ENFORCEMENT_ENABLED", False)
+    published = []
+
+    class Result:
+        id = "legacy-e8-delivery"
+
+    from app.tasks import worker as worker_module
+
+    monkeypatch.setattr(
+        worker_module.execute_orchestration_task,
+        "apply_async",
+        lambda **kwargs: published.append(kwargs) or Result(),
+    )
+    result = e8.reconcile_stranded_continuations(
+        db,
+        now=datetime.now(timezone.utc),
+        grace_seconds=0,
+        suppression_seconds=0,
+        delivery_probe=lambda _: e8.DeliveryProbeResult(present=False),
+        use_project_lock=False,
+    )
+
+    assert result["counts"][e8.REPUBLISHED] == 1
+    assert len(published) == 1
+    assert published[0]["kwargs"]["task_execution_id"] == execution.id
+    assert published[0]["kwargs"]["continuation_retry_count"] == 1
+    assert db.query(TaskExecution).filter_by(task_id=task.id).count() == 1
+    assert (
+        db.query(SessionModel).filter_by(id=session.id).one().status == "retry_pending"
+    )
+
+
+def test_enforced_managed_e8_uses_durable_publisher_without_legacy_fallback(
+    dispatch_db, monkeypatch
+):
+    _enable_budget(monkeypatch)
+    _, _, _, db = dispatch_db
+    _, session, task, _, execution = _graph(db, session_status="recovering")
+    assert _configure(db, session, task, execution)
+    db.commit()
+    assert (
+        workflow.bind_new_root(
+            db,
+            execution.id,
+            expected_session_instance_id=session.instance_id,
+        )
+        is BudgetOutcome.CREATED
+    )
+    execution.dispatch_state = "READY"
+    identity = schedule_continuation(
+        db,
+        session,
+        task_execution=execution,
+        continuation_task_id=task.id,
+        continuation_kind="celery_retry",
+        retry_count=2,
+        retry_eta=datetime.now(timezone.utc) - timedelta(minutes=2),
+    )
+    db.commit()
+    publications = []
+
+    class Result:
+        id = "managed-e8-delivery"
+
+    from app.tasks import worker as worker_module
+
+    def apply_async(*, kwargs, task_id=None, retries=None):
+        publications.append({"kwargs": kwargs, "task_id": task_id, "retries": retries})
+        return Result()
+
+    monkeypatch.setattr(
+        worker_module.execute_orchestration_task,
+        "apply_async",
+        apply_async,
+    )
+    result = e8.reconcile_stranded_continuations(
+        db,
+        now=datetime.now(timezone.utc),
+        grace_seconds=0,
+        suppression_seconds=0,
+        delivery_probe=lambda _: e8.DeliveryProbeResult(present=False),
+        use_project_lock=False,
+    )
+
+    assert result["counts"][e8.REPUBLISHED] == 1
+    assert len(publications) == 1
+    assert publications[0]["task_id"] == execution.dispatch_celery_task_id
+    assert publications[0]["retries"] is None
+    assert publications[0]["kwargs"]["task_execution_id"] == execution.id
+    assert (
+        publications[0]["kwargs"]["expected_session_instance_id"] == session.instance_id
+    )
+    assert publications[0]["kwargs"]["continuation_retry_count"] == 2
+    db.expire_all()
+    claimed_execution = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert claimed_execution.dispatch_state == "READY"
+    assert claimed_execution.dispatch_publish_attempts == 1
+    assert identity.task_execution_id == execution.id
+
+
+def test_two_processes_refuse_enforced_unmanaged_worker_claim(dispatch_db, monkeypatch):
+    path, _, _, db = dispatch_db
+    _, session, task, _, execution = _bound_unmanaged_root(dispatch_db, monkeypatch)
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_claim_in_subprocess,
+            args=(
+                str(path),
+                session.id,
+                task.id,
+                execution.id,
+                session.instance_id,
+                None,
+                result_queue,
+                True,
+            ),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(20)
+        assert process.exitcode == 0
+    outcomes = [result_queue.get(timeout=5) for _ in processes]
+
+    assert sum(accepted for accepted, _ in outcomes) == 0
+    assert all(
+        reason == "workflow_identity_refused:dispatch_contract_required"
+        for _, reason in outcomes
+    )
+    db.expire_all()
+    assert (
+        db.query(TaskExecution).filter_by(id=execution.id).one().status
+        is TaskStatus.PENDING
+    )
+    assert db.query(Task).filter_by(id=task.id).one().status is TaskStatus.PENDING
+    assert (
+        db.query(SessionTask).filter_by(session_id=session.id).one().status
+        is TaskStatus.PENDING
+    )
+    assert db.query(SessionModel).filter_by(id=session.id).one().status == "running"
 
 
 def test_worker_rejects_delivery_revoked_after_publication(dispatch_db):

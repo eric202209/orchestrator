@@ -55,6 +55,7 @@ PHYSICAL_STATE_UNCERTAIN = "PHYSICAL_STATE_UNCERTAIN"
 INVALID_CONTINUATION = "INVALID_CONTINUATION"
 RECONCILIATION_LOCKED = "RECONCILIATION_LOCKED"
 RECONCILIATION_ERROR = "RECONCILIATION_ERROR"
+DISPATCH_CONTRACT_REQUIRED = "DISPATCH_CONTRACT_REQUIRED"
 
 RECONCILIATION_OUTCOMES = (
     NOT_ELIGIBLE,
@@ -67,6 +68,7 @@ RECONCILIATION_OUTCOMES = (
     INVALID_CONTINUATION,
     RECONCILIATION_LOCKED,
     RECONCILIATION_ERROR,
+    DISPATCH_CONTRACT_REQUIRED,
 )
 
 # `validate_continuation` is the canonical eligibility authority; this maps its
@@ -282,6 +284,23 @@ def publish_continuation_delivery(
         .filter(TaskExecution.id == identity.task_execution_id)
         .first()
     )
+    from app.services.execution.workflow_lifecycle import (
+        WorkflowLifecycleError,
+        require_managed_dispatch_contract,
+    )
+
+    try:
+        require_managed_dispatch_contract(execution)
+    except WorkflowLifecycleError as exc:
+        logger.warning(
+            "[E8] refusing continuation without managed dispatch contract "
+            "session_id=%s task_execution_id=%s reason=%s",
+            identity.session_id,
+            identity.task_execution_id,
+            exc.reason,
+        )
+        raise
+
     if execution is not None and execution.dispatch_state is not None:
         from app.services.execution.workflow_lifecycle import (
             publish_task_execution_dispatch,
@@ -516,6 +535,22 @@ def reconcile_session_continuation(
     probe = delivery_probe or (lambda _identity: DeliveryProbeResult(present=False))
     publisher = publish or publish_continuation_delivery
 
+    from app.services.execution.workflow_lifecycle import enforcement_enabled
+
+    if (
+        enforcement_enabled()
+        and getattr(session, "continuation_task_execution_id", None) is None
+    ):
+        return ReconciliationDecision(
+            session_id=session_id,
+            outcome=DISPATCH_CONTRACT_REQUIRED,
+            reason="continuation_task_execution_identity_missing",
+            task_id=getattr(session, "continuation_task_id", None),
+            continuation_kind=getattr(session, "continuation_kind", None),
+            retry_count=getattr(session, "continuation_retry_count", None),
+            instance_id=getattr(session, "instance_id", None),
+        )
+
     identity = resolve_continuation_identity(db, session)
     if identity is None:
         return ReconciliationDecision(
@@ -651,8 +686,39 @@ def _reconcile_locked_section(
             revalidated=True,
         )
 
+    execution = (
+        db.query(TaskExecution)
+        .filter(
+            TaskExecution.id == identity.task_execution_id,
+            TaskExecution.session_id == identity.session_id,
+            TaskExecution.task_id == identity.continuation_task_id,
+        )
+        .first()
+    )
+    from app.services.execution.workflow_lifecycle import (
+        WorkflowLifecycleError,
+        require_managed_dispatch_contract,
+    )
+
+    try:
+        require_managed_dispatch_contract(execution)
+    except WorkflowLifecycleError as exc:
+        return _decision(
+            DISPATCH_CONTRACT_REQUIRED,
+            exc.reason,
+            revalidated=True,
+        )
+
     try:
         celery_task_id = publisher(db, identity)
+    except WorkflowLifecycleError as exc:
+        if exc.reason not in {"dispatch_contract_required", "attempt_missing"}:
+            raise
+        return _decision(
+            DISPATCH_CONTRACT_REQUIRED,
+            exc.reason,
+            revalidated=True,
+        )
     except Exception as exc:  # noqa: BLE001 - reported; marker deliberately kept
         logger.error(
             "[E8] Continuation republication failed for session %s: %s",

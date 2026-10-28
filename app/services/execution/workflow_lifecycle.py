@@ -291,6 +291,17 @@ def enforcement_enabled() -> bool:
     return bool(getattr(settings, "WORKFLOW_BUDGET_ENFORCEMENT_ENABLED", False))
 
 
+def require_managed_dispatch_contract(task_execution: Any) -> None:
+    """Refuse legacy TaskExecution rows at enforced execution boundaries."""
+
+    if not enforcement_enabled():
+        return
+    if getattr(task_execution, "id", None) is None:
+        raise WorkflowLifecycleError("attempt_missing")
+    if getattr(task_execution, "dispatch_state", None) is None:
+        raise WorkflowLifecycleError("dispatch_contract_required")
+
+
 def active_policy(kind: WorkflowKind) -> WorkflowBudgetPolicy | None:
     """The configured ENFORCED policy, ``None`` when disabled; invalid raises."""
 

@@ -310,9 +310,11 @@ def _claim_queued_task_for_worker(
                 return False, "dispatch_identity_mismatch", None, session_task_link
         try:
             from app.services.execution.workflow_lifecycle import (
+                require_managed_dispatch_contract,
                 validate_existing_dispatch_binding,
             )
 
+            require_managed_dispatch_contract(execution)
             validate_existing_dispatch_binding(
                 db,
                 task_execution=execution,
