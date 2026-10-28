@@ -700,6 +700,22 @@ def _dispatch_replay_arguments(
     return args, None
 
 
+def _dispatch_delivery_retries(args: dict[str, Any]) -> int:
+    """Return the Celery transport retry counter for a managed delivery.
+
+    A same-attempt continuation was first published by ``Task.retry``, which
+    stamps ``request.retries + 1``; the Session marker stores that same value
+    and the E3 and capacity budgets read it back from ``request.retries``. A
+    republication carries the marker count, so it neither resets nor consumes
+    a retry. Same-attempt kinds reach ``args`` only from the exact marker. Any
+    other managed delivery (ROOT, fresh automatic recovery) starts at zero.
+    """
+
+    if args.get("continuation_kind") in _SAME_ATTEMPT_CONTINUATION_KINDS:
+        return args["continuation_retry_count"]
+    return 0
+
+
 def managed_continuation_retry_arguments(
     db: Session, execution: TaskExecution
 ) -> tuple[dict[str, Any] | None, str | None]:
@@ -962,6 +978,7 @@ def _publish_one_task_execution_dispatch(
         publisher(
             kwargs=args,
             task_id=execution.dispatch_celery_task_id,
+            retries=_dispatch_delivery_retries(args),
         )
         outcome = "published_unclaimed"
         error = None
@@ -1071,7 +1088,8 @@ def publisher_from_delay(delay_function: Any) -> Any:
     if callable(apply_async):
         return apply_async
 
-    def _injected_publisher(*, kwargs: dict[str, Any], task_id: str):
+    def _injected_publisher(*, kwargs: dict[str, Any], task_id: str, retries: int = 0):
+        # A delay-only test double has no transport options to carry.
         return delay_function(**kwargs)
 
     return _injected_publisher

@@ -465,7 +465,7 @@ def test_uncertain_publication_reuses_exact_id_and_duplicate_claim_is_fenced(
 
     observed = []
 
-    def accepted_but_ack_lost(*, kwargs, task_id):
+    def accepted_but_ack_lost(*, kwargs, task_id, **_options):
         observed.append((kwargs, task_id))
         raise ConnectionError("simulated lost publisher acknowledgment")
 
@@ -480,7 +480,7 @@ def test_uncertain_publication_reuses_exact_id_and_duplicate_claim_is_fenced(
     )
     db.commit()
 
-    def accepted(*, kwargs, task_id):
+    def accepted(*, kwargs, task_id, **_options):
         observed.append((kwargs, task_id))
 
     second = workflow.publish_task_execution_dispatch(
@@ -590,7 +590,7 @@ def test_t1_crash_reconciliation_and_expired_lease_recover_same_attempt(dispatch
     result = workflow.reconcile_task_execution_dispatches(
         db,
         task_execution_id=execution.id,
-        publisher=lambda *, kwargs, task_id: sent.append((kwargs, task_id)),
+        publisher=lambda *, kwargs, task_id, **_options: sent.append((kwargs, task_id)),
     )
     assert result["published_count"] == 1
     assert sent[0][1] == stable_id
@@ -700,7 +700,7 @@ def test_crash_after_binding_before_ready_retries_idempotently(
     second = workflow.publish_task_execution_dispatch(
         db,
         execution.id,
-        publisher=lambda *, kwargs, task_id: sent.append((kwargs, task_id)),
+        publisher=lambda *, kwargs, task_id, **_options: sent.append((kwargs, task_id)),
     )
     assert second["state"] == "published_unclaimed"
     assert len(sent) == 1
@@ -746,7 +746,9 @@ def test_ready_before_lease_rejection_uses_bounded_backoff_and_same_id(dispatch_
     result = workflow.publish_task_execution_dispatch(
         db,
         execution.id,
-        publisher=lambda *, kwargs, task_id: replay.append((kwargs, task_id)),
+        publisher=lambda *, kwargs, task_id, **_options: replay.append(
+            (kwargs, task_id)
+        ),
     )
     assert result["state"] == "published_unclaimed"
     assert replay[0][1] == stable_id
@@ -760,7 +762,7 @@ def test_claim_during_publish_fences_stale_publisher_writeback(dispatch_db):
     execution.dispatch_state = "READY"
     db.commit()
 
-    def publish_and_claim(*, kwargs, task_id):
+    def publish_and_claim(*, kwargs, task_id, **_options):
         assert task_id == stable_id
         worker_db = factory()
         try:
@@ -813,7 +815,7 @@ def test_claimed_attempt_after_worker_crash_is_not_republished(dispatch_db):
     result = workflow.reconcile_task_execution_dispatches(
         db,
         task_execution_id=execution.id,
-        publisher=lambda *, kwargs, task_id: sent.append(task_id),
+        publisher=lambda *, kwargs, task_id, **_options: sent.append(task_id),
     )
     assert result["inspected_count"] == 0
     assert not sent
@@ -835,7 +837,7 @@ def test_lifecycle_revocation_prevents_pending_dispatch(dispatch_db, session_sta
     result = workflow.publish_task_execution_dispatch(
         db,
         execution.id,
-        publisher=lambda *, kwargs, task_id: sent.append(task_id),
+        publisher=lambda *, kwargs, task_id, **_options: sent.append(task_id),
     )
     assert result["state"] == "refused"
     assert not sent
@@ -882,7 +884,7 @@ def test_expired_or_closed_workflow_refuses_publication(
     result = workflow.publish_task_execution_dispatch(
         db,
         execution.id,
-        publisher=lambda *, kwargs, task_id: sent.append(task_id),
+        publisher=lambda *, kwargs, task_id, **_options: sent.append(task_id),
     )
     assert result["state"] == "refused"
     assert not sent
@@ -904,7 +906,7 @@ def test_terminal_attempt_is_never_redispatched(dispatch_db):
     result = workflow.reconcile_task_execution_dispatches(
         db,
         task_execution_id=execution.id,
-        publisher=lambda *, kwargs, task_id: sent.append(task_id),
+        publisher=lambda *, kwargs, task_id, **_options: sent.append(task_id),
     )
     assert result["inspected_count"] == 0
     assert not sent
@@ -951,7 +953,9 @@ def test_same_te_e3_retry_reopens_only_after_durable_continuation_marker(
     result = workflow.publish_task_execution_dispatch(
         db,
         execution.id,
-        publisher=lambda *, kwargs, task_id: published.append((kwargs, task_id)),
+        publisher=lambda *, kwargs, task_id, **_options: published.append(
+            (kwargs, task_id)
+        ),
     )
     assert result["state"] == "published_unclaimed"
     assert len(published) == 1
@@ -1563,7 +1567,7 @@ def test_enforced_managed_e8_uses_durable_publisher_without_legacy_fallback(
     assert result["counts"][e8.REPUBLISHED] == 1
     assert len(publications) == 1
     assert publications[0]["task_id"] == execution.dispatch_celery_task_id
-    assert publications[0]["retries"] is None
+    assert publications[0]["retries"] == 2
     assert publications[0]["kwargs"]["task_execution_id"] == execution.id
     assert (
         publications[0]["kwargs"]["expected_session_instance_id"] == session.instance_id
@@ -1696,7 +1700,7 @@ def test_mutable_task_prompt_reference_is_refused(dispatch_db):
     result = workflow.publish_task_execution_dispatch(
         db,
         execution.id,
-        publisher=lambda *, kwargs, task_id: sent.append(task_id),
+        publisher=lambda *, kwargs, task_id, **_options: sent.append(task_id),
     )
     assert result["state"] == "refused"
     assert not sent
@@ -1715,7 +1719,7 @@ def test_concurrent_reconcilers_take_one_lease_and_publish_once(dispatch_db):
         local = factory()
         try:
 
-            def publisher(*, kwargs, task_id):
+            def publisher(*, kwargs, task_id, **_options):
                 with sent_lock:
                     sent.append(task_id)
 
@@ -1788,7 +1792,7 @@ def test_terminal_and_stale_generation_intents_are_never_republished(dispatch_db
     result = workflow.reconcile_task_execution_dispatches(
         db,
         task_execution_id=execution.id,
-        publisher=lambda *, kwargs, task_id: sent.append(task_id),
+        publisher=lambda *, kwargs, task_id, **_options: sent.append(task_id),
     )
     assert result["refused_count"] == 1
     assert not sent
@@ -2001,7 +2005,7 @@ def _e8_republish(db, monkeypatch):
     publications = []
 
     def apply_async(*, kwargs, task_id=None, retries=None):
-        publications.append({"kwargs": kwargs, "task_id": task_id})
+        publications.append({"kwargs": kwargs, "task_id": task_id, "retries": retries})
         return SimpleNamespace(id=task_id)
 
     monkeypatch.setattr(
@@ -2852,3 +2856,684 @@ def test_c2_claimed_or_terminal_attempt_is_not_retry_publishable(dispatch_db):
         None,
         "dispatch_not_ready",
     )
+
+
+# ---------------------------------------------------------------------------
+# C2R1: durable republication preserves the Celery delivery retry counter
+# ---------------------------------------------------------------------------
+
+
+def _recording_publisher(sent, *, fail=None):
+    def publisher(*, kwargs, task_id, retries=None, **_options):
+        sent.append({"kwargs": dict(kwargs), "task_id": task_id, "retries": retries})
+        if fail is not None:
+            raise fail
+        return SimpleNamespace(id=task_id)
+
+    return publisher
+
+
+def _dispatcher_republish(db, engine, execution_id, *, fail=None):
+    sent = []
+    _make_due(engine, execution_id)
+    db.expire_all()
+    result = workflow.reconcile_task_execution_dispatches(
+        db,
+        task_execution_id=execution_id,
+        publisher=_recording_publisher(sent, fail=fail),
+    )
+    return result, sent
+
+
+def _claim_delivery(db, kwargs, celery_task_id):
+    from app.tasks.worker_support.dispatch import _claim_continuation_for_worker
+
+    claimed = _claim_continuation_for_worker(
+        db=db,
+        session_id=kwargs["session_id"],
+        instance_id=kwargs["expected_session_instance_id"],
+        continuation_task_id=kwargs["continuation_task_id"],
+        continuation_kind=kwargs["continuation_kind"],
+        task_execution_id=kwargs["task_execution_id"],
+        retry_count=kwargs["continuation_retry_count"],
+        celery_task_id=celery_task_id,
+    )
+    db.expire_all()
+    return claimed
+
+
+def _fail_delivery(db, project, ids, celery_delivery, monkeypatch, *, kwargs, retries):
+    """Run E3 for a delivery carrying ``retries`` as Celery would deliver it."""
+
+    session_id, task_id, link_id, execution_id = ids
+    db.expire_all()
+    execution = db.query(TaskExecution).filter_by(id=execution_id).one()
+    delivery = celery_delivery(
+        celery_id=execution.dispatch_celery_task_id, kwargs=kwargs, retries=retries
+    )
+    return _fail_attempt(
+        db,
+        project,
+        db.query(SessionModel).filter_by(id=session_id).one(),
+        db.query(Task).filter_by(id=task_id).one(),
+        db.query(SessionTask).filter_by(id=link_id).one(),
+        execution,
+        delivery,
+        monkeypatch,
+    )
+
+
+def _run_delivery(celery_delivery, *, celery_id, kwargs, retries):
+    """Run the Worker; return its result, or ``None`` when it ``Task.retry``-ed."""
+
+    delivery = celery_delivery(celery_id=celery_id, kwargs=kwargs, retries=retries)
+    try:
+        return delivery.run(**kwargs)
+    except Retry:
+        return None
+
+
+def _ready_managed_root(db):
+    _, session, task, link, execution = _graph(db)
+    assert _configure(db, session, task, execution)
+    execution.dispatch_state = "READY"
+    db.commit()
+    return session, task, link, execution
+
+
+def _marker(db, session_id):
+    db.expire_all()
+    current = db.query(SessionModel).filter_by(id=session_id).one()
+    return (
+        current.status,
+        current.continuation_kind,
+        current.continuation_retry_count,
+        current.continuation_task_execution_id,
+    )
+
+
+def test_c2r1_initial_managed_publication_keeps_zero_retry_counter(dispatch_db):
+    """Test A: an initial ROOT publication is a first delivery."""
+
+    _, engine, _, db = dispatch_db
+    _, session, task, execution = _ready_managed_root(db)
+    result, sent = _dispatcher_republish(db, engine, execution.id)
+
+    assert result["published_count"] == 1
+    assert len(sent) == 1
+    assert (sent[0]["retries"] or 0) == 0
+    assert "continuation_kind" not in sent[0]["kwargs"]
+    assert sent[0]["task_id"] == execution.dispatch_celery_task_id
+
+
+def test_c2r1_e8_and_dispatcher_preserve_e3_celery_retry_counter(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """Tests B, D and Q: republication carries the counter Task.retry stamped."""
+
+    _, engine, _, db = dispatch_db
+    project, session, task, link, execution = _claimed_managed_attempt(db)
+    stable_id = execution.dispatch_celery_task_id
+    first = celery_delivery(
+        celery_id=stable_id, kwargs=_request_kwargs(session, task, execution)
+    )
+    with pytest.raises(Retry):
+        _fail_attempt(db, project, session, task, link, execution, first, monkeypatch)
+    direct = broker.sent[0]
+    assert direct["options"]["retries"] == 1
+    assert _marker(db, session.id) == ("retry_pending", "celery_retry", 1, execution.id)
+
+    _make_due(engine, execution.id)
+    db.expire_all()
+    result, e8_publications = _e8_republish(db, monkeypatch)
+    _, dispatcher_publications = _dispatcher_republish(db, engine, execution.id)
+
+    assert result["counts"][e8.REPUBLISHED] == 1
+    for republished in (e8_publications[0], dispatcher_publications[0]):
+        assert republished["task_id"] == direct["options"]["task_id"] == stable_id
+        assert republished["kwargs"] == direct["kwargs"]
+        assert republished["retries"] == direct["options"]["retries"]
+    assert _marker(db, session.id) == ("retry_pending", "celery_retry", 1, execution.id)
+    assert db.query(TaskExecution).filter_by(session_id=session.id).count() == 1
+
+
+def test_c2r1_e3_retry_budget_cannot_reset_through_durable_republication(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """Tests E and Q: every retry is republished by the dispatcher, yet the
+    E3 limit of three still holds."""
+
+    _, engine, _, db = dispatch_db
+    project, session, task, link, execution = _claimed_managed_attempt(db)
+    ids = (session.id, task.id, link.id, execution.id)
+    stable_id = execution.dispatch_celery_task_id
+    kwargs, retries = _request_kwargs(session, task, execution), 0
+    republished_retries = []
+    for expected in (1, 2, 3):
+        with pytest.raises(Retry):
+            _fail_delivery(
+                db,
+                project,
+                ids,
+                celery_delivery,
+                monkeypatch,
+                kwargs=kwargs,
+                retries=retries,
+            )
+        # Celery stamps request.retries + 1; a reset republication makes this
+        # 1 on every iteration and the E3 budget never runs out.
+        assert broker.sent[-1]["options"]["retries"] == expected
+        assert _marker(db, session.id)[1:3] == ("celery_retry", expected)
+        _, sent = _dispatcher_republish(db, engine, execution.id)
+        assert sent[0]["kwargs"]["continuation_retry_count"] == expected
+        assert _claim_delivery(db, sent[0]["kwargs"], stable_id).accepted
+        republished_retries.append(sent[0]["retries"])
+        # A missing Celery option is delivered as zero.
+        kwargs, retries = sent[0]["kwargs"], sent[0]["retries"] or 0
+
+    # request.retries == max_retries: E3 re-raises instead of retrying.
+    with pytest.raises(RuntimeError, match="retryable"):
+        _fail_delivery(
+            db,
+            project,
+            ids,
+            celery_delivery,
+            monkeypatch,
+            kwargs=kwargs,
+            retries=retries,
+        )
+
+    assert republished_retries == [1, 2, 3]
+    assert len(broker.sent) == 3
+    status, kind, count, _ = _marker(db, session.id)
+    assert not (status == "retry_pending" and kind == "celery_retry")
+    assert count != 4
+
+
+def test_c2r1_e8_republished_capacity_continuation_passes_count_check(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """Tests C and Q: before C2R1 the republished capacity delivery was
+    rejected as ``capacity_retry_count_mismatch``."""
+
+    _, engine, _, db = dispatch_db
+    session, task, _, execution = _ready_managed_root(db)
+    stable_id = execution.dispatch_celery_task_id
+    request_kwargs = _request_kwargs(session, task, execution)
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+    assert (
+        _run_delivery(
+            celery_delivery, celery_id=stable_id, kwargs=request_kwargs, retries=0
+        )
+        is None
+    )
+    direct = broker.sent[0]
+    assert direct["options"]["retries"] == 1
+
+    _make_due(engine, execution.id)
+    db.expire_all()
+    result, publications = _e8_republish(db, monkeypatch)
+    assert result["counts"][e8.REPUBLISHED] == 1
+    republished = publications[0]
+    assert republished["kwargs"] == direct["kwargs"]
+    assert republished["task_id"] == stable_id
+
+    outcome = _run_delivery(
+        celery_delivery,
+        celery_id=stable_id,
+        kwargs=republished["kwargs"],
+        retries=republished["retries"] or 0,
+    )
+
+    assert outcome is None, outcome
+    assert republished["retries"] == 1
+    assert broker.sent[1]["options"]["retries"] == 2
+    assert broker.sent[1]["kwargs"]["continuation_retry_count"] == 2
+    assert _marker(db, session.id) == (
+        "retry_pending",
+        "backend_capacity",
+        2,
+        execution.id,
+    )
+    assert not runtime_calls
+
+
+def test_c2r1_capacity_retry_budget_cannot_reset_through_republication(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """Test F: the 60-wait capacity limit survives durable republication."""
+
+    from app.services.orchestration.lifecycle.worker_capacity import (
+        BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+    )
+
+    _, engine, _, db = dispatch_db
+    session, task, _, execution = _ready_managed_root(db)
+    stable_id = execution.dispatch_celery_task_id
+    schedule_continuation(
+        db,
+        session,
+        task_execution=execution,
+        continuation_task_id=task.id,
+        continuation_kind="backend_capacity",
+        retry_count=BACKEND_CAPACITY_RETRY_MAX_RETRIES - 1,
+    )
+    db.commit()
+    _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+
+    _, sent = _dispatcher_republish(db, engine, execution.id)
+    assert sent[0]["retries"] == BACKEND_CAPACITY_RETRY_MAX_RETRIES - 1
+    assert (
+        _run_delivery(
+            celery_delivery,
+            celery_id=stable_id,
+            kwargs=sent[0]["kwargs"],
+            retries=sent[0]["retries"] or 0,
+        )
+        is None
+    )
+    assert broker.sent[-1]["options"]["retries"] == BACKEND_CAPACITY_RETRY_MAX_RETRIES
+
+    _, sent = _dispatcher_republish(db, engine, execution.id)
+    assert sent[0]["retries"] == BACKEND_CAPACITY_RETRY_MAX_RETRIES
+    outcome = _run_delivery(
+        celery_delivery,
+        celery_id=stable_id,
+        kwargs=sent[0]["kwargs"],
+        retries=sent[0]["retries"] or 0,
+    )
+
+    assert outcome["retry_budget_exhausted"] is True
+    assert len(broker.sent) == 1
+    assert _marker(db, session.id)[0] != "retry_pending"
+
+
+def test_c2r1_lost_ack_and_duplicate_publication_keep_retry_counter(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """Tests G, H and M: broker uncertainty never consumes a logical retry."""
+
+    _enable_budget(monkeypatch)
+    _, engine, factory, db = dispatch_db
+    project, session, task, link, execution = _claimed_managed_attempt(
+        db, enforced=True
+    )
+    execution_id = execution.id
+    session_id = session.id
+    stable_id = execution.dispatch_celery_task_id
+    workflow_before = r3a.resolve_task_execution_workflow(db, execution_id)
+    broker.behaviour["after"] = RuntimeError("broker accepted; ack lost")
+    first = celery_delivery(
+        celery_id=stable_id, kwargs=_request_kwargs(session, task, execution)
+    )
+    with pytest.raises(Reject):
+        _fail_attempt(db, project, session, task, link, execution, first, monkeypatch)
+    accepted = broker.sent[0]
+    marker = _marker(db, session_id)
+    assert marker == ("retry_pending", "celery_retry", 1, execution_id)
+
+    lost, lost_sent = _dispatcher_republish(
+        db, engine, execution_id, fail=RuntimeError("ack lost")
+    )
+    _, duplicate_sent = _dispatcher_republish(db, engine, execution_id)
+    _make_due(engine, execution_id)
+    db.expire_all()
+    _, e8_sent = _e8_republish(db, monkeypatch)
+
+    assert lost["results"][0]["state"] == "publish_error"
+    for republished in (lost_sent[0], duplicate_sent[0], e8_sent[0]):
+        assert republished["task_id"] == stable_id
+        assert republished["kwargs"] == accepted["kwargs"]
+        assert republished["retries"] == accepted["options"]["retries"] == 1
+    assert _marker(db, session_id) == marker
+    recovered = db.query(TaskExecution).filter_by(id=execution_id).one()
+    assert recovered.dispatch_publish_attempts == 3
+
+    first_db, second_db = factory(), factory()
+    try:
+        winner = _claim_delivery(first_db, accepted["kwargs"], stable_id)
+        duplicate = _claim_delivery(second_db, e8_sent[0]["kwargs"], stable_id)
+        second_db.rollback()
+    finally:
+        first_db.close()
+        second_db.close()
+    assert winner.accepted is True
+    assert duplicate.accepted is False
+    assert db.query(TaskExecution).filter_by(session_id=session_id).count() == 1
+    workflow_after = r3a.resolve_task_execution_workflow(db, execution_id)
+    assert workflow_after.workflow_uuid == workflow_before.workflow_uuid
+    assert workflow_after.deadline_at == workflow_before.deadline_at
+    assert workflow_after.reserved_requests == workflow_before.reserved_requests
+    assert db.query(WorkflowBudget).count() == 1
+
+
+@pytest.mark.parametrize("crash_point", ["before", "after"])
+def test_c2r1_restarted_reconciler_recovers_same_retry_counter(
+    dispatch_db, broker, celery_delivery, monkeypatch, crash_point
+):
+    """Tests I and O: crashes in E3 and in the dispatcher keep the counter."""
+
+    path, engine, _, db = dispatch_db
+    project, session, task, link, execution = _claimed_managed_attempt(db)
+    execution_id = execution.id
+    session_id = session.id
+    stable_id = execution.dispatch_celery_task_id
+    broker.behaviour[crash_point] = _ProcessCrash()
+    first = celery_delivery(
+        celery_id=stable_id, kwargs=_request_kwargs(session, task, execution)
+    )
+    with pytest.raises(_ProcessCrash):
+        _fail_attempt(db, project, session, task, link, execution, first, monkeypatch)
+    db.close()
+
+    for restart in range(2):
+        restarted_engine = _engine(path)
+        restarted = _factory(restarted_engine)()
+        try:
+            if restart == 0:
+                # The dispatcher dies after broker acceptance, holding its lease.
+                with pytest.raises(_ProcessCrash):
+                    _dispatcher_republish(
+                        restarted, restarted_engine, execution_id, fail=_ProcessCrash()
+                    )
+                continue
+            with restarted_engine.begin() as connection:
+                connection.exec_driver_sql(
+                    "UPDATE task_executions SET dispatch_lease_expires_at=? WHERE id=?",
+                    (
+                        (datetime.now(timezone.utc) - timedelta(minutes=1)).replace(
+                            tzinfo=None
+                        ),
+                        execution_id,
+                    ),
+                )
+            _, sent = _dispatcher_republish(restarted, restarted_engine, execution_id)
+            assert sent[0]["task_id"] == stable_id
+            assert sent[0]["retries"] == 1
+            assert sent[0]["kwargs"]["continuation_retry_count"] == 1
+            if crash_point == "after":
+                assert broker.sent[0]["options"]["retries"] == sent[0]["retries"]
+                assert broker.sent[0]["kwargs"] == sent[0]["kwargs"]
+            assert _marker(restarted, session_id) == (
+                "retry_pending",
+                "celery_retry",
+                1,
+                execution_id,
+            )
+            recovered = restarted.query(TaskExecution).filter_by(id=execution_id).one()
+            assert recovered.dispatch_lease_fence == 2
+            assert (
+                restarted.query(TaskExecution).filter_by(session_id=session_id).count()
+                == 1
+            )
+        finally:
+            restarted.close()
+            restarted_engine.dispose()
+
+
+def test_c2r1_wrong_transport_counter_cannot_claim_capacity_continuation(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """Test J: the capacity fence still rejects a reset counter."""
+
+    _, _, _, db = dispatch_db
+    session, task, _, execution = _ready_managed_root(db)
+    stable_id = execution.dispatch_celery_task_id
+    request_kwargs = _request_kwargs(session, task, execution)
+    runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+    assert (
+        _run_delivery(
+            celery_delivery, celery_id=stable_id, kwargs=request_kwargs, retries=0
+        )
+        is None
+    )
+    marker = _marker(db, session.id)
+
+    outcome = _run_delivery(
+        celery_delivery,
+        celery_id=stable_id,
+        kwargs=broker.sent[0]["kwargs"],
+        retries=0,
+    )
+
+    assert outcome["reason"] == "capacity_retry_count_mismatch"
+    assert len(broker.sent) == 1
+    assert _marker(db, session.id) == marker
+    assert not runtime_calls
+
+
+def test_c2r1_automatic_recovery_is_first_delivery_then_capacity_counts(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """Test K: a recovery marker's logical count is not a transport counter;
+    the capacity wait that supersedes it is."""
+
+    _, engine, _, db = dispatch_db
+    _, session, task, _, parent = _graph(db)
+    parent.status = TaskStatus.FAILED
+    child = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=2,
+        status=TaskStatus.PENDING,
+    )
+    db.add(child)
+    db.commit()
+    assert workflow.configure_task_execution_dispatch(
+        db,
+        task_execution=child,
+        session=session,
+        task=task,
+        dispatch_kind="RECOVERY",
+        parent_task_execution_id=parent.id,
+        prompt=task.description,
+        timeout_seconds=1800,
+        context={"planner_contract": {"schema": "bounded-v1"}},
+        continuation_task_id=task.id,
+        continuation_kind="automatic_recovery",
+        continuation_retry_count=1,
+    )
+    child.dispatch_state = "READY"
+    session.status = "recovering"
+    schedule_continuation(
+        db,
+        session,
+        task_execution=child,
+        continuation_task_id=task.id,
+        continuation_kind="automatic_recovery",
+        retry_count=1,
+    )
+    db.commit()
+    envelope = deepcopy(child.dispatch_invocation)
+    stable_id = child.dispatch_celery_task_id
+    _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+
+    _, sent = _dispatcher_republish(db, engine, child.id)
+    assert sent[0]["kwargs"]["continuation_kind"] == "automatic_recovery"
+    assert sent[0]["kwargs"]["continuation_retry_count"] == 1
+    assert (sent[0]["retries"] or 0) == 0
+    assert (
+        _run_delivery(
+            celery_delivery,
+            celery_id=stable_id,
+            kwargs=sent[0]["kwargs"],
+            retries=sent[0]["retries"] or 0,
+        )
+        is None
+    )
+    assert broker.sent[0]["options"]["retries"] == 1
+
+    _, sent = _dispatcher_republish(db, engine, child.id)
+
+    assert sent[0]["kwargs"] == broker.sent[0]["kwargs"]
+    assert sent[0]["kwargs"]["continuation_kind"] == "backend_capacity"
+    assert sent[0]["retries"] == 1
+    db.expire_all()
+    assert db.query(TaskExecution).filter_by(id=child.id).one().dispatch_invocation == (
+        envelope
+    )
+
+
+def test_c2r1_e3_then_capacity_shares_one_celery_counter(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """Test L: E3 -> capacity continues the single Celery counter."""
+
+    _, engine, _, db = dispatch_db
+    project, session, task, link, execution = _claimed_managed_attempt(db)
+    stable_id = execution.dispatch_celery_task_id
+    first = celery_delivery(
+        celery_id=stable_id, kwargs=_request_kwargs(session, task, execution)
+    )
+    with pytest.raises(Retry):
+        _fail_attempt(db, project, session, task, link, execution, first, monkeypatch)
+    _, sent = _dispatcher_republish(db, engine, execution.id)
+    assert sent[0]["retries"] == 1
+    _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+
+    outcome = _run_delivery(
+        celery_delivery,
+        celery_id=stable_id,
+        kwargs=sent[0]["kwargs"],
+        retries=sent[0]["retries"] or 0,
+    )
+
+    assert outcome is None, outcome
+    assert broker.sent[-1]["options"]["retries"] == 2
+    assert _marker(db, session.id)[1:3] == ("backend_capacity", 2)
+    _, sent = _dispatcher_republish(db, engine, execution.id)
+    assert sent[0]["retries"] == 2
+    assert sent[0]["kwargs"] == broker.sent[-1]["kwargs"]
+
+
+def test_c2r1_capacity_then_e3_shares_one_celery_counter(
+    dispatch_db, broker, celery_delivery, monkeypatch
+):
+    """Test L: capacity -> E3 continues the same counter and E3 limit."""
+
+    _, engine, _, db = dispatch_db
+    project, session, task, link, execution = _graph(db)
+    assert _configure(db, session, task, execution)
+    execution.dispatch_state = "READY"
+    db.commit()
+    ids = (session.id, task.id, link.id, execution.id)
+    stable_id = execution.dispatch_celery_task_id
+    request_kwargs = _request_kwargs(session, task, execution)
+    _patch_worker_boundaries(monkeypatch, db, capacity_blocked=True)
+    assert (
+        _run_delivery(
+            celery_delivery, celery_id=stable_id, kwargs=request_kwargs, retries=0
+        )
+        is None
+    )
+    _, sent = _dispatcher_republish(db, engine, execution.id)
+    assert sent[0]["retries"] == 1
+    assert _claim_delivery(db, sent[0]["kwargs"], stable_id).accepted
+
+    with pytest.raises(Retry):
+        _fail_delivery(
+            db,
+            project,
+            ids,
+            celery_delivery,
+            monkeypatch,
+            kwargs=sent[0]["kwargs"],
+            retries=sent[0]["retries"] or 0,
+        )
+
+    assert broker.sent[-1]["options"]["retries"] == 2
+    assert _marker(db, session.id)[1:3] == ("celery_retry", 2)
+    _, sent = _dispatcher_republish(db, engine, execution.id)
+    assert sent[0]["retries"] == 2
+    assert sent[0]["kwargs"] == broker.sent[-1]["kwargs"]
+
+
+def test_c2r1_stale_publisher_cannot_overwrite_newer_lease_or_counter(dispatch_db):
+    """Test P: a publisher whose lease expired during broker I/O is fenced."""
+
+    _, engine, factory, db = dispatch_db
+    session, task, _, execution = _ready_managed_root(db)
+    schedule_continuation(
+        db,
+        session,
+        task_execution=execution,
+        continuation_task_id=task.id,
+        continuation_kind="backend_capacity",
+        retry_count=4,
+    )
+    db.commit()
+    marker = _marker(db, session.id)
+    _make_due(engine, execution.id)
+    newer_sent = []
+    stale_sent = []
+
+    def stale_publisher(*, kwargs, task_id, retries=None, **_options):
+        stale_sent.append({"kwargs": dict(kwargs), "retries": retries})
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "UPDATE task_executions SET dispatch_lease_expires_at=? WHERE id=?",
+                (
+                    (datetime.now(timezone.utc) - timedelta(minutes=1)).replace(
+                        tzinfo=None
+                    ),
+                    execution.id,
+                ),
+            )
+        newer_db = factory()
+        try:
+            workflow.reconcile_task_execution_dispatches(
+                newer_db,
+                task_execution_id=execution.id,
+                publisher=_recording_publisher(newer_sent),
+            )
+        finally:
+            newer_db.close()
+        raise RuntimeError("stale publisher ack lost")
+
+    stale = workflow.reconcile_task_execution_dispatches(
+        db, task_execution_id=execution.id, publisher=stale_publisher
+    )
+
+    assert stale["results"][0]["fence"] == 1
+    assert stale_sent[0]["retries"] == newer_sent[0]["retries"] == 4
+    assert stale_sent[0]["kwargs"] == newer_sent[0]["kwargs"]
+    db.expire_all()
+    current = db.query(TaskExecution).filter_by(id=execution.id).one()
+    assert current.dispatch_lease_fence == 2
+    assert current.dispatch_publish_attempts == 2
+    assert current.dispatch_last_error is None
+    assert current.dispatch_lease_owner is None
+    assert current.dispatch_state == "READY"
+    assert _marker(db, session.id) == marker
+
+
+def test_c2r1_legacy_unmanaged_e8_retry_counter_is_unchanged(dispatch_db, monkeypatch):
+    """Test N: the enforcement-disabled unmanaged E8 fallback is untouched."""
+
+    db, session, task, link, execution = _bound_unmanaged_root(
+        dispatch_db, monkeypatch, session_status="recovering"
+    )
+    _schedule_unmanaged_continuation(db, session, task, link, execution)
+    session.continuation_task_execution_id = None
+    db.commit()
+    monkeypatch.setattr(settings, "WORKFLOW_BUDGET_ENFORCEMENT_ENABLED", False)
+    published = []
+    from app.tasks import worker as worker_module
+
+    monkeypatch.setattr(
+        worker_module.execute_orchestration_task,
+        "apply_async",
+        lambda **options: published.append(options) or SimpleNamespace(id="legacy"),
+    )
+    result = e8.reconcile_stranded_continuations(
+        db,
+        now=datetime.now(timezone.utc),
+        grace_seconds=0,
+        suppression_seconds=0,
+        use_project_lock=False,
+    )
+
+    assert result["counts"][e8.REPUBLISHED] == 1
+    assert published[0]["retries"] == 1
+    assert "task_id" not in published[0]
+    assert execution.dispatch_state is None
