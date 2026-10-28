@@ -79,6 +79,37 @@ def _get_applied_versions(engine: Engine) -> set[str]:
 
 
 def _record_migration(engine: Engine, migration: Migration) -> None:
+    if engine.dialect.name == "sqlite":
+        # API startup may race another process applying the same additive
+        # migration. Serialize only the registry insert and treat an already
+        # recorded version as success; the upgrade itself remains responsible
+        # for its own SQLite transaction and idempotent DDL.
+        with engine.connect() as connection:
+            connection.execution_options(isolation_level="AUTOCOMMIT")
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    text(
+                        """
+                        INSERT OR IGNORE INTO schema_migrations
+                            (version, description, applied_at)
+                        VALUES (:version, :description, :applied_at)
+                        """
+                    ),
+                    {
+                        "version": migration.version,
+                        "description": migration.description,
+                        "applied_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+                connection.exec_driver_sql("COMMIT")
+            except BaseException:
+                try:
+                    connection.exec_driver_sql("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+        return
     with engine.begin() as connection:
         connection.execute(
             text(
@@ -6063,6 +6094,319 @@ def _migration_059_workflow_provider_request_budget(engine: Engine) -> None:
     _verify_059_workflow_provider_request_budget(engine)
 
 
+_060_DISPATCH_COLUMNS = {
+    "dispatch_state": "VARCHAR(32) CHECK (dispatch_state IS NULL OR dispatch_state IN ('PENDING_BINDING','READY','CLAIMED','TERMINAL','REFUSED'))",
+    "dispatch_kind": "VARCHAR(24)",
+    "dispatch_session_instance_id": "VARCHAR(36)",
+    "dispatch_parent_task_execution_id": "INTEGER REFERENCES task_executions(id) ON DELETE RESTRICT",
+    "dispatch_celery_task_id": "VARCHAR(255)",
+    "dispatch_invocation": "JSON",
+    "dispatch_invocation_sha256": "VARCHAR(64)",
+    "dispatch_lease_owner": "VARCHAR(255)",
+    "dispatch_lease_fence": "INTEGER DEFAULT 0 CHECK (dispatch_lease_fence IS NULL OR dispatch_lease_fence >= 0)",
+    "dispatch_lease_expires_at": "DATETIME",
+    "dispatch_publish_attempts": "INTEGER DEFAULT 0 CHECK (dispatch_publish_attempts IS NULL OR dispatch_publish_attempts >= 0)",
+    "dispatch_next_attempt_at": "DATETIME",
+    "dispatch_last_error": "TEXT",
+    "dispatch_refusal_reason": "VARCHAR(255)",
+    "dispatch_claimed_at": "DATETIME",
+}
+_060_SESSION_COLUMNS = {
+    "continuation_task_execution_id": "INTEGER",
+}
+
+
+def _060_dispatch_guard_sql() -> dict[str, str]:
+    predicate = """
+        NEW.dispatch_state IS NOT NULL AND (
+            NEW.dispatch_kind IS NULL OR
+            NEW.dispatch_kind NOT IN ('ROOT','RETRY','RECOVERY') OR
+            NEW.dispatch_session_instance_id IS NULL OR
+            TRIM(NEW.dispatch_session_instance_id) = '' OR
+            NEW.dispatch_celery_task_id IS NULL OR
+            TRIM(NEW.dispatch_celery_task_id) = '' OR
+            NEW.dispatch_invocation IS NULL OR
+            LENGTH(CAST(NEW.dispatch_invocation AS BLOB)) > 16384 OR
+            NEW.dispatch_invocation_sha256 IS NULL OR
+            LENGTH(NEW.dispatch_invocation_sha256) != 64 OR
+            NEW.dispatch_lease_fence IS NULL OR
+            NEW.dispatch_publish_attempts IS NULL OR
+            (NEW.dispatch_kind IN ('RETRY','RECOVERY') AND
+                NEW.dispatch_parent_task_execution_id IS NULL) OR
+            (NEW.dispatch_kind = 'ROOT' AND
+                NEW.dispatch_parent_task_execution_id IS NOT NULL) OR
+            ((NEW.dispatch_lease_owner IS NULL) !=
+                (NEW.dispatch_lease_expires_at IS NULL)) OR
+            (NEW.dispatch_lease_owner IS NOT NULL AND
+                TRIM(NEW.dispatch_lease_owner) = '')
+        )
+    """
+    return {
+        "tr_task_execution_dispatch_identity_insert": (
+            "CREATE TRIGGER IF NOT EXISTS tr_task_execution_dispatch_identity_insert "
+            "BEFORE INSERT ON task_executions WHEN "
+            + predicate
+            + " BEGIN SELECT RAISE(ABORT, 'invalid task execution dispatch identity'); END"
+        ),
+        "tr_task_execution_dispatch_identity_update": (
+            "CREATE TRIGGER IF NOT EXISTS tr_task_execution_dispatch_identity_update "
+            "BEFORE UPDATE OF dispatch_state, dispatch_kind, "
+            "dispatch_session_instance_id, dispatch_parent_task_execution_id, "
+            "dispatch_celery_task_id, dispatch_invocation, "
+            "dispatch_invocation_sha256, dispatch_lease_owner, "
+            "dispatch_lease_expires_at ON task_executions WHEN "
+            + predicate
+            + " BEGIN SELECT RAISE(ABORT, 'invalid task execution dispatch identity'); END"
+        ),
+        "tr_task_execution_dispatch_identity_immutable": (
+            "CREATE TRIGGER IF NOT EXISTS tr_task_execution_dispatch_identity_immutable "
+            "BEFORE UPDATE OF dispatch_kind, dispatch_session_instance_id, "
+            "dispatch_parent_task_execution_id, dispatch_celery_task_id, "
+            "dispatch_invocation, dispatch_invocation_sha256 ON task_executions "
+            "WHEN OLD.dispatch_state IS NOT NULL AND ("
+            "OLD.dispatch_kind IS NOT NEW.dispatch_kind OR "
+            "OLD.dispatch_session_instance_id IS NOT NEW.dispatch_session_instance_id OR "
+            "OLD.dispatch_parent_task_execution_id IS NOT NEW.dispatch_parent_task_execution_id OR "
+            "OLD.dispatch_celery_task_id IS NOT NEW.dispatch_celery_task_id OR "
+            "OLD.dispatch_invocation IS NOT NEW.dispatch_invocation OR "
+            "OLD.dispatch_invocation_sha256 IS NOT NEW.dispatch_invocation_sha256) "
+            "BEGIN SELECT RAISE(ABORT, 'task execution dispatch identity is immutable'); END"
+        ),
+    }
+
+
+def _060_continuation_guard_sql() -> dict[str, str]:
+    """Enforce exact continuation lineage without a reciprocal SQLite FK."""
+
+    exact_identity = (
+        "EXISTS (SELECT 1 FROM task_executions te "
+        "WHERE te.id = NEW.continuation_task_execution_id "
+        "AND te.session_id = NEW.id "
+        "AND te.task_id = NEW.continuation_task_id)"
+    )
+    return {
+        "tr_sessions_continuation_execution_identity_insert": (
+            "CREATE TRIGGER IF NOT EXISTS "
+            "tr_sessions_continuation_execution_identity_insert "
+            "BEFORE INSERT ON sessions "
+            "WHEN NEW.continuation_task_execution_id IS NOT NULL AND NOT "
+            + exact_identity
+            + " BEGIN SELECT RAISE(ABORT, 'invalid continuation TaskExecution identity'); END"
+        ),
+        "tr_sessions_continuation_execution_identity_update": (
+            "CREATE TRIGGER IF NOT EXISTS "
+            "tr_sessions_continuation_execution_identity_update "
+            "BEFORE UPDATE OF continuation_task_execution_id, continuation_task_id "
+            "ON sessions "
+            "WHEN NEW.continuation_task_execution_id IS NOT NULL AND NOT "
+            + exact_identity
+            + " BEGIN SELECT RAISE(ABORT, 'invalid continuation TaskExecution identity'); END"
+        ),
+        "tr_task_execution_continuation_ref_restrict_delete": (
+            "CREATE TRIGGER IF NOT EXISTS "
+            "tr_task_execution_continuation_ref_restrict_delete "
+            "BEFORE DELETE ON task_executions "
+            "WHEN EXISTS (SELECT 1 FROM sessions s "
+            "WHERE s.continuation_task_execution_id = OLD.id) "
+            "BEGIN SELECT RAISE(ABORT, 'TaskExecution is a live continuation'); END"
+        ),
+        "tr_task_execution_continuation_ref_restrict_update": (
+            "CREATE TRIGGER IF NOT EXISTS "
+            "tr_task_execution_continuation_ref_restrict_update "
+            "BEFORE UPDATE OF session_id, task_id ON task_executions "
+            "WHEN EXISTS (SELECT 1 FROM sessions s "
+            "WHERE s.continuation_task_execution_id = OLD.id "
+            "AND (s.id != NEW.session_id OR s.continuation_task_id != NEW.task_id)) "
+            "BEGIN SELECT RAISE(ABORT, 'TaskExecution is a live continuation'); END"
+        ),
+    }
+
+
+def _verify_060_task_execution_dispatch(engine: Engine) -> None:
+    # Some supported historical upgrade tests and installations contain only
+    # the early core tables. The owning TaskExecution table is created by the
+    # application schema, so there is nothing for this additive migration to
+    # verify until both owner tables exist.
+    if not {"task_executions", "sessions"} <= _table_names(engine):
+        return
+    with engine.connect() as connection:
+        if engine.dialect.name == "sqlite":
+            connection.exec_driver_sql("SELECT COUNT(*) FROM sqlite_master").scalar()
+        inspector = inspect(connection)
+        columns = {
+            column["name"] for column in inspector.get_columns("task_executions")
+        }
+        missing = set(_060_DISPATCH_COLUMNS) - columns
+        if missing:
+            raise RuntimeError(
+                f"060 dispatch schema missing columns: {sorted(missing)}"
+            )
+        session_columns = {
+            column["name"] for column in inspector.get_columns("sessions")
+        }
+        if not set(_060_SESSION_COLUMNS) <= session_columns:
+            raise RuntimeError(
+                "060 exact continuation TaskExecution reference is missing"
+            )
+        indexes = {
+            index["name"]: index for index in inspector.get_indexes("task_executions")
+        }
+        if not {
+            "uq_task_executions_dispatch_celery_id",
+            "ix_task_executions_dispatch_reconcile",
+        } <= set(indexes):
+            raise RuntimeError(
+                "060 dispatch schema is missing its unique or reconciliation index"
+            )
+        session_indexes = {index["name"] for index in inspector.get_indexes("sessions")}
+        if "ix_sessions_continuation_execution" not in session_indexes:
+            raise RuntimeError("060 continuation attempt index is missing")
+        foreign_keys = inspector.get_foreign_keys("task_executions")
+        if not any(
+            fk.get("constrained_columns") == ["dispatch_parent_task_execution_id"]
+            and fk.get("referred_table") == "task_executions"
+            for fk in foreign_keys
+        ):
+            raise RuntimeError("060 parent TaskExecution FK must use RESTRICT")
+        if engine.dialect.name == "sqlite":
+            with engine.connect() as pragma_connection:
+                task_fks = pragma_connection.exec_driver_sql(
+                    "PRAGMA foreign_key_list(task_executions)"
+                ).fetchall()
+            if not any(
+                row[2] == "task_executions"
+                and row[3] == "dispatch_parent_task_execution_id"
+                and str(row[6]).upper() == "RESTRICT"
+                for row in task_fks
+            ):
+                raise RuntimeError("060 parent TaskExecution FK must use RESTRICT")
+            triggers = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='task_executions'"
+                ).fetchall()
+            }
+            session_triggers = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='sessions'"
+                ).fetchall()
+            }
+            if not set(_060_dispatch_guard_sql()) <= triggers:
+                raise RuntimeError("060 dispatch identity guard triggers are missing")
+            task_execution_triggers = {
+                row[0]
+                for row in connection.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name='task_executions'"
+                ).fetchall()
+            }
+            required_task_execution_triggers = {
+                name
+                for name in _060_continuation_guard_sql()
+                if name.startswith("tr_task_execution_")
+            }
+            if not required_task_execution_triggers <= task_execution_triggers:
+                raise RuntimeError("060 continuation execution guards are missing")
+            required_session_triggers = {
+                name
+                for name in _060_continuation_guard_sql()
+                if name.startswith("tr_sessions_")
+            }
+            if not required_session_triggers <= session_triggers:
+                raise RuntimeError("060 continuation Session guards are missing")
+
+
+def _migration_060_task_execution_dispatch(engine: Engine) -> None:
+    """Add nullable TaskExecution dispatch identity and publisher lease fields."""
+
+    if not {"task_executions", "sessions"} <= _table_names(engine):
+        return
+
+    if engine.dialect.name == "sqlite":
+        with engine.connect() as connection:
+            connection.execution_options(isolation_level="AUTOCOMMIT")
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            try:
+                present = {
+                    column["name"]
+                    for column in inspect(connection).get_columns("task_executions")
+                }
+                for name, ddl in _060_DISPATCH_COLUMNS.items():
+                    if name not in present:
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE task_executions ADD COLUMN {name} {ddl}"
+                        )
+                session_present = {
+                    column["name"]
+                    for column in inspect(connection).get_columns("sessions")
+                }
+                for name, ddl in _060_SESSION_COLUMNS.items():
+                    if name not in session_present:
+                        connection.exec_driver_sql(
+                            f"ALTER TABLE sessions ADD COLUMN {name} {ddl}"
+                        )
+                connection.exec_driver_sql(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_task_executions_dispatch_celery_id "
+                    "ON task_executions(dispatch_celery_task_id) "
+                    "WHERE dispatch_celery_task_id IS NOT NULL"
+                )
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_task_executions_dispatch_reconcile "
+                    "ON task_executions(dispatch_state, dispatch_next_attempt_at, "
+                    "dispatch_lease_expires_at, id)"
+                )
+                connection.exec_driver_sql(
+                    "CREATE INDEX IF NOT EXISTS ix_sessions_continuation_execution "
+                    "ON sessions(continuation_task_execution_id)"
+                )
+                for statement in _060_dispatch_guard_sql().values():
+                    connection.exec_driver_sql(statement)
+                for statement in _060_continuation_guard_sql().values():
+                    connection.exec_driver_sql(statement)
+                connection.exec_driver_sql("COMMIT")
+            except BaseException:
+                try:
+                    connection.exec_driver_sql("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+    else:
+        with engine.begin() as connection:
+            present = {
+                column["name"]
+                for column in inspect(connection).get_columns("task_executions")
+            }
+            for name, ddl in _060_DISPATCH_COLUMNS.items():
+                if name not in present:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE task_executions ADD COLUMN {name} {ddl}"
+                    )
+            session_present = {
+                column["name"] for column in inspect(connection).get_columns("sessions")
+            }
+            for name, ddl in _060_SESSION_COLUMNS.items():
+                if name not in session_present:
+                    connection.exec_driver_sql(
+                        f"ALTER TABLE sessions ADD COLUMN {name} {ddl}"
+                    )
+            connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_task_executions_dispatch_celery_id "
+                "ON task_executions(dispatch_celery_task_id)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_task_executions_dispatch_reconcile "
+                "ON task_executions(dispatch_state, dispatch_next_attempt_at, "
+                "dispatch_lease_expires_at, id)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_sessions_continuation_execution "
+                "ON sessions(continuation_task_execution_id)"
+            )
+            # Non-SQLite deployments rely on the same writer-side identity
+            # predicates; SQLite is the runtime's guarded migration target.
+    _verify_060_task_execution_dispatch(engine)
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(
         version="001_runtime_columns",
@@ -6380,6 +6724,15 @@ MIGRATIONS: tuple[Migration, ...] = (
         ),
         upgrade=_migration_059_workflow_provider_request_budget,
         verify=_verify_059_workflow_provider_request_budget,
+    ),
+    Migration(
+        version="060_task_execution_dispatch_contract",
+        description=(
+            "Add nullable TaskExecution dispatch identity, replay references, "
+            "publisher leases, and reconciliation index"
+        ),
+        upgrade=_migration_060_task_execution_dispatch,
+        verify=_verify_060_task_execution_dispatch,
     ),
 )
 

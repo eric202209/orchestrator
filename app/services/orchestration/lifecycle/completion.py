@@ -11,6 +11,10 @@ from app.services.execution.workflow_lifecycle import (
     WorkflowLifecycleError,
     bind_new_root,
     close_task_workflow,
+    configure_task_execution_dispatch,
+    enforcement_enabled,
+    publish_task_execution_dispatch,
+    publisher_from_delay,
     require_binding_outcome,
 )
 from app.services.orchestration.events.event_types import EventType
@@ -376,78 +380,129 @@ class TaskCompletionFinalizer:
                 status=TaskStatus.PENDING,
                 started_at=None,
             )
-
-            db.add(
-                LogEntry(
-                    session_id=session_id,
-                    session_instance_id=session.instance_id,
-                    task_id=next_task.id,
-                    task_execution_id=next_task_execution.id,
-                    level="INFO",
-                    message=(
-                        f"[ORCHESTRATION] Auto-advancing to next task {next_task.id}: {next_task.title}"
-                    ),
-                    log_metadata=json.dumps(
-                        {
-                            "auto_advance": True,
-                            "task_execution_id": next_task_execution.id,
-                            "plan_position": getattr(next_task, "plan_position", None),
-                        }
-                    ),
-                )
+            next_prompt = next_task.description or next_task.title
+            dispatch_managed = configure_task_execution_dispatch(
+                db,
+                task_execution=next_task_execution,
+                session=session,
+                task=next_task,
+                dispatch_kind="ROOT",
+                prompt=next_prompt,
+                timeout_seconds=ctx.timeout_seconds,
             )
-            db.commit()
-            # Auto-advance starts the next Task's own logical run.
-            binding_outcome = bind_new_root(db, next_task_execution.id)
-            try:
-                require_binding_outcome(binding_outcome, binding_kind="ROOT")
-            except WorkflowLifecycleError as exc:
-                completed_at = datetime.now(UTC)
-                auto_advance_failure = exc.reason
-                message = f"Workflow identity binding failed: {exc.reason}"
+            if not dispatch_managed and enforcement_enabled():
+                auto_advance_failure = "invocation_not_replayable"
                 next_task_execution.failure_category = "workflow_binding_failed"
                 mark_task_attempt_failed(
                     task=next_task,
                     session_task_link=next_session_task_link,
                     task_execution=next_task_execution,
-                    error_message=message,
-                    completed_at=completed_at,
+                    error_message="Task invocation cannot be persisted for safe dispatch replay",
+                    completed_at=datetime.now(UTC),
                 )
                 mark_session_paused(
                     session,
                     alert_level="error",
-                    alert_message=message,
-                    paused_at=completed_at,
+                    alert_message="Automatic advance refused because invocation is not replayable",
+                    paused_at=datetime.now(UTC),
                 )
+                db.commit()
+                dispatch_managed = False
+                next_task_execution = None
+
+            if next_task_execution is None:
+                pass
+            else:
                 db.add(
                     LogEntry(
                         session_id=session_id,
                         session_instance_id=session.instance_id,
                         task_id=next_task.id,
                         task_execution_id=next_task_execution.id,
-                        level="ERROR",
-                        message="Auto-advance not published because workflow identity binding failed",
+                        level="INFO",
+                        message=(
+                            f"[ORCHESTRATION] Auto-advancing to next task {next_task.id}: {next_task.title}"
+                        ),
                         log_metadata=json.dumps(
                             {
-                                "event_type": "workflow_binding_failed",
-                                "failure_category": "workflow_binding_failed",
-                                "binding_outcome": getattr(
-                                    binding_outcome, "value", None
-                                ),
+                                "auto_advance": True,
                                 "task_execution_id": next_task_execution.id,
+                                "plan_position": getattr(
+                                    next_task, "plan_position", None
+                                ),
                             }
                         ),
                     )
                 )
                 db.commit()
-            else:
-                execute_orchestration_task_delay_fn(
-                    session_id=session_id,
-                    task_id=next_task.id,
-                    prompt=next_task.description or next_task.title,
-                    timeout_seconds=ctx.timeout_seconds,
-                    task_execution_id=next_task_execution.id,
+                # Auto-advance starts the next Task's own logical run.
+                binding_outcome = bind_new_root(
+                    db,
+                    next_task_execution.id,
+                    expected_session_instance_id=(
+                        session.instance_id if dispatch_managed else None
+                    ),
                 )
+                try:
+                    require_binding_outcome(binding_outcome, binding_kind="ROOT")
+                except WorkflowLifecycleError as exc:
+                    completed_at = datetime.now(UTC)
+                    auto_advance_failure = exc.reason
+                    message = f"Workflow identity binding failed: {exc.reason}"
+                    next_task_execution.failure_category = "workflow_binding_failed"
+                    mark_task_attempt_failed(
+                        task=next_task,
+                        session_task_link=next_session_task_link,
+                        task_execution=next_task_execution,
+                        error_message=message,
+                        completed_at=completed_at,
+                    )
+                    mark_session_paused(
+                        session,
+                        alert_level="error",
+                        alert_message=message,
+                        paused_at=completed_at,
+                    )
+                    db.add(
+                        LogEntry(
+                            session_id=session_id,
+                            session_instance_id=session.instance_id,
+                            task_id=next_task.id,
+                            task_execution_id=next_task_execution.id,
+                            level="ERROR",
+                            message="Auto-advance not published because workflow identity binding failed",
+                            log_metadata=json.dumps(
+                                {
+                                    "event_type": "workflow_binding_failed",
+                                    "failure_category": "workflow_binding_failed",
+                                    "binding_outcome": getattr(
+                                        binding_outcome, "value", None
+                                    ),
+                                    "task_execution_id": next_task_execution.id,
+                                }
+                            ),
+                        )
+                    )
+                    db.commit()
+                else:
+                    if dispatch_managed:
+                        publisher = (
+                            publisher_from_delay(execute_orchestration_task_delay_fn)
+                            if execute_orchestration_task_delay_fn is not None
+                            else None
+                        )
+                        publish_task_execution_dispatch(
+                            db, next_task_execution.id, publisher=publisher
+                        )
+                    else:
+                        execute_orchestration_task_delay_fn(
+                            session_id=session_id,
+                            task_id=next_task.id,
+                            prompt=next_prompt,
+                            timeout_seconds=ctx.timeout_seconds,
+                            expected_session_instance_id=session.instance_id,
+                            task_execution_id=next_task_execution.id,
+                        )
 
         append_orchestration_event(
             project_dir=control_state_of(orchestration_state),

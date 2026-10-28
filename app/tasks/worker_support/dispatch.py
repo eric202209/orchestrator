@@ -1,7 +1,9 @@
 """Dispatch claiming and rejection helpers for orchestration workers."""
 
 from datetime import datetime, timezone
+import os
 from pathlib import Path
+import socket
 from typing import Any, Dict, Optional
 
 from sqlalchemy.orm import Session
@@ -29,8 +31,10 @@ from app.services.orchestration.state.session_state import mark_session_paused
 from app.services.orchestration.lifecycle.transitions import (
     ContinuationIdentity,
     TransitionResult,
+    begin_atomic_claim_transaction,
     claim_continuation,
 )
+from app.services.execution.process_identity import current_process_start_identity
 
 from .common import _parse_event_timestamp
 from .execution_state import _clear_orphaned_running_state_without_active_execution
@@ -169,6 +173,7 @@ def _claim_continuation_for_worker(
     continuation_kind: Optional[str],
     task_execution_id: Optional[int],
     retry_count: Optional[int],
+    celery_task_id: Optional[str] = None,
     task_id: Optional[int] = None,
 ) -> TransitionResult:
     """Route an E3 delivery through the strict E2 continuation fence."""
@@ -225,6 +230,7 @@ def _claim_continuation_for_worker(
         continuation_kind=str(continuation_kind),
         task_execution_id=task_execution_id,
         retry_count=retry_count,
+        celery_task_id=celery_task_id,
     )
     return claim_continuation(db, identity, commit=True)
 
@@ -236,8 +242,25 @@ def _claim_queued_task_for_worker(
     task: Task,
     session_task_link: Optional[SessionTask],
     expected_session_instance_id: Optional[str],
+    task_execution_id: Optional[int] = None,
+    celery_task_id: Optional[str] = None,
 ) -> tuple[bool, str, Optional[datetime], Optional[SessionTask]]:
-    """Claim a queued task exactly once for the current worker dispatch."""
+    """Atomically claim the exact TE and its Task/Session lifecycle rows."""
+
+    session_id = session.id
+    task_id = task.id
+    session_task_link_id = getattr(session_task_link, "id", None)
+    begin_atomic_claim_transaction(db)
+    session = db.query(SessionModel).filter(SessionModel.id == session_id).first()
+    task = db.query(Task).filter(Task.id == task_id).first()
+    if session is None or task is None:
+        db.rollback()
+        return False, "session_or_task_not_found", None, session_task_link
+    session_task_link = (
+        db.query(SessionTask).filter(SessionTask.id == session_task_link_id).first()
+        if session_task_link_id is not None
+        else _get_latest_session_task_link(db, session_id, task_id)
+    )
 
     if (
         expected_session_instance_id
@@ -246,11 +269,84 @@ def _claim_queued_task_for_worker(
         db.rollback()
         return False, "session_instance_changed", None, session_task_link
 
-    if session.status not in {"pending", "running", "paused", "awaiting_input"}:
+    if session.deleted_at is not None:
+        db.rollback()
+        return False, "session_deleted", None, session_task_link
+    if session.status not in {"pending", "running"}:
         db.rollback()
         return False, f"session_not_runnable:{session.status}", None, session_task_link
 
+    execution = None
+    if task_execution_id is not None:
+        execution = (
+            db.query(TaskExecution)
+            .filter(
+                TaskExecution.id == task_execution_id,
+                TaskExecution.session_id == session.id,
+                TaskExecution.task_id == task.id,
+            )
+            .first()
+        )
+        if execution is None:
+            db.rollback()
+            return False, "task_execution_identity_mismatch", None, session_task_link
+        if execution.status != TaskStatus.PENDING:
+            reason = (
+                "task_not_claimable:running"
+                if execution.status == TaskStatus.RUNNING
+                else f"task_execution_not_claimable:{execution.status.value}"
+            )
+            db.rollback()
+            return False, reason, None, session_task_link
+        if execution.dispatch_state is not None:
+            if (
+                execution.dispatch_state != "READY"
+                or not celery_task_id
+                or execution.dispatch_celery_task_id != celery_task_id
+                or execution.dispatch_session_instance_id
+                != expected_session_instance_id
+            ):
+                db.rollback()
+                return False, "dispatch_identity_mismatch", None, session_task_link
+        try:
+            from app.services.execution.workflow_lifecycle import (
+                validate_existing_dispatch_binding,
+            )
+
+            validate_existing_dispatch_binding(
+                db,
+                task_execution=execution,
+                session_instance_id=session.instance_id,
+            )
+        except Exception as exc:
+            db.rollback()
+            return (
+                False,
+                f"workflow_identity_refused:{getattr(exc, 'reason', 'invalid')}",
+                None,
+                session_task_link,
+            )
+
+    if task.status != TaskStatus.PENDING:
+        db.rollback()
+        return False, f"task_not_claimable:{task.status.value}", None, session_task_link
+
     claim_started_at = datetime.now(timezone.utc)
+    latest_link = session_task_link or _get_latest_session_task_link(
+        db, session.id, task.id
+    )
+    if latest_link is None:
+        db.rollback()
+        return False, "missing_session_task_link", None, None
+    if latest_link.status != TaskStatus.PENDING:
+        db.rollback()
+        return (
+            False,
+            f"session_task_not_claimable:{latest_link.status.value}",
+            None,
+            latest_link,
+        )
+
     updated_task_rows = (
         db.query(Task)
         .filter(Task.id == task.id, Task.status == TaskStatus.PENDING)
@@ -267,13 +363,6 @@ def _claim_queued_task_for_worker(
     if updated_task_rows != 1:
         db.rollback()
         return False, f"task_not_claimable:{task.status.value}", None, session_task_link
-
-    latest_link = session_task_link or _get_latest_session_task_link(
-        db, session.id, task.id
-    )
-    if latest_link is None:
-        db.rollback()
-        return False, "missing_session_task_link", None, None
 
     updated_link_rows = (
         db.query(SessionTask)
@@ -297,6 +386,63 @@ def _claim_queued_task_for_worker(
             None,
             latest_link,
         )
+
+    session_claim = db.query(SessionModel).filter(
+        SessionModel.id == session.id,
+        SessionModel.status.in_(["pending", "running"]),
+        SessionModel.deleted_at.is_(None),
+    )
+    if expected_session_instance_id is not None:
+        session_claim = session_claim.filter(
+            SessionModel.instance_id == expected_session_instance_id
+        )
+    updated_session_rows = session_claim.update(
+        {
+            SessionModel.status: "running",
+            SessionModel.is_active: True,
+            SessionModel.lifecycle_updated_at: claim_started_at,
+        },
+        synchronize_session=False,
+    )
+    if updated_session_rows != 1:
+        db.rollback()
+        return False, "session_generation_or_state_changed", None, latest_link
+
+    if execution is not None:
+        values = {
+            TaskExecution.status: TaskStatus.RUNNING,
+            TaskExecution.started_at: claim_started_at,
+            TaskExecution.completed_at: None,
+            TaskExecution.worker_pid: os.getpid(),
+            TaskExecution.worker_hostname: socket.gethostname(),
+            TaskExecution.worker_process_start_identity: current_process_start_identity(
+                os.getpid()
+            ),
+            TaskExecution.heartbeat_at: claim_started_at,
+        }
+        claim_query = db.query(TaskExecution).filter(
+            TaskExecution.id == execution.id,
+            TaskExecution.status == TaskStatus.PENDING,
+        )
+        if execution.dispatch_state is not None:
+            claim_query = claim_query.filter(
+                TaskExecution.dispatch_state == "READY",
+                TaskExecution.dispatch_celery_task_id == celery_task_id,
+                TaskExecution.dispatch_session_instance_id
+                == expected_session_instance_id,
+            )
+            values.update(
+                {
+                    TaskExecution.dispatch_state: "CLAIMED",
+                    TaskExecution.dispatch_claimed_at: claim_started_at,
+                    TaskExecution.dispatch_lease_owner: None,
+                    TaskExecution.dispatch_lease_expires_at: None,
+                }
+            )
+        updated_execution_rows = claim_query.update(values, synchronize_session=False)
+        if updated_execution_rows != 1:
+            db.rollback()
+            return False, "task_execution_claim_race_lost", None, latest_link
 
     db.commit()
     db.refresh(session)

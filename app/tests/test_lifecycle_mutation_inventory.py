@@ -74,7 +74,7 @@ EXPECTED_SESSION_CALLS = {
     },
     "app/services/orchestration/lifecycle/completion.py": {
         "mark_session_completed": 1,
-        "mark_session_paused": 4,
+        "mark_session_paused": 5,
         "mark_session_running": 1,
     },
     "app/services/orchestration/coordinators/completion_coordinator.py": {
@@ -128,7 +128,7 @@ EXPECTED_TASK_ATTEMPT_CALLS = {
         "mark_task_attempt_failed": 1,
     },
     "app/services/orchestration/lifecycle/completion.py": {
-        "mark_task_attempt_failed": 1,
+        "mark_task_attempt_failed": 2,
         "mark_task_attempt_pending": 2,
     },
     "app/services/orchestration/coordinators/completion_coordinator.py": {
@@ -152,6 +152,7 @@ EXPECTED_DIRECT_STATUS_MUTATIONS = {
     "app/tasks/worker_support/dispatch.py": {
         "SessionTask.status": 1,
         "Task.status": 1,
+        "TaskExecution.status": 1,
     },
     "app/services/orchestration/run_state/transitions.py": {
         "execution.status": 1,
@@ -174,7 +175,7 @@ GOLDEN_LIFECYCLE_TRANSITIONS = {
         "owner": "app/tasks/worker_support/dispatch.py",
         "session": "must be pending/running/paused/awaiting_input",
         "task": "pending -> running",
-        "task_execution": "synchronized by worker execution state",
+        "task_execution": "exact pending attempt atomically claimed with task/session",
     },
     "planning_failure": {
         "owner": "app/services/orchestration/phases/planning_support.py",

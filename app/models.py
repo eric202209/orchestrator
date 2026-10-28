@@ -145,6 +145,10 @@ class Session(Base):
     # derived by the read-side authority; these columns are additive evidence
     # for later writer slices and are not client-mutable session flags.
     continuation_task_id = Column(Integer, nullable=True)
+    # Exact continuation provenance is enforced by SQLite triggers in
+    # migration 060. A reciprocal FK to TaskExecution would create a
+    # Session<->TaskExecution table cycle and break SQLite teardown/deletion.
+    continuation_task_execution_id = Column(Integer, nullable=True)
     continuation_kind = Column(String(64), nullable=True)
     continuation_retry_count = Column(
         Integer, nullable=False, default=0, server_default="0"
@@ -188,6 +192,10 @@ class Session(Base):
             postgresql_where=text("deleted_at IS NULL"),
         ),
         Index("ix_sessions_deleted_instance", "deleted_at", "instance_id"),
+        Index(
+            "ix_sessions_continuation_execution",
+            "continuation_task_execution_id",
+        ),
     )
 
     project = relationship("Project", back_populates="sessions")
@@ -195,7 +203,10 @@ class Session(Base):
         "SessionTask", back_populates="session", cascade="all, delete-orphan"
     )
     task_executions = relationship(
-        "TaskExecution", back_populates="session", cascade="all, delete-orphan"
+        "TaskExecution",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        foreign_keys="TaskExecution.session_id",
     )
     permission_requests = relationship(
         "PermissionRequest", back_populates="session", cascade="all, delete-orphan"
@@ -4360,6 +4371,30 @@ class TaskExecution(Base):
     )
     worker_process_start_identity = Column(String(255), nullable=True)
     heartbeat_at = Column(DateTime(timezone=True), nullable=True)
+    # TaskExecution-owned dispatch identity. NULL means a historical or
+    # explicitly unmanaged legacy attempt; dispatch is never inferred from
+    # Task/Session matching alone.
+    dispatch_state = Column(String(32), nullable=True)
+    dispatch_kind = Column(String(24), nullable=True)
+    dispatch_session_instance_id = Column(String(36), nullable=True)
+    dispatch_parent_task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    dispatch_celery_task_id = Column(String(255), nullable=True)
+    dispatch_invocation = Column(JSON, nullable=True)
+    dispatch_invocation_sha256 = Column(String(64), nullable=True)
+    dispatch_lease_owner = Column(String(255), nullable=True)
+    dispatch_lease_fence = Column(Integer, nullable=True, default=0, server_default="0")
+    dispatch_lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    dispatch_publish_attempts = Column(
+        Integer, nullable=True, default=0, server_default="0"
+    )
+    dispatch_next_attempt_at = Column(DateTime(timezone=True), nullable=True)
+    dispatch_last_error = Column(Text, nullable=True)
+    dispatch_refusal_reason = Column(String(255), nullable=True)
+    dispatch_claimed_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
@@ -4370,9 +4405,53 @@ class TaskExecution(Base):
             "attempt_number",
             name="uq_task_executions_session_task_attempt",
         ),
+        CheckConstraint(
+            "dispatch_state IS NULL OR dispatch_state IN "
+            "('PENDING_BINDING','READY','CLAIMED','TERMINAL','REFUSED')",
+            name="ck_task_execution_dispatch_state",
+        ),
+        CheckConstraint(
+            "dispatch_state IS NULL OR (dispatch_kind IS NOT NULL "
+            "AND dispatch_kind IN ('ROOT','RETRY','RECOVERY') "
+            "AND dispatch_session_instance_id IS NOT NULL "
+            "AND dispatch_celery_task_id IS NOT NULL "
+            "AND dispatch_invocation IS NOT NULL "
+            "AND dispatch_invocation_sha256 IS NOT NULL "
+            "AND dispatch_lease_fence IS NOT NULL "
+            "AND dispatch_publish_attempts IS NOT NULL "
+            "AND dispatch_lease_fence >= 0 "
+            "AND dispatch_publish_attempts >= 0 "
+            "AND ((dispatch_kind IN ('RETRY','RECOVERY') AND "
+            "dispatch_parent_task_execution_id IS NOT NULL) OR "
+            "(dispatch_kind = 'ROOT' AND "
+            "dispatch_parent_task_execution_id IS NULL)) "
+            "AND ((dispatch_lease_owner IS NULL AND "
+            "dispatch_lease_expires_at IS NULL) OR "
+            "(dispatch_lease_owner IS NOT NULL AND "
+            "dispatch_lease_expires_at IS NOT NULL)))",
+            name="ck_task_execution_dispatch_identity",
+        ),
+        Index(
+            "uq_task_executions_dispatch_celery_id",
+            "dispatch_celery_task_id",
+            unique=True,
+            sqlite_where=text("dispatch_celery_task_id IS NOT NULL"),
+            postgresql_where=text("dispatch_celery_task_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_task_executions_dispatch_reconcile",
+            "dispatch_state",
+            "dispatch_next_attempt_at",
+            "dispatch_lease_expires_at",
+            "id",
+        ),
     )
 
-    session = relationship("Session", back_populates="task_executions")
+    session = relationship(
+        "Session",
+        back_populates="task_executions",
+        foreign_keys=[session_id],
+    )
     task = relationship("Task", back_populates="executions")
     planning_session = relationship("PlanningSession")
     runtime_lease = relationship(

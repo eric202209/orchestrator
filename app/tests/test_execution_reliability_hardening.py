@@ -138,7 +138,13 @@ def test_queue_task_for_session_emits_queued_event_and_keeps_task_pending(
         .first()
     )
 
-    assert result["celery_id"] == "celery-queued-1"
+    queued_execution = (
+        db_session.query(TaskExecution)
+        .filter(TaskExecution.id == result["task_execution_id"])
+        .one()
+    )
+    assert result["celery_id"] == queued_execution.dispatch_celery_task_id
+    assert result["celery_id"] != "celery-queued-1"
     assert session.status == "running"
     assert session.is_active is True
     assert task.status == TaskStatus.PENDING
@@ -223,7 +229,13 @@ def test_queue_task_for_session_forwards_planning_lane_override(
         planning_escalation_metadata=metadata,
     )
 
-    assert result["celery_id"] == "celery-escalated-queue"
+    queued_execution = (
+        db_session.query(TaskExecution)
+        .filter(TaskExecution.id == result["task_execution_id"])
+        .one()
+    )
+    assert result["celery_id"] == queued_execution.dispatch_celery_task_id
+    assert result["celery_id"] != "celery-escalated-queue"
     assert captured_delay_kwargs["planning_backend_override"] == "direct_ollama"
     assert captured_delay_kwargs["planning_escalation_metadata"] == metadata
 
@@ -321,7 +333,13 @@ def test_stronger_planning_retry_records_bounded_evidence_and_queues_override(
 
     result = retry_session_with_stronger_planning_lane(db_session, session)
 
-    assert result["celery_id"] == "celery-governed-escalation"
+    queued_execution = (
+        db_session.query(TaskExecution)
+        .filter(TaskExecution.id == result["task_execution_id"])
+        .one()
+    )
+    assert result["celery_id"] == queued_execution.dispatch_celery_task_id
+    assert result["celery_id"] != "celery-governed-escalation"
     assert result["escalation_backend_id"] == "direct_ollama"
     assert captured_delay_kwargs["planning_backend_override"] == "direct_ollama"
     metadata = captured_delay_kwargs["planning_escalation_metadata"]

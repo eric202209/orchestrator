@@ -50,6 +50,11 @@ async def lifespan(app: FastAPI):
         cleanup_db = get_db_session()
         cleanup_result = CheckpointService(cleanup_db).cleanup_orphaned_checkpoints()
         cleanup_db.commit()
+        if cleanup_result.get("error"):
+            logger.warning(
+                "Checkpoint startup orphan cleanup reported errors: %s",
+                cleanup_result.get("error"),
+            )
         if cleanup_result.get("orphaned_session_ids"):
             logger.info(
                 "Checkpoint startup cleanup removed orphaned artifacts: sessions=%s files=%s dirs=%s",

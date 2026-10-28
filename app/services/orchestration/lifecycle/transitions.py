@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import os
+import socket
 import uuid
 from typing import Any
 
@@ -39,6 +41,7 @@ from app.services.orchestration.lifecycle.authority import (
 )
 from app.services.orchestration.state.session_state import normalize_session_status
 from app.services.tasks.execution import create_task_execution
+from app.services.execution.process_identity import current_process_start_identity
 
 
 MAX_ACTIVE_LOGICAL_EXECUTIONS_PER_SESSION = 1
@@ -64,6 +67,19 @@ class LifecycleTransitionError(ValueError):
         super().__init__(reason)
 
 
+def begin_atomic_claim_transaction(db: DbSession) -> None:
+    """Start the Worker claim write transaction before reading claim facts."""
+
+    if db.in_transaction():
+        db.rollback()
+    connection = db.connection()
+    if connection.dialect.name == "sqlite":
+        # pysqlite defers BEGIN until the first DML. Explicitly reserve the
+        # writer before reading, so competing processes cannot both validate
+        # stale PENDING snapshots and then fail with SQLITE_BUSY_SNAPSHOT.
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+
+
 @dataclass(frozen=True)
 class ContinuationIdentity:
     """The durable identity a continuation delivery must present to claim.
@@ -80,6 +96,7 @@ class ContinuationIdentity:
     continuation_kind: str
     task_execution_id: int | None = None
     retry_count: int = 0
+    celery_task_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -152,11 +169,13 @@ def _set_continuation(
     kind: str,
     retry_count: int,
     retry_eta: datetime | None,
+    task_execution_id: int,
     changed_at: datetime,
 ) -> None:
     if not isinstance(task_id, int) or task_id <= 0:
         raise LifecycleTransitionError("continuation_task_id_invalid")
     session.continuation_task_id = task_id
+    session.continuation_task_execution_id = task_execution_id
     session.continuation_kind = _validate_kind(kind)
     session.continuation_retry_count = _validate_retry_count(retry_count)
     session.continuation_retry_eta = retry_eta
@@ -165,6 +184,7 @@ def _set_continuation(
 
 def _clear_continuation(session: SessionModel, *, changed_at: datetime) -> None:
     session.continuation_task_id = None
+    session.continuation_task_execution_id = None
     session.continuation_kind = None
     session.continuation_retry_count = 0
     session.continuation_retry_eta = None
@@ -670,6 +690,7 @@ def enter_recovering(
         kind=continuation_kind,
         retry_count=retry_count,
         retry_eta=retry_eta,
+        task_execution_id=task_execution.id,
         changed_at=changed_at,
     )
     session.status = "recovering"
@@ -805,6 +826,19 @@ def schedule_continuation(
         session_task_link=link,
         task_execution=task_execution,
     )
+    # A same-TE continuation is a distinct, lifecycle-authorized delivery of
+    # the same attempt. Reopen only the dispatch after the exact continuation
+    # marker is about to be written in this transaction. A hard Worker crash
+    # never reaches this transition, so CLAIMED attempts remain non-replayable
+    # until an authoritative continuation or stale-owner decision acts.
+    if task_execution.dispatch_state in {"CLAIMED", "TERMINAL"}:
+        task_execution.dispatch_state = "READY"
+        task_execution.dispatch_claimed_at = None
+        task_execution.dispatch_lease_owner = None
+        task_execution.dispatch_lease_expires_at = None
+        task_execution.dispatch_next_attempt_at = retry_eta
+        task_execution.dispatch_last_error = None
+        task_execution.dispatch_refusal_reason = None
     _ensure_instance_id(session)
     _set_continuation(
         session,
@@ -812,6 +846,7 @@ def schedule_continuation(
         kind=kind,
         retry_count=count,
         retry_eta=retry_eta,
+        task_execution_id=task_execution.id,
         changed_at=changed_at,
     )
     session.status = "retry_pending"
@@ -857,16 +892,20 @@ def resolve_continuation_identity(
     instance_id = getattr(session, "instance_id", None)
     if not instance_id:
         return None
-    execution = (
-        db.query(TaskExecution)
-        .filter(
-            TaskExecution.session_id == session_id,
-            TaskExecution.task_id == task_id,
-            TaskExecution.status == TaskStatus.PENDING,
-        )
-        .order_by(TaskExecution.id.desc())
-        .first()
+    exact_execution_id = getattr(session, "continuation_task_execution_id", None)
+    execution_query = db.query(TaskExecution).filter(
+        TaskExecution.session_id == session_id,
+        TaskExecution.task_id == task_id,
+        TaskExecution.status == TaskStatus.PENDING,
     )
+    if exact_execution_id is not None:
+        execution = execution_query.filter(
+            TaskExecution.id == exact_execution_id
+        ).first()
+    else:
+        # Historical markers predate the exact attempt reference. Keep their
+        # legacy reader for compatibility; managed intents never use it.
+        execution = execution_query.order_by(TaskExecution.id.desc()).first()
     if execution is None:
         return None
     return ContinuationIdentity(
@@ -922,6 +961,8 @@ def claim_continuation(
     # caller-owned transaction.  Flush them before the conditional fence so
     # the claim predicate observes the durable pending marker, while keeping
     # commit ownership with the caller.
+    if commit:
+        begin_atomic_claim_transaction(db)
     db.flush()
 
     session = (
@@ -950,6 +991,36 @@ def claim_continuation(
             task_execution_id=identity.task_execution_id,
             reason="continuation_attempt_not_pending",
         )
+    if execution.dispatch_state is not None:
+        if (
+            execution.dispatch_state != "READY"
+            or not identity.celery_task_id
+            or execution.dispatch_celery_task_id != identity.celery_task_id
+            or execution.dispatch_session_instance_id != identity.instance_id
+        ):
+            return _result_rejected(
+                session_id=identity.session_id,
+                task_id=identity.continuation_task_id,
+                task_execution_id=identity.task_execution_id,
+                reason="dispatch_identity_mismatch",
+            )
+    try:
+        from app.services.execution.workflow_lifecycle import (
+            validate_existing_dispatch_binding,
+        )
+
+        validate_existing_dispatch_binding(
+            db,
+            task_execution=execution,
+            session_instance_id=identity.instance_id,
+        )
+    except Exception as exc:
+        return _result_rejected(
+            session_id=identity.session_id,
+            task_id=identity.continuation_task_id,
+            task_execution_id=identity.task_execution_id,
+            reason=f"workflow_identity_refused:{getattr(exc, 'reason', 'invalid')}",
+        )
     active = _active_executions(db, identity.session_id)
     if any(row.id != execution.id for row in active):
         return _result_rejected(
@@ -968,6 +1039,22 @@ def claim_continuation(
             reason="autonomous_execution_already_active",
         )
 
+    task, link = _task_for_execution(db, execution)
+    if task is None or task.status != TaskStatus.PENDING:
+        return _result_rejected(
+            session_id=identity.session_id,
+            task_id=identity.continuation_task_id,
+            task_execution_id=identity.task_execution_id,
+            reason="continuation_task_not_pending",
+        )
+    if link is None or link.status != TaskStatus.PENDING:
+        return _result_rejected(
+            session_id=identity.session_id,
+            task_id=identity.continuation_task_id,
+            task_execution_id=identity.task_execution_id,
+            reason="continuation_session_task_not_pending",
+        )
+
     changed_at = _now(changed_at)
     updated = (
         db.query(SessionModel)
@@ -978,12 +1065,19 @@ def claim_continuation(
             SessionModel.continuation_task_id == identity.continuation_task_id,
             SessionModel.continuation_kind == kind,
             SessionModel.continuation_retry_count == count,
+            (
+                SessionModel.continuation_task_execution_id
+                == identity.task_execution_id
+                if getattr(session, "continuation_task_execution_id", None) is not None
+                else SessionModel.continuation_task_execution_id.is_(None)
+            ),
         )
         .update(
             {
                 SessionModel.status: "running",
                 SessionModel.is_active: True,
                 SessionModel.continuation_task_id: None,
+                SessionModel.continuation_task_execution_id: None,
                 SessionModel.continuation_kind: None,
                 SessionModel.continuation_retry_count: 0,
                 SessionModel.continuation_retry_eta: None,
@@ -1000,13 +1094,71 @@ def claim_continuation(
             reason="stale_or_duplicate_continuation",
         )
 
-    task, link = _task_for_execution(db, execution)
-    mark_task_attempt_running(
-        task=task,
-        session_task_link=link,
-        task_execution=execution,
-        started_at=changed_at,
+    task_update = (
+        db.query(Task)
+        .filter(Task.id == task.id, Task.status == TaskStatus.PENDING)
+        .update(
+            {
+                Task.status: TaskStatus.RUNNING,
+                Task.started_at: changed_at,
+                Task.completed_at: None,
+                Task.error_message: None,
+            },
+            synchronize_session=False,
+        )
     )
+    link_update = (
+        db.query(SessionTask)
+        .filter(SessionTask.id == link.id, SessionTask.status == TaskStatus.PENDING)
+        .update(
+            {
+                SessionTask.status: TaskStatus.RUNNING,
+                SessionTask.started_at: changed_at,
+                SessionTask.completed_at: None,
+            },
+            synchronize_session=False,
+        )
+    )
+    execution_values = {
+        TaskExecution.status: TaskStatus.RUNNING,
+        TaskExecution.started_at: changed_at,
+        TaskExecution.completed_at: None,
+        TaskExecution.worker_pid: os.getpid(),
+        TaskExecution.worker_hostname: socket.gethostname(),
+        TaskExecution.worker_process_start_identity: current_process_start_identity(
+            os.getpid()
+        ),
+        TaskExecution.heartbeat_at: changed_at,
+    }
+    execution_query = db.query(TaskExecution).filter(
+        TaskExecution.id == execution.id,
+        TaskExecution.status == TaskStatus.PENDING,
+    )
+    if execution.dispatch_state is not None:
+        execution_query = execution_query.filter(
+            TaskExecution.dispatch_state == "READY",
+            TaskExecution.dispatch_celery_task_id == identity.celery_task_id,
+            TaskExecution.dispatch_session_instance_id == identity.instance_id,
+        )
+        execution_values.update(
+            {
+                TaskExecution.dispatch_state: "CLAIMED",
+                TaskExecution.dispatch_claimed_at: changed_at,
+                TaskExecution.dispatch_lease_owner: None,
+                TaskExecution.dispatch_lease_expires_at: None,
+            }
+        )
+    execution_update = execution_query.update(
+        execution_values, synchronize_session=False
+    )
+    if task_update != 1 or link_update != 1 or execution_update != 1:
+        db.rollback()
+        return _result_rejected(
+            session_id=identity.session_id,
+            task_id=identity.continuation_task_id,
+            task_execution_id=identity.task_execution_id,
+            reason="continuation_claim_race_lost",
+        )
     session.status = "running"
     session.is_active = True
     _clear_continuation(session, changed_at=changed_at)
@@ -1071,6 +1223,10 @@ def validate_continuation(
             != "retry_pending"
             or session.instance_id != identity.instance_id
             or session.continuation_task_id != identity.continuation_task_id
+            or (
+                session.continuation_task_execution_id is not None
+                and session.continuation_task_execution_id != identity.task_execution_id
+            )
             or session.continuation_kind != kind
             or session.continuation_retry_count != count
         ):

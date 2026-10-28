@@ -1039,6 +1039,7 @@ def append_orchestration_event(
     phase: Optional[str] = None,
     coordinator: Optional[str] = None,
     project_id: Optional[int] = None,
+    event_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     # ``project_dir`` may already be a ControlStateLocation carrying identity;
     # an explicit ``project_id`` only fills in when it does not.
@@ -1050,7 +1051,7 @@ def append_orchestration_event(
 
     event_details = attach_invocation_provenance(event_details)
     payload: Dict[str, Any] = {
-        "event_id": str(uuid.uuid4()),
+        "event_id": str(event_id or uuid.uuid4()),
         "timestamp": datetime.now(UTC).isoformat(),
         "event_type": event_type,
         "session_id": session_id,

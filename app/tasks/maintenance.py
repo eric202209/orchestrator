@@ -259,8 +259,30 @@ def sweep_stranded_continuation_deliveries(
             limit=limit,
             decision_records=decision_records,
         )
+        from app.services.execution.workflow_lifecycle import (
+            reconcile_task_execution_dispatches,
+        )
+        from app.tasks.worker import execute_orchestration_task
+
+        dispatch_reconciliation = reconcile_task_execution_dispatches(
+            db,
+            limit=max(1, min(int(limit or 50), 50)),
+            publisher=execute_orchestration_task.apply_async,
+        )
         counts = {
             "inspected_continuation_count": result["inspected_count"],
+            "inspected_task_execution_dispatch_count": dispatch_reconciliation[
+                "inspected_count"
+            ],
+            "published_task_execution_dispatch_count": dispatch_reconciliation[
+                "published_count"
+            ],
+            "refused_task_execution_dispatch_count": dispatch_reconciliation[
+                "refused_count"
+            ],
+            "task_execution_dispatch_error_count": dispatch_reconciliation[
+                "error_count"
+            ],
             **{
                 f"{outcome.lower()}_count": value
                 for outcome, value in result["counts"].items()
@@ -269,6 +291,7 @@ def sweep_stranded_continuation_deliveries(
         status = (
             "completed_with_errors"
             if counts.get("reconciliation_error_count")
+            or counts.get("task_execution_dispatch_error_count")
             else "completed"
         )
         _record(
@@ -276,11 +299,13 @@ def sweep_stranded_continuation_deliveries(
             counts=counts,
             duration_seconds=time.monotonic() - started_monotonic,
             decision_evidence=decision_records,
+            task_execution_dispatch_results=dispatch_reconciliation["results"],
         )
         return {
             "status": status,
             **counts,
             "republished_session_ids": result["republished_session_ids"],
+            "task_execution_dispatch_results": dispatch_reconciliation["results"],
         }
     except Exception as exc:
         _record(

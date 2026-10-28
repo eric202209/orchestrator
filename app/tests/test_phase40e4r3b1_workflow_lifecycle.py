@@ -741,8 +741,11 @@ def test_binding_failure_marks_attempt_failed_and_never_publishes(
     )
     monkeypatch.setattr(
         runtime_service,
-        "bind_new_root",
-        lambda *_args, **_kwargs: BudgetOutcome.SCHEMA_UNAVAILABLE,
+        "publish_task_execution_dispatch",
+        lambda *_args, **_kwargs: {
+            "state": "refused",
+            "reason": "workflow_binding_failed:SCHEMA_UNAVAILABLE",
+        },
     )
     monkeypatch.setattr(
         worker.execute_orchestration_task,
@@ -1156,8 +1159,8 @@ def test_worker_admission_runs_after_claim_and_before_runtime_construction():
     )
     claim = calls["_claim_queued_task_for_worker"][0]
     admission = calls["require_dispatch_identity"]
-    assert len(admission) == 1
-    assert claim < admission[0] < min(calls["create_agent_runtime"])
+    assert admission
+    assert claim < admission[-1] < min(calls["create_agent_runtime"])
 
 
 @pytest.mark.parametrize(

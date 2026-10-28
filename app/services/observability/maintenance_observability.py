@@ -56,6 +56,7 @@ def record_maintenance_event(
     error_timestamp: datetime | None = None,
     duration_seconds: float | None = None,
     decision_evidence: list[dict[str, Any]] | None = None,
+    task_execution_dispatch_results: list[dict[str, Any]] | None = None,
 ) -> LogEntry:
     observed = _utc(observed_at)
     metadata: dict[str, Any] = {
@@ -82,6 +83,8 @@ def record_maintenance_event(
         metadata["duration_seconds"] = round(float(duration_seconds), 3)
     if decision_evidence is not None:
         metadata["decision_evidence"] = decision_evidence
+    if task_execution_dispatch_results is not None:
+        metadata["task_execution_dispatch_results"] = task_execution_dispatch_results
 
     row = LogEntry(
         level="ERROR" if event_type == MAINTENANCE_FAILED else "INFO",

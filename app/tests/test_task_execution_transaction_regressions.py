@@ -48,13 +48,20 @@ def _stub_retry_dispatch(
         },
     )
 
-    def _fake_delay(**kwargs):
+    def _fake_apply_async(*args, kwargs=None, task_id=None, **_options):
+        if kwargs is None:
+            kwargs = args[1] if len(args) > 1 else {}
         if captured_kwargs is not None:
             captured_kwargs.clear()
             captured_kwargs.update(kwargs)
+            captured_kwargs["_celery_task_id"] = task_id
         return _FakeAsyncResult()
 
-    monkeypatch.setattr(worker_module.execute_orchestration_task, "delay", _fake_delay)
+    monkeypatch.setattr(
+        worker_module.execute_orchestration_task,
+        "apply_async",
+        _fake_apply_async,
+    )
 
 
 def test_sync_task_execution_uses_terminal_task_state_over_stale_running_link(
@@ -110,7 +117,7 @@ def test_sync_task_execution_uses_terminal_task_state_over_stale_running_link(
     assert execution.completed_at is not None
 
 
-def test_task_retry_marks_attempt_failed_when_post_commit_dispatch_fails(
+def test_task_retry_keeps_durable_attempt_recoverable_when_publish_fails(
     authenticated_client, db_session, monkeypatch
 ):
     project = Project(name="Dispatch Failure Project")
@@ -140,26 +147,33 @@ def test_task_retry_marks_attempt_failed_when_post_commit_dispatch_fails(
             "workspace_scope": "isolated_task_workspace",
         },
     )
+
+    def _raise_publish(*, kwargs, task_id, **_options):
+        raise RuntimeError("broker down")
+
     monkeypatch.setattr(
         worker_module.execute_orchestration_task,
-        "delay",
-        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("broker down")),
+        "apply_async",
+        _raise_publish,
     )
 
-    with pytest.raises(RuntimeError, match="broker down"):
-        authenticated_client.post(f"/api/v1/tasks/{task.id}/retry")
+    response = authenticated_client.post(f"/api/v1/tasks/{task.id}/retry")
+    assert response.status_code == 200
 
     session = db_session.query(SessionModel).one()
-    assert session.status == "stopped"
-    assert session.is_active is False
-    assert session.stopped_at is not None
+    assert session.status == "running"
+    assert session.is_active is True
+    assert session.stopped_at is None
     assert db_session.query(SessionTask).count() == 1
     task_execution = db_session.query(TaskExecution).one()
-    assert task_execution.status == TaskStatus.FAILED
-    assert task_execution.completed_at is not None
+    assert task_execution.status == TaskStatus.PENDING
+    assert task_execution.dispatch_state == "READY"
+    assert task_execution.dispatch_publish_attempts == 1
+    assert task_execution.dispatch_last_error == "publisher_error:RuntimeError"
+    assert task_execution.dispatch_next_attempt_at is not None
     db_session.refresh(task)
-    assert task.status == TaskStatus.FAILED
-    assert task.error_message == "Failed to dispatch task to worker"
+    assert task.status == TaskStatus.PENDING
+    assert task.error_message is None
 
 
 def test_task_retry_commits_records_before_worker_dispatch(
@@ -215,7 +229,17 @@ def test_task_retry_commits_records_before_worker_dispatch(
 
     from app.tasks import worker as worker_module
 
-    monkeypatch.setattr(worker_module.execute_orchestration_task, "delay", _fake_delay)
+    def _fake_apply_async(*args, kwargs=None, task_id=None, **_options):
+        if kwargs is None:
+            kwargs = args[1] if len(args) > 1 else {}
+        _fake_delay(**kwargs)
+        return _FakeAsyncResult()
+
+    monkeypatch.setattr(
+        worker_module.execute_orchestration_task,
+        "apply_async",
+        _fake_apply_async,
+    )
 
     response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/retry",

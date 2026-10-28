@@ -31,6 +31,7 @@ from app.models import (
     Project,
     Session as SessionModel,
     Task,
+    TaskExecution,
 )
 from app.services.orchestration.lifecycle.transitions import (
     ContinuationIdentity,
@@ -276,6 +277,23 @@ def publish_continuation_delivery(
     if task is None:
         raise LookupError("continuation_task_missing")
 
+    execution = (
+        db.query(TaskExecution)
+        .filter(TaskExecution.id == identity.task_execution_id)
+        .first()
+    )
+    if execution is not None and execution.dispatch_state is not None:
+        from app.services.execution.workflow_lifecycle import (
+            publish_task_execution_dispatch,
+        )
+
+        result = publish_task_execution_dispatch(
+            db, execution.id, publisher=execute_orchestration_task.apply_async
+        )
+        if result.get("state") == "published_unclaimed":
+            return execution.dispatch_celery_task_id
+        return None
+
     result = execute_orchestration_task.apply_async(
         kwargs={
             "session_id": identity.session_id,
@@ -492,7 +510,10 @@ def reconcile_session_continuation(
 
     observed = _now(now)
     session_id = getattr(session, "id", None)
-    probe = delivery_probe or inspect_continuation_delivery
+    # A broker's active/reserved/scheduled worker view cannot prove that a
+    # message is absent. The durable continuation claim is the authority; a
+    # missing worker inspection result therefore never gates recovery.
+    probe = delivery_probe or (lambda _identity: DeliveryProbeResult(present=False))
     publisher = publish or publish_continuation_delivery
 
     identity = resolve_continuation_identity(db, session)

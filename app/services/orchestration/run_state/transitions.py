@@ -202,6 +202,10 @@ def mark_task_attempt_failed(
     if task_execution:
         task_execution.status = TaskStatus.FAILED
         task_execution.completed_at = task_execution.completed_at or completed_at
+        if task_execution.dispatch_state is not None:
+            task_execution.dispatch_state = "TERMINAL"
+            task_execution.dispatch_lease_owner = None
+            task_execution.dispatch_lease_expires_at = None
         _release_task_execution_runtime_ownership(
             task_execution,
             released_at=completed_at,
@@ -232,6 +236,10 @@ def mark_task_attempt_cancelled(
     if task_execution:
         task_execution.status = TaskStatus.CANCELLED
         task_execution.completed_at = task_execution.completed_at or completed_at
+        if task_execution.dispatch_state is not None:
+            task_execution.dispatch_state = "TERMINAL"
+            task_execution.dispatch_lease_owner = None
+            task_execution.dispatch_lease_expires_at = None
         _release_task_execution_runtime_ownership(
             task_execution,
             released_at=completed_at,
@@ -260,6 +268,10 @@ def mark_task_attempt_done(
     if task_execution:
         task_execution.status = TaskStatus.DONE
         task_execution.completed_at = task_execution.completed_at or completed_at
+        if task_execution.dispatch_state is not None:
+            task_execution.dispatch_state = "TERMINAL"
+            task_execution.dispatch_lease_owner = None
+            task_execution.dispatch_lease_expires_at = None
         _release_task_execution_runtime_ownership(
             task_execution,
             released_at=completed_at,

@@ -612,6 +612,7 @@ def create_task_execution_workflow(
     *,
     root_task_execution_id: int,
     exclusive_open_task: bool = False,
+    expected_session_instance_id: str | None = None,
 ) -> WorkflowResult:
     """Create, or idempotently return, the workflow rooted at one attempt.
 
@@ -638,17 +639,6 @@ def create_task_execution_workflow(
         return _load_workflow(connection, binding.workflow_uuid)
 
     def body(connection: Connection, observed_at: datetime):
-        binding = _load_binding(connection, root_task_execution_id)
-        if binding is not None:
-            row = _load_workflow(connection, binding.workflow_uuid)
-            if binding.binding_kind != BindingKind.ROOT.value:
-                return (
-                    WorkflowResult(
-                        BudgetOutcome.IDENTITY_CONFLICT, _workflow_state(row)
-                    ),
-                    False,
-                )
-            return _existing_root(row, policy, observed_at), False
         attempt = connection.execute(
             select(
                 _TE.c.session_id,
@@ -660,8 +650,39 @@ def create_task_execution_workflow(
             .select_from(_TE.join(_SESSION, _SESSION.c.id == _TE.c.session_id))
             .where(_TE.c.id == root_task_execution_id)
         ).first()
-        if attempt is None or not attempt.instance_id:
+        if (
+            attempt is None
+            or not attempt.instance_id
+            or (
+                expected_session_instance_id is not None
+                and attempt.instance_id != expected_session_instance_id
+            )
+        ):
             return WorkflowResult(BudgetOutcome.IDENTITY_CONFLICT), False
+        binding = _load_binding(connection, root_task_execution_id)
+        if binding is not None:
+            if (
+                expected_session_instance_id is not None
+                and binding.session_instance_id != expected_session_instance_id
+            ):
+                return (
+                    WorkflowResult(
+                        BudgetOutcome.IDENTITY_CONFLICT,
+                        _workflow_state(
+                            _load_workflow(connection, binding.workflow_uuid)
+                        ),
+                    ),
+                    False,
+                )
+            row = _load_workflow(connection, binding.workflow_uuid)
+            if binding.binding_kind != BindingKind.ROOT.value:
+                return (
+                    WorkflowResult(
+                        BudgetOutcome.IDENTITY_CONFLICT, _workflow_state(row)
+                    ),
+                    False,
+                )
+            return _existing_root(row, policy, observed_at), False
         if exclusive_open_task:
             live = connection.execute(
                 select(_WF)
@@ -800,6 +821,7 @@ def bind_task_execution_attempt(
     task_execution_id: int,
     parent_task_execution_id: int,
     binding_kind: BindingKind,
+    expected_session_instance_id: str | None = None,
 ) -> BindingResult:
     """Bind a later retry/recovery attempt to its parent attempt's workflow.
 
@@ -829,6 +851,10 @@ def bind_task_execution_attempt(
             and existing.workflow_uuid == parent.workflow_uuid
             and existing.parent_task_execution_id == parent_task_execution_id
             and existing.binding_kind == binding_kind.value
+            and (
+                expected_session_instance_id is None
+                or existing.session_instance_id == expected_session_instance_id
+            )
         ):
             return _result(BudgetOutcome.ALREADY_BOUND, existing)
         return _result(BudgetOutcome.IDENTITY_CONFLICT, existing)
@@ -864,6 +890,13 @@ def bind_task_execution_attempt(
             or child.session_id != parent.session_id
             or child.task_id != parent.task_id
             or child.instance_id != parent.session_instance_id
+            or (
+                expected_session_instance_id is not None
+                and (
+                    child.instance_id != expected_session_instance_id
+                    or parent.session_instance_id != expected_session_instance_id
+                )
+            )
             or child.attempt_number <= parent.attempt_number
         ):
             return _result(BudgetOutcome.IDENTITY_CONFLICT), False

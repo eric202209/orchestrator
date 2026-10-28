@@ -942,6 +942,14 @@ def execute_orchestration_task(
         resolved_planning_backend = planning_configuration.backend_name
 
         if task_execution_id is None and not is_e3_continuation_dispatch:
+            # Missing TE identity is a legacy transport shape. It may keep
+            # working while enforcement is disabled, but enforcement never
+            # reconstructs lineage from Session/Task matching.
+            require_dispatch_identity(
+                db,
+                task_execution=None,
+                session_instance_id=expected_session_instance_id,
+            )
             task_execution = create_task_execution(
                 db,
                 session_id=session_id,
@@ -1496,6 +1504,7 @@ def execute_orchestration_task(
                 continuation_kind=continuation_kind,
                 task_execution_id=task_execution_id,
                 retry_count=continuation_retry_count,
+                celery_task_id=getattr(getattr(self, "request", None), "id", None),
             )
             claim_ok = claim_result.accepted
             claim_reason = claim_result.reason
@@ -1529,6 +1538,10 @@ def execute_orchestration_task(
                         task=task,
                         session_task_link=session_task_link,
                         expected_session_instance_id=expected_session_instance_id,
+                        task_execution_id=task_execution_id,
+                        celery_task_id=getattr(
+                            getattr(self, "request", None), "id", None
+                        ),
                     )
                 )
                 if claim_ok or claim_reason == "session_instance_changed":
@@ -1553,15 +1566,15 @@ def execute_orchestration_task(
                     stale_after_seconds=2100,
                 )
             elif (
-                not is_e3_continuation_dispatch
-                and task_execution is not None
-                and task_execution.status == TaskStatus.PENDING
+                task_execution is not None
+                and claim_reason.startswith("workflow_identity_refused:")
+                and task_execution.dispatch_state == "READY"
             ):
-                mark_execution_cancelled(
-                    task=None,
-                    task_execution=task_execution,
-                    completed_at=datetime.now(timezone.utc),
-                )
+                task_execution.dispatch_state = "REFUSED"
+                task_execution.dispatch_refusal_reason = claim_reason[:255]
+                task_execution.dispatch_last_error = claim_reason[:1000]
+                task_execution.dispatch_lease_owner = None
+                task_execution.dispatch_lease_expires_at = None
             db.commit()
             return _emit_dispatch_rejected(
                 reason=claim_reason,

@@ -163,6 +163,16 @@ def _make_worker_sync(monkeypatch, db_session_factory):
 
     class SyncTask:
         @staticmethod
+        def apply_async(*, kwargs: dict[str, Any], task_id: str, **_options: Any):
+            applied = real_task.apply(kwargs=kwargs, task_id=task_id)
+            # The managed dispatch contract uses Celery's exact stable task ID
+            # as Worker claim identity. Execute the real task body in-process
+            # while retaining that transport identity.
+            with allow_join_result():
+                outcome = applied.get(propagate=True)
+            return SyncResult(outcome)
+
+        @staticmethod
         def delay(**kwargs: Any) -> SyncResult:
             applied = real_task.apply(kwargs=kwargs)
             # Eager task execution runs the real Celery task body in-process.

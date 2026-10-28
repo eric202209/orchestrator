@@ -46,6 +46,11 @@ def _fake_dispatch(monkeypatch):
             calls.append(kwargs)
             return _Result()
 
+        @staticmethod
+        def apply_async(*, kwargs, task_id, **_options):
+            calls.append({**kwargs, "_celery_task_id": task_id})
+            return _Result()
+
     monkeypatch.setattr("app.tasks.worker.execute_orchestration_task", _Worker)
     return calls
 
@@ -159,7 +164,7 @@ def test_stale_lock_without_live_execution_is_reconciled_and_admitted(
 
     result = queue_task_for_session(db_session, session, task.id)
 
-    assert result["celery_id"] == "sr1-queued"
+    assert result["celery_id"] == calls[0]["_celery_task_id"]
     assert calls
     assert db_session.query(TaskExecution).count() == 1
     assert not lock_path.exists()
@@ -169,14 +174,14 @@ def test_terminal_execution_without_lock_allows_manual_retry(
     db_session, monkeypatch, tmp_path
 ):
     _bypass_binding(monkeypatch)
-    _fake_dispatch(monkeypatch)
+    calls = _fake_dispatch(monkeypatch)
     project, session, task = _project_with_request(db_session, tmp_path)
     _add_active_owner(db_session, project, status=TaskStatus.DONE)
     before = db_session.query(TaskExecution).count()
 
     result = queue_task_for_session(db_session, session, task.id)
 
-    assert result["celery_id"] == "sr1-queued"
+    assert result["celery_id"] == calls[0]["_celery_task_id"]
     assert db_session.query(TaskExecution).count() == before + 1
 
 
@@ -184,7 +189,7 @@ def test_active_execution_and_lock_on_other_project_do_not_block_dispatch(
     db_session, monkeypatch, tmp_path
 ):
     _bypass_binding(monkeypatch)
-    _fake_dispatch(monkeypatch)
+    calls = _fake_dispatch(monkeypatch)
     owner_project, _, _ = _project_with_request(
         db_session, tmp_path, name="Owner Project"
     )
@@ -204,7 +209,7 @@ def test_active_execution_and_lock_on_other_project_do_not_block_dispatch(
     ):
         result = queue_task_for_session(db_session, request_session, request_task.id)
 
-    assert result["celery_id"] == "sr1-queued"
+    assert result["celery_id"] == calls[0]["_celery_task_id"]
     assert (
         db_session.query(TaskExecution)
         .filter(TaskExecution.task_id == request_task.id)

@@ -63,6 +63,10 @@ from app.services.execution.workflow_lifecycle import (
     WorkflowLifecycleError,
     bind_continuation,
     bind_new_root,
+    configure_task_execution_dispatch,
+    enforcement_enabled,
+    publish_task_execution_dispatch,
+    publisher_from_task,
     require_binding_outcome,
 )
 from app.services.tasks.execution import (
@@ -628,11 +632,73 @@ def queue_task_for_session(
                     session_task_link=session_task_link,
                     reset_started_at=True,
                 )
+            prior_status = task.status
+            should_clear_saved_plan = prior_status in (
+                TaskStatus.DONE,
+                TaskStatus.FAILED,
+                TaskStatus.CANCELLED,
+            )
+            task_prompt = build_task_execution_prompt(task)
+            planner_context = (
+                {"planner_contract": planner_contract}
+                if planner_contract is not None
+                else None
+            )
             task_execution = create_task_execution(
                 db,
                 session_id=session.id,
                 task_id=task.id,
             )
+            dispatch_kind = (
+                "RECOVERY" if continuation_kind == "automatic_recovery" else "ROOT"
+            )
+            dispatch_managed = configure_task_execution_dispatch(
+                db,
+                task_execution=task_execution,
+                session=session,
+                task=task,
+                dispatch_kind=dispatch_kind,
+                parent_task_execution_id=(
+                    recovery_parent_task_execution_id
+                    if dispatch_kind == "RECOVERY"
+                    else None
+                ),
+                prompt=task_prompt,
+                timeout_seconds=timeout_seconds,
+                context=planner_context,
+                planning_backend_override=planning_backend_override,
+                planning_escalation_metadata=planning_escalation_metadata,
+                continuation_task_id=(task.id if e3_continuation_dispatch else None),
+                continuation_kind=continuation_kind,
+                continuation_retry_count=continuation_retry_count,
+            )
+            if not dispatch_managed and enforcement_enabled():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Task invocation cannot be persisted for safe dispatch replay",
+                )
+            prepare_task_for_fresh_execution(
+                task, clear_saved_plan=should_clear_saved_plan
+            )
+            if e3_continuation_dispatch:
+                if recovery_error_message:
+                    task.workspace_status = "changes_requested"
+                    task.error_message = recovery_error_message
+                continuation_identity = schedule_continuation(
+                    db,
+                    session,
+                    task_execution=task_execution,
+                    continuation_task_id=task.id,
+                    continuation_kind=continuation_kind,
+                    retry_count=continuation_retry_count,
+                    retry_eta=continuation_retry_eta,
+                )
+            else:
+                continuation_identity = None
+                mark_session_running(
+                    session, started_at=session.started_at or datetime.now(timezone.utc)
+                )
+                clear_session_alert(session)
             # The admission lock must not be released while this row is still
             # uncommitted; otherwise a concurrent caller can pass the same
             # active-execution query.
@@ -643,116 +709,101 @@ def queue_task_for_session(
     except ProjectExecutionSerializationConflict as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LifecycleTransitionError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=exc.reason) from exc
+    except HTTPException:
+        db.rollback()
+        raise
 
-    # The attempt is committed; R3A binds it on its own connection. Recovery
-    # inherits only from the explicit failed parent; fresh work is a root.
-    if continuation_kind == "automatic_recovery":
-        binding_outcome = bind_continuation(
-            db,
-            task_execution.id,
-            parent_task_execution_id=recovery_parent_task_execution_id,
-            binding_kind=BindingKind.RECOVERY,
-        )
-        binding_kind = BindingKind.RECOVERY
-    elif not e3_continuation_dispatch:
-        binding_outcome = bind_new_root(db, task_execution.id)
-        binding_kind = BindingKind.ROOT
-    else:
+    # Managed dispatch keeps T2 in the durable publisher/reconciler path. The
+    # separate R3A transaction is retried against this exact intent after an
+    # uncertain result. Disabled-mode legacy paths retain their no-op binding
+    # calls for historical compatibility.
+    if dispatch_managed:
         binding_outcome = None
-        binding_kind = BindingKind.RECOVERY
-
-    try:
-        require_binding_outcome(binding_outcome, binding_kind=binding_kind)
-    except WorkflowLifecycleError as exc:
-        completed_at = datetime.now(timezone.utc)
-        failure = f"Workflow identity binding failed: {exc.reason}"
-        task_execution.failure_category = "workflow_binding_failed"
-        mark_task_attempt_failed(
-            task=task,
-            session_task_link=session_task_link,
-            task_execution=task_execution,
-            error_message=failure,
-            completed_at=completed_at,
+        binding_kind = (
+            BindingKind.RECOVERY
+            if continuation_kind == "automatic_recovery"
+            else BindingKind.ROOT
         )
-        mark_session_paused(
-            session,
-            alert_level="error",
-            alert_message=failure,
-            paused_at=completed_at,
-        )
-        db.add(
-            LogEntry(
-                session_id=session.id,
-                session_instance_id=session.instance_id,
-                task_id=task.id,
-                task_execution_id=task_execution.id,
-                level="ERROR",
-                message="Task not published because workflow identity binding failed",
-                log_metadata=json.dumps(
-                    {
-                        "event_type": "workflow_binding_failed",
-                        "failure_category": "workflow_binding_failed",
-                        "binding_outcome": getattr(binding_outcome, "value", None),
-                        "task_execution_id": task_execution.id,
-                    }
-                ),
+    else:
+        binding_outcome = (
+            bind_continuation(
+                db,
+                task_execution.id,
+                parent_task_execution_id=recovery_parent_task_execution_id,
+                binding_kind=BindingKind.RECOVERY,
+            )
+            if continuation_kind == "automatic_recovery"
+            else (
+                bind_new_root(db, task_execution.id)
+                if not e3_continuation_dispatch
+                else None
             )
         )
-        db.commit()
-        status_code = (
-            409
-            if any(
-                outcome in exc.reason
-                for outcome in (
-                    "OPEN_WORKFLOW_EXISTS",
-                    "WORKFLOW_INFERENCE_DEADLINE_EXCEEDED",
+        binding_kind = (
+            BindingKind.RECOVERY if e3_continuation_dispatch else BindingKind.ROOT
+        )
+
+    if not dispatch_managed:
+        try:
+            require_binding_outcome(binding_outcome, binding_kind=binding_kind)
+        except WorkflowLifecycleError as exc:
+            completed_at = datetime.now(timezone.utc)
+            failure = f"Workflow identity binding failed: {exc.reason}"
+            task_execution.failure_category = "workflow_binding_failed"
+            mark_task_attempt_failed(
+                task=task,
+                session_task_link=session_task_link,
+                task_execution=task_execution,
+                error_message=failure,
+                completed_at=completed_at,
+            )
+            mark_session_paused(
+                session,
+                alert_level="error",
+                alert_message=failure,
+                paused_at=completed_at,
+            )
+            db.add(
+                LogEntry(
+                    session_id=session.id,
+                    session_instance_id=session.instance_id,
+                    task_id=task.id,
+                    task_execution_id=task_execution.id,
+                    level="ERROR",
+                    message="Task not published because workflow identity binding failed",
+                    log_metadata=json.dumps(
+                        {
+                            "event_type": "workflow_binding_failed",
+                            "failure_category": "workflow_binding_failed",
+                            "binding_outcome": getattr(binding_outcome, "value", None),
+                            "task_execution_id": task_execution.id,
+                        }
+                    ),
                 )
             )
-            else 503
-        )
-        raise HTTPException(
-            status_code=status_code,
-            detail={
-                "code": "WORKFLOW_BINDING_FAILED",
-                "reason": exc.reason,
-                "task_execution_id": task_execution.id,
-            },
-        ) from exc
-
-    prior_status = task.status
-    should_clear_saved_plan = prior_status in (
-        TaskStatus.DONE,
-        TaskStatus.FAILED,
-        TaskStatus.CANCELLED,
-    )
-    task_prompt = build_task_execution_prompt(task)
-    planner_context = (
-        {"planner_contract": planner_contract} if planner_contract is not None else None
-    )
-    prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
-    if e3_continuation_dispatch:
-        if recovery_error_message:
-            task.workspace_status = "changes_requested"
-            task.error_message = recovery_error_message
-        try:
-            continuation_identity = schedule_continuation(
-                db,
-                session,
-                task_execution=task_execution,
-                continuation_task_id=task.id,
-                continuation_kind=continuation_kind,
-                retry_count=continuation_retry_count,
-                retry_eta=continuation_retry_eta,
+            db.commit()
+            status_code = (
+                409
+                if any(
+                    outcome in exc.reason
+                    for outcome in (
+                        "OPEN_WORKFLOW_EXISTS",
+                        "WORKFLOW_INFERENCE_DEADLINE_EXCEEDED",
+                    )
+                )
+                else 503
             )
-        except LifecycleTransitionError as exc:
-            db.rollback()
-            raise HTTPException(status_code=409, detail=exc.reason) from exc
-    else:
-        continuation_identity = None
-        mark_session_running(
-            session, started_at=session.started_at or datetime.now(timezone.utc)
-        )
-        clear_session_alert(session)
+            raise HTTPException(
+                status_code=status_code,
+                detail={
+                    "code": "WORKFLOW_BINDING_FAILED",
+                    "reason": exc.reason,
+                    "task_execution_id": task_execution.id,
+                },
+            ) from exc
 
     event_project_dir = project_control_state_location(
         Path(task_workspace["workspace_path"]),
@@ -770,6 +821,11 @@ def queue_task_for_session(
         session_id=session.id,
         task_id=task.id,
         event_type=EventType.TASK_QUEUED,
+        event_id=(
+            task_execution.dispatch_invocation.get("queued_event_id")
+            if dispatch_managed
+            else None
+        ),
         details={
             "session_instance_id": session.instance_id,
             "project_dir": task_workspace["workspace_path"],
@@ -799,27 +855,40 @@ def queue_task_for_session(
     db.commit()
 
     try:
-        result = execute_orchestration_task.delay(
-            session_id=session.id,
-            task_id=task.id,
-            prompt=task_prompt,
-            timeout_seconds=timeout_seconds,
-            expected_session_instance_id=session.instance_id,
-            task_execution_id=task_execution.id,
-            queued_event_id=(queued_event or {}).get("event_id"),
-            planning_backend_override=planning_backend_override,
-            planning_escalation_metadata=planning_escalation_metadata,
-            context=planner_context,
-            **(
-                {
-                    "continuation_task_id": continuation_identity.continuation_task_id,
-                    "continuation_kind": continuation_identity.continuation_kind,
-                    "continuation_retry_count": continuation_identity.retry_count,
-                }
-                if continuation_identity is not None
-                else {}
-            ),
-        )
+        if dispatch_managed:
+            dispatch_result = publish_task_execution_dispatch(
+                db,
+                task_execution.id,
+                publisher=publisher_from_task(execute_orchestration_task),
+            )
+            if dispatch_result.get("state") == "refused":
+                raise WorkflowLifecycleError(
+                    dispatch_result.get("reason") or "dispatch_refused"
+                )
+            celery_task_id = task_execution.dispatch_celery_task_id
+        else:
+            result = execute_orchestration_task.delay(
+                session_id=session.id,
+                task_id=task.id,
+                prompt=task_prompt,
+                timeout_seconds=timeout_seconds,
+                expected_session_instance_id=session.instance_id,
+                task_execution_id=task_execution.id,
+                queued_event_id=(queued_event or {}).get("event_id"),
+                planning_backend_override=planning_backend_override,
+                planning_escalation_metadata=planning_escalation_metadata,
+                context=planner_context,
+                **(
+                    {
+                        "continuation_task_id": continuation_identity.continuation_task_id,
+                        "continuation_kind": continuation_identity.continuation_kind,
+                        "continuation_retry_count": continuation_identity.retry_count,
+                    }
+                    if continuation_identity is not None
+                    else {}
+                ),
+            )
+            celery_task_id = result.id
     except Exception as exc:
         if continuation_identity is not None:
             # TASK_QUEUED and retry_pending were committed before the broker
@@ -903,7 +972,7 @@ def queue_task_for_session(
             message="Queued task %s: %s" % (task.id, task.title),
             log_metadata=json.dumps(
                 {
-                    "celery_task_id": result.id,
+                    "celery_task_id": celery_task_id,
                     "task_execution_id": task_execution.id,
                     "task_workspace": task_workspace["workspace_path"],
                     "plan_position": getattr(task, "plan_position", None),
@@ -928,7 +997,7 @@ def queue_task_for_session(
         "task_id": task.id,
         "task_name": task.title,
         "task_execution_id": task_execution.id,
-        "celery_id": result.id,
+        "celery_id": celery_task_id,
         "plan_position": getattr(task, "plan_position", None),
         **(
             {

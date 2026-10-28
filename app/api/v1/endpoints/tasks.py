@@ -46,6 +46,10 @@ from app.services.tasks.execution import (
 from app.services.execution.workflow_lifecycle import (
     WorkflowLifecycleError,
     bind_new_root,
+    configure_task_execution_dispatch,
+    enforcement_enabled,
+    publish_task_execution_dispatch,
+    publisher_from_task,
     require_binding_outcome,
 )
 from app.services.tasks.service import TaskService
@@ -85,7 +89,18 @@ def _require_root_binding_before_publish(
     session_task,
     task_execution,
 ) -> None:
-    outcome = bind_new_root(db, task_execution.id)
+    # A managed dispatch owns T2. Binding here used to sit between the durable
+    # T1 intent commit and its publisher, making an uncertain bind look like a
+    # terminal API failure. The reconciler retries the exact root identity.
+    if task_execution.dispatch_state is not None:
+        return
+    outcome = bind_new_root(
+        db,
+        task_execution.id,
+        expected_session_instance_id=(
+            session.instance_id if task_execution.dispatch_state is not None else None
+        ),
+    )
     try:
         require_binding_outcome(outcome, binding_kind="ROOT")
     except WorkflowLifecycleError as exc:
@@ -302,6 +317,22 @@ def _resume_automatic_chain_after_promotion(
         task_id=next_task.id,
         status=TaskStatus.PENDING,
     )
+    auto_advance_prompt = next_task.description or next_task.title
+    dispatch_managed = configure_task_execution_dispatch(
+        db,
+        task_execution=next_execution,
+        session=session,
+        task=next_task,
+        dispatch_kind="ROOT",
+        prompt=auto_advance_prompt,
+        timeout_seconds=DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
+    )
+    if not dispatch_managed and enforcement_enabled():
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Task invocation cannot be persisted for safe dispatch replay",
+        )
     mark_session_running(session)
     db.add(
         LogEntry(
@@ -329,14 +360,21 @@ def _resume_automatic_chain_after_promotion(
         session_task=session_task,
         task_execution=next_execution,
     )
-    execute_orchestration_task.delay(
-        session_id=session.id,
-        task_id=next_task.id,
-        prompt=next_task.description or next_task.title,
-        timeout_seconds=DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
-        expected_session_instance_id=session.instance_id,
-        task_execution_id=next_execution.id,
-    )
+    if dispatch_managed:
+        publish_task_execution_dispatch(
+            db,
+            next_execution.id,
+            publisher=publisher_from_task(execute_orchestration_task),
+        )
+    else:
+        execute_orchestration_task.delay(
+            session_id=session.id,
+            task_id=next_task.id,
+            prompt=auto_advance_prompt,
+            timeout_seconds=DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
+            expected_session_instance_id=session.instance_id,
+            task_execution_id=next_execution.id,
+        )
 
 
 def _operator_identifier(current_user) -> Optional[str]:
@@ -720,22 +758,6 @@ def _queue_task_retry(
             reset_started_at=True,
         )
 
-    try:
-        with project_execution_serialization_admission(
-            db,
-            session_id=selected_session.id,
-            task_id=task.id,
-        ):
-            task_execution = create_task_execution(
-                db,
-                session_id=selected_session.id,
-                task_id=task.id,
-            )
-            db.commit()
-    except ProjectExecutionSerializationConflict as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-
     should_clear_saved_plan = task.status in (
         TaskStatus.DONE,
         TaskStatus.FAILED,
@@ -750,6 +772,44 @@ def _queue_task_retry(
             change_set=latest_change_set,
         )
     _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
+    mark_session_running(
+        selected_session,
+        started_at=selected_session.started_at or datetime.now(timezone.utc),
+    )
+
+    try:
+        with project_execution_serialization_admission(
+            db,
+            session_id=selected_session.id,
+            task_id=task.id,
+        ):
+            task_execution = create_task_execution(
+                db,
+                session_id=selected_session.id,
+                task_id=task.id,
+            )
+            dispatch_managed = configure_task_execution_dispatch(
+                db,
+                task_execution=task_execution,
+                session=selected_session,
+                task=task,
+                dispatch_kind="ROOT",
+                prompt=prompt,
+                timeout_seconds=timeout_seconds,
+                context=planner_context,
+            )
+            if not dispatch_managed and enforcement_enabled():
+                raise HTTPException(
+                    status_code=409,
+                    detail="Task invocation cannot be persisted for safe dispatch replay",
+                )
+            db.commit()
+    except ProjectExecutionSerializationConflict as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        db.rollback()
+        raise
     repair_archive_result = None
     if (
         explicit_new_session
@@ -780,9 +840,14 @@ def _queue_task_retry(
         session_id=selected_session.id,
         task_id=task.id,
         event_type=EventType.TASK_QUEUED,
+        event_id=(
+            task_execution.dispatch_invocation.get("queued_event_id")
+            if dispatch_managed
+            else None
+        ),
         details={
             "session_instance_id": selected_session.instance_id,
-            "celery_task_id": None,
+            "celery_task_id": task_execution.dispatch_celery_task_id,
             "task_execution_id": task_execution.id,
             "project_dir": task_workspace["workspace_path"],
             "backend": get_effective_agent_backend(settings.AGENT_BACKEND, db=db),
@@ -791,11 +856,6 @@ def _queue_task_retry(
             ),
             "planner_contract": retry_request.planner_contract,
         },
-    )
-
-    mark_session_running(
-        selected_session,
-        started_at=selected_session.started_at or datetime.now(timezone.utc),
     )
 
     db.add(
@@ -808,7 +868,7 @@ def _queue_task_retry(
             message=f"Task queued: {task.title}",
             log_metadata=json.dumps(
                 {
-                    "celery_task_id": None,
+                    "celery_task_id": task_execution.dispatch_celery_task_id,
                     "task_execution_id": task_execution.id,
                     "retry": True,
                     "execution_scope": (
@@ -848,16 +908,29 @@ def _queue_task_retry(
     )
 
     try:
-        result = execute_orchestration_task.delay(
-            session_id=selected_session.id,
-            task_id=task.id,
-            prompt=prompt,
-            timeout_seconds=timeout_seconds,
-            expected_session_instance_id=selected_session.instance_id,
-            task_execution_id=task_execution.id,
-            queued_event_id=(queued_event or {}).get("event_id"),
-            context=planner_context,
-        )
+        if dispatch_managed:
+            dispatch_result = publish_task_execution_dispatch(
+                db,
+                task_execution.id,
+                publisher=publisher_from_task(execute_orchestration_task),
+            )
+            if dispatch_result.get("state") == "refused":
+                raise WorkflowLifecycleError(
+                    dispatch_result.get("reason") or "dispatch_refused"
+                )
+            celery_task_id = task_execution.dispatch_celery_task_id
+        else:
+            result = execute_orchestration_task.delay(
+                session_id=selected_session.id,
+                task_id=task.id,
+                prompt=prompt,
+                timeout_seconds=timeout_seconds,
+                expected_session_instance_id=selected_session.instance_id,
+                task_execution_id=task_execution.id,
+                queued_event_id=(queued_event or {}).get("event_id"),
+                context=planner_context,
+            )
+            celery_task_id = result.id
     except Exception:
         mark_session_stopped(selected_session, stopped_at=datetime.now(timezone.utc))
         mark_execution_failed(
@@ -896,7 +969,7 @@ def _queue_task_retry(
             message=f"Celery task dispatched: {task.title}",
             log_metadata=json.dumps(
                 {
-                    "celery_task_id": result.id,
+                    "celery_task_id": celery_task_id,
                     "task_execution_id": task_execution.id,
                     "dispatch_after_commit": True,
                 }
@@ -909,7 +982,7 @@ def _queue_task_retry(
         "task_id": task.id,
         "session_id": selected_session.id,
         "task_execution_id": task_execution.id,
-        "celery_task_id": result.id,
+        "celery_task_id": celery_task_id,
         "execution_scope": (
             "isolated_session" if explicit_new_session else "workflow_session"
         ),

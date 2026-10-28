@@ -469,14 +469,13 @@ def test_e3_t13_retry_pending_is_committed_before_broker_and_survives_failure(
             raise RuntimeError("broker publication failed")
 
     monkeypatch.setattr("app.tasks.worker.execute_orchestration_task", _Broker)
-    with pytest.raises(RuntimeError, match="broker publication failed"):
-        queue_task_for_session(
-            db_session,
-            session,
-            task.id,
-            continuation_kind="celery_retry",
-            continuation_retry_count=1,
-        )
+    result = queue_task_for_session(
+        db_session,
+        session,
+        task.id,
+        continuation_kind="celery_retry",
+        continuation_retry_count=1,
+    )
 
     assert observed == {
         "status": "retry_pending",
@@ -484,8 +483,19 @@ def test_e3_t13_retry_pending_is_committed_before_broker_and_survives_failure(
         "execution": TaskStatus.PENDING,
     }
     db_session.refresh(session)
+    scheduled_execution = (
+        db_session.query(TaskExecution)
+        .filter(TaskExecution.id == result["task_execution_id"])
+        .one()
+    )
     assert session.status == "retry_pending"
     assert session.continuation_task_id == task.id
+    assert session.continuation_task_execution_id == scheduled_execution.id
+    assert result["celery_id"] == scheduled_execution.dispatch_celery_task_id
+    assert scheduled_execution.status is TaskStatus.PENDING
+    assert scheduled_execution.dispatch_state == "READY"
+    assert scheduled_execution.dispatch_publish_attempts == 1
+    assert scheduled_execution.dispatch_last_error == "publisher_error:RuntimeError"
 
 
 def test_e3_failure_during_strict_claim_leaves_retry_pending_nonterminal(

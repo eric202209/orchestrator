@@ -811,14 +811,21 @@ def test_br2_sweep_reports_counts_and_records_maintenance_evidence(
             present=True, sources=("active",)
         ),
     )
+    monkeypatch.setattr(
+        cr,
+        "publish_continuation_delivery",
+        lambda _db, _identity: "test-task-id",
+    )
 
     sweep = maintenance.sweep_stranded_continuation_deliveries
     result = sweep.run(grace_seconds=0)
 
     assert result["status"] == "completed"
     assert result["inspected_continuation_count"] == 1
-    assert result["delivery_present_count"] == 1
-    assert result["republished_session_ids"] == []
+    # Worker active/reserved/scheduled inspection is diagnostic only. A
+    # positive probe does not supersede the exact durable TE claim fence.
+    assert result["republished_count"] == 1
+    assert result["republished_session_ids"] == [session.id]
 
     maintenance_events = [
         json.loads(row.log_metadata or "{}")
