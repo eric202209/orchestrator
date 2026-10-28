@@ -43,7 +43,10 @@ from app.services.orchestration.lifecycle.transitions import (
     schedule_continuation,
 )
 from app.services.tasks.execution import create_task_execution
-from app.services.execution.workflow_lifecycle import close_task_workflow
+from app.services.execution.workflow_lifecycle import (
+    close_task_workflow,
+    managed_continuation_retry_arguments,
+)
 from app.services.orchestration.state.persistence import (
     record_live_log,
     save_orchestration_checkpoint,
@@ -837,6 +840,11 @@ class FailureCoordinator:
             retry_workspace_restored = False
             retry_kwargs = None
             retry_restore_blocked = False
+            # A managed attempt retries only its persisted invocation; the
+            # current Celery request kwargs are never authoritative for it.
+            managed_retry = isinstance(
+                getattr(task_execution, "dispatch_state", None), str
+            )
             if ctx is not None:
                 (
                     retry_workspace_restored,
@@ -850,11 +858,12 @@ class FailureCoordinator:
                     logger=logger,
                     self_task=self_task,
                 )
-            if retry_restore_blocked:
-                retry_blocked_message = (
-                    "Retry requires checkpoint resume because workspace restore failed "
-                    "or the workspace remained dirty after failure."
-                )
+            if managed_retry and (retry_kwargs or {}).get("resume_checkpoint_name"):
+                # Dirty-workspace retry resumes a checkpoint, which the
+                # persisted invocation cannot carry.
+                retry_restore_blocked = True
+
+            def _pause_blocked_retry(retry_blocked_message: str) -> None:
                 mark_task_attempt_failed(
                     task=task,
                     session_task_link=session_task_link,
@@ -881,11 +890,19 @@ class FailureCoordinator:
                     )
                 db.commit()
                 write_project_state_snapshot_fn(db, project, task, session_id)
+
+            if retry_restore_blocked:
+                _pause_blocked_retry(
+                    "Retry requires checkpoint resume because workspace restore failed "
+                    "or the workspace remained dirty after failure."
+                )
                 return
             retry_delay = getattr(self_task, "default_retry_delay", None)
             retry_eta = None
             if isinstance(retry_delay, (int, float)) and retry_delay >= 0:
                 retry_eta = datetime.now(UTC) + timedelta(seconds=retry_delay)
+            managed_retry_kwargs = None
+            managed_retry_refusal = None
             try:
                 # The pending reset and durable continuation marker share the
                 # schedule_continuation transaction.  A pre-marker exception
@@ -898,8 +915,17 @@ class FailureCoordinator:
                     continuation_kind="celery_retry",
                     retry_count=retry_count + 1,
                     retry_eta=retry_eta,
-                    commit=True,
+                    commit=not managed_retry,
                 )
+                if managed_retry:
+                    # Validate the persisted invocation before the marker
+                    # commits, so a refused retry leaves nothing for E8.
+                    db.flush()
+                    managed_retry_kwargs, managed_retry_refusal = (
+                        managed_continuation_retry_arguments(db, task_execution)
+                    )
+                    if managed_retry_refusal is None:
+                        db.commit()
             except Exception as scheduling_error:
                 db.rollback()
                 current_session = (
@@ -940,9 +966,24 @@ class FailureCoordinator:
                         logger=logger,
                     )
                 raise
+            if managed_retry_refusal is not None:
+                db.rollback()
+                logger.error(
+                    "[E3] Managed retry refused for session %s task_execution %s: %s",
+                    session_id,
+                    task_execution_id,
+                    managed_retry_refusal,
+                )
+                _pause_blocked_retry(
+                    f"Managed retry refused: {managed_retry_refusal}. The persisted "
+                    "invocation cannot be replayed."
+                )
+                return
             retry_kwargs = self._stamp_retry_dispatch_provenance(
                 self_task=self_task,
-                retry_kwargs=retry_kwargs,
+                retry_kwargs=(
+                    dict(managed_retry_kwargs) if managed_retry else retry_kwargs
+                ),
                 orchestration_state=orchestration_state,
                 session=session,
                 task=task,
@@ -952,6 +993,16 @@ class FailureCoordinator:
                 continuation_identity=retry_identity,
             )
             try:
+                if managed_retry:
+                    # The queued event above is provenance only. The delivery
+                    # carries exactly what E8 would republish, under the
+                    # persisted Celery identity.
+                    raise self_task.retry(
+                        exc=exc,
+                        args=(),
+                        kwargs=managed_retry_kwargs,
+                        task_id=task_execution.dispatch_celery_task_id,
+                    )
                 if retry_kwargs is not None:
                     raise self_task.retry(exc=exc, kwargs=retry_kwargs)
                 raise self_task.retry(exc=exc)

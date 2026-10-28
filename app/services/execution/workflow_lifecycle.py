@@ -73,6 +73,7 @@ DISPATCH_CLAIMED = "CLAIMED"
 DISPATCH_TERMINAL = "TERMINAL"
 DISPATCH_REFUSED = "REFUSED"
 _DISPATCH_KINDS = frozenset({"ROOT", "RETRY", "RECOVERY"})
+_SAME_ATTEMPT_CONTINUATION_KINDS = frozenset({"celery_retry", "backend_capacity"})
 _DISPATCH_LEASE_SECONDS = 120
 _DISPATCH_RETRY_BASE_SECONDS = 300
 _DISPATCH_RETRY_MAX_SECONDS = 3600
@@ -647,7 +648,18 @@ def _dispatch_replay_arguments(
             "kind": session.continuation_kind,
             "retry_count": session.continuation_retry_count,
         }
-        if continuation is not None and continuation != current_continuation:
+        # The envelope pins the continuation authorized at T1. A later
+        # Celery-retry or capacity wait on this exact attempt is a separate
+        # lifecycle-authorized marker; it may supersede only the continuation
+        # metadata, never the execution-bearing invocation.
+        if (
+            continuation is not None
+            and continuation != current_continuation
+            and not (
+                continuation.get("task_id") == current_continuation["task_id"]
+                and current_continuation["kind"] in _SAME_ATTEMPT_CONTINUATION_KINDS
+            )
+        ):
             return None, "continuation_marker_changed"
         continuation = current_continuation
     elif session.status not in {"pending", "running"}:
@@ -685,6 +697,35 @@ def _dispatch_replay_arguments(
                 "continuation_retry_count": continuation.get("retry_count"),
             }
         )
+    return args, None
+
+
+def managed_continuation_retry_arguments(
+    db: Session, execution: TaskExecution
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Return the durable invocation for a same-attempt Celery retry.
+
+    Call after ``schedule_continuation`` has been flushed and before it is
+    committed. The kwargs are the same ones E8 republishes, so a managed retry
+    never inherits mutable Celery request kwargs. A refusal reason means the
+    caller must not publish.
+    """
+
+    if execution.dispatch_state != DISPATCH_READY:
+        return None, "dispatch_not_ready"
+    args, reason = _dispatch_replay_arguments(db, execution)
+    if reason:
+        return None, reason
+    if args.get("continuation_kind") is None:
+        return None, "continuation_identity_missing"
+    try:
+        validate_existing_dispatch_binding(
+            db,
+            task_execution=execution,
+            session_instance_id=execution.dispatch_session_instance_id,
+        )
+    except WorkflowLifecycleError as exc:
+        return None, exc.reason
     return args, None
 
 

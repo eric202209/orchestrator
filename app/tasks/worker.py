@@ -39,6 +39,7 @@ from app.services.execution.process_identity import current_worker_identity
 from app.services.execution.workflow_lifecycle import (
     attach_workflow_identity,
     close_task_workflow,
+    managed_continuation_retry_arguments,
     require_dispatch_identity,
 )
 
@@ -1408,6 +1409,42 @@ def execute_orchestration_task(
                         continuation_kind=continuation_kind,
                         continuation_retry_count=continuation_retry_count,
                     )
+                managed_capacity_kwargs = None
+                if isinstance(getattr(task_execution, "dispatch_state", None), str):
+                    # A managed attempt waits with its persisted invocation.
+                    # Validate before the marker commits so a refused
+                    # invocation leaves no continuation and is not published.
+                    db.flush()
+                    managed_capacity_kwargs, managed_capacity_refusal = (
+                        managed_continuation_retry_arguments(db, task_execution)
+                    )
+                    if managed_capacity_refusal is not None:
+                        db.rollback()
+                        return _emit_dispatch_rejected(
+                            reason=f"managed_retry_refused:{managed_capacity_refusal}",
+                            log_message=(
+                                "[ORCHESTRATION] Rejected capacity wait because the "
+                                "persisted invocation cannot be replayed"
+                            ),
+                            db=db,
+                            session=session,
+                            session_id=session_id,
+                            task_id=task_id,
+                            task_execution_id=task_execution_id,
+                            dispatch_project_dir=dispatch_project_dir,
+                            expected_session_instance_id=expected_session_instance_id,
+                            celery_task_id=getattr(
+                                getattr(self, "request", None), "id", None
+                            ),
+                            queue_latency_seconds=queue_latency_seconds,
+                            queued_event=queued_event,
+                            emit_live=emit_live,
+                            runtime_selection=runtime_selection,
+                            continuation_dispatch=is_e3_continuation_dispatch,
+                            continuation_task_id=continuation_task_id,
+                            continuation_kind=continuation_kind,
+                            continuation_retry_count=continuation_retry_count,
+                        )
                 # The lifecycle commit is deliberately separate from broker
                 # publication.  Event persistence may fail independently but
                 # must never be the only durable source of retry intent.
@@ -1464,6 +1501,16 @@ def execute_orchestration_task(
                         _capacity_log_error,
                     )
                 db.commit()
+                if managed_capacity_kwargs is not None:
+                    # Same kwargs E8 republishes, under the persisted Celery
+                    # identity; request kwargs are never authoritative here.
+                    raise self.retry(
+                        countdown=15,
+                        max_retries=BACKEND_CAPACITY_RETRY_MAX_RETRIES,
+                        args=(),
+                        kwargs=managed_capacity_kwargs,
+                        task_id=task_execution.dispatch_celery_task_id,
+                    )
                 request_kwargs = getattr(getattr(self, "request", None), "kwargs", None)
                 if isinstance(request_kwargs, dict):
                     capacity_retry_kwargs = dict(request_kwargs)
