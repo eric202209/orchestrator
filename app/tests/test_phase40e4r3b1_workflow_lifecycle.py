@@ -446,6 +446,10 @@ def test_concurrent_binding_samples_the_deadline_after_lock(r3b, enforced, monke
     _set_status(db, parent, TaskStatus.FAILED)
     before_deadline = _attempt(db, session, task, 2)
     at_deadline = _attempt(db, session, task, 3)
+    parent_execution_id = parent.id
+    before_deadline_execution_id = before_deadline.id
+    at_deadline_execution_id = at_deadline.id
+    workflow_uuid = workflow.workflow_uuid
     instants = {
         "before-deadline": workflow.deadline_at - timedelta(microseconds=1),
         "at-deadline": workflow.deadline_at,
@@ -465,7 +469,7 @@ def test_concurrent_binding_samples_the_deadline_after_lock(r3b, enforced, monke
             outcomes[threading.current_thread().name] = wl.bind_continuation(
                 local,
                 execution_id,
-                parent_task_execution_id=parent.id,
+                parent_task_execution_id=parent_execution_id,
                 binding_kind=BindingKind.RETRY,
             )
         finally:
@@ -485,9 +489,11 @@ def test_concurrent_binding_samples_the_deadline_after_lock(r3b, enforced, monke
 
     assert outcomes["before-deadline"] is BudgetOutcome.BOUND
     assert outcomes["at-deadline"] is BudgetOutcome.WORKFLOW_INFERENCE_DEADLINE_EXCEEDED
-    assert wb.resolve_task_execution_binding(db, before_deadline.id) is not None
-    assert wb.resolve_task_execution_binding(db, at_deadline.id) is None
-    assert _workflow_row(path, workflow.workflow_uuid)[0] == "OPEN"
+    assert (
+        wb.resolve_task_execution_binding(db, before_deadline_execution_id) is not None
+    )
+    assert wb.resolve_task_execution_binding(db, at_deadline_execution_id) is None
+    assert _workflow_row(path, workflow_uuid)[0] == "OPEN"
 
 
 def test_expired_planning_workflow_is_not_republished(r3b, enforced, monkeypatch):
