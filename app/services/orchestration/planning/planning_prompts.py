@@ -278,7 +278,7 @@ Rules:
 22. Preserve the JSON-only output mode from the first instruction.
 23. If the workspace already has files, start by inspecting or extending them before re-scaffolding
 24. For implementation steps with expected_files, include at least one command or file-mutating `ops` entry with actions that materially write or edit file contents, not just mkdir/touch.
-25. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command. For implementation-heavy steps, verification must prove behavior or content using current workspace evidence.
+25. Use only verification forms admitted by the resolved execution capability contract. For implementation-heavy steps, verify behavior or content using current workspace evidence; inline Python must follow the exact limits stated by that contract.
 26. Prefer an inspect -> edit -> verify sequence grounded in the current workspace
 27. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 28. For Python projects with existing tests, preserve those tests unless coverage is missing; prefer source edits under src/ that make the existing assertions pass.
@@ -407,7 +407,7 @@ Requirements:
 12. Keep each command short and machine-runnable
 13. If the workspace already has files, inspect or extend them before re-scaffolding
 14. For implementation steps with expected_files, include at least one command or file-mutating `ops` entry that writes real file content, not just mkdir/touch
-15. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command, and must prove behavior or content using current workspace evidence.
+15. Use only verification forms admitted by the resolved execution capability contract, and prove behavior or content using current workspace evidence. Inline Python must follow the exact limits stated by that contract.
 16. Commands must be runnable shell, not pseudo-commands like `write file: ...`, `create files`, `set up project`, or `implement component`
 17. Do not create or cd into a nested project folder; run directly from {display_project_dir}. {workspace_prefix_prohibition}
 18. Include exactly one final meaningful verification/build step

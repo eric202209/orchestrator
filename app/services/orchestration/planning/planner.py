@@ -624,6 +624,23 @@ class PlannerService:
         return f"{contract}\n\n{str(prompt or '')}"
 
     @staticmethod
+    def _repair_requires_execution_capability_contract(
+        rejection_reasons: list[str] | None,
+    ) -> bool:
+        """Include the resolved command contract for execution-shape repairs."""
+
+        reason_text = "\n".join(str(reason or "") for reason in rejection_reasons or ())
+        lowered = reason_text.lower()
+        return any(
+            marker in lowered
+            for marker in (
+                "unsupported_step_command",
+                "unsupported_verification_command",
+                "steps without runnable commands",
+            )
+        )
+
+    @staticmethod
     def planning_response_evidence_kwargs(runtime_service: Any) -> Dict[str, Any]:
         """Return an opt-in response evidence target for a Planning repair call."""
 
@@ -1091,7 +1108,7 @@ class PlannerService:
         if prompt_profile == "local_qwen_small_json_array":
             profiled += (
                 "- Use the smallest valid plan shape for the workflow profile; prefer 2-3 concrete steps over broad multi-step choreography.\n"
-                "- Prefer typed `ops` for file writes and one bounded Python verification command per implementation step.\n"
+                "- Prefer typed `ops` for file writes. Use only verification forms admitted by the resolved execution capability contract; do not require a Python command for every implementation step.\n"
                 "- Do not include speculative future files in `expected_files`; list only files materialized by typed ops or already present in the workspace.\n"
             )
         return profiled
@@ -2946,9 +2963,8 @@ class PlannerService:
                 )
 
         def _build_repair_prompt(current_guidance_block: str):
-            needs_execution_contract = any(
-                "unsupported_step_command" in str(reason or "")
-                for reason in (rejection_reasons or [])
+            needs_execution_contract = (
+                cls._repair_requires_execution_capability_contract(rejection_reasons)
             )
             if _compact_no_output_retry:
                 prompt = cls.build_compact_planning_repair_prompt(

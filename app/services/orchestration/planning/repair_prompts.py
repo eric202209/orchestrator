@@ -914,14 +914,14 @@ Rules:
 2b. {verification_contract}
 2c. {test_scaffold_contract}
 2d. {json_content_contract}
-3. verification: non-empty command for executable/mutating steps; null only for read-only inspection.
+3. `verification` is a check, not the step's execution action. Supply a meaningful check when needed and ensure each step has a runnable execution channel allowed by the resolved runtime.
 4. expected_files: relative path array.
 5. Relative paths only; no absolute, .., ~, frontend/src/frontend/src, backend/src/backend/src; rooted exactly once.
 6. No nested project folder; use workspace.
 7. No background processes, &, nohup, disown, or dev servers.
 8. No prose, markdown, or extra keys.
 10. expected_files steps must write real content; no touch-only scaffold step.
-11. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command; no `echo` or `cd /... &&`.
+11. Use only verification forms admitted by the resolved execution capability contract; no `echo` or `cd /... &&` wrappers.
 12. No /root/write_file.py, /tmp helpers, absolute helper scripts, outside files.
 13. If scaffolding is required, run it in the current workspace and use ops for follow-up edits.
 14. Stale replace fixes: use only identifiers/paths present in current evidence. Do not invent helper variables.
@@ -2517,7 +2517,7 @@ Rules:
 - {verification_contract}
 - {test_scaffold_contract}
 - {json_content_contract}
-- verification: non-empty command for each executable/mutating step; null only for read-only inspection.
+- verification is a separate check, not runnable step work; ensure each step has an execution channel allowed by the resolved runtime.
 - expected_files must be relative paths only.
 - expected_files steps must write real content; no touch-only, pass, stubs, or placeholder-only implementation; write_file content must be behaviorally complete.
 - no heredocs, multiline shell file bodies, or nested python -c one-liners for file writes; use ops.write_file or ops.replace_in_file instead; prefer python3 -m pytest -q for verification.

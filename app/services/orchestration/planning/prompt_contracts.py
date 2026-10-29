@@ -185,7 +185,9 @@ def render_test_scaffold_contract() -> str:
 
 def render_verification_contract() -> str:
     return (
-        "Verification must be a real project check with a nonzero failure mode, "
-        "such as a test command, build command, compile command, import check, "
-        "or content assertion grounded in current workspace files."
+        "`verification` is a separate check, not the command or operation that "
+        "performs the step; a verification value alone does not make a step "
+        "runnable. When non-null, it must be one real check with a failure signal, "
+        "such as a project test, build, compile, or workspace-content assertion, "
+        "using a form admitted by the resolved execution capability contract."
     )

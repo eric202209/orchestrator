@@ -28,6 +28,7 @@ from app.services.orchestration.planning.prompt_contracts import (
     render_operator_guidance_precedence,
     render_operation_choice_contract,
     render_source_edit_decision_contract,
+    render_verification_contract,
 )
 from app.services.workspace.control_state_paths import (
     ControlStateLocation,
@@ -379,10 +380,10 @@ No prose. No markdown fences. No plan.json. No explanation.
 4. No background processes, &, nohup, disown, dev servers, or long commands.
 5. Don't assume files exist; inspect before editing. Each command is a standalone shell command (no comma-joining).
 6. If prior artifacts are mentioned in context, extend them instead of recreating parallel implementations.
-7. For routine file changes, prefer `ops`: `[{{"op":"write_file","path":"relative/path","content":"file contents"}}]`; do not shell-quote file bodies. Use append_file for appends, replace_in_file for exact literal edits, mkdir for directories, and delete_file for file deletion.
+7. For file changes, use `ops` instead of shell file bodies. Select `write_file`, `append_file`, or `replace_in_file` according to the source-edit decision contract and its evidence requirements; do not shell-quote file bodies.
 8. Keep `commands` for shell tasks such as installs, builds, tests, inspection, and verification. Never use heredoc syntax. Use `ops` for file bodies and deterministic file mutations.
 9. Include exactly one final meaningful verification/build step such as `npm run build`, `pytest`, or `python -m pytest`.
-10. Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command, and must prove behavior or content using current workspace evidence.
+10. {verification_contract}
 11. If a scaffold command is genuinely required, run it in the current workspace and use `ops` for any follow-up source edits.
 12. When the task asks you to correct existing product behavior, tests are verification, not the repair. The plan must include an `ops` mutation of the implementation, configuration, or data that actually changes the behavior; a plan whose only mutations are test files does not complete such a task.
 
@@ -1109,6 +1110,7 @@ Examples:
                 if source_materialization is not None
                 else ""
             ),
+            "verification_contract": render_verification_contract(),
         }
 
         prompt = cls.render("task_planning", **context)

@@ -292,11 +292,17 @@ def render_planning_execution_capability_contract(
     return (
         "## EXECUTION CAPABILITY CONTRACT\n"
         f"Resolved topology: structured orchestrator; this runtime has no native command tools ({', '.join(missing)}). "
+        "Step shape: `commands` carries command work, `ops` carries deterministic file operations, and `verification` is a separate check. "
+        "A `verification` value alone does not make a step runnable; a Structured step needs an admitted command or at least one operation. "
+        "When `commands` carries verification work, use exactly one admitted verification command in that step. "
+        "Put multiple pytest node IDs in one supported pytest invocation, or use separate steps for distinct invocations. "
         f"Plan ops from {{{source_ops}}} are source edits, subject to APA, grounding, and GR2. "
         f"Local inspection forms admitted by this executor: {inspect_forms}. "
         f"Verification forms admitted by this executor: {verify_forms}. "
         "These examples still require command/path admission. Arbitrary shell and "
-        "project-importing inline Python are not available; preserve the objective, "
+        "project-importing inline Python are not available. Inline Python `-c` is "
+        "limited to the constrained read-only file checks admitted by this executor. "
+        "Preserve the objective, "
         "source scope, and verification checks. Do not drop work or relabel an "
         "edit as verification."
     )
