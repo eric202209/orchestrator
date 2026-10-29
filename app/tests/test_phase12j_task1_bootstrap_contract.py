@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models import Base, LogEntry, Project, Task, TaskStatus
+from app.services.agents.agent_backends import ExecutionTopology
 from app.services.observability.metrics_collector import MetricsCollector
 from app.services.orchestration.phases.planning_support import (
     _PlanningRetryState,
@@ -19,6 +20,9 @@ from app.services.orchestration.phases.planning_task1_bootstrap import (
     plan_has_brittle_inline_python_verification,
     task1_bootstrap_contract_passed,
     task1_plan_failed_only_brittle_command_shape,
+)
+from app.services.orchestration.planning.source_materialization import (
+    materialize_planner_source_context,
 )
 from app.services.orchestration.planning.task_bootstrap_contract import (
     validate_task1_bootstrap_contract,
@@ -864,6 +868,234 @@ def test_normalize_task1_brittle_inline_python_verification_is_idempotent(tmp_pa
     once = normalize_task1_brittle_inline_python_verification(plan)
     twice = normalize_task1_brittle_inline_python_verification(once)
     assert once == twice
+
+
+# PRODUCT-RECOVERY-01: the Phase 40 workflow-C seed (dataflow 2.0 regression).
+# The production defect is normalize_records keying on the raw id.
+_DATAFLOW_SEED = {
+    "dataflow/__init__.py": "",
+    "dataflow/normalize.py": (
+        "from typing import Dict, Iterable, List\n"
+        "\n"
+        "\n"
+        "def normalize_id(raw_id: str) -> str:\n"
+        "    return raw_id.strip().lower()\n"
+        "\n"
+        "\n"
+        "def normalize_records(records: Iterable[dict]) -> List[dict]:\n"
+        "    latest: Dict[str, dict] = {}\n"
+        "    for record in records:\n"
+        '        key = record["id"]\n'
+        "        current = latest.get(key)\n"
+        '        if current is None or record["updated_at"] >= current["updated_at"]:\n'
+        '            latest[key] = {**record, "id": normalize_id(record["id"])}\n'
+        '    return sorted(latest.values(), key=lambda item: item["id"])\n'
+    ),
+    "dataflow/aggregate.py": (
+        "from dataflow.normalize import normalize_records\n"
+        "\n"
+        "\n"
+        "def customer_count(records):\n"
+        "    return len(normalize_records(records))\n"
+    ),
+    "tests/__init__.py": "",
+    "tests/test_aggregate.py": (
+        "from dataflow.aggregate import customer_count\n"
+        "\n"
+        "FEED = [\n"
+        '    {"id": "C-001", "updated_at": 10},\n'
+        '    {"id": " c-001", "updated_at": 20},\n'
+        '    {"id": "C-002", "updated_at": 5},\n'
+        '    {"id": "c-002 ", "updated_at": 1},\n'
+        '    {"id": "C-003", "updated_at": 7},\n'
+        "]\n"
+        "\n"
+        "\n"
+        "def test_case_and_whitespace_variants_count_once():\n"
+        "    assert customer_count(FEED) == 3\n"
+    ),
+}
+_DATAFLOW_TASK = (
+    "After the 2.0.0 refactor, downstream aggregation in dataflow/aggregate.py "
+    "double counts customers. Fix the actual defect in the implementation. "
+    "Do not change test expectations."
+)
+_DATAFLOW_FIX = {
+    "op": "replace_in_file",
+    "path": "dataflow/normalize.py",
+    "old": '        key = record["id"]\n',
+    "new": '        key = normalize_id(record["id"])\n',
+}
+_DATAFLOW_VERIFY = (
+    'python -c "from dataflow.aggregate import customer_count as c; '
+    "from tests.test_aggregate import FEED; assert c(FEED) == 3, f'got {c(FEED)}'\""
+)
+
+
+def _dataflow_workspace(root):
+    for relative, content in _DATAFLOW_SEED.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    return materialize_planner_source_context(
+        root,
+        task_description=_DATAFLOW_TASK,
+        expected_paths=["dataflow/aggregate.py", "tests/test_aggregate.py"],
+        supporting_paths=["dataflow/normalize.py"],
+        source_cache={},
+    )
+
+
+def _validate_dataflow_plan(plan, root, materialization, topology):
+    return ValidatorService.validate_plan(
+        plan,
+        output_text=json.dumps(plan),
+        task_prompt=_DATAFLOW_TASK,
+        execution_profile="full_lifecycle",
+        project_dir=root,
+        title="Fix duplicate-customer regression in dataflow 2.0",
+        description=_DATAFLOW_TASK,
+        is_first_ordered_task=True,
+        source_materialization=materialization,
+        execution_topology=topology,
+    )
+
+
+def _dataflow_fix_plan():
+    return [
+        _step(
+            ops=[dict(_DATAFLOW_FIX)],
+            commands=[_DATAFLOW_VERIFY],
+            verification=_DATAFLOW_VERIFY,
+            expected_files=["dataflow/normalize.py"],
+        )
+    ]
+
+
+def test_task1_inline_python_rewrite_is_admissible_with_source_materialization(
+    tmp_path,
+):
+    """PR01: the rewrite's helper write must satisfy the source-operation
+    creation contract that production planning applies (D2 C1 / E2 Task 49
+    were rejected with new_file_creation_not_authorized for this helper)."""
+
+    materialization = _dataflow_workspace(tmp_path)
+    plan = _dataflow_fix_plan()
+    initial = _validate_dataflow_plan(
+        plan, tmp_path, materialization, ExecutionTopology.AGENT_RUNTIME
+    )
+    assert plan_has_brittle_inline_python_verification(initial)
+
+    normalized = normalize_task1_brittle_inline_python_verification(plan)
+    verdict = _validate_dataflow_plan(
+        normalized, tmp_path, materialization, ExecutionTopology.AGENT_RUNTIME
+    )
+
+    assert verdict.accepted, verdict.reasons
+    assert "verify_task1_step1.py" in normalized[0]["expected_files"]
+    grants = {
+        grant["path"]: grant["grant_class"]
+        for grant in verdict.details["accepted_path_authority"]["grants"]
+    }
+    # The accepted Plan may mutate only the production defect; tests stay
+    # read-only and the helper is the only creation grant.
+    assert grants == {
+        "dataflow/aggregate.py": "existing_readonly",
+        "dataflow/normalize.py": "existing_mutable",
+        "tests/test_aggregate.py": "existing_readonly",
+        "verify_task1_step1.py": "creation_authorized",
+    }
+
+
+def test_task1_inline_python_rewrite_grants_no_creation_beyond_its_helper(tmp_path):
+    materialization = _dataflow_workspace(tmp_path)
+    normalized = normalize_task1_brittle_inline_python_verification(
+        _dataflow_fix_plan()
+    )
+    normalized[0]["ops"].append(
+        {"op": "write_file", "path": "dataflow/extra.py", "content": "X = 1\n"}
+    )
+    # A model-authored file that merely looks like a helper gains nothing.
+    normalized[0]["ops"].append(
+        {"op": "write_file", "path": "verify_task1_step9.py", "content": "pass\n"}
+    )
+
+    verdict = _validate_dataflow_plan(
+        normalized, tmp_path, materialization, ExecutionTopology.AGENT_RUNTIME
+    )
+
+    assert not verdict.accepted
+    unauthorized = verdict.details["new_file_write_without_creation_authorization"]
+    assert unauthorized == [
+        "step 1 op 3 (dataflow/extra.py)",
+        "step 1 op 4 (verify_task1_step9.py)",
+    ]
+
+
+def test_task1_inline_python_rewrite_keeps_structured_command_capability_check(
+    tmp_path,
+):
+    """Under STRUCTURED_ORCHESTRATOR the rewritten command has no executor;
+    the rewrite must not hide that, only stop adding a spurious new-file finding."""
+
+    materialization = _dataflow_workspace(tmp_path)
+    normalized = normalize_task1_brittle_inline_python_verification(
+        _dataflow_fix_plan()
+    )
+
+    verdict = _validate_dataflow_plan(
+        normalized,
+        tmp_path,
+        materialization,
+        ExecutionTopology.STRUCTURED_ORCHESTRATOR,
+    )
+
+    assert not verdict.accepted
+    assert verdict.details["steps_with_unsupported_commands"] == {
+        "1": ["python verify_task1_step1.py"]
+    }
+    assert "new_file_write_without_creation_authorization" not in verdict.details
+
+
+def test_test_only_patch_does_not_repair_the_dataflow_production_defect(tmp_path):
+    """Case D: changing the test expectation is not a production repair; the
+    defect is only fixed by the grounded normalize.py edit."""
+
+    import importlib
+    import sys
+
+    def customer_count_after(patch, root):
+        for relative, content in _DATAFLOW_SEED.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        target = root / patch["path"]
+        source = target.read_text()
+        assert source.count(patch["old"]) == 1
+        target.write_text(source.replace(patch["old"], patch["new"]))
+        sys.path.insert(0, str(root))
+        try:
+            for name in [
+                m for m in sys.modules if m.split(".")[0] in {"dataflow", "tests"}
+            ]:
+                del sys.modules[name]
+            aggregate = importlib.import_module("dataflow.aggregate")
+            feed = importlib.import_module("tests.test_aggregate").FEED
+            return aggregate.customer_count(feed)
+        finally:
+            sys.path.remove(str(root))
+            for name in [
+                m for m in sys.modules if m.split(".")[0] in {"dataflow", "tests"}
+            ]:
+                del sys.modules[name]
+
+    test_only = {
+        "path": "tests/test_aggregate.py",
+        "old": "customer_count(FEED) == 3",
+        "new": "customer_count(FEED) == 5",
+    }
+    assert customer_count_after(test_only, tmp_path / "test-only") == 5
+    assert customer_count_after(_DATAFLOW_FIX, tmp_path / "grounded-fix") == 3
 
 
 def test_brittle_commands_still_rejects_unsafe_inline_python_for_later_tasks(tmp_path):

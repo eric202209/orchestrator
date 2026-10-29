@@ -193,12 +193,18 @@ def normalize_task1_brittle_inline_python_verification(
     nested-quote inline command, giving the repair loop no satisfiable
     target. Writing the script to a file and invoking it plainly preserves
     the exact verification semantics while satisfying both rules.
+
+    The helper is declared in the step's ``expected_files``: the source
+    operation contract lets ``write_file`` create only a classified new
+    expected file, so an undeclared helper is always rejected as
+    ``new_file_creation_not_authorized`` once Planning source is materialized.
     """
 
     normalized: list[dict[str, Any]] = []
     for index, step in enumerate(plan, start=1):
         updated = dict(step)
         ops = list(updated.get("ops") or [])
+        expected_files = list(updated.get("expected_files") or [])
         rewritten_by_original: dict[str, str] = {}
         changed = False
 
@@ -223,6 +229,8 @@ def normalize_task1_brittle_inline_python_verification(
                     "content": script + "\n",
                 }
             )
+            if script_path not in expected_files:
+                expected_files.append(script_path)
             rewritten = f"{interpreter} {script_path}"
             rewritten_by_original[raw_command] = rewritten
             return rewritten
@@ -248,6 +256,7 @@ def normalize_task1_brittle_inline_python_verification(
             updated["commands"] = new_commands
             updated["verification"] = new_verification
             updated["ops"] = ops
+            updated["expected_files"] = expected_files
         normalized.append(updated)
     return normalized
 
