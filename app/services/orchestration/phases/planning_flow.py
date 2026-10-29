@@ -32,6 +32,10 @@ from app.services.orchestration.planning.planner import (
 from app.services.orchestration.planning.planner_contract_registry import (
     planner_grounding_evidence,
 )
+from app.services.orchestration.planning.repair_operation_preservation import (
+    capture_command_only_operation_baseline,
+    compare_command_only_operation_projection,
+)
 from app.services.orchestration.planning.source_materialization import (
     materialize_planner_source_context,
     repair_removed_source_materialization as _repair_removed_source_materialization,
@@ -535,6 +539,60 @@ def execute_planning_phase(
     persisted_failures = _count_prior_failed_planning_executions(ctx)
     retry_state = _PlanningRetryState(persisted_failures=persisted_failures)
     retry_state.minimal_prompt_used = used_minimal_planning_prompt
+    command_only_operation_preservation_baseline = None
+
+    def reject_if_command_only_operations_changed(
+        plan: Any, *, gate_stage: str
+    ) -> Dict[str, Any] | None:
+        if command_only_operation_preservation_baseline is None:
+            return None
+        comparison = compare_command_only_operation_projection(
+            command_only_operation_preservation_baseline, plan
+        )
+        if comparison.get("preserved"):
+            return None
+
+        failure_reason = (
+            "Command-capability-only Repair changed the original source-operation "
+            "projection; the repaired Plan was rejected before persistence."
+        )
+        failure_details = {
+            "reason": "command_only_repair_operation_preservation_failed",
+            "gate_stage": gate_stage,
+            "operation_preservation": comparison,
+        }
+        ctx.orchestration_state.status = OrchestrationStatus.ABORTED
+        ctx.orchestration_state.abort_reason = failure_reason
+        ctx.logger.error(
+            "[ORCHESTRATION] Command-only Repair changed source operations: %s",
+            failure_details,
+        )
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="ERROR",
+            phase="planning",
+            message=(
+                "[ORCHESTRATION] Command-capability-only Repair failed "
+                "source-operation preservation"
+            ),
+            details=failure_details,
+        )
+        _finalize_planning_terminal_failure(
+            ctx=ctx,
+            failure_type="planning_validation_failed_after_repair",
+            failure_reason=failure_reason,
+            planning_root_cause=_terminal_planning_root_cause(retry_state),
+        )
+        if ctx.restore_workspace_snapshot_if_needed:
+            ctx.restore_workspace_snapshot_if_needed(
+                "command-only Repair operation preservation failure"
+            )
+        return {
+            "status": "failed",
+            "reason": "planning_validation_failed_after_repair",
+        }
+
     if persisted_failures > 0:
         ctx.logger.warning(
             "[ORCHESTRATION] session_id=%s task_id=%s "
@@ -1416,6 +1474,12 @@ def execute_planning_phase(
                     retry_state.consecutive_failures += 1
                     continue
                 raise
+            preservation_failure = reject_if_command_only_operations_changed(
+                ctx.orchestration_state.plan,
+                gate_stage="post_normalization",
+            )
+            if preservation_failure:
+                return preservation_failure
             materialization_result = _ground_post_plan_sources_or_abort_missing(
                 ctx=ctx,
                 retry_state=retry_state,
@@ -1973,6 +2037,12 @@ def execute_planning_phase(
                     plan_verdict.reasons,
                     plan_verdict.details,
                 )
+                command_only_operation_preservation_baseline = (
+                    capture_command_only_operation_baseline(
+                        ctx.orchestration_state.plan,
+                        plan_verdict,
+                    )
+                )
                 _record_repair_target(
                     retry_state,
                     codes=semantic_violation_codes,
@@ -2283,6 +2353,12 @@ def execute_planning_phase(
                     "strategy": strategy_info,
                 },
             )
+            preservation_failure = reject_if_command_only_operations_changed(
+                ctx.orchestration_state.plan,
+                gate_stage="pre_persistence",
+            )
+            if preservation_failure:
+                return preservation_failure
             ctx.task.steps = json.dumps(ctx.orchestration_state.plan)
             ctx.task.current_step = 0
             ctx.db.commit()
