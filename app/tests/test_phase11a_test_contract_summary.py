@@ -2,6 +2,7 @@ from pathlib import Path
 
 from app.services.orchestration.planning.planner import PlannerService
 from app.services.project.source_imports import (
+    PythonTestContract,
     extract_python_test_contract,
     python_test_source_context_from_tests,
     render_python_test_contract_summary,
@@ -227,3 +228,109 @@ def test_phase11a_simplified_prompt_is_smaller_than_verbose_contract(tmp_path: P
     assert old_verbose_floor > 100
     assert len(python_test_source_context_from_tests(tmp_path)) < 700
     assert len(prompt) < 7000
+
+
+def _write_dataflow_no_src_project(root: Path) -> None:
+    _write(root / "dataflow" / "__init__.py", "")
+    _write(
+        root / "dataflow" / "normalize.py",
+        "def normalize_id(value):\n    return value\n",
+    )
+    _write(
+        root / "dataflow" / "aggregate.py",
+        "from dataflow.normalize import normalize_id\n\n"
+        "def customer_count(rows):\n    return len(rows)\n",
+    )
+    _write(
+        root / "tests" / "test_aggregate.py",
+        "from dataflow.aggregate import customer_count\n\n"
+        "def test_count():\n    assert customer_count([]) == 0\n",
+    )
+    _write(
+        root / "tests" / "test_normalize.py",
+        "from dataflow.normalize import normalize_id\n\n"
+        "def test_normalize_id():\n    assert normalize_id(' AbC ') == 'abc'\n",
+    )
+
+
+def test_pr07_no_src_project_omits_src_preference_and_keeps_targets(
+    tmp_path: Path,
+):
+    _write_dataflow_no_src_project(tmp_path)
+
+    contract = extract_python_test_contract(tmp_path)
+    assert contract is not None
+    assert contract.src_layout_detected is False
+
+    summary = render_python_test_contract_summary(contract)
+
+    assert "src/" not in summary
+    assert "Prefer source edits under" not in summary
+    assert "- dataflow/aggregate.py" in summary
+    assert "- dataflow/normalize.py" in summary
+    assert "Existing tests are the contract. Preserve them." in summary
+    assert "Do not rewrite tests or verifier commands" in summary
+
+
+def test_pr07_src_layout_project_keeps_src_preference(tmp_path: Path):
+    _write(tmp_path / "src" / "small_cli" / "__init__.py", "")
+    _write(
+        tmp_path / "src" / "small_cli" / "cli.py",
+        "def main(argv=None):\n    return 0\n",
+    )
+    _write(
+        tmp_path / "tests" / "test_cli.py",
+        "from small_cli.cli import main\n\n"
+        "def test_main():\n    assert main(['x']) == 0\n",
+    )
+
+    contract = extract_python_test_contract(tmp_path)
+    assert contract is not None
+    assert contract.src_layout_detected is True
+
+    summary = render_python_test_contract_summary(contract)
+
+    assert "- Prefer source edits under src/." in summary
+    assert "- src/small_cli/cli.py" in summary
+    assert "Existing tests are the contract. Preserve them." in summary
+    assert "Do not rewrite tests or verifier commands" in summary
+
+
+def test_pr07_no_src_without_targets_invents_no_directory():
+    contract = PythonTestContract(
+        test_files=("tests/test_x.py",),
+        imports=("from pkg import f",),
+        public_calls=("f(1)",),
+        assertions=("f(1) == 2",),
+        source_targets=(),
+        missing_source_targets=(),
+        src_layout_detected=False,
+    )
+
+    summary = render_python_test_contract_summary(contract)
+
+    assert summary.splitlines() == [
+        "## TEST CONTRACT SUMMARY",
+        "- Existing tests are the contract. Preserve them.",
+        "- Do not rewrite tests or verifier commands to satisfy imports/behavior.",
+        "",
+        "Expected behavior:",
+        "- f(1) should equal 2",
+    ]
+
+
+def test_pr07_rendering_does_not_alter_extracted_contract(tmp_path: Path):
+    _write_dataflow_no_src_project(tmp_path)
+
+    before = extract_python_test_contract(tmp_path)
+    assert before is not None
+    render_python_test_contract_summary(before)
+    after = extract_python_test_contract(tmp_path)
+
+    assert after == before
+    assert tuple(path for path, _reason in before.source_targets) == (
+        "dataflow/aggregate.py",
+        "dataflow/normalize.py",
+    )
+    assert before.test_files == ("tests/test_aggregate.py", "tests/test_normalize.py")
+    assert before.missing_source_targets == ()

@@ -535,7 +535,10 @@ def render_python_test_contract_summary(
     lines = [
         "## TEST CONTRACT SUMMARY",
         "- Existing tests are the contract. Preserve them.",
-        "- Prefer source edits under src/.",
+    ]
+    if contract.src_layout_detected:
+        lines.append("- Prefer source edits under src/.")
+    lines += [
         "- Do not rewrite tests or verifier commands to satisfy imports/behavior.",
         "",
     ]
