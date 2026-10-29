@@ -14,6 +14,8 @@ from app.services.orchestration.phases.planning_knowledge import (
 )
 from app.services.orchestration.phases.planning_support import (
     _PlanningRetryState,
+    TRUNCATED_PLAN_REPAIR_REJECTION_REASON,
+    _build_repair_rejection_reasons,
     _emit_planning_diagnostics_contract_violation,
     _finalize_planning_terminal_failure,
     _get_targeted_second_repair_reason,
@@ -24,6 +26,8 @@ from app.services.orchestration.phases.planning_support import (
     _task1_bootstrap_second_repair_rejection_reasons,
     _terminal_validation_failure_details,
     _terminal_planning_root_cause,
+    _should_repair_truncated_single_step_plan,
+    _truncated_multistep_collapse_diagnostics,
 )
 from app.services.orchestration.phases.planning_task1_bootstrap import (
     is_first_ordered_task as _is_first_ordered_task,
@@ -56,6 +60,153 @@ from app.services.orchestration.state.persistence import append_orchestration_ev
 from app.services.orchestration.types import OrchestrationRunContext, ValidationVerdict
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.prompt_templates import OrchestrationStatus
+
+
+def handle_initial_truncated_multistep_plan(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: _PlanningRetryState,
+    output_text: str,
+    extracted_plan: Any,
+    prompt_profile: str,
+    verification_only_task: bool,
+    planning_timeout_seconds: int,
+    planning_knowledge_ctx: Any,
+    looks_like_truncated_multistep_plan: Callable[[str, Any], bool],
+    repair_planning_output: Callable[..., Any],
+    retry_with_minimal_prompt: Callable[..., Any],
+) -> tuple[bool, Any]:
+    """Handle the first truncated multi-step response before normal validation."""
+    if (
+        not looks_like_truncated_multistep_plan(output_text, extracted_plan)
+        or retry_state.minimal_prompt_used
+    ):
+        return False, None
+
+    truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
+        output_text=output_text,
+        extracted_plan=extracted_plan,
+        repair_stage=(
+            "after_first_repair"
+            if retry_state.repair_prompt_used
+            else "before_first_repair"
+        ),
+    )
+    if (
+        _should_repair_truncated_single_step_plan(
+            prompt_profile=prompt_profile,
+            extracted_plan=extracted_plan,
+            execution_profile=ctx.execution_profile,
+        )
+        and not verification_only_task
+    ):
+        emit_phase_event(
+            ctx.orchestration_state,
+            ctx.emit_live,
+            level="WARN",
+            phase="planning",
+            message=(
+                "[ORCHESTRATION] Planning output collapsed into a "
+                "single step on the local model path; starting a "
+                "repair pass instead of executing it as-is"
+            ),
+            details={
+                "reason": "truncated_multistep_plan_repair_requested",
+                "model_profile": prompt_profile,
+            },
+        )
+        _emit_planning_diagnostics_contract_violation(
+            ctx,
+            reason="truncated_multistep_plan_detected",
+            contract_violations=[
+                "truncated multi-step plan collapsed into a single step"
+            ],
+            contract_diagnostics=truncated_diagnostics,
+            output_text=output_text,
+            strategy_info="truncated_multistep_plan_repair_requested",
+        )
+        retry_state.last_repair_reason = "truncated_multistep_plan_detected"
+        planning_result = repair_planning_output(
+            ctx=ctx,
+            planning_timeout_seconds=planning_timeout_seconds,
+            malformed_output=output_text,
+            reason="truncated_multistep_plan_detected",
+            rejection_reasons=_build_repair_rejection_reasons(
+                [TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
+                truncated_diagnostics,
+            ),
+            prompt_profile=prompt_profile,
+        )
+        retry_state.repair_prompt_used = True
+        retry_state.consecutive_failures += 1
+        return True, planning_result
+
+    _emit_planning_diagnostics_contract_violation(
+        ctx,
+        reason="truncated_multistep_plan_detected",
+        contract_violations=["truncated multi-step plan collapsed into a single step"],
+        contract_diagnostics=truncated_diagnostics,
+        output_text=output_text,
+        strategy_info="truncated_multistep_plan_minimal_retry",
+    )
+    planning_result = retry_with_minimal_prompt(
+        ctx=ctx,
+        planning_timeout_seconds=planning_timeout_seconds,
+        reason="truncated_multistep_plan_detected",
+        prompt_profile=prompt_profile,
+        knowledge_context=planning_knowledge_ctx,
+    )
+    retry_state.minimal_prompt_used = True
+    retry_state.consecutive_failures += 1
+    return True, planning_result
+
+
+def handle_truncated_plan_after_minimal_retry(
+    *,
+    ctx: OrchestrationRunContext,
+    retry_state: _PlanningRetryState,
+    output_text: str,
+    extracted_plan: Any,
+    prompt_profile: str,
+    planning_timeout_seconds: int,
+    looks_like_truncated_multistep_plan: Callable[[str, Any], bool],
+    repair_planning_output: Callable[..., Any],
+) -> tuple[bool, Any]:
+    """Repair a still-truncated response after the minimal-prompt attempt."""
+    if (
+        not looks_like_truncated_multistep_plan(output_text, extracted_plan)
+        or retry_state.repair_prompt_used
+    ):
+        return False, None
+
+    truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
+        output_text=output_text,
+        extracted_plan=extracted_plan,
+        repair_stage="before_first_repair",
+    )
+    _emit_planning_diagnostics_contract_violation(
+        ctx,
+        reason="truncated_multistep_plan_after_minimal",
+        contract_violations=["truncated multi-step plan collapsed into a single step"],
+        contract_diagnostics=truncated_diagnostics,
+        output_text=output_text,
+        strategy_info="truncated_multistep_plan_after_minimal",
+    )
+    retry_state.last_repair_reason = "truncated_multistep_plan_after_minimal"
+    planning_result = repair_planning_output(
+        ctx=ctx,
+        planning_timeout_seconds=planning_timeout_seconds,
+        malformed_output=output_text,
+        reason="truncated_multistep_plan_after_minimal",
+        rejection_reasons=_build_repair_rejection_reasons(
+            [TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
+            truncated_diagnostics,
+        ),
+        prompt_profile=prompt_profile,
+    )
+    retry_state.repair_prompt_used = True
+    retry_state.consecutive_failures += 1
+    return True, planning_result
 
 
 def preserve_repair_replace_operation_modes(

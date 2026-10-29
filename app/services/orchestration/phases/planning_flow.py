@@ -90,6 +90,8 @@ from app.services.orchestration.phases.read_only_fallbacks import (
 )
 from app.services.orchestration.phases.planning_repair_arbitration_control import (
     arbitrate_planning_repair_candidate,
+    handle_initial_truncated_multistep_plan,
+    handle_truncated_plan_after_minimal_retry,
 )
 from app.services.orchestration.phases.planning_operation_repair_control import (
     attempt_operation_level_repair,
@@ -1021,124 +1023,43 @@ def execute_planning_phase(
                     retry_state.consecutive_failures += 1
                     continue
 
-            if (
-                looks_like_truncated_multistep_plan(output_text, extracted_plan)
-                and not retry_state.minimal_prompt_used
-            ):
-                truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
-                    output_text=output_text,
-                    extracted_plan=extracted_plan,
-                    repair_stage=(
-                        "after_first_repair"
-                        if retry_state.repair_prompt_used
-                        else "before_first_repair"
-                    ),
-                )
-                if (
-                    _should_repair_truncated_single_step_plan(
-                        prompt_profile=prompt_profile,
-                        extracted_plan=extracted_plan,
-                        execution_profile=ctx.execution_profile,
-                    )
-                    and not verification_only_task
-                ):
-                    emit_phase_event(
-                        ctx.orchestration_state,
-                        ctx.emit_live,
-                        level="WARN",
-                        phase="planning",
-                        message=(
-                            "[ORCHESTRATION] Planning output collapsed into a "
-                            "single step on the local model path; starting a "
-                            "repair pass instead of executing it as-is"
-                        ),
-                        details={
-                            "reason": "truncated_multistep_plan_repair_requested",
-                            "model_profile": prompt_profile,
-                        },
-                    )
-                    _emit_planning_diagnostics_contract_violation(
-                        ctx,
-                        reason="truncated_multistep_plan_detected",
-                        contract_violations=[
-                            "truncated multi-step plan collapsed into a single step"
-                        ],
-                        contract_diagnostics=truncated_diagnostics,
-                        output_text=output_text,
-                        strategy_info="truncated_multistep_plan_repair_requested",
-                    )
-                    retry_state.last_repair_reason = "truncated_multistep_plan_detected"
-                    planning_result = __repair_planning_output(
-                        ctx=ctx,
-                        planning_timeout_seconds=planning_timeout_seconds,
-                        malformed_output=output_text,
-                        reason="truncated_multistep_plan_detected",
-                        rejection_reasons=_build_repair_rejection_reasons(
-                            [TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
-                            truncated_diagnostics,
-                        ),
-                        prompt_profile=prompt_profile,
-                    )
-                    retry_state.repair_prompt_used = True
-                    retry_state.consecutive_failures += 1
-                    continue
-                else:
-                    _emit_planning_diagnostics_contract_violation(
-                        ctx,
-                        reason="truncated_multistep_plan_detected",
-                        contract_violations=[
-                            "truncated multi-step plan collapsed into a single step"
-                        ],
-                        contract_diagnostics=truncated_diagnostics,
-                        output_text=output_text,
-                        strategy_info="truncated_multistep_plan_minimal_retry",
-                    )
-                    planning_result = __retry_with_minimal_prompt(
-                        ctx=ctx,
-                        planning_timeout_seconds=planning_timeout_seconds,
-                        reason="truncated_multistep_plan_detected",
-                        prompt_profile=prompt_profile,
-                        knowledge_context=planning_knowledge_ctx,
-                    )
-                    retry_state.minimal_prompt_used = True
-                    retry_state.consecutive_failures += 1
-                    continue
-
-            if (
-                looks_like_truncated_multistep_plan(output_text, extracted_plan)
-                and not retry_state.repair_prompt_used
-            ):
-                truncated_diagnostics = _truncated_multistep_collapse_diagnostics(
-                    output_text=output_text,
-                    extracted_plan=extracted_plan,
-                    repair_stage="before_first_repair",
-                )
-                _emit_planning_diagnostics_contract_violation(
-                    ctx,
-                    reason="truncated_multistep_plan_after_minimal",
-                    contract_violations=[
-                        "truncated multi-step plan collapsed into a single step"
-                    ],
-                    contract_diagnostics=truncated_diagnostics,
-                    output_text=output_text,
-                    strategy_info="truncated_multistep_plan_after_minimal",
-                )
-                retry_state.last_repair_reason = (
-                    "truncated_multistep_plan_after_minimal"
-                )
-                planning_result = __repair_planning_output(
+            truncated_plan_handled, truncated_plan_result = (
+                handle_initial_truncated_multistep_plan(
                     ctx=ctx,
-                    planning_timeout_seconds=planning_timeout_seconds,
-                    malformed_output=output_text,
-                    reason="truncated_multistep_plan_after_minimal",
-                    rejection_reasons=_build_repair_rejection_reasons(
-                        [TRUNCATED_PLAN_REPAIR_REJECTION_REASON],
-                        truncated_diagnostics,
-                    ),
+                    retry_state=retry_state,
+                    output_text=output_text,
+                    extracted_plan=extracted_plan,
                     prompt_profile=prompt_profile,
+                    verification_only_task=verification_only_task,
+                    planning_timeout_seconds=planning_timeout_seconds,
+                    planning_knowledge_ctx=planning_knowledge_ctx,
+                    looks_like_truncated_multistep_plan=(
+                        looks_like_truncated_multistep_plan
+                    ),
+                    repair_planning_output=__repair_planning_output,
+                    retry_with_minimal_prompt=__retry_with_minimal_prompt,
                 )
-                retry_state.repair_prompt_used = True
-                retry_state.consecutive_failures += 1
+            )
+            if truncated_plan_handled:
+                planning_result = truncated_plan_result
+                continue
+
+            truncated_plan_handled, truncated_plan_result = (
+                handle_truncated_plan_after_minimal_retry(
+                    ctx=ctx,
+                    retry_state=retry_state,
+                    output_text=output_text,
+                    extracted_plan=extracted_plan,
+                    prompt_profile=prompt_profile,
+                    planning_timeout_seconds=planning_timeout_seconds,
+                    looks_like_truncated_multistep_plan=(
+                        looks_like_truncated_multistep_plan
+                    ),
+                    repair_planning_output=__repair_planning_output,
+                )
+            )
+            if truncated_plan_handled:
+                planning_result = truncated_plan_result
                 continue
 
             if (
