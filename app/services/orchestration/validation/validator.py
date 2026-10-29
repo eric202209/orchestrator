@@ -181,6 +181,7 @@ from .rules.core_file_ops import (
 from .rules.core_execution_capability import (
     command_requires_mutation,
     plan_steps_with_unsupported_commands,
+    plan_steps_with_unsupported_verification,
     plan_steps_without_execution_channel,
     render_planning_execution_capability_contract,
 )
@@ -1362,6 +1363,9 @@ class ValidatorService:
             "unmaterialized_expected_files": "unmaterialized_expected_files",
             "steps_without_execution_channel": "step_execution_channel_missing",
             "steps_with_unsupported_commands": "step_command_capability_unsupported",
+            "steps_with_unsupported_verification": (
+                "step_verification_capability_unsupported"
+            ),
             "oversized_command_steps": "oversized_command_length",
             "brittle_command_subcodes": "brittle_command",
             "malformed_shell_quoting_steps": "malformed_shell_quoting",
@@ -2472,6 +2476,30 @@ class ValidatorService:
                     str(step_number): commands[:5]
                     for step_number, commands in sorted(
                         unsupported_command_steps.items()
+                    )
+                }
+                details["execution_topology"] = execution_topology.value
+
+            unsupported_verification_steps = plan_steps_with_unsupported_verification(
+                plan,
+                project_dir=(Path(project_dir) if project_dir is not None else None),
+                execution_topology=execution_topology,
+            )
+            if unsupported_verification_steps:
+                first_command = sorted(unsupported_verification_steps.items())[0][1]
+                reason_prefix = "unsupported_verification_command: rejected "
+                reason_suffix = "; structured runtime cannot execute this verification."
+                rejected_command = repr(" ".join(first_command.split()))
+                command_limit = 180 - len(reason_prefix) - len(reason_suffix)
+                if len(rejected_command) > command_limit:
+                    rejected_command = (
+                        rejected_command[: max(0, command_limit - 3)].rstrip() + "..."
+                    )
+                repairable.append(f"{reason_prefix}{rejected_command}{reason_suffix}")
+                details["steps_with_unsupported_verification"] = {
+                    str(step_number): command
+                    for step_number, command in sorted(
+                        unsupported_verification_steps.items()
                     )
                 }
                 details["execution_topology"] = execution_topology.value

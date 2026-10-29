@@ -367,12 +367,17 @@ def _attempt_completion_repair(
     save_orchestration_checkpoint_fn: Callable[..., None],
     accepted_path_authority: Any = None,
 ) -> Dict[str, Any]:
+    from app.services.agents.agent_runtime import execution_topology_for_runtime
+
     repairable_findings = list(
         getattr(completion_validation, "repairable_findings", []) or []
     )
     if not repairable_findings:
         return {"status": "skipped", "reason": "no_typed_repairable_findings"}
     orchestration_state = ctx.orchestration_state
+    execution_topology = execution_topology_for_runtime(
+        getattr(ctx, "runtime_service", None)
+    )
     emit_live = ctx.emit_live
     logger = ctx.logger
     task = ctx.task
@@ -1163,6 +1168,7 @@ def _attempt_completion_repair(
         verification_result = execute_verification_command(
             project_dir=Path(orchestration_state.project_dir),
             command=verification_command,
+            execution_topology=execution_topology,
         )
         verification_output = str(verification_result.get("output") or "")
         provider_verification = {
@@ -1205,6 +1211,7 @@ def _attempt_completion_repair(
             validation_profile=ctx.validation_profile,
             validation_severity=ctx.validation_severity,
             relaxed_mode=orchestration_state.relaxed_mode,
+            execution_topology=execution_topology,
         )
     if assessment.validation_verdict:
         record_validation_verdict(

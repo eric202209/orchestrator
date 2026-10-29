@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services.agents.agent_backends import ExecutionTopology
 from app.services.orchestration.execution import python_resolution as pr
 from app.services.orchestration.execution.execution_flow import (
     execute_verification_command,
@@ -168,7 +169,9 @@ def test_python_verification_failure_keeps_existing_response_shape(tmp_path):
     _dangling_dot_venv(tmp_path)
 
     result = execute_verification_command(
-        project_dir=tmp_path, command="python -c 'print(1)'"
+        project_dir=tmp_path,
+        command="python -c 'print(1)'",
+        execution_topology=ExecutionTopology.AGENT_RUNTIME,
     )
 
     assert set(result) == {"success", "command", "returncode", "output"}
@@ -182,7 +185,9 @@ def test_non_python_verification_is_unaffected_by_broken_venv(tmp_path):
     _dangling_dot_venv(tmp_path)
 
     result = execute_verification_command(
-        project_dir=tmp_path, command="sh -c 'echo NON_PYTHON_OK'"
+        project_dir=tmp_path,
+        command="sh -c 'echo NON_PYTHON_OK'",
+        execution_topology=ExecutionTopology.AGENT_RUNTIME,
     )
 
     assert result["success"] is True

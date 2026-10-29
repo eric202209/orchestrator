@@ -160,6 +160,46 @@ def plan_steps_with_unsupported_commands(
     return findings
 
 
+def plan_steps_with_unsupported_verification(
+    plan: List[Dict[str, Any]],
+    *,
+    project_dir: Optional[Path],
+    execution_topology: ExecutionTopology,
+) -> Dict[int, str]:
+    """Return standalone verification fields Structured Runtime cannot execute."""
+
+    if execution_topology is not ExecutionTopology.STRUCTURED_ORCHESTRATOR:
+        return {}
+    if project_dir is None:
+        return {}
+
+    # Verification is a separate execution channel from ``commands``. Reuse
+    # the command-level verification predicate without requiring a matching
+    # ``commands`` entry, since ops-only steps may declare verification alone.
+    from app.services.orchestration.phases.execution_local_steps import (
+        local_verification_command_is_executable,
+    )
+
+    resolved_dir = Path(project_dir)
+    findings: Dict[int, str] = {}
+    for index, step in enumerate(plan, start=1):
+        if not isinstance(step, dict):
+            continue
+        verification = step.get("verification")
+        command = str(verification or "").strip()
+        if not command or local_verification_command_is_executable(
+            project_dir=resolved_dir,
+            verification_command=command,
+        ):
+            continue
+        try:
+            step_number = int(step.get("step_number", index))
+        except (TypeError, ValueError):
+            step_number = index
+        findings[step_number] = command
+    return findings
+
+
 def local_executor_command_examples(project_dir: Path) -> tuple[list[str], list[str]]:
     """Return representative inspection and verification forms admitted locally."""
 

@@ -7,10 +7,11 @@ from pathlib import Path
 import shlex
 import sys
 
+from app.services.agents.agent_backends import ExecutionTopology
 from app.services.orchestration.execution.execution_flow import (
     _inject_project_venv_path,
     _strip_orchestrator_pip_shadow,
-    execute_verification_command,
+    execute_verification_command as _execute_verification_command,
 )
 from app.services.orchestration.execution.python_resolution import (
     resolve_project_python,
@@ -18,6 +19,13 @@ from app.services.orchestration.execution.python_resolution import (
 from app.services.orchestration.phases.completion_flow import (
     _execute_completion_verification,
 )
+
+
+def execute_verification_command(*args, **kwargs):
+    """Run characterization cases against the pre-existing Agent Runtime path."""
+
+    kwargs.setdefault("execution_topology", ExecutionTopology.AGENT_RUNTIME)
+    return _execute_verification_command(*args, **kwargs)
 
 
 class VerificationMismatchType(StrEnum):

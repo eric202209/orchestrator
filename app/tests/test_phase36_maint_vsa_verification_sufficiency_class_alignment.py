@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from app.services.agents.agent_backends import ExecutionTopology
 from app.models import LogEntry
 from app.services.orchestration.phases.execution_local_steps import (
     execute_verification_command,
@@ -294,7 +295,10 @@ def test_v12_failed_behavioral_verification_is_terminal_before_review(tmp_path):
     project_dir.mkdir()
     (project_dir / "app.py").write_text(INCORRECT_SRC, encoding="utf-8")
     result = execute_verification_command(
-        project_dir=project_dir, command=BEHAVIORAL, timeout_seconds=30
+        project_dir=project_dir,
+        command=BEHAVIORAL,
+        timeout_seconds=30,
+        execution_topology=ExecutionTopology.AGENT_RUNTIME,
     )
     assert result.get("success") is False
     assert classify_verification_command(BEHAVIORAL) == "behavioral"

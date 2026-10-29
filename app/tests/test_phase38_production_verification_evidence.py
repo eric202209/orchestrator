@@ -180,7 +180,10 @@ def test_in_process_portable_verification_does_not_claim_process_exit_code(
     (tmp_path / "README.md").write_text("hello\n", encoding="utf-8")
 
     result = execute_verification_command(
-        project_dir=tmp_path, command="cat README.md", include_evidence=True
+        project_dir=tmp_path,
+        command="cat README.md",
+        include_evidence=True,
+        check_structured_verification=False,
     )
 
     assert result["success"] is True

@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.agents.agent_backends import ExecutionTopology
 from app.services.orchestration.diagnostics.outcome_observability import (
     redact_observed_text,
 )
@@ -357,6 +358,8 @@ def execute_verification_command(
     command: str,
     timeout_seconds: int | None = None,
     include_evidence: bool = False,
+    execution_topology: ExecutionTopology | None = None,
+    check_structured_verification: bool = True,
 ) -> Dict[str, Any]:
     def result_with_evidence(
         result: Dict[str, Any], evidence: Dict[str, Any]
@@ -392,6 +395,49 @@ def execute_verification_command(
             },
             evidence,
         )
+    if check_structured_verification:
+        try:
+            resolved_topology = ExecutionTopology(
+                execution_topology or ExecutionTopology.STRUCTURED_ORCHESTRATOR
+            )
+        except (TypeError, ValueError):
+            resolved_topology = ExecutionTopology.STRUCTURED_ORCHESTRATOR
+        if resolved_topology is ExecutionTopology.STRUCTURED_ORCHESTRATOR:
+            from app.services.orchestration.phases.execution_local_steps import (
+                local_verification_command_is_executable,
+            )
+
+            if not local_verification_command_is_executable(
+                project_dir=project_dir,
+                verification_command=raw_command,
+            ):
+                rejection = (
+                    "Structured Runtime refused unsupported verification command"
+                )
+                evidence = _verification_evidence_record(
+                    declared_command=raw_command,
+                    executed_command=raw_command,
+                    command_execution_status="rejected",
+                    verification_status="failed",
+                    process_exit_code=None,
+                    started_at=None,
+                    ended_at=None,
+                    duration_seconds=None,
+                    stdout_bytes=None,
+                    stderr_bytes=None,
+                    output_text=rejection,
+                    execution_kind="not_started",
+                    capture_error="structured_verification_capability_rejected",
+                )
+                return result_with_evidence(
+                    {
+                        "success": False,
+                        "command": raw_command,
+                        "returncode": 126,
+                        "output": rejection,
+                    },
+                    evidence,
+                )
     try:
         assert_no_workspace_cd_escape(raw_command, project_dir)
     except TaskWorkspaceViolationError as exc:
@@ -854,6 +900,7 @@ def assess_step_execution(
     validation_profile: str,
     validation_severity: str = "standard",
     relaxed_mode: bool = False,
+    execution_topology: ExecutionTopology | None = None,
 ) -> StepExecutionAssessment:
     step_output = str(step_result.get("output", ""))
     raw_status = str(step_result.get("status") or "").strip().lower()
@@ -950,6 +997,7 @@ def assess_step_execution(
             project_dir=project_dir,
             command=verification_command,
             include_evidence=True,
+            execution_topology=execution_topology,
         )
         verification_output = verification_result.get("output", "")
         step_result["verification_output"] = verification_output

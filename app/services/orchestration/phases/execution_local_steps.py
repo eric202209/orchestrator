@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.services.agents.agent_backends import ExecutionTopology
 from app.services.orchestration.execution.execution_flow import (
     execute_verification_command,
     workspace_python_command_env,
@@ -521,6 +522,17 @@ def _simple_verification_command_to_run(
     return command_to_run
 
 
+def local_verification_command_is_executable(
+    *, project_dir: Path, verification_command: Any
+) -> bool:
+    """Whether Structured Runtime admits a standalone verification command."""
+
+    command = str(verification_command or "").strip()
+    return bool(command) and _is_simple_verification_command(
+        command, project_dir=project_dir
+    )
+
+
 def local_step_commands_are_executable(
     *, project_dir: Path, commands: list[Any], verification_command: Any
 ) -> bool:
@@ -544,6 +556,7 @@ def _execute_read_only_inspection_step(
     *,
     project_dir: Path,
     commands: list[Any],
+    execution_topology: ExecutionTopology | None = None,
 ) -> dict[str, Any] | None:
     if not commands or not all(
         _is_read_only_inspection_command(str(c)) for c in commands
@@ -556,6 +569,8 @@ def _execute_read_only_inspection_step(
             project_dir=project_dir,
             command=str(command),
             timeout_seconds=settings.READ_ONLY_INSPECTION_TIMEOUT_SECONDS,
+            execution_topology=execution_topology,
+            check_structured_verification=False,
         )
         if not result.get("success"):
             try:
@@ -591,6 +606,7 @@ def _execute_local_shell_commands_step(
     project_dir: Path,
     commands: list[Any],
     verification_command: Any,
+    execution_topology: ExecutionTopology | None = None,
 ) -> dict[str, Any] | None:
     normalized_cmds = _admitted_local_shell_commands(project_dir, commands)
     if normalized_cmds is None:
@@ -675,6 +691,8 @@ def _execute_local_shell_commands_step(
             command=verification,
             timeout_seconds=settings.SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS,
             include_evidence=True,
+            execution_topology=execution_topology,
+            check_structured_verification=bool(verification),
         )
         if not vresult.get("success"):
             verr = vresult.get("output", "verification failed")
@@ -709,6 +727,7 @@ def _execute_simple_verification_step(
     project_dir: Path,
     commands: list[Any],
     verification_command: Any,
+    execution_topology: ExecutionTopology | None = None,
 ) -> dict[str, Any] | None:
     command_to_run = _simple_verification_command_to_run(
         project_dir, commands, verification_command
@@ -721,6 +740,8 @@ def _execute_simple_verification_step(
         command=command_to_run,
         timeout_seconds=settings.LOCAL_VERIFICATION_TIMEOUT_SECONDS,
         include_evidence=True,
+        execution_topology=execution_topology,
+        check_structured_verification=bool(str(verification_command or "").strip()),
     )
     return {
         "status": "completed" if result.get("success") else "failed",

@@ -1032,6 +1032,7 @@ def execute_step_loop(
                 local_inspection_result = _execute_read_only_inspection_step(
                     project_dir=orchestration_state.project_dir,
                     commands=step_commands,
+                    execution_topology=_execution_topology_for_runtime(runtime_service),
                 )
                 if local_inspection_result is not None:
                     step_result = local_inspection_result
@@ -1040,6 +1041,9 @@ def execute_step_loop(
                         project_dir=orchestration_state.project_dir,
                         commands=step_commands,
                         verification_command=verification_command,
+                        execution_topology=_execution_topology_for_runtime(
+                            runtime_service
+                        ),
                     )
                     if local_verification_result is not None:
                         step_result = local_verification_result
@@ -1048,6 +1052,9 @@ def execute_step_loop(
                             project_dir=orchestration_state.project_dir,
                             commands=step_commands,
                             verification_command=verification_command,
+                            execution_topology=_execution_topology_for_runtime(
+                                runtime_service
+                            ),
                         )
                         if local_shell_result is not None:
                             step_result = local_shell_result
@@ -1248,6 +1255,7 @@ def execute_step_loop(
             validation_profile=validation_profile,
             validation_severity=ctx.validation_severity,
             relaxed_mode=orchestration_state.relaxed_mode,
+            execution_topology=_execution_topology_for_runtime(runtime_service),
         )
         step_output = assessment.step_output
         step_status = assessment.step_status

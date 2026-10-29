@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.services.agents.agent_backends import ExecutionTopology
 from app.models import (
     LogEntry,
     Project,
@@ -263,6 +264,7 @@ def test_python_inline_verification_env_resolves_src_layout_package(tmp_path):
     result = execute_verification_command(
         project_dir=tmp_path,
         command='python -c "from pkg import VALUE; raise SystemExit(0 if VALUE == 42 else 1)"',
+        execution_topology=ExecutionTopology.AGENT_RUNTIME,
     )
 
     assert result["success"] is True
