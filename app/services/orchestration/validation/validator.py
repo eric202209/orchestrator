@@ -180,6 +180,7 @@ from .rules.core_file_ops import (
 )
 from .rules.core_execution_capability import (
     command_requires_mutation,
+    describe_unsupported_step_commands,
     plan_steps_with_unsupported_commands,
     plan_steps_with_unsupported_verification,
     plan_steps_without_execution_channel,
@@ -2456,22 +2457,14 @@ class ValidatorService:
                 execution_topology=execution_topology,
             )
             if unsupported_command_steps:
-                first_commands = sorted(unsupported_command_steps.items())[0][1]
-                # Repair retains the rejected command and capability limit
-                # under its 180-character per-reason bound. The complete
-                # command remains in the malformed Plan shown to the repair.
-                reason_prefix = "unsupported_step_command: rejected "
-                reason_suffix = (
-                    "; structured runtime has no command tools. "
-                    "Plan ops for edits; keep goal, scope, checks."
-                )
-                rejected_command = repr(" ".join(str(first_commands[0]).split()))
-                command_limit = 180 - len(reason_prefix) - len(reason_suffix)
-                if len(rejected_command) > command_limit:
-                    rejected_command = (
-                        rejected_command[: max(0, command_limit - 3)].rstrip() + "..."
+                first_step, first_commands = sorted(unsupported_command_steps.items())[
+                    0
+                ]
+                repairable.append(
+                    describe_unsupported_step_commands(
+                        first_step, first_commands, project_dir=Path(project_dir)
                     )
-                repairable.append(f"{reason_prefix}{rejected_command}{reason_suffix}")
+                )
                 details["steps_with_unsupported_commands"] = {
                     str(step_number): commands[:5]
                     for step_number, commands in sorted(

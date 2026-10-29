@@ -160,6 +160,74 @@ def plan_steps_with_unsupported_commands(
     return findings
 
 
+def describe_unsupported_step_commands(
+    step_number: int, commands: List[str], *, project_dir: Path
+) -> str:
+    """Return a bounded repair reason for a step ``plan_steps_with_unsupported_commands`` reported.
+
+    Diagnostic only: admission is decided by ``local_step_commands_are_executable``.
+    The per-command classification only chooses which truthful reason to give.
+    """
+
+    from app.services.orchestration.phases.execution_local_steps import (
+        _is_read_only_inspection_command,
+        _is_simple_verification_command,
+        local_step_commands_are_executable,
+    )
+
+    prefix = "unsupported_step_command: "
+    inspections = [c for c in commands if _is_read_only_inspection_command(c)]
+    verifications = [
+        c
+        for c in commands
+        if c not in inspections
+        and _is_simple_verification_command(c, project_dir=project_dir)
+    ]
+    if len(inspections) + len(verifications) == len(commands):
+        if inspections and verifications:
+            return (
+                f"{prefix}step {step_number} mixes inspection and verification "
+                "commands; use an inspection-only step and a separate step with "
+                "exactly one verification command."
+            )
+        if len(verifications) > 1:
+            return (
+                f"{prefix}step {step_number} has {len(verifications)} verification "
+                "commands; use exactly one per step (one pytest call may list "
+                "several node IDs)."
+            )
+    rejected = next(
+        (
+            command
+            for command in commands
+            if not local_step_commands_are_executable(
+                project_dir=project_dir, commands=[command], verification_command=None
+            )
+        ),
+        None,
+    )
+    if rejected is None:
+        return (
+            f"{prefix}step {step_number} commands fit no single admitted channel "
+            "(inspection only, one verification, or safe shell only); split them."
+        )
+    # Repair retains the rejected command and capability limit under its
+    # 180-character per-reason bound. The complete command remains in the
+    # malformed Plan shown to the repair.
+    reason_prefix = f"{prefix}rejected "
+    reason_suffix = (
+        "; structured runtime has no command tools. "
+        "Plan ops for edits; keep goal, scope, checks."
+    )
+    rejected_command = repr(" ".join(rejected.split()))
+    command_limit = 180 - len(reason_prefix) - len(reason_suffix)
+    if len(rejected_command) > command_limit:
+        rejected_command = (
+            rejected_command[: max(0, command_limit - 3)].rstrip() + "..."
+        )
+    return f"{reason_prefix}{rejected_command}{reason_suffix}"
+
+
 def plan_steps_with_unsupported_verification(
     plan: List[Dict[str, Any]],
     *,
@@ -295,6 +363,9 @@ def render_planning_execution_capability_contract(
         "Step shape: `commands` carries command work, `ops` carries deterministic file operations, and `verification` is a separate check. "
         "A `verification` value alone does not make a step runnable; a Structured step needs an admitted command or at least one operation. "
         "When `commands` carries verification work, use exactly one admitted verification command in that step. "
+        "A step's full `commands` list must fit one admitted channel: admitted inspection commands may share a step, "
+        "a verification command must be the only command in its step, and safe local shell commands keep their own admission rules. "
+        "Do not mix inspection and verification commands in one step; put them in separate steps. "
         "Put multiple pytest node IDs in one supported pytest invocation, or use separate steps for distinct invocations. "
         f"Plan ops from {{{source_ops}}} are source edits, subject to APA, grounding, and GR2. "
         f"Local inspection forms admitted by this executor: {inspect_forms}. "
