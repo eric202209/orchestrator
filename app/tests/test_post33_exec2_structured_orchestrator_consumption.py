@@ -431,7 +431,10 @@ def test_case_b_local_command_runs_in_runtime_workspace_without_provider(
     step = _step(
         description="Run the Orchestrator-owned local command",
         commands=["printf 'local-command-ok\\n' > command-output.txt"],
-        verification="test -f command-output.txt",
+        verification=(
+            'python -c "import pathlib,sys; '
+            "sys.exit(0 if pathlib.Path('command-output.txt').exists() else 1)\""
+        ),
         expected_files=["command-output.txt"],
     )
     runtime = DirectRuntimeStub({"status": "completed", "output": "unreachable"})

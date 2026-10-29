@@ -41,11 +41,8 @@ def test_initial_planning_prompt_contains_valid_json_contract_example():
         "No background processes, &, nohup, disown, dev servers, or long commands"
         in prompt
     )
-    assert (
-        "Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command"
-        in prompt
-    )
-    assert "must prove behavior or content using current workspace evidence" in prompt
+    assert "admitted by the resolved execution capability contract" in prompt
+    assert "workspace-content assertion with a failure signal" in prompt
     assert "If a scaffold command is genuinely required" in prompt
     assert "use `ops` for any follow-up source edits" in prompt
     assert "Never use heredoc syntax" in prompt

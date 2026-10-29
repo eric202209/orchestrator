@@ -190,7 +190,10 @@ def test_execution_contract_is_derived_from_structured_executor(tmp_path: Path):
     assert "pytest -q tests" in contract
     assert "python -m py_compile module.py" in contract
     assert "project-importing inline Python are not available" in contract
-    assert "preserve the objective, source scope, and verification checks" in contract
+    assert (
+        "preserve the objective, source scope, and verification checks"
+        in contract.lower()
+    )
     assert 'python -c "from package' not in contract
 
 

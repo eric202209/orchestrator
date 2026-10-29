@@ -49,11 +49,10 @@ def test_missing_verification_repair_contract_names_field_and_steps(tmp_path):
     assert "steps=[2,3]" in reasons[0]
     assert "require=nonempty project verification" in reasons[0]
     assert "output=full_plan" in reasons[0]
-    assert (
-        "verification: non-empty command for executable/mutating steps" in prompt
-        or "verification: non-empty command for each executable/mutating step" in prompt
-    )
-    assert "null only for read-only inspection" in prompt
+    assert "missing verification commands" in prompt
+    assert "require=nonempty project verification" in prompt
+    assert "field=verification" in prompt
+    assert "steps=[2,3]" in prompt
 
 
 def test_planning_repair_prompt_forbids_duplicated_workspace_roots():

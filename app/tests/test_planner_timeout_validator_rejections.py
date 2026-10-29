@@ -171,7 +171,8 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     )
 
     assert "materially write or edit file contents" in prompt
-    assert "verification must prove behavior or content" in prompt
+    assert "workspace-content assertion with a failure signal" in prompt
+    assert "resolved execution capability contract" in prompt
     assert "Commands must be runnable shell, not prose" in prompt
     assert "Do not create or cd into a nested project folder" in prompt
     assert "Return 3 or 4 small sequential steps maximum" in prompt
@@ -182,16 +183,10 @@ def test_minimal_planning_prompt_requires_real_content_and_strong_verification()
     assert '"op": "write_file"' in prompt
     assert "fallback limits" in prompt
     assert "If content needs quoting, move that content into `ops`" in prompt
-    assert (
-        "Verification must be a real project check with a nonzero failure mode"
-        in prompt
-    )
+    assert "A non-null value must be a project test" in prompt
     assert "No heredocs, background processes, absolute helpers" in prompt
-    assert (
-        "Verification must use `python -c`, `python -m`, `npm run build`, `node -e`, or a project test command"
-        in prompt
-    )
-    assert "must prove behavior or content using current workspace evidence" in prompt
+    assert "admitted by the resolved execution capability contract" in prompt
+    assert "workspace-content assertion with a failure signal" in prompt
     assert "If a scaffold command is genuinely required" in prompt
     assert "use `ops` for any follow-up source edits" in prompt
     assert (

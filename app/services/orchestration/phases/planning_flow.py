@@ -2576,10 +2576,10 @@ def execute_planning_phase(
                 trigger="phase_finished",
                 related_event_id=phase_finished_event.get("event_id"),
             )
-        except Exception as exc:
+        except Exception as snapshot_exc:
             ctx.logger.debug(
                 "[ORCHESTRATION] Failed to persist planning parse-error phase-finish snapshot: %s",
-                exc,
+                snapshot_exc,
             )
         _finalize_planning_terminal_failure(
             ctx=ctx,

@@ -432,6 +432,10 @@ def build_planning_repair_prompt_with_metadata(
     guidance_block: str = "",
     workspace_identity: PlannerWorkspaceIdentity | None = None,
 ) -> PlanningRepairPromptBuildResult:
+    if rejection_reasons:
+        # Repeated validator feedback adds no repair value and can crowd the
+        # bounded prompt. Preserve first-seen order while keeping each reason once.
+        rejection_reasons = list(dict.fromkeys(rejection_reasons))
     broken_output = compact_invalid_output_excerpt(malformed_output)
     knowledge_block = render_repair_knowledge_block(knowledge_context)
     source_context_block = build_python_test_source_context_block(

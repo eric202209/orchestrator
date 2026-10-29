@@ -36,8 +36,8 @@ def test_planning_uses_workspace_plan_json_before_strict_retry(tmp_path, monkeyp
         {
             "step_number": 1,
             "description": "Inspect current FastAPI routes",
-            "commands": ['rg -n "APIRouter|include_router" app/api app/main.py'],
-            "verification": "python3 -c \"print('inspect ok')\"",
+            "commands": ["rg --files ."],
+            "verification": None,
             "rollback": None,
             "expected_files": [],
         },
@@ -47,7 +47,11 @@ def test_planning_uses_workspace_plan_json_before_strict_retry(tmp_path, monkeyp
             "commands": [
                 "printf 'patched\\n' > app/services/orchestration/planning/recovery.txt"
             ],
-            "verification": "python3 -c \"print('edit ok')\"",
+            "verification": (
+                'python3 -c "import pathlib,sys; '
+                "sys.exit(0 if pathlib.Path('app/services/orchestration/planning/recovery.txt').read_text() "
+                "== 'patched\\n' else 1)\""
+            ),
             "rollback": "rm -f app/services/orchestration/planning/recovery.txt",
             "expected_files": [
                 "app/services/orchestration/planning/recovery.txt",

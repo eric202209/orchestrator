@@ -688,7 +688,11 @@ def test_ops_only_step_ignores_unrelated_tool_failure_logs(tmp_path, monkeypatch
             "step_number": 1,
             "description": "Update calculator",
             "commands": [],
-            "verification": "cat app/calculator.py",
+            "verification": (
+                'python -c "import pathlib,sys; '
+                "sys.exit(0 if 'def cents_to_dollars' in "
+                "pathlib.Path('app/calculator.py').read_text() else 1)\""
+            ),
             "expected_files": ["app/calculator.py"],
             "ops": [
                 {

@@ -239,14 +239,20 @@ class TestExecuteLocalShellCommandsStep:
         script = tmp_path / "scripts" / "smoke_status.py"
         script.parent.mkdir()
         script.write_text("#!/usr/bin/env python\nprint('ok')\n", encoding="utf-8")
+        permission_test = tmp_path / "tests" / "test_smoke_status_permissions.py"
+        permission_test.parent.mkdir()
+        permission_test.write_text(
+            "import os\n"
+            "from pathlib import Path\n\n"
+            "def test_script_is_executable():\n"
+            "    assert os.access(Path('scripts/smoke_status.py'), os.X_OK)\n",
+            encoding="utf-8",
+        )
 
         result = _execute_local_shell_commands_step(
             project_dir=tmp_path,
             commands=["chmod +x scripts/smoke_status.py"],
-            verification_command=(
-                'python -c "import os,sys; '
-                "sys.exit(0 if os.access('scripts/smoke_status.py', os.X_OK) else 1)\""
-            ),
+            verification_command="pytest -q tests/test_smoke_status_permissions.py",
         )
 
         assert result is not None

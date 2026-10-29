@@ -37,8 +37,8 @@ def _valid_three_step_plan():
         {
             "step_number": 1,
             "description": "Inspect current planning modules",
-            "commands": ['rg -n "PlannerService" app/services/orchestration/planning'],
-            "verification": "python3 -c \"print('inspect ok')\"",
+            "commands": ["rg --files ."],
+            "verification": None,
             "rollback": None,
             "expected_files": [],
         },
@@ -46,7 +46,11 @@ def _valid_three_step_plan():
             "step_number": 2,
             "description": "Update planner timeout handling",
             "commands": ["printf 'ok\\n' > planner_timeout_marker.txt"],
-            "verification": "python3 - <<'PY'\nfrom pathlib import Path\nassert Path('planner_timeout_marker.txt').read_text() == 'ok\\n'\nPY",
+            "verification": (
+                'python3 -c "import pathlib,sys; '
+                "sys.exit(0 if pathlib.Path('planner_timeout_marker.txt').read_text() "
+                "== 'ok\\n' else 1)\""
+            ),
             "rollback": "rm -f planner_timeout_marker.txt",
             "expected_files": ["planner_timeout_marker.txt"],
         },

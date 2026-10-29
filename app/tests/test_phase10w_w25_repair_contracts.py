@@ -118,10 +118,19 @@ def test_w25_rejects_inline_unittest_main_without_discovery(tmp_path):
 
 
 def test_w25_shell_command_created_files_are_shared_writable(tmp_path):
+    permission_test = tmp_path / "tests" / "test_shared_permissions.py"
+    permission_test.parent.mkdir()
+    permission_test.write_text(
+        "from pathlib import Path\n\n"
+        "def test_shell_created_items_are_shared_writable():\n"
+        "    assert Path('package.json').stat().st_mode & 0o006 == 0o006\n"
+        "    assert Path('build').stat().st_mode & 0o007 == 0o007\n",
+        encoding="utf-8",
+    )
     result = _execute_local_shell_commands_step(
         project_dir=tmp_path,
         commands=["mkdir -p build && printf '{}' > package.json"],
-        verification_command="test -f package.json && test -d build",
+        verification_command="pytest -q tests/test_shared_permissions.py",
     )
 
     assert result is not None

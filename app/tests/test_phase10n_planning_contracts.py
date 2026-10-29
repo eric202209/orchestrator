@@ -42,7 +42,8 @@ def test_phase10n_test_scaffold_guidance_is_in_planning_and_repair_prompts(
         assert "supported test mutation" in prompt
         assert "inspection, verification, or expected_files alone" in prompt
         assert "Never invent paths" in prompt
-        assert "real project check with a nonzero failure mode" in prompt
+        assert "workspace-content assertion with a failure signal" in prompt
+        assert "resolved execution capability contract" in prompt
 
     assert len(compact) < PLANNING_REPAIR_PROMPT_MAX_CHARS
 
