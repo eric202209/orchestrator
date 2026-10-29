@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import shlex
+from pathlib import Path
 from typing import Any, Callable
 
+from app.services.agents.agent_backends import ExecutionTopology
 from app.services.orchestration.events.telemetry import emit_phase_event
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.validation.validator import ValidatorService
@@ -184,6 +186,9 @@ def plan_has_brittle_inline_python_verification(plan_verdict: Any) -> bool:
 
 def normalize_task1_brittle_inline_python_verification(
     plan: list[dict[str, Any]],
+    *,
+    project_dir: Path | None = None,
+    execution_topology: ExecutionTopology | None = None,
 ) -> list[dict[str, Any]]:
     """Rewrite brittle `python -c "..."` commands into an ops-written script.
 
@@ -198,6 +203,12 @@ def normalize_task1_brittle_inline_python_verification(
     operation contract lets ``write_file`` create only a classified new
     expected file, so an undeclared helper is always rejected as
     ``new_file_creation_not_authorized`` once Planning source is materialized.
+
+    A step is only rewritten when the resolved topology can execute the
+    rewritten step (the validator's ``plan_steps_with_unsupported_commands``).  Under
+    ``STRUCTURED_ORCHESTRATOR`` no local executor admits ``python <script>``,
+    so the rewrite could never be accepted; the original step is kept and is
+    rejected for the command the Planner actually wrote.
     """
 
     normalized: list[dict[str, Any]] = []
@@ -257,6 +268,12 @@ def normalize_task1_brittle_inline_python_verification(
             updated["verification"] = new_verification
             updated["ops"] = ops
             updated["expected_files"] = expected_files
+            if ValidatorService._plan_steps_with_unsupported_commands(
+                [updated],
+                project_dir=project_dir,
+                execution_topology=execution_topology,
+            ):
+                updated = step
         normalized.append(updated)
     return normalized
 
@@ -315,9 +332,16 @@ def apply_task1_brittle_inline_python_normalization(
     ctx: OrchestrationRunContext,
     plan_verdict: Any,
 ) -> Any | None:
+    from app.services.agents.agent_runtime import resolve_execution_topology_for_role
+
+    execution_topology = resolve_execution_topology_for_role(getattr(ctx, "db", None))
     return reconcile_task1_bootstrap_plan(
         ctx,
-        normalize=normalize_task1_brittle_inline_python_verification,
+        normalize=lambda plan: normalize_task1_brittle_inline_python_verification(
+            plan,
+            project_dir=ctx.orchestration_state.project_dir,
+            execution_topology=execution_topology,
+        ),
         reason="task1_bootstrap_brittle_inline_python_normalized",
         message=(
             "[ORCHESTRATION] Normalized Task 1 bootstrap plan by rewriting "

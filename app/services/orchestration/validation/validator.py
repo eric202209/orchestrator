@@ -1144,6 +1144,9 @@ class ValidatorService:
 
     _iter_candidate_files = staticmethod(_iter_candidate_files)
     _command_requires_mutation = staticmethod(command_requires_mutation)
+    _plan_steps_with_unsupported_commands = staticmethod(
+        plan_steps_with_unsupported_commands
+    )
     _find_nested_expected_file_matches = staticmethod(
         _find_nested_expected_file_matches
     )

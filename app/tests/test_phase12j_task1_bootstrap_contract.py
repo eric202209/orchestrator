@@ -1098,6 +1098,163 @@ def test_test_only_patch_does_not_repair_the_dataflow_production_defect(tmp_path
     assert customer_count_after(_DATAFLOW_FIX, tmp_path / "grounded-fix") == 3
 
 
+def test_task1_inline_python_rewrite_is_skipped_when_structured_cannot_run_it(
+    tmp_path,
+):
+    """PR02: under STRUCTURED_ORCHESTRATOR no executor runs ``python <script>``,
+    so the normalizer keeps the Planner's own step and the rejection names the
+    command the Planner wrote, not an Orchestrator-generated helper."""
+
+    materialization = _dataflow_workspace(tmp_path)
+    plan = _dataflow_fix_plan()
+
+    normalized = normalize_task1_brittle_inline_python_verification(
+        plan,
+        project_dir=tmp_path,
+        execution_topology=ExecutionTopology.STRUCTURED_ORCHESTRATOR,
+    )
+
+    assert normalized == plan
+    verdict = _validate_dataflow_plan(
+        normalized,
+        tmp_path,
+        materialization,
+        ExecutionTopology.STRUCTURED_ORCHESTRATOR,
+    )
+    assert not verdict.accepted
+    assert verdict.details["steps_with_unsupported_commands"] == {
+        "1": [_DATAFLOW_VERIFY]
+    }
+    assert "new_file_write_without_creation_authorization" not in verdict.details
+    assert not any("verify_task1_step" in reason for reason in verdict.reasons)
+
+
+def test_task1_inline_python_rewrite_still_applies_under_agent_runtime(tmp_path):
+    materialization = _dataflow_workspace(tmp_path)
+
+    normalized = normalize_task1_brittle_inline_python_verification(
+        _dataflow_fix_plan(),
+        project_dir=tmp_path,
+        execution_topology=ExecutionTopology.AGENT_RUNTIME,
+    )
+
+    assert normalized[0]["commands"] == ["python verify_task1_step1.py"]
+    assert "verify_task1_step1.py" in normalized[0]["expected_files"]
+    verdict = _validate_dataflow_plan(
+        normalized, tmp_path, materialization, ExecutionTopology.AGENT_RUNTIME
+    )
+    assert verdict.accepted, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    ("topology", "expect_rewrite"),
+    [
+        (ExecutionTopology.STRUCTURED_ORCHESTRATOR, False),
+        (ExecutionTopology.AGENT_RUNTIME, True),
+    ],
+)
+def test_task1_brittle_inline_normalization_entry_uses_resolved_topology(
+    tmp_path, monkeypatch, topology, expect_rewrite
+):
+    """The production entry point resolves the EXECUTION-role topology the
+    same way plan validation does."""
+
+    from types import SimpleNamespace
+
+    import app.services.agents.agent_runtime as agent_runtime
+    from app.services.orchestration.phases import planning_task1_bootstrap
+
+    materialization = _dataflow_workspace(tmp_path)
+    monkeypatch.setattr(
+        agent_runtime,
+        "resolve_execution_topology_for_role",
+        lambda db, role=None: topology,
+    )
+    monkeypatch.setattr(
+        planning_task1_bootstrap, "emit_phase_event", lambda *a, **k: {}
+    )
+    plan = _dataflow_fix_plan()
+    ctx = SimpleNamespace(
+        orchestration_state=SimpleNamespace(
+            plan=json.loads(json.dumps(plan)), project_dir=tmp_path
+        ),
+        prompt=_DATAFLOW_TASK,
+        execution_profile="full_lifecycle",
+        task=SimpleNamespace(
+            title="Fix duplicate-customer regression in dataflow 2.0",
+            description=_DATAFLOW_TASK,
+            plan_position=1,
+        ),
+        validation_severity="standard",
+        workflow_profile="default",
+        workflow_stage=None,
+        planner_source_materialization=materialization,
+        db=None,
+        intent_mode="default",
+        emit_live=lambda *a, **k: None,
+    )
+
+    verdict = planning_task1_bootstrap.apply_task1_brittle_inline_python_normalization(
+        ctx, None
+    )
+
+    if expect_rewrite:
+        assert verdict is not None and verdict.accepted, verdict
+        assert ctx.orchestration_state.plan[0]["commands"] == [
+            "python verify_task1_step1.py"
+        ]
+    else:
+        assert verdict is None
+        assert ctx.orchestration_state.plan == plan
+
+
+def test_structured_runtime_accepts_grounded_fix_with_supported_verification(
+    tmp_path,
+):
+    materialization = _dataflow_workspace(tmp_path)
+    plan = [
+        _step(
+            ops=[dict(_DATAFLOW_FIX)],
+            commands=["python -m pytest -q tests"],
+            verification="python -m pytest -q tests",
+            expected_files=["dataflow/normalize.py"],
+        )
+    ]
+
+    verdict = _validate_dataflow_plan(
+        plan, tmp_path, materialization, ExecutionTopology.STRUCTURED_ORCHESTRATOR
+    )
+
+    assert verdict.accepted, verdict.reasons
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python arbitrary_script.py",
+        'python -c "import dataflow; print(dataflow)"',
+        'bash -c "python -m pytest -q tests"',
+    ],
+)
+def test_structured_runtime_still_rejects_arbitrary_step_commands(tmp_path, command):
+    materialization = _dataflow_workspace(tmp_path)
+    plan = [
+        _step(
+            ops=[dict(_DATAFLOW_FIX)],
+            commands=[command],
+            verification=None,
+            expected_files=["dataflow/normalize.py"],
+        )
+    ]
+
+    verdict = _validate_dataflow_plan(
+        plan, tmp_path, materialization, ExecutionTopology.STRUCTURED_ORCHESTRATOR
+    )
+
+    assert not verdict.accepted
+    assert verdict.details["steps_with_unsupported_commands"] == {"1": [command]}
+
+
 def test_brittle_commands_still_rejects_unsafe_inline_python_for_later_tasks(tmp_path):
     """The brittle_commands rule itself must remain intact outside the
     bootstrap-contract reconciliation path (later tasks are unaffected)."""
