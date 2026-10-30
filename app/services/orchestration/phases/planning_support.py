@@ -947,6 +947,21 @@ def _build_repair_rejection_reasons(
             f"{', '.join(str(code) for code in truncated_subcodes)}."
         )
 
+    # The verdict reasons describe only the first unsupported-command step.
+    unsupported_step_reasons = details.get("unsupported_step_command_reasons") or {}
+    for step_number in _normalized_step_numbers(unsupported_step_reasons):
+        step_reason = str(
+            unsupported_step_reasons.get(str(step_number))
+            or unsupported_step_reasons.get(step_number)
+            or ""
+        )
+        if (
+            step_reason
+            and step_reason not in base_reasons
+            and step_reason not in targeted_reasons
+        ):
+            targeted_reasons.append(step_reason)
+
     return targeted_reasons + base_reasons
 
 

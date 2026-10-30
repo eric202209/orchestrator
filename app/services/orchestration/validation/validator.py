@@ -2457,20 +2457,24 @@ class ValidatorService:
                 execution_topology=execution_topology,
             )
             if unsupported_command_steps:
-                first_step, first_commands = sorted(unsupported_command_steps.items())[
-                    0
-                ]
-                repairable.append(
-                    describe_unsupported_step_commands(
-                        first_step, first_commands, project_dir=Path(project_dir)
+                # The verdict keeps one reason (the first step); every step's
+                # reason is kept in details so repair feedback can name them all.
+                step_reasons = {
+                    str(step_number): describe_unsupported_step_commands(
+                        step_number, commands, project_dir=Path(project_dir)
                     )
-                )
+                    for step_number, commands in sorted(
+                        unsupported_command_steps.items()
+                    )
+                }
+                repairable.append(next(iter(step_reasons.values())))
                 details["steps_with_unsupported_commands"] = {
                     str(step_number): commands[:5]
                     for step_number, commands in sorted(
                         unsupported_command_steps.items()
                     )
                 }
+                details["unsupported_step_command_reasons"] = step_reasons
                 details["execution_topology"] = execution_topology.value
 
             unsupported_verification_steps = plan_steps_with_unsupported_verification(
