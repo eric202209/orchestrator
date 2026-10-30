@@ -346,6 +346,11 @@ class Settings(BaseSettings):
     # Only runs when HUMAN_GUIDANCE_TABLE_ENABLED=True.
     HUMAN_GUIDANCE_CONFLICT_DETECTION_ENABLED: bool = False
 
+    # PR20-A1: at completion candidate validation, also run pytest commands
+    # quoted in the task's explicit "Acceptance criteria:" section. Off by
+    # default; failures and refusals are non-repairable errors.
+    TASK_ACCEPTANCE_VERIFICATION_ENABLED: bool = False
+
     @field_validator("AGENT_SECONDARY_BACKEND")
     @classmethod
     def validate_agent_secondary_backend(cls, value: Optional[str]) -> Optional[str]:

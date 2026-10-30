@@ -4046,6 +4046,9 @@ class ValidatorService:
                     if accepted_path_authority is not None
                     else observed_scope
                 ),
+                task_acceptance_enabled=bool(
+                    completion_evidence.get("run_task_acceptance_checks", False)
+                ),
             )
             candidate_findings.extend(candidate_checks.findings)
             details["focused_test_selection"] = {
@@ -4054,6 +4057,10 @@ class ValidatorService:
                 "paths": list(candidate_checks.selection.paths),
                 "fallback": candidate_checks.selection.fallback,
             }
+            if candidate_checks.task_acceptance is not None:
+                details["task_acceptance_verification"] = (
+                    candidate_checks.task_acceptance
+                )
             details["candidate_commands"] = list(candidate_checks.commands_run)
             details["candidate_static_policy"] = (
                 candidate_checks.static_policy.to_dict()

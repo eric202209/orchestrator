@@ -588,6 +588,8 @@ class CompletionCoordinator:
                 "run_candidate_checks": True,
                 "include_static_checks": True,
             }
+            if settings.TASK_ACCEPTANCE_VERIFICATION_ENABLED:
+                evidence["run_task_acceptance_checks"] = True
             if _gating_change_set_cache[0]:
                 evidence["change_set"] = _gating_change_set_cache[0]
             return evidence
@@ -1012,6 +1014,11 @@ class CompletionCoordinator:
                         "candidate_delta_required": True,
                         "run_candidate_checks": True,
                         "include_static_checks": True,
+                        **(
+                            {"run_task_acceptance_checks": True}
+                            if settings.TASK_ACCEPTANCE_VERIFICATION_ENABLED
+                            else {}
+                        ),
                     },
                     validation_severity=ctx.validation_severity,
                     workflow_stage=ctx.workflow_stage,

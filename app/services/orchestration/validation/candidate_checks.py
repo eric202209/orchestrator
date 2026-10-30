@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -60,6 +61,150 @@ class CandidateCheckRun:
     findings: tuple[CandidateFinding, ...]
     commands_run: tuple[str, ...]
     static_policy: CandidateStaticPolicy = field(default_factory=CandidateStaticPolicy)
+    # PR20-A1: present only when task acceptance verification is enabled.
+    task_acceptance: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class TaskAcceptanceCommand:
+    text: str
+    pytest_args: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TaskAcceptanceExtraction:
+    """Pytest commands stated in a task's explicit ``Acceptance criteria:``."""
+
+    section_found: bool
+    extracted: tuple[str, ...]
+    admitted: tuple[TaskAcceptanceCommand, ...]
+    refused: tuple[dict[str, str], ...]
+    ignored: tuple[dict[str, str], ...]
+
+
+_ACCEPTANCE_HEADING = re.compile(r"^\s*acceptance criteria:(.*)$", re.IGNORECASE)
+# A later unindented, non-list "Heading:" line closes the acceptance section.
+_SECTION_HEADING = re.compile(r"^[A-Za-z][^`]*:\s*$")
+_CODE_SPAN = re.compile(r"`([^`\n]+)`")
+_PYTEST_WORD = re.compile(r"(?<![\w.-])pytest(?![\w./-])")
+_SHELL_METACHARACTERS = frozenset(";&|<>$`(){}[]*?!~#\\'\"\n")
+_PYTEST_FLAGS = frozenset(
+    {
+        "-q",
+        "-qq",
+        "-v",
+        "-vv",
+        "-x",
+        "-s",
+        "-ra",
+        "--quiet",
+        "--verbose",
+        "--exitfirst",
+        "--tb=auto",
+        "--tb=long",
+        "--tb=short",
+        "--tb=line",
+        "--tb=native",
+        "--tb=no",
+    }
+)
+
+
+def _acceptance_sections(task_prompt: str) -> list[str]:
+    sections: list[str] = []
+    current: list[str] | None = None
+    for line in str(task_prompt or "").splitlines():
+        heading = _ACCEPTANCE_HEADING.match(line)
+        if heading:
+            if current is not None:
+                sections.append("\n".join(current))
+            current = [heading.group(1)]
+        elif current is not None:
+            if _SECTION_HEADING.match(line):
+                sections.append("\n".join(current))
+                current = None
+            else:
+                current.append(line)
+    if current is not None:
+        sections.append("\n".join(current))
+    return sections
+
+
+def _admit_pytest_command(
+    text: str, project_dir: Path | None
+) -> tuple[TaskAcceptanceCommand | None, str]:
+    if any(char in _SHELL_METACHARACTERS for char in text):
+        return None, "shell_metacharacter"
+    tokens = text.split()
+    if tokens[:1] == ["pytest"]:
+        args = tokens[1:]
+    elif tokens[:1] in (["python"], ["python3"]) and tokens[1:3] == ["-m", "pytest"]:
+        args = tokens[3:]
+    else:
+        return None, "unsupported_executable"
+    admitted_args: list[str] = []
+    for arg in args:
+        if arg.startswith("-"):
+            if arg not in _PYTEST_FLAGS:
+                return None, "unsupported_pytest_option"
+            admitted_args.append(arg)
+            continue
+        raw_path, separator, node = arg.partition("::")
+        if "=" in raw_path:
+            return None, "unsupported_argument"
+        if Path(raw_path).is_absolute():
+            return None, "absolute_path"
+        if ".." in Path(raw_path).parts:
+            return None, "path_traversal"
+        path = raw_path
+        if project_dir is not None:
+            try:
+                path = normalize_path_reference(raw_path, project_dir.resolve())
+            except TaskWorkspaceViolationError:
+                return None, "path_escapes_workspace"
+            if Path(path).is_absolute():
+                return None, "path_escapes_workspace"
+        admitted_args.append(f"{path}{separator}{node}")
+    return TaskAcceptanceCommand(text=text, pytest_args=tuple(admitted_args)), ""
+
+
+def task_acceptance_pytest_commands(
+    task_prompt: str, *, project_dir: Path | None = None
+) -> TaskAcceptanceExtraction:
+    """Extract pytest commands quoted in the task's explicit acceptance section.
+
+    Only backtick-quoted spans inside an ``Acceptance criteria:`` section are
+    considered, and only spans naming ``pytest`` are command candidates.
+    Nothing is executed here; with ``project_dir`` path arguments must also
+    resolve (symlinks included) inside the workspace.
+    """
+
+    sections = _acceptance_sections(task_prompt)
+    extracted: list[str] = []
+    admitted: list[TaskAcceptanceCommand] = []
+    refused: list[dict[str, str]] = []
+    ignored: list[dict[str, str]] = []
+    for section in sections:
+        for span in _CODE_SPAN.findall(section):
+            text = span.strip()
+            if not text:
+                continue
+            if not _PYTEST_WORD.search(text):
+                ignored.append({"text": text, "reason": "not_pytest_command"})
+                continue
+            extracted.append(text)
+            command, reason = _admit_pytest_command(text, project_dir)
+            if command is None:
+                refused.append({"command": text, "reason": reason})
+            elif command not in admitted:
+                admitted.append(command)
+    return TaskAcceptanceExtraction(
+        section_found=bool(sections),
+        extracted=tuple(extracted),
+        admitted=tuple(admitted),
+        refused=tuple(refused),
+        ignored=tuple(ignored),
+    )
 
 
 def _is_file(path: Path) -> bool:
@@ -342,6 +487,134 @@ def _run_command(
     return completed.returncode, output[:12000]
 
 
+def _task_acceptance_finding(
+    *,
+    rule_id: str,
+    category: str,
+    message: str,
+    evidence: dict[str, Any],
+) -> CandidateFinding:
+    # No baseline differential exists for task-wide acceptance commands, so a
+    # failure cannot be attributed to the candidate and stays fail-closed.
+    return CandidateFinding(
+        rule_id=rule_id,
+        source="task_acceptance",
+        category=category,
+        severity="error",
+        attribution="unknown",
+        repairable=False,
+        message=message,
+        evidence=evidence,
+    )
+
+
+def _run_task_acceptance(
+    *,
+    project_dir: Path,
+    task_prompt: str,
+    focused_command: str,
+    focused_returncode: int | None,
+    timeout_seconds: int,
+    findings: list[CandidateFinding],
+    commands_run: list[str],
+) -> dict[str, Any]:
+    """Run task-declared acceptance pytest commands in addition to focused tests."""
+
+    extraction = task_acceptance_pytest_commands(task_prompt, project_dir=project_dir)
+    for refusal in extraction.refused:
+        findings.append(
+            _task_acceptance_finding(
+                rule_id="task_acceptance_command_refused",
+                category="task_contract",
+                message=(
+                    "Task acceptance command was refused and cannot be verified: "
+                    f"{refusal['command']}"
+                ),
+                evidence=dict(refusal),
+            )
+        )
+    results: list[dict[str, Any]] = []
+    python = None
+    if extraction.admitted:
+        try:
+            python = shlex.quote(_candidate_python(project_dir))
+        except ProjectPythonResolutionError as exc:
+            if not any(
+                finding.rule_id == "candidate_python_unavailable"
+                for finding in findings
+            ):
+                findings.append(_python_unavailable_finding(exc))
+    for admitted in extraction.admitted:
+        if python is None:
+            results.append(
+                {"command": admitted.text, "executed": False, "outcome": "not_run"}
+            )
+            continue
+        command = " ".join(
+            [python, "-m", "pytest", *(shlex.quote(a) for a in admitted.pytest_args)]
+        )
+        result: dict[str, Any] = {
+            "command": admitted.text,
+            "executed_command": command,
+        }
+        if focused_command and command == focused_command:
+            # Identical argv already ran as the focused selection; its result
+            # (and any finding) is authoritative.
+            returncode = focused_returncode
+            result["covered_by"] = "focused_test_selection"
+            output = ""
+        else:
+            commands_run.append(command)
+            returncode, output = _run_command(
+                project_dir=project_dir,
+                command=command,
+                timeout_seconds=timeout_seconds,
+            )
+        result["executed"] = True
+        result["returncode"] = returncode
+        if returncode == 0:
+            result["outcome"] = "passed"
+        elif returncode is None:
+            result["outcome"] = "infrastructure_failure"
+        else:
+            result["outcome"] = "failed"
+        results.append(result)
+        if "covered_by" in result or returncode == 0:
+            continue
+        evidence = {
+            "command": command,
+            "task_command": admitted.text,
+            "returncode": returncode,
+            "output": output,
+        }
+        if returncode is None:
+            findings.append(
+                _task_acceptance_finding(
+                    rule_id="task_acceptance_pytest_infrastructure_failure",
+                    category="infrastructure",
+                    message="Task acceptance pytest did not complete",
+                    evidence=evidence,
+                )
+            )
+        else:
+            findings.append(
+                _task_acceptance_finding(
+                    rule_id="task_acceptance_pytest_failed",
+                    category="test",
+                    message=f"Task acceptance pytest failed: {admitted.text}",
+                    evidence=evidence,
+                )
+            )
+    return {
+        "section_found": extraction.section_found,
+        "extracted": list(extraction.extracted),
+        "admitted": [command.text for command in extraction.admitted],
+        "refused": [dict(refusal) for refusal in extraction.refused],
+        "ignored": [dict(item) for item in extraction.ignored],
+        "results": results,
+    }
+
+
 def validate_candidate_delta(
     *,
     project_dir: Path,
@@ -353,6 +626,7 @@ def validate_candidate_delta(
     timeout_seconds: int = 180,
     observed_scope: Sequence[str] | None = None,
     verification_scope: Sequence[str] | None = None,
+    task_acceptance_enabled: bool = False,
 ) -> CandidateCheckRun:
     """Run candidate-owned checks and return typed, attributed findings."""
 
@@ -374,6 +648,7 @@ def validate_candidate_delta(
         )
     static_policy = discover_candidate_static_policy(project_dir)
     commands_run: list[str] = []
+    focused_returncode: int | None = None
     if selection.command:
         commands_run.append(selection.command)
         returncode, output = _run_command(
@@ -381,6 +656,7 @@ def validate_candidate_delta(
             command=selection.command,
             timeout_seconds=timeout_seconds,
         )
+        focused_returncode = returncode
         if returncode is None:
             findings.append(
                 CandidateFinding(
@@ -415,6 +691,18 @@ def validate_candidate_delta(
                     },
                 )
             )
+
+    task_acceptance = None
+    if task_acceptance_enabled:
+        task_acceptance = _run_task_acceptance(
+            project_dir=project_dir,
+            task_prompt=task_prompt,
+            focused_command=selection.command,
+            focused_returncode=focused_returncode,
+            timeout_seconds=timeout_seconds,
+            findings=findings,
+            commands_run=commands_run,
+        )
 
     if include_static_checks:
         observed_paths = tuple(
@@ -542,4 +830,5 @@ def validate_candidate_delta(
         findings=tuple(findings),
         commands_run=tuple(commands_run),
         static_policy=static_policy,
+        task_acceptance=task_acceptance,
     )
