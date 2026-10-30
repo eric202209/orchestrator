@@ -483,9 +483,18 @@ def test_worker_ready_consumes_configured_operator_pin(monkeypatch, tmp_path):
     runtime_root = tmp_path / "runtime"
     source_root.mkdir()
     runtime_root.mkdir()
+    pin_protected_root = tmp_path / "complete-controlled-runtime"
     pin_path = tmp_path / "operator-pins" / "candidate-pin.json"
     monkeypatch.setattr(worker_tasks.settings, "WORKER_SOURCE_ROOT", str(source_root))
     monkeypatch.setattr(worker_tasks.settings, "RUNTIME_ROOT", str(runtime_root))
+    monkeypatch.setattr(
+        worker_tasks.settings, "CONTROLLED_WORKER_IDENTITY_REQUIRED", True
+    )
+    monkeypatch.setattr(
+        worker_tasks.settings,
+        "WORKER_CANDIDATE_PIN_PROTECTED_ROOT",
+        str(pin_protected_root),
+    )
     monkeypatch.setattr(
         worker_tasks.settings, "WORKER_CANDIDATE_PIN_PATH", str(pin_path)
     )
@@ -536,7 +545,11 @@ def test_worker_ready_consumes_configured_operator_pin(monkeypatch, tmp_path):
     assert loads == [
         (
             str(pin_path),
-            {"source_root": source_root, "runtime_root": str(runtime_root)},
+            {
+                "source_root": source_root,
+                "runtime_root": str(pin_protected_root),
+                "require_outside_runtime": True,
+            },
         )
     ]
     assert creates[0]["candidate_pin_load"] is sentinel

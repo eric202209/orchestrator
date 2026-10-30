@@ -297,10 +297,18 @@ class Settings(BaseSettings):
     # Explicit repository root used by Worker boot identity evidence. This is
     # intentionally derived from this config module, never from process cwd.
     WORKER_SOURCE_ROOT: str = str(BASE_DIR)
-    # Phase 39B: absolute path of the operator-approved candidate pin read once
-    # at Worker boot. Empty means no pin, so boot identity stays inconclusive.
-    # Must live outside WORKER_SOURCE_ROOT and RUNTIME_ROOT/tasks.
+    # Phase 39B: absolute path of the independently operator-approved
+    # candidate pin. Boot records its identity; controlled dispatch reloads it
+    # to reject replacement or expiry. Empty means identity stays inconclusive.
+    # Must live outside WORKER_SOURCE_ROOT and the controlled runtime root.
     WORKER_CANDIDATE_PIN_PATH: str = ""
+    # Optional complete trust-boundary root used by the controlled runtime.
+    # Empty retains the existing production check against RUNTIME_ROOT.
+    WORKER_CANDIDATE_PIN_PROTECTED_ROOT: str = ""
+    # Opt-in used only by the isolated development runtime. Production
+    # ordinary dispatch keeps its existing policy unless explicitly enabled.
+    CONTROLLED_WORKER_IDENTITY_REQUIRED: bool = False
+    CONTROLLED_WORKER_NODE_IDENTITY: str = ""
     # RTO1: explicit OpenClaw template identity. Empty means no normal
     # OpenClaw invocation is eligible; selection must never fall back to the
     # ProjectRoot agent, main, or a generic workspace.

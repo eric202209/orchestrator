@@ -18,7 +18,7 @@ from app.tasks import worker as worker_tasks
 from scripts import dev_runtime
 
 
-def test_development_runtime_default_layout_overlaps_worker_source_root(
+def test_development_runtime_default_layout_is_disjoint_and_requires_pin_opt_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo_root = tmp_path / "checkout"
@@ -27,13 +27,15 @@ def test_development_runtime_default_layout_overlaps_worker_source_root(
     runtime_root = config.root / "runtime"
     runtime_root.mkdir(parents=True)
 
-    assert config.root == repo_root / ".dev-runtime" / "phase40b-r1"
+    assert config.root != repo_root / ".dev-runtime" / "phase40b-r1"
+    assert repo_root not in config.root.parents
+    assert config.root not in repo_root.parents
     assert config.repo_root.resolve() == repo_root.resolve()
-    with pytest.raises(
-        worker_identity.WorkerIdentityPathError,
-        match="source/runtime root overlap",
-    ):
-        worker_identity.resolve_worker_identity_paths(config.repo_root, runtime_root)
+    paths = worker_identity.resolve_worker_identity_paths(
+        config.repo_root, runtime_root
+    )
+    assert paths.source_root == repo_root.resolve()
+    assert paths.runtime_root == runtime_root.resolve()
 
     monkeypatch.delenv(dev_runtime.ACCEPTANCE_VERIFICATION_OPT_IN_ENV, raising=False)
     env = dev_runtime.build_environment(config, secret_key="test-only")
@@ -81,7 +83,7 @@ def test_missing_boot_manifest_becomes_inconclusive_invocation_provenance(
     assert projection["worker_boot_manifest_digest"] is None
 
 
-def test_launcher_readiness_uses_worker_ping_without_boot_identity(
+def test_launcher_reports_responsive_but_identity_unverified_worker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo_root = tmp_path / "checkout"
@@ -108,58 +110,48 @@ def test_launcher_readiness_uses_worker_ping_without_boot_identity(
     monkeypatch.setattr(dev_runtime, "_api_ready", lambda _config: True)
     monkeypatch.setattr(dev_runtime, "_redis_ping", lambda _port: True)
     monkeypatch.setattr(dev_runtime, "_worker_ping", lambda *_args: True)
+    monkeypatch.setattr(
+        dev_runtime,
+        "_worker_identity_report",
+        lambda *_args: {
+            "worker_identity_verified": False,
+            "identity_status": "IDENTITY_INCONCLUSIVE",
+            "manifest_id": None,
+            "manifest_digest": None,
+            "reasons": ["candidate_pin_unavailable"],
+        },
+    )
     monkeypatch.setattr(dev_runtime, "_qdrant_ready", lambda _config: False)
     monkeypatch.setattr(dev_runtime, "build_environment", lambda _config: {})
     monkeypatch.setattr(dev_runtime, "provider_summary", lambda: "offline fixture")
 
     report = dev_runtime.status_report(config)
     assert report["status"] == "ready"
-    assert report["worker_ready"] is True
-    assert "worker_boot_manifest_id" not in report
-    assert "worker_identity_verified" not in report
+    assert report["process_ready"] is True
+    assert report["worker_responsive"] is True
+    assert report["worker_identity_verified"] is False
+    assert report["worker_ready"] is False
+    assert report["worker_identity"]["reasons"] == ["candidate_pin_unavailable"]
 
 
-def test_api_execute_route_queues_without_worker_attestation_check(
+def test_controlled_api_dispatch_rejects_unverified_worker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    task = SimpleNamespace(
-        id=52,
-        status=TaskStatus.PENDING,
-        title="offline task",
-        description="offline acceptance task",
+    monkeypatch.setattr(
+        task_endpoints.settings, "CONTROLLED_WORKER_IDENTITY_REQUIRED", True
     )
-    calls: list[dict[str, object]] = []
     monkeypatch.setattr(
         task_endpoints,
-        "require_task_runtime_eligibility",
-        lambda _db, _task_id, _user: task,
+        "_current_controlled_worker_identity_binding",
+        lambda: (_ for _ in ()).throw(
+            task_endpoints.ControlledWorkerIdentityError("identity unavailable")
+        ),
     )
 
-    def fake_queue(_db, queued_task, *, retry_request, prompt_override):
-        calls.append(
-            {
-                "task_id": queued_task.id,
-                "prompt": prompt_override,
-                "session_id": retry_request.session_id,
-            }
-        )
-        return {
-            "task_id": queued_task.id,
-            "session_id": 43,
-            "task_execution_id": 52,
-            "celery_task_id": "offline-only",
-        }
-
-    monkeypatch.setattr(task_endpoints, "_queue_task_retry", fake_queue)
-    response = task_endpoints.queue_task_with_canonical_execution(
-        task_id=52,
-        payload=task_endpoints.DirectExecuteRequest(),
-        db=object(),
-        current_user=object(),
-    )
-
-    assert response["status"] == "queued"
-    assert calls == [{"task_id": 52, "prompt": task.description, "session_id": None}]
+    with pytest.raises(
+        Exception, match="controlled Worker identity verification failed"
+    ):
+        task_endpoints._attach_controlled_worker_identity(None)
 
 
 def test_validation_event_drops_details_that_checkpoint_persists(

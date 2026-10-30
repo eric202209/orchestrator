@@ -474,6 +474,38 @@ def configure_task_execution_dispatch(
     if source is None:
         return False
 
+    if settings.CONTROLLED_WORKER_IDENTITY_REQUIRED:
+        from app.services.orchestration.controlled_worker_identity import (
+            CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY,
+            ControlledWorkerIdentityError,
+            current_controlled_worker_identity_binding,
+        )
+
+        dispatch_context = dict(context or {})
+        existing_binding = dispatch_context.get(CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY)
+        if existing_binding is not None and not isinstance(existing_binding, dict):
+            raise WorkflowLifecycleError(
+                "controlled Worker identity binding has an invalid shape"
+            )
+        try:
+            binding = current_controlled_worker_identity_binding(
+                source_root=settings.WORKER_SOURCE_ROOT,
+                runtime_root=settings.RUNTIME_ROOT,
+                pin_path=settings.WORKER_CANDIDATE_PIN_PATH,
+                pin_protected_root=(
+                    settings.WORKER_CANDIDATE_PIN_PROTECTED_ROOT
+                    or settings.RUNTIME_ROOT
+                ),
+                expected_node_identity=settings.CONTROLLED_WORKER_NODE_IDENTITY,
+                expected_binding=existing_binding,
+            )
+        except ControlledWorkerIdentityError as exc:
+            raise WorkflowLifecycleError(
+                "controlled Worker identity verification failed"
+            ) from exc
+        dispatch_context[CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY] = binding
+        context = dispatch_context
+
     invocation = {
         "version": 1,
         "session_id": session.id,
@@ -689,6 +721,37 @@ def _dispatch_replay_arguments(
         "planning_backend_override": invocation.get("planning_backend_override"),
         "planning_escalation_metadata": invocation.get("planning_escalation_metadata"),
     }
+    if settings.CONTROLLED_WORKER_IDENTITY_REQUIRED:
+        from app.services.orchestration.controlled_worker_identity import (
+            CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY,
+            verify_controlled_worker_identity,
+        )
+
+        dispatch_context = args.get("context")
+        expected_binding = (
+            dispatch_context.get(CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY)
+            if isinstance(dispatch_context, dict)
+            else None
+        )
+        if not isinstance(expected_binding, dict):
+            return None, "controlled_worker_identity_binding_missing"
+        evidence = verify_controlled_worker_identity(
+            source_root=settings.WORKER_SOURCE_ROOT,
+            runtime_root=settings.RUNTIME_ROOT,
+            pin_path=settings.WORKER_CANDIDATE_PIN_PATH,
+            pin_protected_root=(
+                settings.WORKER_CANDIDATE_PIN_PROTECTED_ROOT or settings.RUNTIME_ROOT
+            ),
+            expected_node_identity=settings.CONTROLLED_WORKER_NODE_IDENTITY,
+            expected_binding=expected_binding,
+        )
+        if not evidence.identity_verified:
+            reason = (
+                evidence.reasons[0]
+                if evidence.reasons
+                else "worker_identity_unverified"
+            )
+            return None, f"controlled_worker_identity_binding_refused:{reason}"
     if continuation:
         args.update(
             {

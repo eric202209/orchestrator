@@ -9,6 +9,7 @@ settings from the invoking shell.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -38,6 +39,7 @@ PROJECT_NAME = "Phase 40B-R1 Development Runtime"
 OWNER_FILE = ".dev-runtime-owner.json"
 STATE_FILE = "runtime-state.json"
 SCHEMA_VERSION = 1
+RUNTIME_ROOT_CONTRACT = "phase40b-r1-external-checkout-root-v1"
 STARTUP_TIMEOUT_SECONDS = 30
 SHUTDOWN_TIMEOUT_SECONDS = 10
 # The one operator-authorized inference service: the GX10 host Ollama, reached
@@ -51,6 +53,10 @@ INFERENCE_CONTEXT_TOKENS = "32768"
 # Only "1" enables it; unset or "0" keeps the application default (off).
 ACCEPTANCE_VERIFICATION_OPT_IN_ENV = "ORCHESTRATOR_DEV_TASK_ACCEPTANCE_VERIFICATION"
 ACCEPTANCE_VERIFICATION_APP_ENV = "TASK_ACCEPTANCE_VERIFICATION_ENABLED"
+WORKER_CANDIDATE_PIN_OPT_IN_ENV = "ORCHESTRATOR_DEV_WORKER_CANDIDATE_PIN_PATH"
+WORKER_IDENTITY_REQUIRED_APP_ENV = "CONTROLLED_WORKER_IDENTITY_REQUIRED"
+WORKER_NODE_IDENTITY_APP_ENV = "CONTROLLED_WORKER_NODE_IDENTITY"
+WORKER_PIN_PROTECTED_ROOT_APP_ENV = "WORKER_CANDIDATE_PIN_PROTECTED_ROOT"
 ACCEPTANCE_VERIFICATION_OPT_IN_VALUES = {"0": "false", "1": "true"}
 REDIS_STARTUP_DIAGNOSTICS_OPT_IN_ENV = "ORCHESTRATOR_DEV_REDIS_STARTUP_DIAGNOSTICS"
 REDIS_DIAGNOSTICS_MAX_RECORDS = 256
@@ -90,17 +96,37 @@ class RuntimeConfig:
     redis_port: int = REDIS_PORT
     qdrant_port: int = QDRANT_PORT
     queue_name: str = QUEUE_NAME
+    worker_candidate_pin_path: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "repo_root", self.repo_root.resolve())
-        object.__setattr__(self, "root", self.root.resolve())
+        object.__setattr__(
+            self,
+            "root",
+            Path(os.path.abspath(Path(self.root).expanduser())),
+        )
+        object.__setattr__(
+            self,
+            "worker_candidate_pin_path",
+            str(self.worker_candidate_pin_path or "").strip(),
+        )
 
     @classmethod
-    def for_repo(cls, repo_root: Path) -> "RuntimeConfig":
+    def for_repo(
+        cls,
+        repo_root: Path,
+        *,
+        worker_candidate_pin_path: str | Path | None = None,
+    ) -> "RuntimeConfig":
         repo_root = repo_root.resolve()
+        if worker_candidate_pin_path is None:
+            worker_candidate_pin_path = os.environ.get(
+                WORKER_CANDIDATE_PIN_OPT_IN_ENV, ""
+            )
         return cls(
             repo_root=repo_root,
-            root=repo_root / ".dev-runtime" / "phase40b-r1",
+            root=_trusted_runtime_root(repo_root),
+            worker_candidate_pin_path=str(worker_candidate_pin_path or ""),
         )
 
     @property
@@ -128,17 +154,32 @@ def _inside(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
 
 
+def _trusted_runtime_root(repo_root: Path) -> Path:
+    """Return the one cleanup-authorized, checkout-specific external root."""
+
+    repo_root = repo_root.expanduser().resolve()
+    checkout_key = hashlib.sha256(str(repo_root).encode("utf-8")).hexdigest()[:16]
+    return (
+        repo_root.parent
+        / ".orchestrator-dev-runtime"
+        / f"{repo_root.name}-{checkout_key}"
+        / "phase40b-r1"
+    )
+
+
 def _require_runtime_root(config: RuntimeConfig) -> None:
-    expected = config.repo_root / ".dev-runtime" / "phase40b-r1"
-    if config.root != expected:
+    expected = _trusted_runtime_root(config.repo_root)
+    if config.root.resolve(strict=False) != config.root or config.root != expected:
         raise RuntimeToolError(
-            "runtime root must be exactly the checkout-local .dev-runtime/phase40b-r1 directory"
+            "runtime root must equal the canonical trusted development-runtime root"
         )
-    if config.root == config.repo_root or not _inside(config.root, config.repo_root):
-        raise RuntimeToolError("runtime root escapes the development checkout")
-    for path in (config.repo_root / ".dev-runtime", config.root):
-        if path.is_symlink():
-            raise RuntimeToolError(f"refusing symlinked runtime path: {path}")
+    if _inside(config.root, config.repo_root) or _inside(config.repo_root, config.root):
+        raise RuntimeToolError("runtime root overlaps the development checkout")
+    cursor = config.root
+    while cursor != cursor.parent:
+        if cursor.is_symlink():
+            raise RuntimeToolError(f"refusing symlinked runtime path: {cursor}")
+        cursor = cursor.parent
 
 
 def _as_path(value: str) -> Path:
@@ -225,7 +266,10 @@ def build_environment(
         "ONE_SHOT_EXECUTION_ENABLED": "false",
         "ONE_SHOT_SUPERVISOR_SOCKET": str(root / "run" / "supervisor.sock"),
         "WORKER_SOURCE_ROOT": str(config.repo_root),
-        "WORKER_CANDIDATE_PIN_PATH": "",
+        "WORKER_CANDIDATE_PIN_PATH": config.worker_candidate_pin_path,
+        WORKER_PIN_PROTECTED_ROOT_APP_ENV: str(root),
+        WORKER_IDENTITY_REQUIRED_APP_ENV: "true",
+        WORKER_NODE_IDENTITY_APP_ENV: config.worker_name,
         "OPENCLAW_RUNNER_AGENT_ID": "",
         "OPENCLAW_GATEWAY_URL": "http://127.0.0.1:0",
         "OPENCLAW_API_KEY": "",
@@ -429,6 +473,25 @@ def validate_isolation(config: RuntimeConfig, env: dict[str, str]) -> None:
         raise RuntimeToolError(
             f"{ACCEPTANCE_VERIFICATION_APP_ENV} must be exactly true or false"
         )
+    if env.get(WORKER_IDENTITY_REQUIRED_APP_ENV) != "true":
+        raise RuntimeToolError("controlled Worker identity enforcement must be enabled")
+    if env.get(WORKER_NODE_IDENTITY_APP_ENV) != config.worker_name:
+        raise RuntimeToolError(
+            "controlled Worker node identity must match the launcher"
+        )
+    if env.get("WORKER_CANDIDATE_PIN_PATH", "") != config.worker_candidate_pin_path:
+        raise RuntimeToolError(
+            "Worker candidate pin path must match explicit launcher configuration"
+        )
+    if env.get(WORKER_PIN_PROTECTED_ROOT_APP_ENV) != str(config.root):
+        raise RuntimeToolError(
+            "Worker candidate pin protected root must match the owned runtime root"
+        )
+    if (
+        config.worker_candidate_pin_path
+        and not Path(config.worker_candidate_pin_path).expanduser().is_absolute()
+    ):
+        raise RuntimeToolError("Worker candidate pin path must be absolute")
     if inference:
         if (
             env.get("PLANNING_PROVIDER") != "direct_openai_compatible"
@@ -505,6 +568,7 @@ def _owner_record(config: RuntimeConfig) -> dict[str, Any]:
     record = _read_json(owner_path)
     if (
         record.get("schema") != SCHEMA_VERSION
+        or record.get("runtime_contract") != RUNTIME_ROOT_CONTRACT
         or record.get("repo_root") != str(config.repo_root)
         or record.get("runtime_root") != str(config.root)
         or not record.get("instance_id")
@@ -524,6 +588,7 @@ def _ensure_owner(config: RuntimeConfig) -> dict[str, Any]:
         )
     record = {
         "schema": SCHEMA_VERSION,
+        "runtime_contract": RUNTIME_ROOT_CONTRACT,
         "instance_id": str(uuid.uuid4()),
         "repo_root": str(config.repo_root),
         "runtime_root": str(config.root),
@@ -606,10 +671,57 @@ def _port_available(port: int) -> bool:
     return True
 
 
+def _validate_worker_candidate_pin(
+    config: RuntimeConfig, env: dict[str, str]
+) -> dict[str, Any]:
+    if str(config.repo_root) not in sys.path:
+        sys.path.insert(0, str(config.repo_root))
+    from app.services.orchestration import worker_identity
+    from app.services.orchestration.controlled_worker_identity import (
+        verify_candidate_pin_source,
+    )
+
+    loaded = worker_identity.load_candidate_identity_pin(
+        env.get("WORKER_CANDIDATE_PIN_PATH", ""),
+        source_root=config.repo_root,
+        runtime_root=config.root,
+        require_outside_runtime=True,
+    )
+    if loaded.status != worker_identity.PIN_LOADED or loaded.pin is None:
+        reason = loaded.reasons[0] if loaded.reasons else "candidate_pin_unavailable"
+        raise RuntimeToolError(f"controlled Worker candidate pin refused: {reason}")
+    candidate, reasons = verify_candidate_pin_source(
+        source_root=config.repo_root,
+        pin=loaded.pin,
+    )
+    if candidate is None:
+        raise RuntimeToolError(
+            "controlled Worker candidate pin does not match current source: "
+            + ",".join(reasons[:8])
+        )
+    identity = loaded.identity or {}
+    return {
+        "status": worker_identity.PIN_LOADED,
+        "approval_id": identity.get("approval_id"),
+        "operator_identity": identity.get("operator_identity"),
+        "expires_at": identity.get("expires_at"),
+        "pin_sha256": identity.get("pin_sha256"),
+        "candidate_head": candidate.candidate_head,
+        "candidate_tree": candidate.candidate_tree,
+        "source_manifest_digest": candidate.source_manifest_digest,
+    }
+
+
 def preflight(config: RuntimeConfig) -> dict[str, Any]:
     _require_runtime_root(config)
     env = build_environment(config)
     validate_isolation(config, env)
+    worker_identity_contract = {
+        "required": True,
+        "node_identity": config.worker_name,
+        "candidate_pin": _validate_worker_candidate_pin(config, env),
+        "enforcement": "startup-readiness-api-dispatch-and-worker-task-entry",
+    }
     if config.root.exists():
         _validate_existing_root(config)
     if config.process_cwd.exists() and (config.process_cwd / ".env").exists():
@@ -633,11 +745,13 @@ def preflight(config: RuntimeConfig) -> dict[str, Any]:
         "safe": True,
         "repo_root": str(config.repo_root),
         "runtime_root": str(config.root),
+        "runtime_root_contract": RUNTIME_ROOT_CONTRACT,
         "api_url": config.api_url,
         "redis_port": config.redis_port,
         "qdrant_url": config.qdrant_url,
         "queue": config.queue_name,
         "worker": config.worker_name,
+        "worker_identity_contract": worker_identity_contract,
         "provider": provider_summary(),
         "redis_binary": redis_binary,
         "qdrant_binary": qdrant_binary,
@@ -1653,6 +1767,7 @@ def start_runtime(config: RuntimeConfig) -> dict[str, Any]:
     state["processes"] = {}
     state["status"] = "starting"
     state["preflight"] = preflight_info
+    state["worker_identity_contract"] = preflight_info["worker_identity_contract"]
     state["started_at_epoch"] = time.time()
     state["error"] = None
     app_env = build_environment(config)
@@ -1754,6 +1869,13 @@ def start_runtime(config: RuntimeConfig) -> dict[str, Any]:
             [config.worker_name],
         )
         _wait_until(config, "worker", lambda: _worker_ping(config, app_env))
+        _wait_until(
+            config,
+            "verified Worker identity",
+            lambda: _worker_identity_report(
+                config, state.get("processes", {}).get("worker")
+            )["worker_identity_verified"],
+        )
         state["status"] = "ready"
         state["ready_at_epoch"] = time.time()
         _save_state(config, state)
@@ -1792,10 +1914,20 @@ def status_report(config: RuntimeConfig) -> dict[str, Any]:
                 else None
             )
     recorded = state.get("task_acceptance_verification") or {}
+    worker_record = state.get("processes", {}).get("worker")
+    process_ready = processes.get("worker", {}).get("ownership") == "owned"
+    worker_responsive = process_ready and _worker_ping(
+        config, build_environment(config)
+    )
+    identity_report = _worker_identity_report(
+        config, worker_record if process_ready else None
+    )
+    worker_identity_verified = bool(identity_report["worker_identity_verified"])
     return {
         "status": state.get("status", "unknown"),
         "owned": True,
         "runtime_root": str(config.root),
+        "runtime_root_contract": RUNTIME_ROOT_CONTRACT,
         "api_ready": processes.get("api", {}).get("ownership") == "owned"
         and _api_ready(config),
         "redis_ready": processes.get("redis", {}).get("ownership") == "owned"
@@ -1803,11 +1935,13 @@ def status_report(config: RuntimeConfig) -> dict[str, Any]:
         "qdrant_ready": processes.get("qdrant", {}).get("ownership") == "owned"
         and _qdrant_ready(config),
         "qdrant_mode": state.get("qdrant_mode", "unknown"),
-        "worker_ready": (
-            _worker_ping(config, build_environment(config))
-            if processes.get("worker", {}).get("ownership") == "owned"
-            else False
-        ),
+        "process_ready": process_ready,
+        "worker_responsive": worker_responsive,
+        "worker_identity_verified": worker_identity_verified,
+        "worker_identity": identity_report,
+        "worker_ready": process_ready
+        and worker_responsive
+        and worker_identity_verified,
         "queue": config.queue_name,
         "worker": config.worker_name,
         "provider": provider_summary(),
@@ -1819,6 +1953,53 @@ def status_report(config: RuntimeConfig) -> dict[str, Any]:
             "process_start_basis": "/proc/<pid>/environ of owned api/worker; null when not running",
             "effective_per_task": "established only by each task's persisted completion verdict",
         },
+    }
+
+
+def _worker_identity_report(
+    config: RuntimeConfig, worker_record: dict[str, Any] | None
+) -> dict[str, Any]:
+    if not worker_record:
+        return {
+            "worker_identity_verified": False,
+            "identity_status": "IDENTITY_UNAVAILABLE",
+            "manifest_id": None,
+            "manifest_digest": None,
+            "reasons": ["worker_process_not_owned"],
+        }
+    if str(config.repo_root) not in sys.path:
+        sys.path.insert(0, str(config.repo_root))
+    from app.services.orchestration.controlled_worker_identity import (
+        verify_controlled_worker_identity,
+    )
+
+    try:
+        evidence = verify_controlled_worker_identity(
+            source_root=config.repo_root,
+            runtime_root=config.root / "runtime",
+            pin_path=config.worker_candidate_pin_path,
+            pin_protected_root=config.root,
+            expected_node_identity=config.worker_name,
+            expected_pid=int(worker_record["pid"]),
+        )
+    except Exception:
+        return {
+            "worker_identity_verified": False,
+            "identity_status": "IDENTITY_INCONCLUSIVE",
+            "manifest_id": None,
+            "manifest_digest": None,
+            "reasons": ["worker_identity_verifier_error"],
+        }
+    manifest = evidence.manifest
+    return {
+        "worker_identity_verified": evidence.identity_verified,
+        "identity_status": evidence.identity_status,
+        "process_ready": evidence.process_ready,
+        "manifest_id": manifest.record_id if manifest else None,
+        "manifest_digest": evidence.manifest_digest,
+        "candidate_pin_status": manifest.candidate_pin_status if manifest else None,
+        "worker_node_identity": manifest.worker_node_identity if manifest else None,
+        "reasons": list(evidence.reasons),
     }
 
 

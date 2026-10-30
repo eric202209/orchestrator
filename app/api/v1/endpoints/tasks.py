@@ -77,6 +77,11 @@ from app.services.workspace.project_isolation_service import (
     resolve_project_workspace_path,
 )
 from app.config import settings
+from app.services.orchestration.controlled_worker_identity import (
+    CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY,
+    ControlledWorkerIdentityError,
+    current_controlled_worker_identity_binding,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -318,6 +323,7 @@ def _resume_automatic_chain_after_promotion(
         status=TaskStatus.PENDING,
     )
     auto_advance_prompt = next_task.description or next_task.title
+    auto_advance_context = _attach_controlled_worker_identity(None)
     dispatch_managed = configure_task_execution_dispatch(
         db,
         task_execution=next_execution,
@@ -326,8 +332,11 @@ def _resume_automatic_chain_after_promotion(
         dispatch_kind="ROOT",
         prompt=auto_advance_prompt,
         timeout_seconds=DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
+        context=auto_advance_context,
     )
-    if not dispatch_managed and enforcement_enabled():
+    if not dispatch_managed and (
+        enforcement_enabled() or settings.CONTROLLED_WORKER_IDENTITY_REQUIRED
+    ):
         db.rollback()
         raise HTTPException(
             status_code=409,
@@ -492,6 +501,39 @@ def _validate_task_execution_for_change_set(
 CHANGE_SET_EXECUTION_NOT_COMPLETED = "change_set_execution_not_completed"
 
 
+def _current_controlled_worker_identity_binding() -> dict[str, object]:
+    """Return fresh pinned Worker evidence and require its exact node to pong."""
+
+    return current_controlled_worker_identity_binding(
+        source_root=settings.WORKER_SOURCE_ROOT,
+        runtime_root=settings.RUNTIME_ROOT,
+        pin_path=settings.WORKER_CANDIDATE_PIN_PATH,
+        pin_protected_root=(
+            settings.WORKER_CANDIDATE_PIN_PROTECTED_ROOT or settings.RUNTIME_ROOT
+        ),
+        expected_node_identity=settings.CONTROLLED_WORKER_NODE_IDENTITY,
+    )
+
+
+def _attach_controlled_worker_identity(
+    context: dict[str, object] | None,
+) -> dict[str, object] | None:
+    """Bind only the isolated runtime's dispatch to its verified Worker boot."""
+
+    if not settings.CONTROLLED_WORKER_IDENTITY_REQUIRED:
+        return context
+    try:
+        binding = _current_controlled_worker_identity_binding()
+    except ControlledWorkerIdentityError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="controlled Worker identity verification failed",
+        ) from exc
+    result = dict(context or {})
+    result[CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY] = binding
+    return result
+
+
 def _require_completed_change_set_execution(task_execution: TaskExecution) -> None:
     """Release a Change Set only from the TaskExecution that completed it.
 
@@ -617,6 +659,7 @@ def _queue_task_retry(
         if retry_request.planner_contract is not None
         else None
     )
+    planner_context = _attach_controlled_worker_identity(planner_context)
 
     if explicit_new_session:
         selected_session = SessionModel(
@@ -798,6 +841,13 @@ def _queue_task_retry(
                 timeout_seconds=timeout_seconds,
                 context=planner_context,
             )
+            if not dispatch_managed and settings.CONTROLLED_WORKER_IDENTITY_REQUIRED:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Task invocation cannot be persisted for controlled identity-bound dispatch"
+                    ),
+                )
             if not dispatch_managed and enforcement_enabled():
                 raise HTTPException(
                     status_code=409,

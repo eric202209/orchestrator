@@ -1015,6 +1015,180 @@ def test_explicit_recovery_parent_is_persisted_and_validated(dispatch_db):
     assert reason is None
 
 
+@pytest.mark.parametrize(
+    "identity_mode, expected_reason",
+    [
+        ("missing", "controlled_worker_identity_binding_missing"),
+        (
+            "stale",
+            "controlled_worker_identity_binding_refused:worker_identity_unverified",
+        ),
+        ("verified", None),
+    ],
+)
+def test_controlled_dispatch_requires_fresh_worker_identity_binding(
+    dispatch_db, monkeypatch, identity_mode, expected_reason
+):
+    _, _, _, db = dispatch_db
+    _, session, task, _, execution = _graph(db)
+    monkeypatch.setattr(settings, "CONTROLLED_WORKER_IDENTITY_REQUIRED", False)
+    binding = {
+        "schema_version": 1,
+        "record_id": "boot-pid-start",
+        "manifest_sha256": "1" * 64,
+        "candidate_pin_sha256": "2" * 64,
+    }
+    context = {"planner_contract": {"schema": "bounded-v1"}}
+    if identity_mode != "missing":
+        from app.services.orchestration.controlled_worker_identity import (
+            CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY,
+        )
+
+        context[CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY] = binding
+    workflow.configure_task_execution_dispatch(
+        db,
+        task_execution=execution,
+        session=session,
+        task=task,
+        dispatch_kind="ROOT",
+        prompt=task.description,
+        timeout_seconds=1800,
+        context=context,
+    )
+    monkeypatch.setattr(settings, "CONTROLLED_WORKER_IDENTITY_REQUIRED", True)
+    monkeypatch.setattr(settings, "WORKER_SOURCE_ROOT", "/fixture/source")
+    monkeypatch.setattr(settings, "RUNTIME_ROOT", "/fixture/runtime/runtime")
+    monkeypatch.setattr(settings, "WORKER_CANDIDATE_PIN_PATH", "/trusted/pin.json")
+    monkeypatch.setattr(
+        settings, "WORKER_CANDIDATE_PIN_PROTECTED_ROOT", "/fixture/runtime"
+    )
+    monkeypatch.setattr(settings, "CONTROLLED_WORKER_NODE_IDENTITY", "fixture@worker")
+    from app.services.orchestration import controlled_worker_identity
+
+    calls = []
+
+    def verify(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            identity_verified=identity_mode == "verified",
+            reasons=("worker_identity_unverified",),
+        )
+
+    monkeypatch.setattr(
+        controlled_worker_identity, "verify_controlled_worker_identity", verify
+    )
+
+    arguments, reason = workflow._dispatch_replay_arguments(db, execution)
+
+    assert reason == expected_reason
+    if identity_mode == "verified":
+        assert arguments is not None
+        assert calls[0]["expected_binding"] == binding
+        assert calls[0]["pin_protected_root"] == "/fixture/runtime"
+    elif identity_mode == "missing":
+        assert arguments is None
+        assert calls == []
+    else:
+        assert arguments is None
+        assert calls[0]["expected_binding"] == binding
+
+
+def test_production_default_dispatch_policy_remains_unchanged(dispatch_db, monkeypatch):
+    _, _, _, db = dispatch_db
+    _, session, task, _, execution = _graph(db)
+    _configure(db, session, task, execution)
+    monkeypatch.setattr(settings, "CONTROLLED_WORKER_IDENTITY_REQUIRED", False)
+
+    arguments, reason = workflow._dispatch_replay_arguments(db, execution)
+
+    assert reason is None
+    assert arguments is not None
+
+
+def test_configure_persists_controlled_worker_binding_before_publish(
+    dispatch_db, monkeypatch
+):
+    _, _, _, db = dispatch_db
+    _, session, task, _, execution = _graph(db)
+    binding = {
+        "schema_version": 1,
+        "record_id": "boot-pid-start",
+        "manifest_sha256": "1" * 64,
+    }
+    monkeypatch.setattr(settings, "CONTROLLED_WORKER_IDENTITY_REQUIRED", True)
+    from app.services.orchestration import controlled_worker_identity
+
+    calls = []
+
+    def current_binding(**kwargs):
+        calls.append(kwargs)
+        return binding
+
+    monkeypatch.setattr(
+        controlled_worker_identity,
+        "current_controlled_worker_identity_binding",
+        current_binding,
+    )
+
+    configured = workflow.configure_task_execution_dispatch(
+        db,
+        task_execution=execution,
+        session=session,
+        task=task,
+        dispatch_kind="ROOT",
+        prompt=task.description,
+        timeout_seconds=1800,
+        context={"planner_contract": {"schema": "bounded-v1"}},
+    )
+
+    from app.services.orchestration.controlled_worker_identity import (
+        CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY,
+    )
+
+    assert configured is True
+    assert (
+        execution.dispatch_invocation["context"][CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY]
+        == binding
+    )
+    assert calls and calls[0]["expected_binding"] is None
+
+
+def test_configure_refuses_controlled_dispatch_without_worker_identity(
+    dispatch_db, monkeypatch
+):
+    _, _, _, db = dispatch_db
+    _, session, task, _, execution = _graph(db)
+    monkeypatch.setattr(settings, "CONTROLLED_WORKER_IDENTITY_REQUIRED", True)
+    from app.services.orchestration import controlled_worker_identity
+
+    def unavailable(**_kwargs):
+        raise controlled_worker_identity.ControlledWorkerIdentityError(
+            "candidate_pin_unavailable"
+        )
+
+    monkeypatch.setattr(
+        controlled_worker_identity,
+        "current_controlled_worker_identity_binding",
+        unavailable,
+    )
+
+    with pytest.raises(
+        workflow.WorkflowLifecycleError, match="identity verification failed"
+    ):
+        workflow.configure_task_execution_dispatch(
+            db,
+            task_execution=execution,
+            session=session,
+            task=task,
+            dispatch_kind="ROOT",
+            prompt=task.description,
+            timeout_seconds=1800,
+        )
+
+    assert execution.dispatch_invocation is None
+    assert execution.dispatch_celery_task_id is None
+
+
 def test_e8_routes_managed_continuation_through_same_te_dispatch(
     dispatch_db, monkeypatch
 ):

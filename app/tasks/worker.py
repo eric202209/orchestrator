@@ -35,6 +35,10 @@ from app.services import (
     get_session_or_404,
 )
 from app.config import settings
+from app.services.orchestration.controlled_worker_identity import (
+    CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY,
+    verify_controlled_worker_identity,
+)
 from app.services.execution.process_identity import current_worker_identity
 from app.services.execution.workflow_lifecycle import (
     attach_workflow_identity,
@@ -592,7 +596,10 @@ def on_worker_ready(sender, **kwargs):
         candidate_pin_load = _load_candidate_identity_pin(
             getattr(settings, "WORKER_CANDIDATE_PIN_PATH", ""),
             source_root=identity_paths.source_root,
-            runtime_root=settings.RUNTIME_ROOT,
+            runtime_root=(
+                settings.WORKER_CANDIDATE_PIN_PROTECTED_ROOT or settings.RUNTIME_ROOT
+            ),
+            require_outside_runtime=settings.CONTROLLED_WORKER_IDENTITY_REQUIRED,
         )
         manifest_path, boot_manifest = _create_worker_boot_identity(
             source_root=identity_paths.source_root,
@@ -701,7 +708,9 @@ def reconcile_backend_slots_on_boot(db) -> Optional[Dict[str, Any]]:
     return result
 
 
-def _one_shot_worker_identity_attestation() -> Optional[Any]:
+def _one_shot_worker_identity_attestation(
+    expected_binding: Optional[Dict[str, Any]] = None,
+) -> Optional[Any]:
     """This process's own boot identity record, or None when unavailable.
 
     The recorded classification is used as-is; nothing here upgrades an
@@ -709,6 +718,26 @@ def _one_shot_worker_identity_attestation() -> Optional[Any]:
     """
 
     try:
+        if settings.CONTROLLED_WORKER_IDENTITY_REQUIRED:
+            if not isinstance(expected_binding, dict):
+                return None
+            evidence = verify_controlled_worker_identity(
+                source_root=settings.WORKER_SOURCE_ROOT,
+                runtime_root=settings.RUNTIME_ROOT,
+                pin_path=settings.WORKER_CANDIDATE_PIN_PATH,
+                pin_protected_root=(
+                    settings.WORKER_CANDIDATE_PIN_PROTECTED_ROOT
+                    or settings.RUNTIME_ROOT
+                ),
+                expected_node_identity=settings.CONTROLLED_WORKER_NODE_IDENTITY,
+                expected_pid=os.getpid(),
+                expected_binding=expected_binding,
+            )
+            if not evidence.identity_verified or evidence.manifest is None:
+                return None
+            return _OneShotWorkerIdentityAttestation.from_boot_manifest(
+                evidence.manifest
+            )
         identity_paths = _resolve_worker_identity_paths(
             source_root=settings.WORKER_SOURCE_ROOT,
             runtime_root=settings.RUNTIME_ROOT,
@@ -767,7 +796,11 @@ def _route_one_shot_if_requested(
                     or getattr(task_request, "retries", 0)
                 ),
             ),
-            worker_identity=_one_shot_worker_identity_attestation,
+            worker_identity=lambda: _one_shot_worker_identity_attestation(
+                (context or {}).get(CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY)
+                if settings.CONTROLLED_WORKER_IDENTITY_REQUIRED
+                else None
+            ),
             supervisor=_one_shot_supervisor(),
         )
         return result.as_task_result()
@@ -1164,6 +1197,74 @@ def execute_orchestration_task(
                         datetime.now(timezone.utc) - _coerce_utc_datetime(queued_at)
                     ).total_seconds(),
                     3,
+                )
+        if settings.CONTROLLED_WORKER_IDENTITY_REQUIRED:
+            expected_worker_binding = (
+                context.get(CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY)
+                if isinstance(context, dict)
+                else None
+            )
+            if isinstance(expected_worker_binding, dict):
+                identity_evidence = verify_controlled_worker_identity(
+                    source_root=settings.WORKER_SOURCE_ROOT,
+                    runtime_root=settings.RUNTIME_ROOT,
+                    pin_path=settings.WORKER_CANDIDATE_PIN_PATH,
+                    pin_protected_root=(
+                        settings.WORKER_CANDIDATE_PIN_PROTECTED_ROOT
+                        or settings.RUNTIME_ROOT
+                    ),
+                    expected_node_identity=settings.CONTROLLED_WORKER_NODE_IDENTITY,
+                    expected_pid=os.getpid(),
+                    expected_binding=expected_worker_binding,
+                )
+                identity_reason = (
+                    None
+                    if identity_evidence.identity_verified
+                    else (
+                        identity_evidence.reasons[0]
+                        if identity_evidence.reasons
+                        else "worker_identity_unverified"
+                    )
+                )
+            else:
+                identity_reason = "dispatch_worker_binding_missing"
+            if identity_reason is not None:
+                task_execution = get_task_execution(db, task_execution_id)
+                if (
+                    task_execution is not None
+                    and task_execution.dispatch_state
+                    not in {
+                        "DONE",
+                        "CANCELLED",
+                        "REFUSED",
+                    }
+                ):
+                    task_execution.dispatch_state = "REFUSED"
+                    task_execution.dispatch_refusal_reason = (
+                        "controlled_worker_identity_refused"
+                    )
+                    task_execution.dispatch_last_error = identity_reason[:1000]
+                    task_execution.dispatch_lease_owner = None
+                    task_execution.dispatch_lease_expires_at = None
+                    db.commit()
+                return _emit_dispatch_rejected(
+                    reason=f"controlled_worker_identity_refused:{identity_reason}",
+                    log_message=(
+                        "[ORCHESTRATION] Rejected controlled dispatch because Worker identity was not fresh and bound"
+                    ),
+                    db=db,
+                    session=session,
+                    session_id=session_id,
+                    task_id=task_id,
+                    task_execution_id=task_execution_id,
+                    dispatch_project_dir=dispatch_project_dir,
+                    expected_session_instance_id=expected_session_instance_id,
+                    celery_task_id=getattr(getattr(self, "request", None), "id", None),
+                    queue_latency_seconds=queue_latency_seconds,
+                    queued_event=queued_event,
+                    emit_live=emit_live,
+                    runtime_selection=runtime_selection,
+                    continuation_dispatch=is_e3_continuation_dispatch,
                 )
         stale_dispatch_reason = None
         if not is_e3_continuation_dispatch:

@@ -20,7 +20,7 @@ except Exception:
 from datetime import UTC, datetime
 
 from celery import Celery
-from celery.signals import after_task_publish, worker_process_init
+from celery.signals import after_task_publish, before_task_publish, worker_process_init
 from .config import settings
 
 celery_app = Celery(
@@ -69,6 +69,63 @@ celery_app.conf.update(
 
 # Ensure tasks are registered when workers start with `-A app.celery_app worker`.
 celery_app.autodiscover_tasks(["app.tasks"])
+
+
+CONTROLLED_EXECUTION_TASK_NAME = "app.tasks.worker.execute_orchestration_task"
+
+
+def _require_controlled_worker_identity_for_publish(
+    *, sender: str | None, body: object
+) -> None:
+    """Reject controlled task publication without its fresh Worker binding."""
+
+    if (
+        not settings.CONTROLLED_WORKER_IDENTITY_REQUIRED
+        or sender != CONTROLLED_EXECUTION_TASK_NAME
+    ):
+        return
+    if not isinstance(body, (tuple, list)) or len(body) < 2:
+        raise RuntimeError("controlled Worker identity dispatch body is unavailable")
+    task_kwargs = body[1]
+    if not isinstance(task_kwargs, dict):
+        raise RuntimeError("controlled Worker identity dispatch arguments are invalid")
+    from app.services.orchestration.controlled_worker_identity import (
+        CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY,
+        ControlledWorkerIdentityError,
+        current_controlled_worker_identity_binding,
+    )
+
+    context_value = task_kwargs.get("context")
+    if context_value is not None and not isinstance(context_value, dict):
+        raise RuntimeError("controlled Worker identity dispatch context is invalid")
+    context = dict(context_value or {})
+    expected_binding = context.get(CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY)
+    if expected_binding is not None and not isinstance(expected_binding, dict):
+        raise RuntimeError("controlled Worker identity dispatch binding is invalid")
+    try:
+        binding = current_controlled_worker_identity_binding(
+            source_root=settings.WORKER_SOURCE_ROOT,
+            runtime_root=settings.RUNTIME_ROOT,
+            pin_path=settings.WORKER_CANDIDATE_PIN_PATH,
+            pin_protected_root=(
+                settings.WORKER_CANDIDATE_PIN_PROTECTED_ROOT or settings.RUNTIME_ROOT
+            ),
+            expected_node_identity=settings.CONTROLLED_WORKER_NODE_IDENTITY,
+            expected_binding=expected_binding,
+        )
+    except ControlledWorkerIdentityError as exc:
+        raise RuntimeError(
+            f"controlled Worker identity dispatch refused: {exc}"
+        ) from exc
+    context[CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY] = binding
+    task_kwargs["context"] = context
+
+
+@before_task_publish.connect
+def _verify_controlled_worker_identity_before_publish(
+    sender=None, body=None, **_kwargs
+) -> None:
+    _require_controlled_worker_identity_for_publish(sender=sender, body=body)
 
 
 @worker_process_init.connect

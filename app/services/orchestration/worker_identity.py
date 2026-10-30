@@ -1295,6 +1295,7 @@ def load_candidate_identity_pin(
     *,
     source_root: str | Path,
     runtime_root: str | Path | None = None,
+    require_outside_runtime: bool = False,
     now: datetime | None = None,
 ) -> CandidatePinLoad:
     """Read the operator-provisioned candidate pin used at Worker boot.
@@ -1310,10 +1311,28 @@ def load_candidate_identity_pin(
     if not path.is_absolute():
         return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_path_invalid",))
     resolved = path.resolve(strict=False)
+    if require_outside_runtime and Path(os.path.abspath(path)) != resolved:
+        return CandidatePinLoad(PIN_INVALID, reasons=("candidate_pin_path_symlinked",))
+    if require_outside_runtime:
+        try:
+            parent_info = path.parent.stat(follow_symlinks=False)
+        except OSError:
+            return CandidatePinLoad(
+                PIN_INVALID, reasons=("candidate_pin_parent_unavailable",)
+            )
+        if (
+            not stat.S_ISDIR(parent_info.st_mode)
+            or parent_info.st_mode & 0o022
+            or parent_info.st_uid not in {0, os.geteuid()}
+        ):
+            return CandidatePinLoad(
+                PIN_INVALID, reasons=("candidate_pin_parent_permissions_unsafe",)
+            )
     protected_roots = [Path(source_root).expanduser().resolve(strict=False)]
     if runtime_root is not None and str(runtime_root).strip():
+        runtime = Path(str(runtime_root)).expanduser().resolve(strict=False)
         protected_roots.append(
-            Path(str(runtime_root)).expanduser().resolve(strict=False) / "tasks"
+            runtime if require_outside_runtime else runtime / "tasks"
         )
     if any(_is_within(resolved, root) for root in protected_roots):
         return CandidatePinLoad(
