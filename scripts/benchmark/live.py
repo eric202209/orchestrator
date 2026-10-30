@@ -150,8 +150,11 @@ def protected_output_problem(output: Path, repo_root: Path) -> str | None:
         evidence_dir = (repo_root / phase["evidence_dir"]).resolve()
         if resolved.is_relative_to(evidence_dir):
             return f"refusing to write into historical evidence directory {phase['evidence_dir']}"
-    runtime = (repo_root / ".dev-runtime" / "phase40b-r1").resolve()
-    if resolved.is_relative_to(runtime):
+    runtime_roots = (
+        dev_runtime._trusted_runtime_root(repo_root).resolve(),
+        (repo_root / ".dev-runtime" / "phase40b-r1").resolve(),
+    )
+    if any(resolved.is_relative_to(runtime) for runtime in runtime_roots):
         return "refusing to write into the development runtime"
     return None
 

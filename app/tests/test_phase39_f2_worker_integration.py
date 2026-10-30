@@ -109,7 +109,9 @@ def stack(tmp_path: Path, monkeypatch, supervisor_root):
     monkeypatch.setattr(worker, "get_db_session", get_db_session)
     # Test-only identity fixture; the Supervisor selection stays real.
     monkeypatch.setattr(
-        worker, "_one_shot_worker_identity_attestation", lambda: state["identity"]
+        worker,
+        "_one_shot_worker_identity_attestation",
+        lambda *_args: state["identity"],
     )
     db = factory()
     try:

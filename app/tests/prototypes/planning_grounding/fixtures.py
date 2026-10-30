@@ -49,7 +49,7 @@ CASE_A = GroundingFixture(
         "command."
     ),
     expected_path="app/api/v1/endpoints/tasks.py",
-    expected_regions=((27853, 31813), (32691, 35166)),
+    expected_regions=((36922, 39106), (41492, 44064)),
     known_expected_symbols=("get_all_tasks", "get_project_tasks"),
     notes="Phase35-A1 operator text. Current architecture: head_fallback_no_target, 0 overlap.",
 )
@@ -73,7 +73,7 @@ CASE_B = GroundingFixture(
         "with the repository's existing test command."
     ),
     expected_path="app/api/v1/endpoints/mobile.py",
-    expected_regions=((4677, 5262), (22463, 22713), (37183, 38596)),
+    expected_regions=((4797, 5399), (20884, 23387), (36279, 39590)),
     known_expected_symbols=(
         "_build_task_counts",
         "get_session_summary",

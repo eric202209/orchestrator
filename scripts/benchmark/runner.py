@@ -61,8 +61,10 @@ def isolation_checks(config: dev_runtime.RuntimeConfig) -> list[dict[str, Any]]:
             "detail": config.queue_name,
         },
         {
-            "check": "runtime_root_inside_dev_runtime",
-            "passed": config.root.is_relative_to(config.repo_root / ".dev-runtime"),
+            "check": "runtime_root_is_canonical_external",
+            "passed": config.root == dev_runtime._trusted_runtime_root(
+                config.repo_root
+            ),
             "detail": str(config.root),
         },
         {

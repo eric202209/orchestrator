@@ -72,6 +72,7 @@ def env(tmp_path: Path, monkeypatch):
     """Disposable migrated SQLite wired into the Worker; gate enabled."""
 
     monkeypatch.setattr(settings, "ONE_SHOT_EXECUTION_ENABLED", True)
+    monkeypatch.setattr(settings, "CONTROLLED_WORKER_IDENTITY_REQUIRED", False)
     path = tmp_path / "f1c2.db"
     engine = _engine(path)
     Base.metadata.create_all(bind=engine)
@@ -93,7 +94,9 @@ def env(tmp_path: Path, monkeypatch):
     state = {"identity": VERIFIED, "supervisor": supervisor}
     monkeypatch.setattr(worker, "get_db_session", get_db_session)
     monkeypatch.setattr(
-        worker, "_one_shot_worker_identity_attestation", lambda: state["identity"]
+        worker,
+        "_one_shot_worker_identity_attestation",
+        lambda *_args: state["identity"],
     )
     monkeypatch.setattr(worker, "_one_shot_supervisor", lambda: state["supervisor"])
     db = factory()

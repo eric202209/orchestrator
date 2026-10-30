@@ -31,7 +31,7 @@ from scripts.benchmark.schema import (
 )
 
 REPO = Path(__file__).resolve().parents[2]
-DEV_RUNTIME = REPO / ".dev-runtime" / "phase40b-r1"
+DEV_RUNTIME = runner.dev_runtime._trusted_runtime_root(REPO)
 HAS_HISTORY = (DEV_RUNTIME / "database" / "orchestrator-dev.sqlite3").is_file()
 ENTERING = "855cb68cab1aaca0a02ec9f3d2b9c0e93bc94cc1"
 COMMITTED = "d9cea2c5b056e69ff14c00863015bd065cbadeba"
@@ -960,7 +960,7 @@ def test_isolation_checks_reject_production_shapes(tmp_path):
     assert failed == {
         "api_loopback",
         "dedicated_queue",
-        "runtime_root_inside_dev_runtime",
+        "runtime_root_is_canonical_external",
     }
 
 

@@ -31,10 +31,7 @@ def _fake_checkout(tmp_path: Path) -> dev_runtime.RuntimeConfig:
     repo_root = tmp_path / "checkout"
     repo_root.mkdir()
     (repo_root / "app").symlink_to(REPO_ROOT / "app", target_is_directory=True)
-    return dev_runtime.RuntimeConfig(
-        repo_root=repo_root,
-        root=repo_root / ".dev-runtime" / "phase40b-r1",
-    )
+    return dev_runtime.RuntimeConfig.for_repo(repo_root)
 
 
 def test_normal_redis_command_identity_is_owned(
@@ -164,6 +161,9 @@ def test_unrelated_process_on_redis_port_blocks_preflight(
             lambda _name: "/usr/bin/redis-server",
         )
         monkeypatch.setattr(dev_runtime, "_qdrant_binary", lambda _config: None)
+        monkeypatch.setattr(
+            dev_runtime, "_validate_worker_candidate_pin", lambda *_args: {}
+        )
         monkeypatch.setattr(
             dev_runtime,
             "_port_available",

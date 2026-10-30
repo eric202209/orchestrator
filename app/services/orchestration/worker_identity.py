@@ -98,6 +98,7 @@ DEFAULT_AFFECTED_MODULES = (
     "app.models",
     "app.services.orchestration",
     "app.services.orchestration.worker_identity",
+    "app.services.orchestration.controlled_worker_identity",
     "app.services.orchestration.invocation_provenance",
     "app.services.workspace.changeset_service",
     "app.services.session.session_lifecycle_service",
