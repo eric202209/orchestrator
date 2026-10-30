@@ -45,6 +45,11 @@ AUTHORIZED_OLLAMA_URL = "http://host.docker.internal:11434"
 INFERENCE_MODEL_ENV = "ORCHESTRATOR_DEV_OLLAMA_MODEL"
 INFERENCE_BACKEND = "openai_chat_completions"
 INFERENCE_CONTEXT_TOKENS = "32768"
+# Explicit invoking-shell opt-in for task-declared acceptance verification.
+# Only "1" enables it; unset or "0" keeps the application default (off).
+ACCEPTANCE_VERIFICATION_OPT_IN_ENV = "ORCHESTRATOR_DEV_TASK_ACCEPTANCE_VERIFICATION"
+ACCEPTANCE_VERIFICATION_APP_ENV = "TASK_ACCEPTANCE_VERIFICATION_ENABLED"
+ACCEPTANCE_VERIFICATION_OPT_IN_VALUES = {"0": "false", "1": "true"}
 OWNED_TOP_LEVEL_ENTRIES = {
     OWNER_FILE,
     STATE_FILE,
@@ -251,6 +256,7 @@ def build_environment(
         "LANGFUSE_SECRET_KEY": "",
         "TRACE_EXPORTER_BACKEND": "local_json",
         "WORKSPACE_REVIEW_POLICY": "hold_all",
+        ACCEPTANCE_VERIFICATION_APP_ENV: planned_task_acceptance_verification(),
     }
     model = inference_model()
     if model:
@@ -295,6 +301,25 @@ def inference_model() -> str:
     """Return the opt-in development model, or "" for the fail-closed stub."""
 
     return os.environ.get(INFERENCE_MODEL_ENV, "").strip()
+
+
+def task_acceptance_verification_opt_in() -> str | None:
+    """Return the raw invoking-shell opt-in, or None when it is unset."""
+
+    return os.environ.get(ACCEPTANCE_VERIFICATION_OPT_IN_ENV)
+
+
+def planned_task_acceptance_verification() -> str:
+    """Map the opt-in to the application flag, refusing unsupported values."""
+
+    opt_in = task_acceptance_verification_opt_in()
+    if opt_in is None:
+        return "false"
+    if opt_in not in ACCEPTANCE_VERIFICATION_OPT_IN_VALUES:
+        raise RuntimeToolError(
+            f"{ACCEPTANCE_VERIFICATION_OPT_IN_ENV} must be unset, 0, or 1"
+        )
+    return ACCEPTANCE_VERIFICATION_OPT_IN_VALUES[opt_in]
 
 
 def provider_summary() -> str:
@@ -391,6 +416,10 @@ def validate_isolation(config: RuntimeConfig, env: dict[str, str]) -> None:
         )
     if env.get("ONE_SHOT_EXECUTION_ENABLED", "").lower() != "false":
         raise RuntimeToolError("one-shot execution must remain disabled")
+    if env.get(ACCEPTANCE_VERIFICATION_APP_ENV) not in {"true", "false"}:
+        raise RuntimeToolError(
+            f"{ACCEPTANCE_VERIFICATION_APP_ENV} must be exactly true or false"
+        )
     if inference:
         if (
             env.get("PLANNING_PROVIDER") != "direct_openai_compatible"
@@ -604,7 +633,30 @@ def preflight(config: RuntimeConfig) -> dict[str, Any]:
         "redis_binary": redis_binary,
         "qdrant_binary": qdrant_binary,
         "qdrant_mode": "isolated_process" if qdrant_binary else "disabled_no_binary",
+        "task_acceptance_verification": {
+            "opt_in_env": ACCEPTANCE_VERIFICATION_OPT_IN_ENV,
+            "opt_in_value": task_acceptance_verification_opt_in(),
+            "planned_task_acceptance_verification": env[
+                ACCEPTANCE_VERIFICATION_APP_ENV
+            ],
+            "isolation_validated": True,
+            "basis": "planned_configuration_no_process_started",
+        },
     }
+
+
+def _proc_environ_value(pid: int, name: str) -> str | None:
+    """Return one variable from a process's start-time environment, if readable."""
+
+    try:
+        raw = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return None
+    prefix = f"{name}=".encode()
+    for item in raw.split(b"\0"):
+        if item.startswith(prefix):
+            return item[len(prefix) :].decode(errors="replace")
+    return None
 
 
 def _proc_snapshot(pid: int) -> tuple[int, int, str] | None:
@@ -1079,9 +1131,13 @@ def start_runtime(config: RuntimeConfig) -> dict[str, Any]:
     state["preflight"] = preflight_info
     state["started_at_epoch"] = time.time()
     state["error"] = None
-    _save_state(config, state)
     app_env = build_environment(config)
     validate_isolation(config, app_env)
+    state["task_acceptance_verification"] = {
+        "opt_in_value": task_acceptance_verification_opt_in(),
+        "configured": app_env[ACCEPTANCE_VERIFICATION_APP_ENV],
+    }
+    _save_state(config, state)
     try:
         redis = _which_required("redis-server")
         redis_command = [
@@ -1202,6 +1258,7 @@ def status_report(config: RuntimeConfig) -> dict[str, Any]:
     owner = _owner_record(config)
     state = _load_state(config, owner)
     processes: dict[str, Any] = {}
+    process_start: dict[str, str | None] = {}
     for name, record in state.get("processes", {}).items():
         identity, reason = _process_identity(record)
         processes[name] = {
@@ -1209,6 +1266,14 @@ def status_report(config: RuntimeConfig) -> dict[str, Any]:
             "pid": record.get("pid"),
             "detail": reason,
         }
+        if name in {"api", "worker"}:
+            # Read only from a process whose ownership was just proven.
+            process_start[name] = (
+                _proc_environ_value(int(record["pid"]), ACCEPTANCE_VERIFICATION_APP_ENV)
+                if identity == "owned"
+                else None
+            )
+    recorded = state.get("task_acceptance_verification") or {}
     return {
         "status": state.get("status", "unknown"),
         "owned": True,
@@ -1229,6 +1294,13 @@ def status_report(config: RuntimeConfig) -> dict[str, Any]:
         "worker": config.worker_name,
         "provider": provider_summary(),
         "processes": processes,
+        "task_acceptance_verification": {
+            "configured": recorded.get("configured"),
+            "opt_in_value": recorded.get("opt_in_value"),
+            "process_start": process_start,
+            "process_start_basis": "/proc/<pid>/environ of owned api/worker; null when not running",
+            "effective_per_task": "established only by each task's persisted completion verdict",
+        },
     }
 
 

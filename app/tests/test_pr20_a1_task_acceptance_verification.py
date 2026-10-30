@@ -30,8 +30,14 @@ from app.tests.test_phase36_maint_gr7_candidate_semantic_verification_authority 
     _candidate_project,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-PR17_EVIDENCE = REPO_ROOT / "docs/roadmap/reports/evidence/product-recovery-17"
+# Tracked copy of PR17 evidence candidate-c.patch (docs/ is not in git); the
+# digest is the one recorded in the PR17 evidence SHA256SUMS.
+CANDIDATE_C_PATCH = (
+    Path(__file__).resolve().parent / "fixtures/pr20_a1_candidate_c.patch"
+)
+CANDIDATE_C_PATCH_SHA256 = (
+    "6ab6ffc62344c1b14c956b6d45c0783531cabdf17ae5d63a45fce79cc3680f2e"
+)
 
 # D2 C1 / Task 31 exact task text (sha256 0f56a25a…, PR17 benchmark-identity).
 TASK31_PROMPT = (
@@ -176,7 +182,8 @@ def _task31_project(tmp_path: Path) -> Path:
 
 def _apply_candidate_c(root: Path) -> None:
     removed, added = [], []
-    patch = (PR17_EVIDENCE / "candidate-c.patch").read_text(encoding="utf-8")
+    patch = CANDIDATE_C_PATCH.read_text(encoding="utf-8")
+    assert _sha256(patch) == CANDIDATE_C_PATCH_SHA256
     for line in patch.splitlines():
         if line.startswith("-") and not line.startswith("---"):
             removed.append(line[1:])

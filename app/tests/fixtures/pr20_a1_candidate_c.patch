@@ -1,0 +1,10 @@
+--- a/dataflow/normalize.py
++++ b/dataflow/normalize.py
+@@ -14,7 +14,7 @@ def normalize_records(records: Iterable[dict]) -> List[dict]:
+     latest: Dict[str, dict] = {}
+     for record in records:
+-        key = record["id"]
++        key = normalize_id(record["id"])
+         current = latest.get(key)
+         if current is None or record["updated_at"] >= current["updated_at"]:
+             latest[key] = {**record, "id": normalize_id(record["id"])}
