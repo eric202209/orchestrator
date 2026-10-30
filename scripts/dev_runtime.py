@@ -15,6 +15,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
@@ -50,6 +52,13 @@ INFERENCE_CONTEXT_TOKENS = "32768"
 ACCEPTANCE_VERIFICATION_OPT_IN_ENV = "ORCHESTRATOR_DEV_TASK_ACCEPTANCE_VERIFICATION"
 ACCEPTANCE_VERIFICATION_APP_ENV = "TASK_ACCEPTANCE_VERIFICATION_ENABLED"
 ACCEPTANCE_VERIFICATION_OPT_IN_VALUES = {"0": "false", "1": "true"}
+REDIS_STARTUP_DIAGNOSTICS_OPT_IN_ENV = "ORCHESTRATOR_DEV_REDIS_STARTUP_DIAGNOSTICS"
+REDIS_DIAGNOSTICS_MAX_RECORDS = 256
+REDIS_DIAGNOSTICS_MAX_RECORD_BYTES = 2048
+REDIS_DIAGNOSTICS_MAX_FILE_BYTES = (
+    REDIS_DIAGNOSTICS_MAX_RECORDS * REDIS_DIAGNOSTICS_MAX_RECORD_BYTES
+)
+REDIS_DIAGNOSTICS_MAX_CMDLINE_CHARS = 512
 OWNED_TOP_LEVEL_ENTRIES = {
     OWNER_FILE,
     STATE_FILE,
@@ -676,20 +685,433 @@ def _proc_snapshot(pid: int) -> tuple[int, int, str] | None:
         return None
 
 
-def _process_identity(record: dict[str, Any]) -> tuple[str, str]:
+def _utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _read_proc_diagnostic_observation(pid: int) -> dict[str, Any]:
+    """Read identity inputs once and retain only an in-memory raw cmdline."""
+
+    observation: dict[str, Any] = {
+        "observed_monotonic_ns": time.monotonic_ns(),
+        "observed_wall_clock_utc": _utc_now(),
+        "proc_reads": {},
+        "proc_read_errors": {},
+        "identity_observation_source": "diagnostic_proc_reads",
+        "parent_pid": None,
+        "process_state": None,
+        "process_group": None,
+        "start_ticks": None,
+        "cmdline": "",
+        "raw_cmdline": b"",
+        "executable_target": None,
+        "snapshot": None,
+    }
+
+    stat_path = Path(f"/proc/{pid}/stat")
+    stat_start_ns = time.monotonic_ns()
+    stat_wall = _utc_now()
+    stat_read = {
+        "monotonic_start_ns": stat_start_ns,
+        "wall_clock_start_utc": stat_wall,
+        "monotonic_end_ns": None,
+    }
+    observation["proc_reads"]["stat"] = stat_read
+    try:
+        stat_text = stat_path.read_text()
+    except OSError as exc:
+        observation["proc_read_errors"]["stat"] = type(exc).__name__
+    else:
+        try:
+            close_paren = stat_text.rfind(")")
+            fields = stat_text[close_paren + 2 :].split()
+            observation["process_state"] = fields[0]
+            observation["parent_pid"] = int(fields[1])
+            observation["process_group"] = int(fields[2])
+            observation["start_ticks"] = int(fields[19])
+        except (ValueError, IndexError):
+            observation["proc_read_errors"]["stat_parse"] = "invalid_stat_format"
+    finally:
+        stat_read["monotonic_end_ns"] = time.monotonic_ns()
+
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    cmdline_start_ns = time.monotonic_ns()
+    cmdline_wall = _utc_now()
+    cmdline_read = {
+        "monotonic_start_ns": cmdline_start_ns,
+        "wall_clock_start_utc": cmdline_wall,
+        "monotonic_end_ns": None,
+    }
+    observation["proc_reads"]["cmdline"] = cmdline_read
+    try:
+        raw_cmdline = cmdline_path.read_bytes()
+    except OSError as exc:
+        observation["proc_read_errors"]["cmdline"] = type(exc).__name__
+    else:
+        observation["raw_cmdline"] = raw_cmdline
+        observation["cmdline"] = raw_cmdline.replace(b"\0", b" ").decode(
+            errors="replace"
+        )
+    finally:
+        cmdline_read["monotonic_end_ns"] = time.monotonic_ns()
+
+    exe_path = Path(f"/proc/{pid}/exe")
+    exe_start_ns = time.monotonic_ns()
+    exe_wall = _utc_now()
+    exe_read = {
+        "monotonic_start_ns": exe_start_ns,
+        "wall_clock_start_utc": exe_wall,
+        "monotonic_end_ns": None,
+    }
+    observation["proc_reads"]["exe"] = exe_read
+    try:
+        observation["executable_target"] = str(exe_path.readlink())
+    except OSError as exc:
+        observation["proc_read_errors"]["exe"] = type(exc).__name__
+    finally:
+        exe_read["monotonic_end_ns"] = time.monotonic_ns()
+
+    if not observation["proc_read_errors"].get("stat_parse") and not any(
+        name in observation["proc_read_errors"] for name in ("stat", "cmdline")
+    ):
+        observation["snapshot"] = (
+            observation["process_group"],
+            observation["start_ticks"],
+            observation["cmdline"],
+        )
+    return observation
+
+
+def _safe_command_basename(value: str) -> str:
+    basename = Path(value).name[:128]
+    lowered = basename.lower()
+    if (
+        basename
+        and all(char.isalnum() or char in "._+-" for char in basename)
+        and not any(
+            name in lowered
+            for name in (
+                "password",
+                "secret",
+                "token",
+                "credential",
+                "auth",
+                "key-file",
+            )
+        )
+    ):
+        return basename
+    return "[REDACTED_EXECUTABLE]"
+
+
+def _redacted_cmdline(raw_cmdline: bytes) -> tuple[str, bool]:
+    """Keep argv shape and safe flags while removing untrusted argument values."""
+
+    raw_args = [part.decode(errors="replace") for part in raw_cmdline.split(b"\0")]
+    args = [arg for arg in raw_args if arg]
+    if not args:
+        return "", False
+    if len(args) == 1 and len(args[0].split()) > 1:
+        # Redis can rewrite argv in place, leaving one padded process-title
+        # string instead of the original NUL-separated argument vector.
+        args = args[0].split()
+    safe_args = [_safe_command_basename(args[0])]
+    redact_next = False
+    sensitive_names = (
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "auth",
+        "credential",
+        "api-key",
+        "key-file",
+        "private-key",
+    )
+    safe_boolean_flags = {"--protected-mode", "--appendonly", "--daemonize"}
+    allow_port_value = False
+    allow_boolean_value = False
+    for arg in args[1:]:
+        if redact_next:
+            safe_args.append("[REDACTED]")
+            redact_next = False
+            allow_port_value = False
+            allow_boolean_value = False
+            continue
+        lowered = arg.lower()
+        if arg.startswith("-") and any(name in lowered for name in sensitive_names):
+            if "=" not in arg:
+                redact_next = True
+            safe_args.append(arg.split("=", 1)[0] + "=[REDACTED]")
+            allow_port_value = False
+            allow_boolean_value = False
+        elif arg.startswith("--") and "=" in arg:
+            safe_args.append(arg.split("=", 1)[0] + "=[REDACTED]")
+            allow_port_value = False
+            allow_boolean_value = False
+        elif arg.startswith("-") and all(
+            char.isalnum() or char in "-_" for char in arg
+        ):
+            safe_args.append(arg[:96])
+            allow_port_value = arg == "--port"
+            allow_boolean_value = arg in safe_boolean_flags
+        elif allow_port_value and arg.isdigit() and len(arg) <= 5:
+            safe_args.append(arg)
+            allow_port_value = False
+            allow_boolean_value = False
+        elif allow_boolean_value and arg in {"yes", "no"}:
+            safe_args.append(arg)
+            allow_boolean_value = False
+        elif arg == "127.0.0.1" or (
+            arg.startswith("127.0.0.1:") and arg[10:].isdigit()
+        ):
+            safe_args.append(arg)
+            allow_port_value = False
+            allow_boolean_value = False
+        else:
+            safe_args.append("[REDACTED]")
+            allow_port_value = False
+            allow_boolean_value = False
+    value = " ".join(safe_args)
+    truncated = len(value) > REDIS_DIAGNOSTICS_MAX_CMDLINE_CHARS
+    if truncated:
+        value = value[:REDIS_DIAGNOSTICS_MAX_CMDLINE_CHARS]
+    return value, truncated
+
+
+def _safe_executable_target(target: str | None) -> str | None:
+    if not target:
+        return None
+    basename = _safe_command_basename(target)
+    if basename == "[REDACTED_EXECUTABLE]":
+        return basename
+    lowered = target.lower()
+    sensitive_path = any(
+        name in lowered
+        for name in ("password", "secret", "token", "credential", "auth")
+    )
+    if (
+        not sensitive_path
+        and target.startswith(("/usr/", "/bin/", "/sbin/"))
+        and all(char.isalnum() or char in "/._+-" for char in target)
+    ):
+        return target[:256]
+    return f"[non-system]/{basename}"
+
+
+def _safe_expected_tokens(record: dict[str, Any]) -> list[str]:
+    safe_tokens = []
+    for item in record.get("expected_cmdline", [])[:8]:
+        token = str(item)
+        if token == "redis-server":
+            safe_tokens.append(token)
+        else:
+            safe_tokens.append("[REDACTED]")
+    return safe_tokens
+
+
+def _process_identity_result(
+    record: dict[str, Any], *, diagnostics_enabled: bool
+) -> tuple[str, str, dict[str, Any] | None]:
     pid = int(record["pid"])
-    snapshot = _proc_snapshot(pid)
+    observation = None
+    if diagnostics_enabled:
+        try:
+            observation = _read_proc_diagnostic_observation(pid)
+            snapshot = observation["snapshot"]
+        except Exception as exc:
+            # Diagnostic collection errors cannot grant ownership. Re-run the
+            # original bounded identity snapshot; label its separate timings.
+            fallback_start_ns = time.monotonic_ns()
+            fallback_wall = _utc_now()
+            snapshot = _proc_snapshot(pid)
+            fallback_end_ns = time.monotonic_ns()
+            fallback_cmdline = snapshot[2] if snapshot is not None else ""
+            fallback_raw_cmdline = b"\0".join(
+                item.encode(errors="replace") for item in fallback_cmdline.split()
+            )
+            observation = {
+                "observed_monotonic_ns": fallback_start_ns,
+                "observed_wall_clock_utc": fallback_wall,
+                "identity_observation_source": "legacy_snapshot_after_diagnostic_error",
+                "proc_reads": {
+                    "identity_fallback_snapshot": {
+                        "monotonic_start_ns": fallback_start_ns,
+                        "wall_clock_start_utc": fallback_wall,
+                        "monotonic_end_ns": fallback_end_ns,
+                    }
+                },
+                "proc_read_errors": {"diagnostic_collection": type(exc).__name__},
+                "snapshot": snapshot,
+                "raw_cmdline": fallback_raw_cmdline,
+                "cmdline": fallback_cmdline,
+                "process_group": snapshot[0] if snapshot is not None else None,
+                "start_ticks": snapshot[1] if snapshot is not None else None,
+                "parent_pid": None,
+                "process_state": None,
+                "executable_target": None,
+            }
+    else:
+        snapshot = _proc_snapshot(pid)
     if snapshot is None:
-        return "stopped", "process is absent"
+        return "stopped", "process is absent", observation
     process_group, start_ticks, cmdline = snapshot
     if start_ticks != int(record["start_ticks"]):
-        return "unknown", "PID start time changed"
+        return "unknown", "PID start time changed", observation
     if process_group != int(record["process_group"]):
-        return "unknown", "process group changed"
+        return "unknown", "process group changed", observation
     expected = [str(item) for item in record.get("expected_cmdline", [])]
     if not all(item in cmdline for item in expected):
-        return "unknown", "process command identity changed"
-    return "owned", "PID, start time, process group, and command identity match"
+        return "unknown", "process command identity changed", observation
+    return (
+        "owned",
+        "PID, start time, process group, and command identity match",
+        observation,
+    )
+
+
+def _write_redis_diagnostic(
+    diagnostic_path: Path,
+    record: dict[str, Any],
+    observation: dict[str, Any] | None,
+    identity: str,
+    reason: str,
+    *,
+    event: str,
+    child_process: subprocess.Popen[Any] | None,
+    readiness_result: bool | None,
+    readiness_observed: dict[str, Any] | None = None,
+) -> None:
+    """Append one redacted, bounded record; diagnostics never affect verdicts."""
+
+    if observation is None:
+        observation = {
+            "observed_monotonic_ns": time.monotonic_ns(),
+            "observed_wall_clock_utc": _utc_now(),
+            "proc_reads": {},
+            "proc_read_errors": {"observation": "unavailable"},
+            "identity_observation_source": "diagnostic_observation_unavailable",
+            "raw_cmdline": b"",
+            "executable_target": None,
+            "parent_pid": None,
+            "process_state": None,
+            "process_group": None,
+            "start_ticks": None,
+        }
+    try:
+        observed_cmdline, cmdline_truncated = _redacted_cmdline(
+            observation.get("raw_cmdline", b"")
+        )
+        executable_target = _safe_executable_target(
+            observation.get("executable_target")
+        )
+        child_status: dict[str, Any] = {
+            "available": child_process is not None,
+            "returncode": None,
+            "observed_monotonic_ns": None,
+            "observed_wall_clock_utc": None,
+        }
+        if child_process is not None:
+            child_status["observed_monotonic_ns"] = time.monotonic_ns()
+            child_status["observed_wall_clock_utc"] = _utc_now()
+            child_status["returncode"] = child_process.poll()
+        diagnostic = {
+            "schema": 1,
+            "event": event[:32],
+            "observed_monotonic_ns": observation.get("observed_monotonic_ns"),
+            "observed_wall_clock_utc": observation.get("observed_wall_clock_utc"),
+            "diagnostic_recorded_monotonic_ns": time.monotonic_ns(),
+            "identity_observation_source": observation.get(
+                "identity_observation_source", "diagnostic_proc_reads"
+            ),
+            "proc_reads": observation.get("proc_reads", {}),
+            "proc_read_errors": observation.get("proc_read_errors", {}),
+            "pid": int(record["pid"]),
+            "parent_pid": observation.get("parent_pid"),
+            "process_group": observation.get("process_group"),
+            "recorded_process_group": int(record["process_group"]),
+            "process_start_ticks": observation.get("start_ticks"),
+            "recorded_start_ticks": int(record["start_ticks"]),
+            "process_state": observation.get("process_state"),
+            "observed_cmdline": observed_cmdline,
+            "observed_cmdline_truncated": cmdline_truncated,
+            "expected_command_tokens": _safe_expected_tokens(record),
+            "executable_symlink_target": executable_target,
+            "child_poll_status": child_status,
+            "identity_classification": identity,
+            "identity_reason": reason,
+            "failure_reason": reason if identity != "owned" else None,
+            "redis_readiness_result": readiness_result,
+            "redis_readiness_observed": readiness_observed,
+        }
+        payload = json.dumps(diagnostic, separators=(",", ":")).encode() + b"\n"
+        if len(payload) > REDIS_DIAGNOSTICS_MAX_RECORD_BYTES:
+            diagnostic["observed_cmdline"] = "[REDACTED_TRUNCATED]"
+            diagnostic["observed_cmdline_truncated"] = True
+            payload = json.dumps(diagnostic, separators=(",", ":")).encode() + b"\n"
+        if len(payload) > REDIS_DIAGNOSTICS_MAX_RECORD_BYTES:
+            return
+
+        if diagnostic_path.parent.is_symlink():
+            return
+        flags = os.O_RDWR | os.O_CREAT | os.O_APPEND
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(diagnostic_path, flags, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+            file_stat = os.fstat(fd)
+            if not stat.S_ISREG(file_stat.st_mode):
+                return
+            if file_stat.st_nlink != 1:
+                return
+            current_size = file_stat.st_size
+            if current_size > REDIS_DIAGNOSTICS_MAX_FILE_BYTES:
+                return
+            existing = os.pread(fd, current_size, 0) if current_size else b""
+            if (
+                existing.count(b"\n") >= REDIS_DIAGNOSTICS_MAX_RECORDS
+                or current_size + len(payload) > REDIS_DIAGNOSTICS_MAX_FILE_BYTES
+                or (existing and not existing.endswith(b"\n"))
+            ):
+                return
+            offset = 0
+            while offset < len(payload):
+                offset += os.write(fd, payload[offset:])
+        finally:
+            os.close(fd)
+    except Exception:
+        # Retention is best-effort and is not part of the ownership decision.
+        return
+
+
+def _process_identity(
+    record: dict[str, Any],
+    *,
+    diagnostic_path: Path | None = None,
+    event: str = "identity_check",
+    child_process: subprocess.Popen[Any] | None = None,
+    readiness_result: bool | None = None,
+) -> tuple[str, str]:
+    enabled = diagnostic_path is not None and record.get("kind") == "redis"
+    identity, reason, observation = _process_identity_result(
+        record, diagnostics_enabled=enabled
+    )
+    if enabled and diagnostic_path is not None:
+        _write_redis_diagnostic(
+            diagnostic_path,
+            record,
+            observation,
+            identity,
+            reason,
+            event=event,
+            child_process=child_process,
+            readiness_result=readiness_result,
+        )
+    return identity, reason
 
 
 def _process_group_exists(process_group: int) -> bool:
@@ -791,8 +1213,18 @@ def _spawn(
     return process
 
 
-def _stop_one(record: dict[str, Any]) -> None:
-    identity, reason = _process_identity(record)
+def _stop_one(
+    record: dict[str, Any],
+    *,
+    diagnostic_path: Path | None = None,
+    child_process: subprocess.Popen[Any] | None = None,
+) -> None:
+    identity, reason = _process_identity(
+        record,
+        diagnostic_path=diagnostic_path,
+        event="cleanup_identity",
+        child_process=child_process,
+    )
     process_group = int(record["process_group"])
     if identity == "stopped":
         if _process_group_has_live_members(process_group):
@@ -830,15 +1262,45 @@ def _stop_one(record: dict[str, Any]) -> None:
         raise RuntimeToolError(f"{record['kind']} process group did not stop")
 
 
-def _stop_processes(config: RuntimeConfig, state: dict[str, Any]) -> list[str]:
+def _redis_diagnostic_path(config: RuntimeConfig, state: dict[str, Any]) -> Path | None:
+    settings = state.get("redis_startup_diagnostics")
+    if isinstance(settings, dict) and settings.get("enabled") is True:
+        return config.root / "logs" / "redis-startup-identity.jsonl"
+    return None
+
+
+def _configure_redis_startup_diagnostics(
+    state: dict[str, Any], *, enabled: bool
+) -> None:
+    if enabled:
+        state["redis_startup_diagnostics"] = {
+            "enabled": True,
+            "record_limit": REDIS_DIAGNOSTICS_MAX_RECORDS,
+            "record_bytes_limit": REDIS_DIAGNOSTICS_MAX_RECORD_BYTES,
+            "file_bytes_limit": REDIS_DIAGNOSTICS_MAX_FILE_BYTES,
+        }
+    else:
+        state.pop("redis_startup_diagnostics", None)
+
+
+def _stop_processes(
+    config: RuntimeConfig,
+    state: dict[str, Any],
+    child_processes: dict[str, subprocess.Popen[Any]] | None = None,
+) -> list[str]:
     errors: list[str] = []
     processes = state.get("processes", {})
+    diagnostic_path = _redis_diagnostic_path(config, state)
     for kind in ("api", "worker", "qdrant", "redis"):
         record = processes.get(kind)
         if not record:
             continue
         try:
-            _stop_one(record)
+            _stop_one(
+                record,
+                diagnostic_path=diagnostic_path if kind == "redis" else None,
+                child_process=(child_processes or {}).get(kind),
+            )
         except RuntimeToolError as exc:
             errors.append(str(exc))
     if not errors:
@@ -848,13 +1310,16 @@ def _stop_processes(config: RuntimeConfig, state: dict[str, Any]) -> list[str]:
 
 
 def _rollback_startup(
-    config: RuntimeConfig, state: dict[str, Any], exc: Exception
+    config: RuntimeConfig,
+    state: dict[str, Any],
+    exc: Exception,
+    child_processes: dict[str, subprocess.Popen[Any]] | None = None,
 ) -> list[str]:
     state["status"] = "startup_failed"
     state["error"] = f"{type(exc).__name__}: {exc}"
     state["failed_at_epoch"] = time.time()
     _save_state(config, state)
-    cleanup_errors = _stop_processes(config, state)
+    cleanup_errors = _stop_processes(config, state, child_processes)
     state["status"] = (
         "startup_failed_cleaned"
         if not cleanup_errors
@@ -928,17 +1393,54 @@ def _wait_until(
     kind: str,
     check: Callable[[], bool],
     timeout: float = STARTUP_TIMEOUT_SECONDS,
+    child_process: subprocess.Popen[Any] | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        record = (
-            _load_state(config, _owner_record(config)).get("processes", {}).get(kind)
+        state = _load_state(config, _owner_record(config))
+        record = state.get("processes", {}).get(kind)
+        diagnostic_path = (
+            _redis_diagnostic_path(config, state) if kind == "redis" else None
         )
         if record:
-            identity, reason = _process_identity(record)
+            if diagnostic_path is not None:
+                identity, reason, observation = _process_identity_result(
+                    record, diagnostics_enabled=True
+                )
+            else:
+                identity, reason = _process_identity(record)
+                observation = None
             if identity != "owned":
+                if diagnostic_path is not None:
+                    _write_redis_diagnostic(
+                        diagnostic_path,
+                        record,
+                        observation,
+                        identity,
+                        reason,
+                        event="startup_identity_poll",
+                        child_process=child_process,
+                        readiness_result=None,
+                    )
                 raise RuntimeToolError(f"{kind} failed during startup: {reason}")
-        if check():
+        ready = check()
+        if diagnostic_path is not None and record:
+            readiness_observed = {
+                "monotonic_ns": time.monotonic_ns(),
+                "wall_clock_utc": _utc_now(),
+            }
+            _write_redis_diagnostic(
+                diagnostic_path,
+                record,
+                observation,
+                identity,
+                reason,
+                event="startup_identity_poll",
+                child_process=child_process,
+                readiness_result=ready,
+                readiness_observed=readiness_observed,
+            )
+        if ready:
             return
         time.sleep(0.25)
     raise RuntimeToolError(f"{kind} did not become ready within {timeout:g} seconds")
@@ -1090,6 +1592,28 @@ def _redis_environment(config: RuntimeConfig) -> dict[str, str]:
     }
 
 
+def _redis_command(redis_binary: str, config: RuntimeConfig) -> list[str]:
+    return [
+        redis_binary,
+        "--bind",
+        "127.0.0.1",
+        "--protected-mode",
+        "yes",
+        "--port",
+        str(config.redis_port),
+        "--dir",
+        str(config.root / "redis"),
+        "--pidfile",
+        str(config.root / "redis" / "redis.pid"),
+        "--appendonly",
+        "no",
+        "--save",
+        "",
+        "--daemonize",
+        "no",
+    ]
+
+
 def _qdrant_environment(config: RuntimeConfig) -> dict[str, str]:
     env = _redis_environment(config)
     env.update(
@@ -1137,37 +1661,29 @@ def start_runtime(config: RuntimeConfig) -> dict[str, Any]:
         "opt_in_value": task_acceptance_verification_opt_in(),
         "configured": app_env[ACCEPTANCE_VERIFICATION_APP_ENV],
     }
+    _configure_redis_startup_diagnostics(
+        state,
+        enabled=os.environ.get(REDIS_STARTUP_DIAGNOSTICS_OPT_IN_ENV) == "1",
+    )
     _save_state(config, state)
+    child_processes: dict[str, subprocess.Popen[Any]] = {}
     try:
         redis = _which_required("redis-server")
-        redis_command = [
-            redis,
-            "--bind",
-            "127.0.0.1",
-            "--protected-mode",
-            "yes",
-            "--port",
-            str(config.redis_port),
-            "--dir",
-            str(config.root / "redis"),
-            "--pidfile",
-            str(config.root / "redis" / "redis.pid"),
-            "--appendonly",
-            "no",
-            "--save",
-            "",
-            "--daemonize",
-            "no",
-        ]
-        _spawn(
+        redis_process = _spawn(
             config,
             state,
             "redis",
-            redis_command,
+            _redis_command(redis, config),
             _redis_environment(config),
             ["redis-server"],
         )
-        _wait_until(config, "redis", lambda: _redis_ping(config.redis_port))
+        child_processes["redis"] = redis_process
+        _wait_until(
+            config,
+            "redis",
+            lambda: _redis_ping(config.redis_port),
+            child_process=redis_process,
+        )
 
         qdrant = _qdrant_binary(config)
         if qdrant:
@@ -1243,7 +1759,9 @@ def start_runtime(config: RuntimeConfig) -> dict[str, Any]:
         _save_state(config, state)
         return status_report(config)
     except Exception as exc:
-        cleanup_errors = _rollback_startup(config, state, exc)
+        cleanup_errors = _rollback_startup(
+            config, state, exc, child_processes=child_processes
+        )
         if cleanup_errors:
             raise RuntimeToolError(
                 f"startup failed ({exc}); owned-process cleanup was incomplete: {cleanup_errors}"
