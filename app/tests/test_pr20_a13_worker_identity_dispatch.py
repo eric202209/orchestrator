@@ -676,6 +676,14 @@ def test_celery_publish_boundary_rechecks_binding_and_preserves_default_policy(
         "inspect",
         lambda **_kwargs: SimpleNamespace(ping=lambda: {NODE: {"ok": "pong"}}),
     )
+    # The publish path reads the wall clock; pin it so the fixture approval
+    # window (NOW + 1 day) does not expire with real time.
+    verify_identity = controlled_worker_identity.verify_controlled_worker_identity
+    monkeypatch.setattr(
+        controlled_worker_identity,
+        "verify_controlled_worker_identity",
+        lambda **kwargs: verify_identity(**kwargs, now=NOW),
+    )
     body = (
         (),
         {
