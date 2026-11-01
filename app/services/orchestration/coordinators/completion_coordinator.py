@@ -617,6 +617,7 @@ class CompletionCoordinator:
             task_id,
             orchestration_state,
             completion_validation,
+            task_execution_id=ctx.task_execution_id,
         )
         db.commit()
 
@@ -721,6 +722,7 @@ class CompletionCoordinator:
                     task_id,
                     orchestration_state,
                     completion_validation,
+                    task_execution_id=ctx.task_execution_id,
                 )
                 db.commit()
 
@@ -781,6 +783,7 @@ class CompletionCoordinator:
                     task_id,
                     orchestration_state,
                     completion_validation,
+                    task_execution_id=ctx.task_execution_id,
                 )
                 db.commit()
                 if (
@@ -1034,6 +1037,7 @@ class CompletionCoordinator:
                 task_id,
                 orchestration_state,
                 completion_validation,
+                task_execution_id=ctx.task_execution_id,
             )
             db.commit()
             if not completion_validation.accepted:

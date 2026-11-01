@@ -101,6 +101,39 @@ def build_trace_export(
                 }
             )
 
+        acceptance = details.get("task_acceptance_evidence")
+        if event_type == "validation_result" and isinstance(acceptance, dict):
+            results = [
+                r for r in acceptance.get("results") or [] if isinstance(r, dict)
+            ]
+            checkpoint_ref = acceptance.get("checkpoint_ref") or {}
+            spans.append(
+                {
+                    "span_id": f"acceptance:{event.get('event_id')}",
+                    "kind": "event",
+                    "name": "task_acceptance_verification",
+                    "started_at": timestamp,
+                    "finished_at": timestamp,
+                    "status": str(details.get("status") or "recorded"),
+                    "duration_ms": 0,
+                    "attributes": {
+                        "schema": acceptance.get("schema"),
+                        "task_execution_id": acceptance.get("task_execution_id"),
+                        "verdict_stage": acceptance.get("verdict_stage"),
+                        "commands": [r.get("command") for r in results],
+                        "outcomes": [r.get("outcome") for r in results],
+                        "returncodes": [r.get("returncode") for r in results],
+                        "refused_count": acceptance.get("refused_count"),
+                        "checkpoint_state_snapshot_sha256": checkpoint_ref.get(
+                            "state_snapshot_sha256"
+                        ),
+                        "checkpoint_projected_before_commit": checkpoint_ref.get(
+                            "projected_before_commit"
+                        ),
+                    },
+                }
+            )
+
         failure_envelope = details.get("failure_envelope")
         if isinstance(failure_envelope, dict):
             spans.append(

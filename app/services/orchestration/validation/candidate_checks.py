@@ -454,9 +454,41 @@ def select_candidate_verification(
     )
 
 
+_COMMAND_OUTPUT_LIMIT = 12000
+
+
 def _run_command(
     *, project_dir: Path, command: str, timeout_seconds: int
 ) -> tuple[int | None, str]:
+    returncode, output = _execute_command(
+        project_dir=project_dir, command=command, timeout_seconds=timeout_seconds
+    )
+    if returncode is None:
+        return returncode, _with_timeout_marker(output, timeout_seconds)
+    return returncode, output[:_COMMAND_OUTPUT_LIMIT]
+
+
+def _with_timeout_marker(output: str, timeout_seconds: int) -> str:
+    return (output + f"\nTimed out after {timeout_seconds}s").strip()
+
+
+def _combined_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    # TimeoutExpired carries raw bytes even under text=True; decode, never repr.
+    parts = (
+        part.decode("utf-8", errors="replace") if isinstance(part, bytes) else part
+        for part in (stdout, stderr)
+    )
+    return "\n".join(part.strip() for part in parts if part and part.strip())
+
+
+def _execute_command(
+    *, project_dir: Path, command: str, timeout_seconds: int
+) -> tuple[int | None, str]:
+    """Run ``command`` and return its complete combined output (uncapped).
+
+    A None returncode means the command timed out; the output is then only what
+    was captured before the deadline, without the runner's timeout marker.
+    """
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTEST_ADDOPTS"] = (
@@ -475,16 +507,25 @@ def _run_command(
                 env=env,
             )
         except subprocess.TimeoutExpired as exc:
-            output = "\n".join(
-                str(part or "") for part in (exc.stdout, exc.stderr) if part
-            )
-            return None, (output + f"\nTimed out after {timeout_seconds}s").strip()
-    output = "\n".join(
-        part.strip()
-        for part in (completed.stdout, completed.stderr)
-        if part and part.strip()
-    )
-    return completed.returncode, output[:12000]
+            return None, _combined_output(exc.stdout, exc.stderr)
+    return completed.returncode, _combined_output(completed.stdout, completed.stderr)
+
+
+def _acceptance_output_metadata(output: str, *, retained: bool) -> dict[str, Any]:
+    # Measured over the decoded, combined stdout/stderr text the command produced
+    # (never raw process bytes, never runner-added markers).  ``retained_chars``
+    # is the excerpt the checkpoint finding keeps; 0 with ``chars`` > 0 and
+    # ``truncated`` false means the output was intentionally not retained.
+    encoded = output.encode("utf-8", errors="replace")
+    retained_chars = min(len(output), _COMMAND_OUTPUT_LIMIT) if retained else 0
+    return {
+        "scope": "combined_stdout_stderr_text",
+        "chars": len(output),
+        "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+        "retained_chars": retained_chars,
+        "truncated": retained and retained_chars < len(output),
+    }
 
 
 def _task_acceptance_finding(
@@ -547,7 +588,12 @@ def _run_task_acceptance(
     for admitted in extraction.admitted:
         if python is None:
             results.append(
-                {"command": admitted.text, "executed": False, "outcome": "not_run"}
+                {
+                    "command": admitted.text,
+                    "executed": False,
+                    "outcome": "not_run",
+                    "infrastructure_failure": "candidate_python_unavailable",
+                }
             )
             continue
         command = " ".join(
@@ -565,17 +611,27 @@ def _run_task_acceptance(
             output = ""
         else:
             commands_run.append(command)
-            returncode, output = _run_command(
+            returncode, full_output = _execute_command(
                 project_dir=project_dir,
                 command=command,
                 timeout_seconds=timeout_seconds,
             )
+            # Passing output is not retained; failure output is capped.
+            result["output"] = _acceptance_output_metadata(
+                full_output, retained=returncode != 0
+            )
+            output = full_output[: result["output"]["retained_chars"]]
+            if returncode is None:
+                output = _with_timeout_marker(output, timeout_seconds)
         result["executed"] = True
         result["returncode"] = returncode
         if returncode == 0:
             result["outcome"] = "passed"
         elif returncode is None:
             result["outcome"] = "infrastructure_failure"
+            if "covered_by" not in result:
+                # _execute_command returns None only for TimeoutExpired.
+                result["infrastructure_failure"] = "timeout"
         else:
             result["outcome"] = "failed"
         results.append(result)

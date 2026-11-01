@@ -1337,6 +1337,86 @@ def save_orchestration_checkpoint(
         )
 
 
+TASK_ACCEPTANCE_EVIDENCE_SCHEMA = "task_acceptance_evidence/v1"
+_ACCEPTANCE_EVIDENCE_TEXT_LIMIT = 500
+_ACCEPTANCE_EVIDENCE_ITEM_LIMIT = 20
+_ACCEPTANCE_OUTPUT_KEYS = (
+    "scope",
+    "chars",
+    "bytes",
+    "sha256",
+    "retained_chars",
+    "truncated",
+)
+
+
+def _bounded_evidence_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return str(value)[:_ACCEPTANCE_EVIDENCE_TEXT_LIMIT]
+
+
+def _task_acceptance_evidence(
+    verdict_payload: Dict[str, Any],
+    *,
+    session_id: int,
+    task_id: int,
+    task_execution_id: Optional[int],
+) -> Optional[Dict[str, Any]]:
+    """Bounded, versioned projection of the verdict's acceptance result.
+
+    Never carries command output (metadata only) or the resolved interpreter
+    path (``executed_command`` stays in the checkpoint's raw acceptance
+    result).  ``task_execution_id`` is the caller's attempt context; None
+    means the caller supplied none.
+    """
+    acceptance = (verdict_payload.get("details") or {}).get(
+        "task_acceptance_verification"
+    )
+    if not isinstance(acceptance, dict):
+        return None
+    results = [r for r in acceptance.get("results") or [] if isinstance(r, dict)]
+    refused = [r for r in acceptance.get("refused") or [] if isinstance(r, dict)]
+    projected: List[Dict[str, Any]] = []
+    for result in results[:_ACCEPTANCE_EVIDENCE_ITEM_LIMIT]:
+        item: Dict[str, Any] = {
+            "command": _bounded_evidence_text(result.get("command")),
+            # Results exist only for admitted commands; refusals are below.
+            "admitted": True,
+            "executed": bool(result.get("executed")),
+            "outcome": _bounded_evidence_text(result.get("outcome")),
+            "returncode": result.get("returncode"),
+        }
+        for key in ("covered_by", "infrastructure_failure"):
+            if key in result:
+                item[key] = _bounded_evidence_text(result[key])
+        output = result.get("output")
+        if isinstance(output, dict):
+            item["output"] = {key: output.get(key) for key in _ACCEPTANCE_OUTPUT_KEYS}
+        projected.append(item)
+    return {
+        "schema": TASK_ACCEPTANCE_EVIDENCE_SCHEMA,
+        "session_id": session_id,
+        "task_id": task_id,
+        "task_execution_id": task_execution_id,
+        "verdict_stage": verdict_payload.get("stage"),
+        "verdict_status": verdict_payload.get("status"),
+        "recorded_at": datetime.now(UTC).isoformat(),
+        "section_found": bool(acceptance.get("section_found")),
+        "admitted_count": len(acceptance.get("admitted") or []),
+        "refused_count": len(refused),
+        "results": projected,
+        "results_omitted": max(0, len(results) - _ACCEPTANCE_EVIDENCE_ITEM_LIMIT),
+        "refused": [
+            {
+                "command": _bounded_evidence_text(r.get("command")),
+                "reason": _bounded_evidence_text(r.get("reason")),
+            }
+            for r in refused[:_ACCEPTANCE_EVIDENCE_ITEM_LIMIT]
+        ],
+    }
+
+
 def record_validation_verdict(
     db: Session,
     session_id: int,
@@ -1346,19 +1426,54 @@ def record_validation_verdict(
     *,
     step_number: Optional[int] = None,
     parent_event_id: Optional[str] = None,
+    task_execution_id: Optional[int] = None,
 ) -> None:
+    verdict_payload = verdict.to_dict()
+    acceptance_evidence = _task_acceptance_evidence(
+        verdict_payload,
+        session_id=session_id,
+        task_id=task_id,
+        task_execution_id=task_execution_id,
+    )
+    if acceptance_evidence is not None:
+        # to_dict() copies details, so the shared verdict is never stamped.
+        verdict_payload["details"]["task_acceptance_evidence"] = acceptance_evidence
+    checkpoint_type = f"validation_{verdict.stage}"
+    state_snapshot = json.dumps(verdict_payload)
     db.add(
         TaskCheckpoint(
             task_id=task_id,
             session_id=session_id,
-            checkpoint_type=f"validation_{verdict.stage}",
+            checkpoint_type=checkpoint_type,
             step_number=step_number,
             description=f"{verdict.stage}:{verdict.status}",
-            state_snapshot=json.dumps(verdict.to_dict()),
+            state_snapshot=state_snapshot,
         )
     )
-    verdict_payload = verdict.to_dict()
     orchestration_state.validation_history.append(verdict_payload)
+    event_details: Dict[str, Any] = {
+        "stage": verdict.stage,
+        "status": verdict.status,
+        "profile": verdict.profile,
+        "step_number": step_number,
+        "reasons": verdict.reasons[:10],
+        "confidence": verdict.confidence,
+    }
+    if acceptance_evidence is not None:
+        # The journal is appended before the caller commits the checkpoint, so
+        # this projection is never itself proof of a committed verdict; the
+        # digest identifies the authoritative checkpoint row if it committed.
+        event_details["task_acceptance_evidence"] = {
+            **acceptance_evidence,
+            "checkpoint_ref": {
+                "authority": "task_checkpoint",
+                "checkpoint_type": checkpoint_type,
+                "state_snapshot_sha256": hashlib.sha256(
+                    state_snapshot.encode("utf-8")
+                ).hexdigest(),
+                "projected_before_commit": True,
+            },
+        }
     try:
         event = append_orchestration_event(
             project_dir=control_state_of(orchestration_state),
@@ -1366,14 +1481,7 @@ def record_validation_verdict(
             task_id=task_id,
             event_type=EventType.VALIDATION_RESULT,
             parent_event_id=parent_event_id,
-            details={
-                "stage": verdict.stage,
-                "status": verdict.status,
-                "profile": verdict.profile,
-                "step_number": step_number,
-                "reasons": verdict.reasons[:10],
-                "confidence": verdict.confidence,
-            },
+            details=event_details,
         )
         write_orchestration_state_snapshot(
             project_dir=orchestration_state.project_dir,

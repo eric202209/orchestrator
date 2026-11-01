@@ -522,6 +522,9 @@ def test_task31_candidate_c_passes_acceptance_tests(tmp_path):
     run = _run(root, ["dataflow/normalize.py"], AGGREGATE_ONLY_PLAN)
 
     assert _rule_ids(run) == []
+    # PR20-RESET-02: passing output is not retained; only its metadata is.
+    output = run.task_acceptance["results"][0].pop("output")
+    assert output["chars"] > 0 and output["retained_chars"] == 0
     assert run.task_acceptance["results"] == [
         {
             "command": "python -m pytest -q",
