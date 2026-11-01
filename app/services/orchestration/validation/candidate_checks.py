@@ -495,7 +495,11 @@ def _execute_command(
     env["PYTEST_ADDOPTS"] = (
         str(env.get("PYTEST_ADDOPTS") or "") + " -p no:cacheprovider"
     ).strip()
-    with tempfile.TemporaryDirectory(prefix="candidate-validation-pycache-") as cache:
+    # A cleanup failure after the process ran must not discard its real result;
+    # creation failures still raise (the process never started).
+    with tempfile.TemporaryDirectory(
+        prefix="candidate-validation-pycache-", ignore_cleanup_errors=True
+    ) as cache:
         env["PYTHONPYCACHEPREFIX"] = cache
         try:
             completed = subprocess.run(
@@ -513,6 +517,17 @@ def _execute_command(
         except subprocess.TimeoutExpired as exc:
             return None, _combined_output(exc.stdout, exc.stderr)
     return completed.returncode, _combined_output(completed.stdout, completed.stderr)
+
+
+def _process_start_failure_evidence(exc: OSError) -> dict[str, Any]:
+    # The process never started: no return code or output exists.  Never
+    # str(exc): it names host paths (executable, shebang target, cwd).
+    return {
+        "returncode": None,
+        "output": "",
+        "infrastructure_failure": "process_start_failure",
+        "error": {"type": type(exc).__name__, "errno": errno.errorcode.get(exc.errno)},
+    }
 
 
 def _acceptance_output_metadata(output: str, *, retained: bool) -> dict[str, Any]:
@@ -739,15 +754,35 @@ def validate_candidate_delta(
     static_policy = discover_candidate_static_policy(project_dir)
     commands_run: list[str] = []
     focused_returncode: int | None = None
+    start_error: OSError | None = None
     if selection.command:
         commands_run.append(selection.command)
-        returncode, output = _run_command(
-            project_dir=project_dir,
-            command=selection.command,
-            timeout_seconds=timeout_seconds,
-        )
+        try:
+            returncode, output = _run_command(
+                project_dir=project_dir,
+                command=selection.command,
+                timeout_seconds=timeout_seconds,
+            )
+        except OSError as exc:
+            start_error, returncode, output = exc, None, ""
         focused_returncode = returncode
-        if returncode is None:
+        if start_error is not None:
+            findings.append(
+                CandidateFinding(
+                    rule_id="focused_pytest_infrastructure_failure",
+                    source="pytest",
+                    category="infrastructure",
+                    severity="error",
+                    attribution="unknown",
+                    repairable=False,
+                    message="Focused candidate pytest could not be started",
+                    evidence={
+                        "command": selection.command,
+                        **_process_start_failure_evidence(start_error),
+                    },
+                )
+            )
+        elif returncode is None:
             findings.append(
                 CandidateFinding(
                     rule_id="focused_pytest_infrastructure_failure",
@@ -787,7 +822,8 @@ def validate_candidate_delta(
         task_acceptance = _run_task_acceptance(
             project_dir=project_dir,
             task_prompt=task_prompt,
-            focused_command=selection.command,
+            # A never-started focused run is not reusable acceptance evidence.
+            focused_command=selection.command if start_error is None else "",
             focused_returncode=focused_returncode,
             timeout_seconds=timeout_seconds,
             findings=findings,
@@ -842,11 +878,30 @@ def validate_candidate_delta(
                 )
             for source, rule_id, command in static_commands:
                 commands_run.append(command)
-                returncode, output = _run_command(
-                    project_dir=project_dir,
-                    command=command,
-                    timeout_seconds=timeout_seconds,
-                )
+                try:
+                    returncode, output = _run_command(
+                        project_dir=project_dir,
+                        command=command,
+                        timeout_seconds=timeout_seconds,
+                    )
+                except OSError as exc:
+                    findings.append(
+                        CandidateFinding(
+                            rule_id=f"{source}_infrastructure_failure",
+                            source=source,
+                            category="infrastructure",
+                            severity="error",
+                            attribution="unknown",
+                            repairable=False,
+                            message=f"Candidate-scoped {source} could not be started",
+                            evidence={
+                                "command": command,
+                                **_process_start_failure_evidence(exc),
+                                "paths": list(python_paths),
+                            },
+                        )
+                    )
+                    continue
                 if returncode == 0:
                     continue
                 tool_unavailable = (
@@ -892,12 +947,35 @@ def validate_candidate_delta(
                 quoted_paths = " ".join(shlex.quote(path) for path in changed_paths)
                 command = f"git diff --check -- {quoted_paths}"
                 commands_run.append(command)
-                returncode, output = _run_command(
-                    project_dir=project_dir,
-                    command=command,
-                    timeout_seconds=timeout_seconds,
-                )
-                if returncode != 0:
+                start_error = None
+                try:
+                    returncode, output = _run_command(
+                        project_dir=project_dir,
+                        command=command,
+                        timeout_seconds=timeout_seconds,
+                    )
+                except OSError as exc:
+                    start_error = exc
+                if start_error is not None:
+                    findings.append(
+                        CandidateFinding(
+                            rule_id="git_diff_check_infrastructure_failure",
+                            source="git_diff_check",
+                            category="infrastructure",
+                            severity="error",
+                            attribution="unknown",
+                            repairable=False,
+                            message=(
+                                "Candidate-scoped git diff check could not be started"
+                            ),
+                            evidence={
+                                "command": command,
+                                **_process_start_failure_evidence(start_error),
+                                "paths": list(changed_paths),
+                            },
+                        )
+                    )
+                elif returncode != 0:
                     findings.append(
                         CandidateFinding(
                             rule_id="candidate_diff_check_failed",
