@@ -553,6 +553,7 @@ def _task_acceptance_finding(
     category: str,
     message: str,
     evidence: dict[str, Any],
+    severity: str = "error",
 ) -> CandidateFinding:
     # No baseline differential exists for task-wide acceptance commands, so a
     # failure cannot be attributed to the candidate and stays fail-closed.
@@ -560,7 +561,7 @@ def _task_acceptance_finding(
         rule_id=rule_id,
         source="task_acceptance",
         category=category,
-        severity="error",
+        severity=severity,
         attribution="unknown",
         repairable=False,
         message=message,
@@ -593,6 +594,27 @@ def _run_task_acceptance(
                 evidence=dict(refusal),
             )
         )
+    if extraction.section_found and not (extraction.admitted or extraction.refused):
+        # Policy B: declared acceptance that names no verifiable pytest command
+        # is visible but not blocking.  A missing section stays silent.
+        findings.append(
+            _task_acceptance_finding(
+                rule_id="task_acceptance_no_verifiable_commands",
+                category="task_contract",
+                severity="warning",
+                message=(
+                    "Task acceptance criteria name no verifiable pytest command; "
+                    "acceptance was not verified"
+                ),
+                evidence={
+                    "section_found": True,
+                    "extracted_count": len(extraction.extracted),
+                    "admitted_count": 0,
+                    "refused_count": 0,
+                    "ignored_count": len(extraction.ignored),
+                },
+            )
+        )
     results: list[dict[str, Any]] = []
     python = None
     if extraction.admitted:
@@ -623,8 +645,8 @@ def _run_task_acceptance(
             "executed_command": command,
         }
         if focused_command and command == focused_command:
-            # Identical argv already ran as the focused selection; its result
-            # (and any finding) is authoritative.
+            # Identical argv already ran as the focused selection; reuse its
+            # result instead of running the command again.
             returncode = focused_returncode
             result["covered_by"] = "focused_test_selection"
             output = ""
@@ -678,13 +700,14 @@ def _run_task_acceptance(
             result["outcome"] = "passed"
         elif returncode is None:
             result["outcome"] = "infrastructure_failure"
-            if "covered_by" not in result:
-                # _execute_command returns None only for TimeoutExpired.
-                result["infrastructure_failure"] = "timeout"
+            # Only a timeout yields None here: a never-started focused run is
+            # not reused and a never-started acceptance run returned above.
+            result["infrastructure_failure"] = "timeout"
         else:
             result["outcome"] = "failed"
         results.append(result)
-        if "covered_by" in result or returncode == 0:
+        if returncode == 0 or ("covered_by" in result and returncode is None):
+            # A reused timeout is already the focused infrastructure finding.
             continue
         evidence = {
             "command": command,
@@ -692,6 +715,10 @@ def _run_task_acceptance(
             "returncode": returncode,
             "output": output,
         }
+        if "covered_by" in result:
+            # Same classification as an independent failure; the output stays
+            # on the focused finding.
+            evidence["covered_by"] = result["covered_by"]
         if returncode is None:
             findings.append(
                 _task_acceptance_finding(
