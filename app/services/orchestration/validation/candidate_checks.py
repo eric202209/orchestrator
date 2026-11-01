@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 from dataclasses import dataclass, field
+import errno
 import hashlib
 import json
 import os
@@ -473,7 +474,7 @@ def _with_timeout_marker(output: str, timeout_seconds: int) -> str:
 
 
 def _combined_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
-    # TimeoutExpired carries raw bytes even under text=True; decode, never repr.
+    # TimeoutExpired carries raw bytes even in text mode; decode, never repr.
     parts = (
         part.decode("utf-8", errors="replace") if isinstance(part, bytes) else part
         for part in (stdout, stderr)
@@ -502,7 +503,10 @@ def _execute_command(
                 cwd=project_dir,
                 shell=False,
                 capture_output=True,
-                text=True,
+                # Same UTF-8 replacement decoding as the timeout path: invalid
+                # output bytes never mask the process's real return code.
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout_seconds,
                 env=env,
             )
@@ -611,11 +615,41 @@ def _run_task_acceptance(
             output = ""
         else:
             commands_run.append(command)
-            returncode, full_output = _execute_command(
-                project_dir=project_dir,
-                command=command,
-                timeout_seconds=timeout_seconds,
-            )
+            try:
+                returncode, full_output = _execute_command(
+                    project_dir=project_dir,
+                    command=command,
+                    timeout_seconds=timeout_seconds,
+                )
+            except OSError as exc:
+                # The process never started: no return code or output exists.
+                result.update(
+                    executed=False,
+                    returncode=None,
+                    outcome="infrastructure_failure",
+                    infrastructure_failure="process_start_failure",
+                )
+                results.append(result)
+                findings.append(
+                    _task_acceptance_finding(
+                        rule_id="task_acceptance_pytest_infrastructure_failure",
+                        category="infrastructure",
+                        message="Task acceptance pytest could not be started",
+                        evidence={
+                            "command": command,
+                            "task_command": admitted.text,
+                            "returncode": None,
+                            "output": "",
+                            "infrastructure_failure": "process_start_failure",
+                            # Never str(exc): it names the host executable path.
+                            "error": {
+                                "type": type(exc).__name__,
+                                "errno": errno.errorcode.get(exc.errno),
+                            },
+                        },
+                    )
+                )
+                continue
             # Passing output is not retained; failure output is capped.
             result["output"] = _acceptance_output_metadata(
                 full_output, retained=returncode != 0
