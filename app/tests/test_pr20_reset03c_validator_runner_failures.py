@@ -262,28 +262,37 @@ def test_full_validator_with_broken_interpreter_rejects(tmp_path):
 # --- F-02: temporary-directory cleanup after a completed run -----------------
 
 
-def _cleanup_fails_after_removal(monkeypatch) -> None:
-    """Make TemporaryDirectory cleanup report EBUSY through its real handler."""
+def _cleanup_fails_after_removal(monkeypatch) -> list[str]:
+    """Make removal of the runner's pycache dir fail with EBUSY.
 
-    real_rmtree = tempfile._rmtree
+    Only public ``os.rmdir`` is patched; shutil.rmtree and TemporaryDirectory's
+    own cleanup handler decide whether the error propagates.  Private tempfile
+    internals differ between CPython builds (e.g. distro-patched stdlib).
+    """
 
-    def _rmtree(path, onexc):
-        real_rmtree(path, onexc=onexc)
-        # shutil invokes onexc inside its except block; mirror that.
-        try:
-            raise OSError(errno.EBUSY, "Device or resource busy")
-        except OSError as exc:
-            onexc(os.rmdir, path, exc)
+    real_rmdir = os.rmdir
+    busy: list[str] = []
 
-    monkeypatch.setattr(tempfile, "_rmtree", _rmtree)
+    def _rmdir(path, *args, **kwargs):
+        if os.path.basename(path).startswith("candidate-validation-pycache-"):
+            busy.append(os.fspath(path))
+            raise OSError(errno.EBUSY, "Device or resource busy", path)
+        return real_rmdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rmdir", _rmdir)
+    return busy
 
 
 def test_cleanup_failure_keeps_completed_acceptance_result(tmp_path, monkeypatch):
     root = _project(tmp_path, "ok")
-    _cleanup_fails_after_removal(monkeypatch)
+    busy = _cleanup_fails_after_removal(monkeypatch)
 
     acceptance, findings, _ = _run_acceptance(root)
+    monkeypatch.undo()
+    for path in busy:
+        os.rmdir(path)
 
+    assert busy, "cleanup failure was not exercised"
     [result] = acceptance["results"]
     assert (result["executed"], result["returncode"]) == (True, 0)
     assert result["outcome"] == "passed"
