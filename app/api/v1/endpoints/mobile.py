@@ -105,6 +105,14 @@ from app.services.observability.streaming_health import (
 )
 from app.services.workspace.system_settings import get_effective_mobile_gateway_key
 from app.services.tasks.service import TaskService
+from app.services.planning.task_position_integrity import (
+    RetryableTaskPositionLockError,
+    TaskPositionConflictError,
+    TaskPositionIntegrityError,
+    acquire_sqlite_write_reservation,
+    check_no_new_position_conflicts,
+    snapshot_task_positions,
+)
 from app.services.session.session_inspection_service import (
     delete_session_checkpoint_payload,
     derive_orchestration_state_block,
@@ -1371,12 +1379,46 @@ def update_mobile_task_position(
 ):
     """Update task plan_position for drag-and-drop reorder (T036)."""
     _log_mobile_request(request, "update_task_position", task_id=task_id)
-    task = db.query(Task).filter(Task.id == task_id).first()
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-    task.plan_position = body.plan_position
-    db.commit()
-    return {"task_id": task_id, "plan_position": body.plan_position}
+    try:
+        acquire_sqlite_write_reservation(db)
+        task = db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        before = snapshot_task_positions(
+            db.query(Task).filter(Task.project_id == task.project_id).all()
+        )
+        task.plan_position = body.plan_position
+        db.flush()
+        after = snapshot_task_positions(
+            db.query(Task).filter(Task.project_id == task.project_id).all()
+        )
+        check_no_new_position_conflicts(before, after)
+        db.commit()
+        return {"task_id": task_id, "plan_position": body.plan_position}
+    except RetryableTaskPositionLockError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "TASK_POSITION_WRITE_BUSY", "retryable": True},
+        ) from exc
+    except TaskPositionConflictError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TASK_POSITION_CONFLICT"},
+        ) from exc
+    except TaskPositionIntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "TASK_POSITION_WRITE_UNAVAILABLE"},
+        ) from exc
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.post("/mobile/tasks/{task_id}/review")

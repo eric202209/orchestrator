@@ -52,7 +52,17 @@ from app.services.engineering_context import (
     EngineeringContextService,
 )
 from app.services.planning.plan_commit_service import PlanCommitService
+from app.services.planning.plan_commit_service import PlanCommitPositionConflictError
 from app.services.planning.planner_service import PlannerService
+from app.services.planning.task_position_integrity import (
+    RetryableTaskPositionLockError,
+    TaskPositionConflictError,
+    TaskPositionLockAcquisitionError,
+    UnsupportedTaskPositionDialectError,
+    acquire_sqlite_write_reservation,
+    check_no_new_position_conflicts,
+    snapshot_task_positions,
+)
 from app.services.planning.planning_dispatch import (
     PlanningTaskDispatcher,
     get_planning_task_dispatcher,
@@ -850,102 +860,146 @@ class PlanningSessionService:
         selected_tasks: Optional[list[PlannerTaskCandidate]] = None,
         planner_markdown: Optional[str] = None,
     ) -> tuple[PlanningSession, Optional[Plan], list[Task]]:
-        session = self.get_session(session_id)
-        if not session.generation_id:
-            raise HTTPException(
-                status_code=409,
-                detail="Planning session generation is unavailable; migration required",
-            )
-        if session.status != "completed":
-            raise HTTPException(
-                status_code=409,
-                detail="Planning session must be completed before commit",
-            )
+        try:
+            # This must precede the Plan flush below. PlanCommitService's nested
+            # acquire is then idempotent inside the same Session transaction.
+            acquire_sqlite_write_reservation(self.db)
+            session = self.get_session(session_id)
+            if not session.generation_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Planning session generation is unavailable; migration required",
+                )
+            if session.status != "completed":
+                raise HTTPException(
+                    status_code=409,
+                    detail="Planning session must be completed before commit",
+                )
 
-        committed_task_ids = self._load_committed_task_ids(session)
-        if committed_task_ids:
-            tasks = (
-                self.db.query(Task)
-                .filter(Task.id.in_(committed_task_ids))
-                .order_by(Task.plan_position.asc(), Task.id.asc())
-                .all()
-            )
-            return session, session.finalized_plan, tasks
+            committed_task_ids = self._load_committed_task_ids(session)
+            if committed_task_ids:
+                tasks = (
+                    self.db.query(Task)
+                    .filter(Task.id.in_(committed_task_ids))
+                    .order_by(Task.plan_position.asc(), Task.id.asc())
+                    .all()
+                )
+                return session, session.finalized_plan, tasks
 
-        effective_markdown = (
-            planner_markdown.strip() if planner_markdown is not None else None
-        )
-        if effective_markdown is None:
-            effective_markdown = self._get_artifact_content(session, "planner_markdown")
-        if not effective_markdown:
-            raise HTTPException(
-                status_code=422,
-                detail="Planning session is missing final planner markdown",
+            before = snapshot_task_positions(
+                self.db.query(Task).filter(Task.project_id == session.project_id).all()
             )
+            effective_markdown = (
+                planner_markdown.strip() if planner_markdown is not None else None
+            )
+            if effective_markdown is None:
+                effective_markdown = self._get_artifact_content(
+                    session, "planner_markdown"
+                )
+            if not effective_markdown:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Planning session is missing final planner markdown",
+                )
 
-        task_candidates = (
-            PlannerService.parse_markdown(effective_markdown)
-            if selected_tasks is None
-            else selected_tasks
-        )
-        included_tasks = [
-            task
-            for task in task_candidates
-            if getattr(task, "include", True) and (task.title or "").strip()
-        ]
-        if not included_tasks:
-            raise HTTPException(
-                status_code=422,
-                detail="At least one task must be selected for commit",
+            task_candidates = (
+                PlannerService.parse_markdown(effective_markdown)
+                if selected_tasks is None
+                else selected_tasks
             )
+            included_tasks = [
+                task
+                for task in task_candidates
+                if getattr(task, "include", True) and (task.title or "").strip()
+            ]
+            if not included_tasks:
+                raise HTTPException(
+                    status_code=422,
+                    detail="At least one task must be selected for commit",
+                )
 
-        plan = session.finalized_plan
-        if plan is None:
-            title = session.title[:255]
-            requirement = (
-                self._get_artifact_content(session, "requirements") or session.prompt
+            plan = session.finalized_plan
+            if plan is None:
+                title = session.title[:255]
+                requirement = (
+                    self._get_artifact_content(session, "requirements")
+                    or session.prompt
+                )
+                plan = Plan(
+                    project_id=session.project_id,
+                    title=title,
+                    source_brain=session.source_brain,
+                    requirement=requirement,
+                    markdown=effective_markdown,
+                    status="draft",
+                )
+                self.db.add(plan)
+                self.db.flush()
+                session.finalized_plan_id = plan.id
+            else:
+                plan.markdown = effective_markdown
+
+            if planner_markdown is not None:
+                self._append_artifact_version(
+                    session,
+                    artifact_type="planner_markdown",
+                    filename="planner.md",
+                    content=effective_markdown,
+                )
+
+            committed_plan, tasks = PlanCommitService(self.db).create_plan_tasks(
+                session.project,
+                included_tasks,
+                plan=plan,
+                commit=False,
             )
-            plan = Plan(
-                project_id=session.project_id,
-                title=title,
-                source_brain=session.source_brain,
-                requirement=requirement,
-                markdown=effective_markdown,
-                status="draft",
+            session.committed_at = datetime.now(timezone.utc)
+            session.committed_task_ids = json.dumps([task.id for task in tasks])
+            session.finalized_plan_id = (
+                committed_plan.id if committed_plan else session.finalized_plan_id
             )
-            self.db.add(plan)
             self.db.flush()
-            session.finalized_plan_id = plan.id
-        else:
-            plan.markdown = effective_markdown
-
-        if planner_markdown is not None:
-            self._append_artifact_version(
-                session,
-                artifact_type="planner_markdown",
-                filename="planner.md",
-                content=effective_markdown,
+            after = snapshot_task_positions(
+                self.db.query(Task).filter(Task.project_id == session.project_id).all()
             )
-
-        committed_plan, tasks = PlanCommitService(self.db).create_plan_tasks(
-            session.project,
-            included_tasks,
-            plan=plan,
-            commit=False,
-        )
-        session.committed_at = datetime.now(timezone.utc)
-        session.committed_task_ids = json.dumps([task.id for task in tasks])
-        session.finalized_plan_id = (
-            committed_plan.id if committed_plan else session.finalized_plan_id
-        )
-        self.db.flush()
-        self.db.commit()
-        self.db.refresh(session)
-        if committed_plan:
-            self.db.refresh(committed_plan)
-        for task in tasks:
-            self.db.refresh(task)
-        return session, committed_plan, tasks
+            check_no_new_position_conflicts(before, after)
+            self.db.commit()
+            self.db.refresh(session)
+            if committed_plan:
+                self.db.refresh(committed_plan)
+            for task in tasks:
+                self.db.refresh(task)
+            return session, committed_plan, tasks
+        except RetryableTaskPositionLockError as exc:
+            self.db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "TASK_POSITION_WRITE_BUSY", "retryable": True},
+            ) from exc
+        except TaskPositionConflictError as exc:
+            self.db.rollback()
+            code = (
+                "INVALID_TASK_POSITIONS"
+                if isinstance(exc, PlanCommitPositionConflictError)
+                and exc.candidate_only
+                else "TASK_POSITION_CONFLICT"
+            )
+            raise HTTPException(
+                status_code=422 if code == "INVALID_TASK_POSITIONS" else 409,
+                detail={"code": code},
+            ) from exc
+        except (
+            UnsupportedTaskPositionDialectError,
+            TaskPositionLockAcquisitionError,
+        ) as exc:
+            self.db.rollback()
+            raise HTTPException(
+                status_code=500,
+                detail={"code": "TASK_POSITION_WRITE_UNAVAILABLE"},
+            ) from exc
+        except Exception:
+            self.db.rollback()
+            raise
 
     def build_session_payload(self, session: PlanningSession) -> dict[str, Any]:
         target_stage = self._requested_stage_target(session)

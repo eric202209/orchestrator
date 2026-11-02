@@ -21,6 +21,14 @@ from app.schemas import TaskCreate, TaskUpdate, TaskResponse, TaskPromotionReque
 from app.dependencies import get_current_active_user
 from app.services.observability.log_utils import deduplicate_logs
 from app.services.project.name_formatter import humanize_display_name
+from app.services.planning.task_position_integrity import (
+    RetryableTaskPositionLockError,
+    TaskPositionConflictError,
+    TaskPositionIntegrityError,
+    acquire_sqlite_write_reservation,
+    check_no_new_position_conflicts,
+    snapshot_task_positions,
+)
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.execution.runtime import (
     workspace_snapshot_key,
@@ -1188,13 +1196,44 @@ def create_task(
     task_data["intent_mode"] = normalize_task_intent(task_data.get("intent_mode"))
     task_data["title"] = humanize_display_name(task_data.get("title", ""))
     task_service = TaskService(db)
-    if task_data.get("plan_position") is None:
-        task_data["plan_position"] = task_service.next_plan_position(project.id)
-    db_task = Task(**task_data, status=TaskStatus.PENDING)
-    db.add(db_task)
-    db.commit()
-    db.refresh(db_task)
-    return db_task
+    try:
+        acquire_sqlite_write_reservation(db)
+        before = snapshot_task_positions(
+            db.query(Task).filter(Task.project_id == project.id).all()
+        )
+        if task_data.get("plan_position") is None:
+            task_data["plan_position"] = task_service.next_plan_position(project.id)
+        db_task = Task(**task_data, status=TaskStatus.PENDING)
+        db.add(db_task)
+        db.flush()
+        after = snapshot_task_positions(
+            db.query(Task).filter(Task.project_id == project.id).all()
+        )
+        check_no_new_position_conflicts(before, after)
+        db.commit()
+        db.refresh(db_task)
+        return db_task
+    except RetryableTaskPositionLockError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "TASK_POSITION_WRITE_BUSY", "retryable": True},
+        ) from exc
+    except TaskPositionConflictError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "TASK_POSITION_CONFLICT"},
+        ) from exc
+    except TaskPositionIntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "TASK_POSITION_WRITE_UNAVAILABLE"},
+        ) from exc
+    except Exception:
+        db.rollback()
+        raise
 
 
 def _enrich_tasks_with_session_ids(db: Session, tasks: list) -> list:

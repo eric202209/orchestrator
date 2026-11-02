@@ -12,8 +12,19 @@ from app.models import Plan, Task, TaskStatus
 from app.schemas import PlanResponse, PlannerTaskCandidate, TaskResponse
 from app.services.auth.authorization import get_project_for_user
 from app.services.project.name_formatter import humanize_display_name
-from app.services.planning.plan_commit_service import PlanCommitService
+from app.services.planning.plan_commit_service import (
+    PlanCommitPositionConflictError,
+    PlanCommitService,
+)
 from app.services.planning.planner_service import PlannerService
+from app.services.planning.task_position_integrity import (
+    RetryableTaskPositionLockError,
+    TaskPositionConflictError,
+    TaskPositionIntegrityError,
+    acquire_sqlite_write_reservation,
+    check_no_new_position_conflicts,
+    snapshot_task_positions,
+)
 
 router = APIRouter()
 MAX_PLANNER_MARKDOWN_CHARS = 100_000
@@ -155,20 +166,55 @@ def delete_project_plan(
     current_user=Depends(get_current_active_user),
 ):
     get_project_for_user(db, project_id, current_user)
+    try:
+        acquire_sqlite_write_reservation(db)
+        before = snapshot_task_positions(
+            db.query(Task).filter(Task.project_id == project_id).all()
+        )
+        plan = (
+            db.query(Plan)
+            .filter(Plan.id == plan_id, Plan.project_id == project_id)
+            .first()
+        )
+        if not plan:
+            raise HTTPException(status_code=404, detail="Plan not found")
 
-    plan = (
-        db.query(Plan).filter(Plan.id == plan_id, Plan.project_id == project_id).first()
-    )
-    if not plan:
-        raise HTTPException(status_code=404, detail="Plan not found")
-
-    # Keep already-created project tasks intact; just detach their source plan link.
-    db.query(Task).filter(Task.plan_id == plan.id).update(
-        {"plan_id": None}, synchronize_session=False
-    )
-    db.delete(plan)
-    db.commit()
-    return None
+        # Keep already-created project tasks intact and synchronize loaded Tasks.
+        db.query(Task).filter(Task.plan_id == plan.id).update(
+            {"plan_id": None}, synchronize_session="fetch"
+        )
+        db.delete(plan)
+        db.flush()
+        after = snapshot_task_positions(
+            db.query(Task).filter(Task.project_id == project_id).all()
+        )
+        try:
+            check_no_new_position_conflicts(before, after)
+        except TaskPositionConflictError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "PLAN_DETACH_POSITION_CONFLICT"},
+            ) from exc
+        db.commit()
+        return None
+    except RetryableTaskPositionLockError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "TASK_POSITION_WRITE_BUSY", "retryable": True},
+        ) from exc
+    except TaskPositionIntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "TASK_POSITION_WRITE_UNAVAILABLE"},
+        ) from exc
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception:
+        db.rollback()
+        raise
 
 
 @router.put("/projects/{project_id}/plans/{plan_id}", response_model=PlanResponse)
@@ -230,15 +276,43 @@ def create_batch_tasks(
         )
         if not plan:
             raise HTTPException(status_code=404, detail="Plan not found")
-    plan, created_tasks = PlanCommitService(db).create_plan_tasks(
-        project,
-        payload.tasks,
-        plan=plan,
-        markdown=payload.markdown,
-        plan_title=payload.plan_title,
-        requirement=payload.requirement,
-        source_brain=payload.source_brain,
-    )
+    try:
+        plan, created_tasks = PlanCommitService(db).create_plan_tasks(
+            project,
+            payload.tasks,
+            plan=plan,
+            markdown=payload.markdown,
+            plan_title=payload.plan_title,
+            requirement=payload.requirement,
+            source_brain=payload.source_brain,
+        )
+    except RetryableTaskPositionLockError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "TASK_POSITION_WRITE_BUSY", "retryable": True},
+        ) from exc
+    except TaskPositionConflictError as exc:
+        db.rollback()
+        candidate_only = (
+            isinstance(exc, PlanCommitPositionConflictError) and exc.candidate_only
+        )
+        raise HTTPException(
+            status_code=422 if candidate_only else 409,
+            detail={
+                "code": (
+                    "INVALID_TASK_POSITIONS"
+                    if candidate_only
+                    else "TASK_POSITION_CONFLICT"
+                )
+            },
+        ) from exc
+    except TaskPositionIntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "TASK_POSITION_WRITE_UNAVAILABLE"},
+        ) from exc
 
     return BatchTaskCreateResponse(
         plan=PlanResponse.model_validate(plan) if plan else None,
