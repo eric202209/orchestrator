@@ -88,6 +88,78 @@ _ACCEPTANCE_HEADING = re.compile(r"^\s*acceptance criteria:(.*)$", re.IGNORECASE
 _SECTION_HEADING = re.compile(r"^[A-Za-z][^`]*:\s*$")
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
 _PYTEST_WORD = re.compile(r"(?<![\w.-])pytest(?![\w./-])")
+_DECLARED_FORM_ORDER = (
+    "planner",
+    "markdown",
+    "bold",
+    "bullet",
+    "no_colon",
+    "parenthetical",
+    "singular",
+    "inline",
+)
+_REQUEST_CHANGES_FEEDBACK_HEADING = re.compile(
+    r"^\s*Operator request-changes feedback \(not acceptance criteria\):\s*$",
+    re.IGNORECASE,
+)
+_DECLARED_ACCEPTANCE_HEADINGS = (
+    (
+        "planner",
+        re.compile(
+            r"^\s*planner\s+acceptance\s+criteria\s*:(?P<content>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "markdown",
+        re.compile(
+            r"^\s*#{1,6}[ \t]+acceptance\s+criteria"
+            r"(?:(?:[ \t]*:)(?P<content>.*))?[ \t]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "bold",
+        re.compile(
+            r"^\s*\*\*[ \t]*acceptance\s+criteria:[ \t]*\*\*" r"(?P<content>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "bullet",
+        re.compile(
+            r"^\s*[-*+][ \t]+acceptance\s+criteria"
+            r"(?:(?:[ \t]*:)(?P<content>.*))?[ \t]*$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "no_colon",
+        re.compile(r"^\s*acceptance\s+criteria\s*$", re.IGNORECASE),
+    ),
+    (
+        "parenthetical",
+        re.compile(
+            r"^\s*acceptance\s+criteria[ \t]*\([^()\n]+\)" r"[ \t]*:(?P<content>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "singular",
+        re.compile(
+            r"^\s*acceptance\s+criterion[ \t]*:(?P<content>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "inline",
+        re.compile(
+            r"^[^\n]*[.!?][ \t]+acceptance\s+criteria[ \t]*:" r"(?P<content>.*)$",
+            re.IGNORECASE,
+        ),
+    ),
+)
+_DECLARED_MARKDOWN_SECTION_HEADING = re.compile(r"^\s*#{1,6}(?:\s|$)")
 _SHELL_METACHARACTERS = frozenset(";&|<>$`(){}[]*?!~#\\'\"\n")
 _PYTEST_FLAGS = frozenset(
     {
@@ -129,6 +201,68 @@ def _acceptance_sections(task_prompt: str) -> list[str]:
     if current is not None:
         sections.append("\n".join(current))
     return sections
+
+
+def _declared_acceptance_heading(line: str) -> tuple[str, str] | None:
+    if _REQUEST_CHANGES_FEEDBACK_HEADING.match(line):
+        return None
+    for form, pattern in _DECLARED_ACCEPTANCE_HEADINGS:
+        match = pattern.match(line)
+        if match:
+            return form, match.groupdict().get("content") or ""
+    return None
+
+
+def declared_acceptance_forms(task_prompt: str) -> tuple[dict, ...]:
+    """Observe non-canonical acceptance declarations without granting authority.
+
+    Each recognized form is returned once, in stable form order. Repeated
+    declarations of the same form aggregate their pytest-span counts. A span
+    is counted when it is a single-line backtick span containing the same
+    pytest word accepted by the canonical extractor; it is never admitted,
+    refused, or executed here.
+    """
+
+    counts: dict[str, int] = {}
+    current_form: str | None = None
+    current_lines: list[str] = []
+
+    def finish_current() -> None:
+        if current_form is None:
+            return
+        counts[current_form] = counts.get(current_form, 0) + sum(
+            1
+            for span in _CODE_SPAN.findall("\n".join(current_lines))
+            if _PYTEST_WORD.search(span.strip())
+        )
+
+    for line in str(task_prompt or "").splitlines():
+        heading = _declared_acceptance_heading(line)
+        if heading is not None:
+            finish_current()
+            current_form, content = heading
+            current_lines = [content]
+            continue
+
+        if current_form is not None and (
+            _ACCEPTANCE_HEADING.match(line)
+            or _SECTION_HEADING.match(line)
+            or _DECLARED_MARKDOWN_SECTION_HEADING.match(line)
+        ):
+            finish_current()
+            current_form = None
+            current_lines = []
+            continue
+
+        if current_form is not None:
+            current_lines.append(line)
+
+    finish_current()
+    return tuple(
+        {"form": form, "pytest_span_count": counts[form]}
+        for form in _DECLARED_FORM_ORDER
+        if form in counts
+    )
 
 
 def _admit_pytest_command(
@@ -744,6 +878,7 @@ def _run_task_acceptance(
         "refused": [dict(refusal) for refusal in extraction.refused],
         "ignored": [dict(item) for item in extraction.ignored],
         "results": results,
+        "declared_forms": list(declared_acceptance_forms(task_prompt)),
     }
 
 

@@ -1,0 +1,1254 @@
+{
+  "provenance": {
+    "oracle_commit": "8892fc0db7496e1516840f4ea364fed3b50b4749",
+    "oracle_source": "app/services/orchestration/validation/candidate_checks.py",
+    "oracle_source_sha256": "9c0488df6ffb4b634935bf7bdb06af41d9b1edb74b99eddeb84d674b372db522",
+    "input_sources": {
+      "docs/roadmap/reports/evidence/pr20-reset-03b-t1/probe_t1.py": "4c610c2cd8dee974a789e75c3948a34ac686e31e79b774ed8bcd8af8420b23aa",
+      "docs/roadmap/reports/evidence/pr20-reset-03b-t2/t2_harness.py": "1296e6e200ebbbcda5d22767b230c486cc8ff7bd63db8dfaf76083a1d211bdb3"
+    },
+    "planner_source": "app/services/planning/planner_service.py",
+    "planner_source_sha256": "af388319cf996bb852e29a7eb477a1c1983fc927a36a0b2a3032bc2db4967319"
+  },
+  "cases": [
+    {
+      "case_id": "A01_plain_colon",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance criteria:\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria:\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A02_title_case_colon",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance Criteria:\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\nAcceptance Criteria:\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A03_upper_colon",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nACCEPTANCE CRITERIA:\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\nACCEPTANCE CRITERIA:\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A04_md_h2_no_colon",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\n## Acceptance Criteria\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\n## Acceptance Criteria\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A05_md_h2_colon",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\n## Acceptance Criteria:\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\n## Acceptance Criteria:\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A06_md_h3",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\n### Acceptance criteria\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\n### Acceptance criteria\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A07_bold",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\n**Acceptance criteria:**\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\n**Acceptance criteria:**\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A08_bullet_prefixed",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n- Acceptance criteria:\n  - `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n- Acceptance criteria:\n  - `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A09_no_colon",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance criteria\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A10_parenthetical",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance criteria (must pass):\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria (must pass):\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A11_inline_same_line",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria: `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Acceptance criteria: `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A12_inline_mid_sentence",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it. Acceptance criteria: `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it. Acceptance criteria: `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A13_singular",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance criterion:\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criterion:\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A14_done_when",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nDone when:\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\nDone when:\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A15_verification",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nVerification:\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\nVerification:\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "A16_indented_heading",
+      "matrix": "A_format_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\n   Acceptance criteria:\n- `pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Fix it.\n\n   Acceptance criteria:\n- `pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B01_nl_only",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance criteria:\n1. GET /items returns 404 for unknown ids.\n2. Do not modify anything under tests/.\n",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria:\n1. GET /items returns 404 for unknown ids.\n2. Do not modify anything under tests/.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B02_mixed_exec_nonexec",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance criteria:\n1. `pytest tests/test_a.py` passes.\n2. The API response shape is unchanged.\n3. Only files under app/ change.\n",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria:\n1. `pytest tests/test_a.py` passes.\n2. The API response shape is unchanged.\n3. Only files under app/ change.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B03_multiple_commands",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- `pytest tests/test_a.py` passes.\n- `python -m pytest -q tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- `pytest tests/test_a.py` passes.\n- `python -m pytest -q tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py",
+            "python -m pytest -q tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            },
+            {
+              "text": "python -m pytest -q tests/test_a.py",
+              "pytest_args": [
+                "-q",
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B04_nested_list",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- API:\n  - `pytest tests/test_a.py` passes.\n  - Error responses unchanged.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- API:\n  - `pytest tests/test_a.py` passes.\n  - Error responses unchanged.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B05_closed_by_plain_heading",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- `pytest tests/test_a.py` passes.\nNotes:\n- also run `pytest -k slow`.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- `pytest tests/test_a.py` passes.\nNotes:\n- also run `pytest -k slow`.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B06_md_heading_does_not_close",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- `pytest tests/test_a.py` passes.\n\n## Implementation notes\nAvoid `pytest -k slow` locally.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- `pytest tests/test_a.py` passes.\n\n## Implementation notes\nAvoid `pytest -k slow` locally.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py",
+            "pytest -k slow"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [
+            {
+              "command": "pytest -k slow",
+              "reason": "unsupported_pytest_option"
+            }
+          ],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B07_two_sections",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- `pytest tests/test_a.py` passes.\nSteps:\n- do it\nAcceptance criteria:\n- `python -m pytest tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- `pytest tests/test_a.py` passes.\nSteps:\n- do it\nAcceptance criteria:\n- `python -m pytest tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py",
+            "python -m pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            },
+            {
+              "text": "python -m pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B08_fenced_block",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n```\npytest tests/test_a.py\n```\n",
+      "descriptions": [
+        "Acceptance criteria:\n```\npytest tests/test_a.py\n```\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B09_unquoted_command",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- pytest tests/test_a.py passes.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- pytest tests/test_a.py passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B10_malformed_backticks",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- `pytest tests/test_a.py passes.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- `pytest tests/test_a.py passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B11_refused_option",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- `pytest -k smoke tests/test_a.py` passes.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- `pytest -k smoke tests/test_a.py` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest -k smoke tests/test_a.py"
+          ],
+          "admitted": [],
+          "refused": [
+            {
+              "command": "pytest -k smoke tests/test_a.py",
+              "reason": "unsupported_pytest_option"
+            }
+          ],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B12_refused_shell",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- `pytest tests/test_a.py && echo ok` passes.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- `pytest tests/test_a.py && echo ok` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py && echo ok"
+          ],
+          "admitted": [],
+          "refused": [
+            {
+              "command": "pytest tests/test_a.py && echo ok",
+              "reason": "shell_metacharacter"
+            }
+          ],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B13_non_pytest_runner",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- `make test` passes.\n- `npm test` passes.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- `make test` passes.\n- `npm test` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": [
+            {
+              "text": "make test",
+              "reason": "not_pytest_command"
+            },
+            {
+              "text": "npm test",
+              "reason": "not_pytest_command"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "case_id": "B14_empty_section",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance criteria:\n",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria:\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B15_missing_section",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Fix it. Make the tests pass.\n",
+      "descriptions": [
+        "Fix it. Make the tests pass.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B16_ids_only",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- AC-001\n- AC-002\n",
+      "descriptions": [
+        "Acceptance criteria:\n- AC-001\n- AC-002\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B17_ids_with_text",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- AC-001: `pytest tests/test_a.py` passes.\n- AC-002: response shape unchanged.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- AC-001: `pytest tests/test_a.py` passes.\n- AC-002: response shape unchanged.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "pytest tests/test_a.py",
+              "pytest_args": [
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "B18_absolute_path",
+      "matrix": "B_boundary_matrix",
+      "kind": "description",
+      "input": "Acceptance criteria:\n- `pytest /etc/passwd` passes.\n",
+      "descriptions": [
+        "Acceptance criteria:\n- `pytest /etc/passwd` passes.\n"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest /etc/passwd"
+          ],
+          "admitted": [],
+          "refused": [
+            {
+              "command": "pytest /etc/passwd",
+              "reason": "absolute_path"
+            }
+          ],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M01_operator_valid_command",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes.\n2. Do not modify tests/.",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes.\n2. Do not modify tests/."
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "python -m pytest -q"
+          ],
+          "admitted": [
+            {
+              "text": "python -m pytest -q",
+              "pytest_args": [
+                "-q"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M02_operator_refused_command",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\nAcceptance criteria:\n- `pytest -k smoke tests/test_a.py` passes.",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria:\n- `pytest -k smoke tests/test_a.py` passes."
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "pytest -k smoke tests/test_a.py"
+          ],
+          "admitted": [],
+          "refused": [
+            {
+              "command": "pytest -k smoke tests/test_a.py",
+              "reason": "unsupported_pytest_option"
+            }
+          ],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M03_planner_no_criteria",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Fix normalize | Fix the bug | order=1 | P1 | effort=small | profile=full_lifecycle\n",
+      "descriptions": [
+        "Fix the bug | order=1 | P1 | effort=small"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M04_planner_nl_criteria",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Fix normalize | Fix the bug | order=1 | P1 | AC: GET /items returns 404 for unknown ids | AC: response shape unchanged\n",
+      "descriptions": [
+        "Fix the bug | order=1 | P1\n\nPlanner acceptance criteria:\n- GET /items returns 404 for unknown ids\n- response shape unchanged"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M05_planner_exec_criteria",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Fix normalize | Fix the bug | order=1 | AC: `pytest tests/test_a.py` passes\n",
+      "descriptions": [
+        "Fix the bug | order=1\n\nPlanner acceptance criteria:\n- `pytest tests/test_a.py` passes"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M06_planner_mixed",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Fix normalize | Fix the bug | order=1 | AC: `pytest tests/test_a.py` passes | AC: only app/ changes\n",
+      "descriptions": [
+        "Fix the bug | order=1\n\nPlanner acceptance criteria:\n- `pytest tests/test_a.py` passes\n- only app/ changes"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M07_md_heading_exec",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\n## Acceptance Criteria\n- `pytest tests/test_a.py` passes.",
+      "descriptions": [
+        "Fix it.\n\n## Acceptance Criteria\n- `pytest tests/test_a.py` passes."
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M08_md_heading_refused",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "description",
+      "input": "Fix it.\n\n## Acceptance Criteria\n- `pytest -k slow tests/` passes.",
+      "descriptions": [
+        "Fix it.\n\n## Acceptance Criteria\n- `pytest -k slow tests/` passes."
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M09_heading_task_bullets",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n### Fix normalize\nFix the bug.\n\n#### Acceptance Criteria\n- `pytest tests/test_a.py` passes.\n- Do not modify tests/.\n",
+      "descriptions": [
+        "Fix the bug.\n\n#### Acceptance Criteria\n- `pytest tests/test_a.py` passes.\n- Do not modify tests/."
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M10_multiple_tasks_distinct",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Task one | Do one | order=1 | AC: `pytest tests/test_one.py` passes\n- [ ] TASK_START: Task two | Do two | order=2 | AC: docs updated\n",
+      "descriptions": [
+        "Do one | order=1\n\nPlanner acceptance criteria:\n- `pytest tests/test_one.py` passes",
+        "Do two | order=2\n\nPlanner acceptance criteria:\n- docs updated"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        },
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M11_nested_markdown",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n### API task\nChange the API.\n```\n### not a task\n- not a task\n```\n- detail bullet\n  - nested bullet\nAcceptance criteria:\n- `pytest tests/test_api.py` passes\n  - continuation\n### UI task\nChange UI.\n",
+      "descriptions": [
+        "Change the API.\n```\n### not a task\n- not a task\n```\n- detail bullet\n  - nested bullet\nPlanner Acceptance criteria:\n- `pytest tests/test_api.py` passes\n  - continuation",
+        "Change UI."
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        },
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M12_request_changes_note_pytest",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "description_note",
+      "input": "Fix it.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes.\n2. Do not modify tests/.",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes.\n2. Do not modify tests/.\n\nOperator requested changes before this task can be accepted.\nRequest changes note: Also ensure `pytest -k smoke tests/` passes\n\nRepair instructions:\n- Address the operator note directly.\n- Preserve accepted existing project files unless the note requires a change.\n- Do not recreate unrelated scaffolding or parallel task folders.\n- Verify the repaired result before finishing."
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "python -m pytest -q",
+            "pytest -k smoke tests/"
+          ],
+          "admitted": [
+            {
+              "text": "python -m pytest -q",
+              "pytest_args": [
+                "-q"
+              ]
+            }
+          ],
+          "refused": [
+            {
+              "command": "pytest -k smoke tests/",
+              "reason": "unsupported_pytest_option"
+            }
+          ],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M13_retry_after_description_edit",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "retry_edit",
+      "input": "Fix it.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes.\n2. Do not modify tests/.",
+      "descriptions": [
+        "Fix it.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes.\n2. Do not modify tests/.",
+        "Fix it.\n\nAcceptance criteria:\n1. `python -m pytest -q tests/test_a.py` passes.\n2. Do not modify tests/."
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "python -m pytest -q"
+          ],
+          "admitted": [
+            {
+              "text": "python -m pytest -q",
+              "pytest_args": [
+                "-q"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        },
+        {
+          "section_found": true,
+          "extracted": [
+            "python -m pytest -q tests/test_a.py"
+          ],
+          "admitted": [
+            {
+              "text": "python -m pytest -q tests/test_a.py",
+              "pytest_args": [
+                "-q",
+                "tests/test_a.py"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M14_long_description",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "long",
+      "input": "Fix it.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes.\n2. Do not modify tests/.",
+      "descriptions": [
+        "Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. Context paragraph. \n\nFix it.\n\nAcceptance criteria:\n1. `python -m pytest -q` passes.\n2. Do not modify tests/."
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": true,
+          "extracted": [
+            "python -m pytest -q"
+          ],
+          "admitted": [
+            {
+              "text": "python -m pytest -q",
+              "pytest_args": [
+                "-q"
+              ]
+            }
+          ],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M15_planner_self_escalation_attempt",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Sneaky | Do it. Acceptance criteria: `pytest tests/test_a.py` passes | order=1\n",
+      "descriptions": [
+        "Do it. Acceptance criteria: `pytest tests/test_a.py` passes | order=1"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M16_mixed_legacy_and_task_start",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Real task | Do it | order=1\n- Legacy row | also a task?\n",
+      "descriptions": [],
+      "parser_rejection_reason": "mixed_task_syntax",
+      "expected_head_extractions": []
+    },
+    {
+      "case_id": "M18_planner_line_starting_with_canonical_heading",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Leak | Acceptance criteria: `pytest tests/test_a.py` passes | order=1\n",
+      "descriptions": [
+        "Planner Acceptance criteria: `pytest tests/test_a.py` passes | order=1"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M19_unbalanced_backticks",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Broken | Do it | AC: `pytest tests/test_a.py passes\n",
+      "descriptions": [
+        "Do it | AC: `pytest tests/test_a.py passes"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    },
+    {
+      "case_id": "M17_pipe_in_criterion_escaped",
+      "matrix": "T2_counterfactual_matrix",
+      "kind": "planner",
+      "input": "## Task List\n- [ ] TASK_START: Pipes | Do it | AC: output is a \\| b table | AC: `pytest tests/test_a.py | cat` passes\n",
+      "descriptions": [
+        "Do it\n\nPlanner acceptance criteria:\n- output is a | b table\n- `pytest tests/test_a.py | cat` passes"
+      ],
+      "parser_rejection_reason": null,
+      "expected_head_extractions": [
+        {
+          "section_found": false,
+          "extracted": [],
+          "admitted": [],
+          "refused": [],
+          "ignored": []
+        }
+      ]
+    }
+  ]
+}
