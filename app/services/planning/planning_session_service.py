@@ -1856,6 +1856,7 @@ class PlanningSessionService:
                 "design must be markdown with architecture, interfaces, data flow, and risks.",
                 "implementation_plan must be markdown with ordered steps and test strategy.",
                 "planner_markdown must be markdown compatible with an Orchestrator task list using: ## Task List then - [ ] TASK_START: Title | Description | order=1 | P1 | effort=medium | profile=full_lifecycle.",
+                "On each TASK_START line, add one | AC: <criterion> field per acceptance criterion of that task, put test commands in single backticks, and write a literal | in prose as \\|.",
                 "planner_markdown must contain between 3 and 8 concrete tasks.",
                 "Prefer implementation detail grounded in the prompt and transcript.",
                 "Do not include prose outside the JSON object.",

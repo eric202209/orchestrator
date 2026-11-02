@@ -34,6 +34,10 @@ OPERATOR_ACCEPTANCE_HEADING_RE = re.compile(
     r"^\s*acceptance criteria:(.*)$", re.IGNORECASE
 )
 PLANNER_ACCEPTANCE_MARKER = "Planner "
+# Planner-declared criteria block (TAB-1). Classification only: it never
+# matches the operator heading grammar above.
+PLANNER_ACCEPTANCE_HEADING = "Planner acceptance criteria:"
+PLANNER_AC_FIELD_RE = re.compile(r"^\s*AC:(?P<text>.*)$")
 
 
 @dataclass
@@ -196,13 +200,15 @@ class PlannerService:
             return PlannerMarkdownParseResult([], "rejected", "mixed_task_syntax")
 
         heading_metadata_sources: Optional[List[tuple[str, str]]] = None
+        # Only list-form TASK_START rows carry decodable ``| AC:`` fields.
+        list_row_count = 0
         if start_rows:
             mode = "task_start"
             if cls._has_top_level_pipe_row(
                 lines, fenced, skip=set(start_rows)
             ) or cls._has_unprefixed_checkbox_sibling(lines, fenced, set(start_rows)):
                 return PlannerMarkdownParseResult([], "rejected", "mixed_task_syntax")
-            candidates = cls._task_start_candidates(lines, start_rows)
+            candidates, list_row_count = cls._task_start_candidates(lines, start_rows)
         elif task_headings:
             mode = "heading"
             level = min(item[1] for item in task_headings)
@@ -258,6 +264,14 @@ class PlannerService:
             normalized_title = re.sub(r"\s+", " ", title or "").strip(" :-")
             if not normalized_title:
                 continue
+
+            planner_criteria: List[str] = []
+            if extracted_index <= list_row_count:
+                # Strip AC fields before normalization, scope metadata and
+                # inference so criteria text is never metadata authority.
+                description, planner_criteria = cls._split_acceptance_fields(
+                    description or ""
+                )
 
             if heading_metadata_sources is not None:
                 source_kind, metadata_source = heading_metadata_sources[
@@ -347,8 +361,11 @@ class PlannerService:
                 ParsedPlannerTask(
                     title=normalized_title,
                     description=cls._neutralize_acceptance_headings(
-                        normalized_description
-                        or f"Implement {normalized_title.lower()}"
+                        cls._render_planner_acceptance_block(
+                            normalized_description
+                            or f"Implement {normalized_title.lower()}",
+                            planner_criteria,
+                        )
                     ),
                     execution_profile=explicit_profile
                     or cls._infer_execution_profile(normalized_title, inference_text),
@@ -381,6 +398,54 @@ class PlannerService:
             effective_positions.add(effective_position)
 
         return PlannerMarkdownParseResult(parsed_tasks, mode)
+
+    @staticmethod
+    def _split_acceptance_fields(raw: str) -> tuple[str, List[str]]:
+        """Remove ``AC:`` fields from a list-form TASK_START description.
+
+        Fields are split on ``|`` outside backtick spans and not escaped as
+        ``\\|``.  Each ``AC:`` field is removed together with its preceding
+        delimiter (or its following one when it is first); every other byte
+        is kept in place.  Inside AC values ``\\|`` decodes to ``|`` and
+        whitespace is normalized; empty values are dropped and duplicates keep
+        their order.  A row with unbalanced backticks, or without AC fields,
+        is returned unchanged with no criteria.
+        """
+
+        if raw.count("`") % 2:
+            return raw, []
+        delimiters: List[int] = []
+        in_code = False
+        previous = ""
+        for index, char in enumerate(raw):
+            if char == "`":
+                in_code = not in_code
+            elif char == "|" and not in_code and previous != "\\":
+                delimiters.append(index)
+            previous = char
+        bounds = [-1, *delimiters, len(raw)]
+        fields = [(bounds[i] + 1, bounds[i + 1]) for i in range(len(bounds) - 1)]
+        criteria: List[str] = []
+        kept: List[tuple[int, int]] = []
+        for start, end in fields:
+            match = PLANNER_AC_FIELD_RE.match(raw[start:end])
+            if match is None:
+                kept.append((start, end))
+                continue
+            text = re.sub(r"\s+", " ", match.group("text").replace("\\|", "|"))
+            if text.strip():
+                criteria.append(text.strip())
+        if len(kept) == len(fields):
+            return raw, []
+        remainder = "|".join(raw[start:end] for start, end in kept)
+        return remainder, criteria
+
+    @staticmethod
+    def _render_planner_acceptance_block(description: str, criteria: List[str]) -> str:
+        if not criteria:
+            return description
+        items = "\n".join(f"- {criterion}" for criterion in criteria)
+        return f"{description}\n\n{PLANNER_ACCEPTANCE_HEADING}\n{items}"
 
     @staticmethod
     def _neutralize_acceptance_headings(text: str) -> str:
@@ -470,7 +535,9 @@ class PlannerService:
     @classmethod
     def _task_start_candidates(
         cls, lines: List[str], start_rows: List[int]
-    ) -> List[tuple[str, str]]:
+    ) -> tuple[List[tuple[str, str]], int]:
+        """Return TASK_START candidates and how many leading ones are list rows."""
+
         rows = set(start_rows)
         # Same regex pass as the legacy parser, restricted to TASK_START rows:
         # list rows first, then heading rows, preserving extraction order.
@@ -481,6 +548,7 @@ class PlannerService:
             (match.group("title") or "", (match.group("description") or "").strip())
             for match in TASK_LINE_RE.finditer(row_text)
         ]
+        list_row_count = len(candidates)
         for index in start_rows:
             match = TASK_HEADING_RE.match(lines[index])
             if not match:
@@ -490,7 +558,7 @@ class PlannerService:
             if not description:
                 description = cls._consume_following_description(lines, index)
             candidates.append((title, description))
-        return candidates
+        return candidates, list_row_count
 
     @staticmethod
     def _task_start_row_form(line: str) -> Optional[str]:
