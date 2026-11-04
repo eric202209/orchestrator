@@ -1537,8 +1537,24 @@ def test_repeated_request_changes_cycles_use_latest_note_but_original_authority(
     assert first_execution is not None
     first_authority = first_execution.dispatch_invocation["acceptance_authority"]
 
-    # Model completion of that repair before the next review cycle.
-    task.status = TaskStatus.DONE
+    # Model a completed repair before the next review cycle. The endpoint wrote
+    # these rows through its own DB session, so refresh and use the lifecycle
+    # transition to persist terminal state across the Task, link, and execution.
+    db_session.refresh(task)
+    from app.services.session.session_execution_service import mark_execution_done
+
+    first_link = (
+        db_session.query(SessionTask)
+        .filter_by(session_id=first_execution.session_id, task_id=task.id)
+        .order_by(SessionTask.id.desc())
+        .first()
+    )
+    assert first_link is not None
+    mark_execution_done(
+        task=task,
+        session_task_link=first_link,
+        task_execution=first_execution,
+    )
     task.workspace_status = "ready"
     db_session.commit()
     latest_note = (

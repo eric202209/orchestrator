@@ -1318,7 +1318,7 @@ def test_compatibility_execute_does_not_duplicate_active_task_execution(
 
 
 def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(
-    authenticated_client, db_session, monkeypatch
+    authenticated_client, db_session, db_session_factory, tmp_path, monkeypatch
 ):
     project = Project(name="Requested Changes Repair Project")
     db_session.add(project)
@@ -1411,7 +1411,40 @@ def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(
     )
 
     assert response.status_code == 200, response.text
-    prompt = captured_kwargs["prompt"]
+    assert captured_kwargs["prompt"] == task.description
+    execution_id = captured_kwargs["task_execution_id"]
+    retry_execution = db_session.get(TaskExecution, execution_id)
+    assert retry_execution is not None
+    assert retry_execution.dispatch_invocation["prompt_source"] == "description"
+    assert (
+        retry_execution.dispatch_invocation["acceptance_authority"]["acceptance_mode"]
+        == "request_changes"
+    )
+
+    from app.tests.test_pr20_t3a2_request_changes_boundary import (
+        _run_worker_completion_seam,
+        _worker_seam_failure_diagnostics,
+    )
+
+    worker_result = _run_worker_completion_seam(
+        monkeypatch,
+        tmp_path / "requested-changes-worker",
+        db_session_factory=db_session_factory,
+        task=task,
+        prompt=captured_kwargs["prompt"],
+        context=captured_kwargs.get("context"),
+        dispatch_kind="ROOT",
+        persisted_task_execution_id=execution_id,
+        expected_attempt_number=1,
+        celery_task_id=captured_kwargs["_celery_task_id"],
+    )
+    diagnostics = _worker_seam_failure_diagnostics(worker_result)
+    assert len(worker_result.worker_contexts) == 1, diagnostics
+    assert (
+        worker_result.worker_contexts[0].acceptance_authority_status
+        == "verified_request_changes"
+    )
+    prompt = worker_result.worker_contexts[0].prompt
     assert "Operator requested changes" in prompt
     assert "Tighten the README" in prompt
     assert "added=1, modified=1, deleted=1" in prompt
