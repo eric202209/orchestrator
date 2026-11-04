@@ -3956,9 +3956,7 @@ def test_c2r3_managed_initial_root_remains_admissible_at_transport_zero(
                 timeout_seconds=invocation["timeout_seconds"],
                 context=invocation["context"],
                 planning_backend_override=invocation["planning_backend_override"],
-                planning_escalation_metadata=invocation[
-                    "planning_escalation_metadata"
-                ],
+                planning_escalation_metadata=invocation["planning_escalation_metadata"],
                 resume_checkpoint_name=None,
                 queued_event_id=invocation["queued_event_id"],
             ),
