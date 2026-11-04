@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 import subprocess
 import sys
@@ -44,6 +45,19 @@ LEGACY_EVENT_KEYS = {
     "confidence",
 }
 ACCEPTANCE_PROMPT = "Fix it.\n\nAcceptance criteria:\n- `python -m pytest -q` passes.\n"
+
+
+def _scalar_values(value):
+    """Yield every non-container value nested in decoded JSON."""
+
+    if isinstance(value, dict):
+        for item in value.values():
+            yield from _scalar_values(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _scalar_values(item)
+    else:
+        yield value
 
 
 def _state(project_dir: Path, *, session_id: int, task_id: int) -> OrchestrationState:
@@ -231,7 +245,19 @@ def test_session_task_events_api_exposes_evidence_without_cross_task_leak(
     evidence = events[0]["details"]["task_acceptance_evidence"]
     assert (evidence["task_id"], evidence["task_execution_id"]) == (5, 301)
     assert evidence["results"][0]["outcome"] == "passed"
-    assert "302" not in json.dumps(events)
+    # Check values, not the raw JSON text: random hex digests in the payload
+    # can contain the substring "302" by chance (e.g. "...e603027a...").
+    leaked = [
+        value
+        for value in _scalar_values(events)
+        if value == 302
+        or (
+            isinstance(value, str)
+            and re.search(r"(?<![0-9A-Za-z])302(?![0-9A-Za-z])", value)
+        )
+    ]
+    assert leaked == []
+    assert all(result.get("outcome") != "failed" for result in evidence["results"])
 
 
 # --- E: existing trace transformation -----------------------------------------

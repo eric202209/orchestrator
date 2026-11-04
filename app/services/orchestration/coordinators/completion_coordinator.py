@@ -443,9 +443,7 @@ class CompletionCoordinator:
         task_id = ctx.task_id
         prompt = ctx.prompt
         acceptance_task_prompt = getattr(ctx, "acceptance_task_prompt", None)
-        acceptance_authority_status = getattr(
-            ctx, "acceptance_authority_status", None
-        )
+        acceptance_authority_status = getattr(ctx, "acceptance_authority_status", None)
         execution_profile = ctx.execution_profile
         validation_profile = ctx.validation_profile
         runs_in_canonical_baseline = ctx.runs_in_canonical_baseline

@@ -1155,9 +1155,8 @@ def execute_orchestration_task(
             # Missing TE identity is a legacy transport shape. It may keep
             # working while enforcement is disabled, but enforcement never
             # reconstructs lineage from Session/Task matching.
-            if (
-                getattr(task, "workspace_status", None) == "changes_requested"
-                or bool(getattr(task, "promotion_note", None))
+            if getattr(task, "workspace_status", None) == "changes_requested" or bool(
+                getattr(task, "promotion_note", None)
             ):
                 raise AcceptanceAuthorityRefusal(
                     "acceptance_provenance_refused:task_execution_identity_missing"

@@ -626,7 +626,10 @@ class TaskService:
         if mode == "request_changes":
             if not isinstance(task.description, str) or not task.description.strip():
                 raise ValueError("request-changes Task description is missing")
-            if not isinstance(task.promotion_note, str) or not task.promotion_note.strip():
+            if (
+                not isinstance(task.promotion_note, str)
+                or not task.promotion_note.strip()
+            ):
                 raise ValueError("request-changes promotion note is missing")
             if change_set is not None:
                 payload = change_set.get("change_set")
@@ -635,9 +638,9 @@ class TaskService:
                 change_set_id = change_set.get("change_set_id") or payload.get(
                     "change_set_id"
                 )
-                prior_execution_id = change_set.get(
+                prior_execution_id = change_set.get("task_execution_id") or payload.get(
                     "task_execution_id"
-                ) or payload.get("task_execution_id")
+                )
                 if (
                     type(change_set_id) is not int
                     or change_set_id <= 0
