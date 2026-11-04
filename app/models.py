@@ -4508,6 +4508,66 @@ class TaskExecutionChangeSet(Base):
     task_execution = relationship("TaskExecution", back_populates="change_sets")
 
 
+class RequestChangesIssuanceWitness(Base):
+    """Insert-only issuance binding for one managed request-changes retry.
+
+    Committed in the same transaction as the retry's dispatch invocation. It
+    pins the ChangeSet the API selected at issuance (Policy P1); SQLite
+    triggers from migration 061 reject UPDATE and DELETE. Foreign keys prove
+    row existence only; Task/Session ownership equality is checked by the
+    issuance writer (and by the Worker/replay verifier once I2 lands).
+    """
+
+    __tablename__ = "request_changes_issuance_witnesses"
+
+    current_task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        primary_key=True,
+        autoincrement=False,
+    )
+    source_task_execution_id = Column(
+        Integer,
+        ForeignKey("task_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_session_id = Column(
+        Integer, ForeignKey("sessions.id", ondelete="RESTRICT"), nullable=False
+    )
+    change_set_id = Column(
+        Integer,
+        ForeignKey("task_execution_change_sets.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    bounded_fields_sha256 = Column(String(64), nullable=False)
+    invocation_sha256 = Column(String(64), nullable=False)
+    witness_schema_version = Column(Integer, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "current_task_execution_id != source_task_execution_id",
+            name="ck_rc_issuance_witness_distinct_execution",
+        ),
+        CheckConstraint(
+            "witness_schema_version >= 1",
+            name="ck_rc_issuance_witness_version",
+        ),
+        CheckConstraint(
+            "length(bounded_fields_sha256) = 64 AND "
+            "bounded_fields_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_rc_issuance_witness_bounded_digest",
+        ),
+        CheckConstraint(
+            "length(invocation_sha256) = 64 AND "
+            "invocation_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_rc_issuance_witness_invocation_digest",
+        ),
+        Index("ix_rc_issuance_witness_source_execution", "source_task_execution_id"),
+        Index("ix_rc_issuance_witness_source_session", "source_session_id"),
+        Index("ix_rc_issuance_witness_change_set", "change_set_id"),
+    )
+
+
 class TaskCheckpoint(Base):
     """Task checkpoint for resumption"""
 

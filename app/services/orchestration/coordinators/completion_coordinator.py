@@ -442,6 +442,10 @@ class CompletionCoordinator:
         session_id = ctx.session_id
         task_id = ctx.task_id
         prompt = ctx.prompt
+        acceptance_task_prompt = getattr(ctx, "acceptance_task_prompt", None)
+        acceptance_authority_status = getattr(
+            ctx, "acceptance_authority_status", None
+        )
         execution_profile = ctx.execution_profile
         validation_profile = ctx.validation_profile
         runs_in_canonical_baseline = ctx.runs_in_canonical_baseline
@@ -602,6 +606,8 @@ class CompletionCoordinator:
             workspace_consistency=workspace_consistency,
             title=task.title if task else None,
             description=task.description if task else None,
+            acceptance_task_prompt=acceptance_task_prompt,
+            acceptance_authority_status=acceptance_authority_status,
             relaxed_mode=orchestration_state.relaxed_mode,
             completion_evidence=_gating_completion_evidence(),
             validation_severity=ctx.validation_severity,
@@ -707,6 +713,8 @@ class CompletionCoordinator:
                     workspace_consistency=workspace_consistency,
                     title=task.title if task else None,
                     description=task.description if task else None,
+                    acceptance_task_prompt=acceptance_task_prompt,
+                    acceptance_authority_status=acceptance_authority_status,
                     relaxed_mode=orchestration_state.relaxed_mode,
                     completion_evidence=_gating_completion_evidence(rebuild=True),
                     validation_severity=ctx.validation_severity,
@@ -757,6 +765,8 @@ class CompletionCoordinator:
                     workspace_consistency=workspace_consistency,
                     title=task.title if task else None,
                     description=task.description if task else None,
+                    acceptance_task_prompt=acceptance_task_prompt,
+                    acceptance_authority_status=acceptance_authority_status,
                     relaxed_mode=orchestration_state.relaxed_mode,
                     completion_evidence=_gating_completion_evidence(rebuild=True),
                     validation_severity=ctx.validation_severity,
@@ -1005,6 +1015,8 @@ class CompletionCoordinator:
                     workspace_consistency=workspace_consistency,
                     title=task.title if task else None,
                     description=task.description if task else None,
+                    acceptance_task_prompt=acceptance_task_prompt,
+                    acceptance_authority_status=acceptance_authority_status,
                     relaxed_mode=orchestration_state.relaxed_mode,
                     completion_evidence={
                         "summary_generated": bool(summary_result),

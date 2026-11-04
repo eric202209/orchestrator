@@ -6316,6 +6316,127 @@ def _verify_060_task_execution_dispatch(engine: Engine) -> None:
                 raise RuntimeError("060 continuation Session guards are missing")
 
 
+_061_TABLE = "request_changes_issuance_witnesses"
+_061_OWNER_TABLES = {"task_executions", "sessions", "task_execution_change_sets"}
+
+
+def _061_trigger_statements() -> dict[str, str]:
+    return {
+        "trg_rc_issuance_witness_no_update": f"""
+        CREATE TRIGGER trg_rc_issuance_witness_no_update
+        BEFORE UPDATE ON {_061_TABLE}
+        BEGIN
+            SELECT RAISE(ABORT, 'request-changes issuance witness is immutable');
+        END
+        """,
+        "trg_rc_issuance_witness_no_delete": f"""
+        CREATE TRIGGER trg_rc_issuance_witness_no_delete
+        BEFORE DELETE ON {_061_TABLE}
+        BEGIN
+            SELECT RAISE(ABORT, 'request-changes issuance witness is retained');
+        END
+        """,
+    }
+
+
+def _verify_061_request_changes_issuance_witness(engine: Engine) -> None:
+    """Verify the exact witness columns, keys, checks, indexes, and triggers."""
+
+    from app.models import RequestChangesIssuanceWitness
+
+    if not _061_OWNER_TABLES <= _table_names(engine):
+        return
+    if engine.dialect.name != "sqlite":
+        raise RuntimeError("061 issuance witness is supported on SQLite only")
+    table = RequestChangesIssuanceWitness.__table__
+    with engine.connect() as connection:
+        connection.exec_driver_sql("SELECT COUNT(*) FROM sqlite_master").scalar()
+        inspector = inspect(connection)
+        if _061_TABLE not in inspector.get_table_names():
+            raise RuntimeError("061 issuance witness table is missing")
+        columns = {c["name"]: c for c in inspector.get_columns(_061_TABLE)}
+        if set(columns) != {column.name for column in table.columns}:
+            raise RuntimeError("061 issuance witness columns do not match")
+        if any(bool(column.get("nullable", True)) for column in columns.values()):
+            raise RuntimeError("061 issuance witness columns must be NOT NULL")
+        primary_key = inspector.get_pk_constraint(_061_TABLE)
+        if primary_key.get("constrained_columns") != ["current_task_execution_id"]:
+            raise RuntimeError("061 issuance witness primary key is invalid")
+        expected_checks = {
+            constraint.name: " ".join(str(constraint.sqltext).split())
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint)
+        }
+        actual_checks = {
+            check.get("name"): " ".join(str(check.get("sqltext", "")).split())
+            for check in inspector.get_check_constraints(_061_TABLE)
+        }
+        if actual_checks != expected_checks:
+            raise RuntimeError("061 issuance witness check constraints do not match")
+        expected_indexes = {index.name for index in table.indexes}
+        actual_indexes = {index["name"] for index in inspector.get_indexes(_061_TABLE)}
+        if actual_indexes != expected_indexes:
+            raise RuntimeError("061 issuance witness indexes do not match")
+        foreign_keys = connection.exec_driver_sql(
+            f"PRAGMA foreign_key_list({_061_TABLE})"
+        ).fetchall()
+        actual_keys = {
+            (row[3], row[2], row[4], str(row[6]).upper()) for row in foreign_keys
+        }
+        expected_keys = {
+            ("current_task_execution_id", "task_executions", "id", "RESTRICT"),
+            ("source_task_execution_id", "task_executions", "id", "RESTRICT"),
+            ("source_session_id", "sessions", "id", "RESTRICT"),
+            ("change_set_id", "task_execution_change_sets", "id", "RESTRICT"),
+        }
+        if actual_keys != expected_keys:
+            raise RuntimeError("061 issuance witness foreign keys must be RESTRICT")
+        rows = connection.exec_driver_sql(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'trigger' "
+            "AND tbl_name = ?",
+            (_061_TABLE,),
+        ).fetchall()
+    stored = {row[0]: " ".join((row[1] or "").split()) for row in rows}
+    expected = {
+        name: " ".join(sql.split()) for name, sql in _061_trigger_statements().items()
+    }
+    if stored != expected:
+        raise RuntimeError("061 issuance witness triggers are missing or invalid")
+
+
+def _migration_061_request_changes_issuance_witness(engine: Engine) -> None:
+    """Create the insert-only witness table and SQLite guards atomically.
+
+    SQLite only (Operator decision D-2). Upgrade-only: no downgrade and no
+    historical backfill; existing request-changes executions get no witness.
+    """
+
+    from app.models import RequestChangesIssuanceWitness
+
+    # Historical upgrade fixtures may hold only early core tables; the owner
+    # tables come from the application schema (same rule as 060).
+    if not _061_OWNER_TABLES <= _table_names(engine):
+        return
+    if engine.dialect.name != "sqlite":
+        raise RuntimeError("061 issuance witness is supported on SQLite only")
+    with engine.connect() as connection:
+        connection.execution_options(isolation_level="AUTOCOMMIT")
+        connection.exec_driver_sql("BEGIN IMMEDIATE")
+        try:
+            RequestChangesIssuanceWitness.__table__.create(connection, checkfirst=True)
+            for statement in _061_trigger_statements().values():
+                connection.exec_driver_sql(statement)
+            connection.exec_driver_sql("COMMIT")
+        except BaseException:
+            try:
+                if connection.connection.dbapi_connection.in_transaction:
+                    connection.exec_driver_sql("ROLLBACK")
+            except Exception:
+                connection.invalidate()
+            raise
+    _verify_061_request_changes_issuance_witness(engine)
+
+
 def _migration_060_task_execution_dispatch(engine: Engine) -> None:
     """Add nullable TaskExecution dispatch identity and publisher lease fields."""
 
@@ -6733,6 +6854,12 @@ MIGRATIONS: tuple[Migration, ...] = (
         ),
         upgrade=_migration_060_task_execution_dispatch,
         verify=_verify_060_task_execution_dispatch,
+    ),
+    Migration(
+        version="061_request_changes_issuance_witness",
+        description=("Add the SQLite insert-only request-changes issuance witness"),
+        upgrade=_migration_061_request_changes_issuance_witness,
+        verify=_verify_061_request_changes_issuance_witness,
     ),
 )
 

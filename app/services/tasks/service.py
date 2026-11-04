@@ -14,12 +14,19 @@ from sqlalchemy.orm import Session
 from app.models import (
     LogEntry,
     Project,
+    RequestChangesIssuanceWitness,
+    Session as SessionModel,
     SessionTask,
     Task,
+    TaskExecution,
     TaskExecutionChangeSet,
     TaskStatus,
 )
 from app.services.orchestration.review_policy import build_operator_override_metadata
+from app.services.execution.workflow_lifecycle import (
+    dispatch_value_sha256,
+    valid_acceptance_authority,
+)
 from app.services.workspace.canonical_mutation_service import CanonicalMutationService
 from app.services.workspace.baseline_promotion_service import BaselinePromotionService
 from app.services.workspace.changeset_service import ChangesetService
@@ -562,6 +569,455 @@ class TaskService:
         task_id: int,
     ) -> Optional[dict[str, Any]]:
         return self.changesets.get_latest_task_change_set_for_task(task_id)
+
+    @staticmethod
+    def request_changes_change_set_fields(
+        change_set: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Return exactly the bounded ChangeSet fields used in repair text."""
+
+        if not isinstance(change_set, dict):
+            raise ValueError("request-changes ChangeSet is missing or malformed")
+        payload = change_set.get("change_set")
+        if not isinstance(payload, dict):
+            payload = change_set
+
+        def _count(key: str) -> int:
+            value = payload.get(key, 0)
+            if value is None:
+                return 0
+            if type(value) is not int or value < 0:
+                raise ValueError(f"request-changes ChangeSet {key} is invalid")
+            return value
+
+        def _items(key: str, limit: int) -> list[str]:
+            value = payload.get(key) or []
+            if not isinstance(value, list):
+                raise ValueError(f"request-changes ChangeSet {key} is invalid")
+            return [str(item) for item in value[:limit]]
+
+        warnings = payload.get("warning_flags") or []
+        if not isinstance(warnings, list):
+            raise ValueError("request-changes ChangeSet warning_flags is invalid")
+        return {
+            "added_count": _count("added_count"),
+            "modified_count": _count("modified_count"),
+            "deleted_count": _count("deleted_count"),
+            "warning_flags": [str(item) for item in warnings[:8]],
+            "added_files": _items("added_files", 12),
+            "modified_files": _items("modified_files", 12),
+            "deleted_files": _items("deleted_files", 12),
+        }
+
+    @classmethod
+    def build_request_changes_acceptance_authority(
+        cls,
+        *,
+        task: Task,
+        acceptance_mode: str,
+        change_set: Optional[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Bind one retry's acceptance source and repair snapshot to its attempt."""
+
+        if acceptance_mode not in {"ordinary", "request_changes"}:
+            raise ValueError("acceptance mode is unsupported")
+        mode = acceptance_mode
+        prior_change_set = None
+        if mode == "request_changes":
+            if not isinstance(task.description, str) or not task.description.strip():
+                raise ValueError("request-changes Task description is missing")
+            if not isinstance(task.promotion_note, str) or not task.promotion_note.strip():
+                raise ValueError("request-changes promotion note is missing")
+            if change_set is not None:
+                payload = change_set.get("change_set")
+                if not isinstance(payload, dict):
+                    payload = change_set
+                change_set_id = change_set.get("change_set_id") or payload.get(
+                    "change_set_id"
+                )
+                prior_execution_id = change_set.get(
+                    "task_execution_id"
+                ) or payload.get("task_execution_id")
+                if (
+                    type(change_set_id) is not int
+                    or change_set_id <= 0
+                    or type(prior_execution_id) is not int
+                    or prior_execution_id <= 0
+                    or payload.get("task_id") != task.id
+                    or payload.get("project_id") != task.project_id
+                ):
+                    raise ValueError("request-changes ChangeSet identity is invalid")
+                fields = cls.request_changes_change_set_fields(change_set)
+                prior_change_set = {
+                    "change_set_id": change_set_id,
+                    "task_execution_id": prior_execution_id,
+                    "bounded_fields_sha256": dispatch_value_sha256(fields),
+                }
+        return {
+            "version": 1,
+            "acceptance_mode": mode,
+            "trusted_source_kind": (
+                "operator_task_description"
+                if mode == "request_changes"
+                else "managed_task_prompt"
+            ),
+            "task_description_sha256": dispatch_value_sha256(task.description),
+            "promotion_note_sha256": (
+                dispatch_value_sha256(task.promotion_note)
+                if mode == "request_changes"
+                else None
+            ),
+            "prior_change_set": prior_change_set,
+        }
+
+    REQUEST_CHANGES_WITNESS_SCHEMA_VERSION = 1
+
+    def record_request_changes_issuance_witness(
+        self,
+        *,
+        task: Task,
+        task_execution: TaskExecution,
+        change_set: Optional[dict[str, Any]],
+        acceptance_authority: dict[str, Any],
+    ) -> RequestChangesIssuanceWitness:
+        """Insert the one issuance witness for a managed request-changes retry.
+
+        Insert-only: there is no update path. The caller owns the transaction
+        and must commit this row together with the retry invocation. Every
+        source relationship is checked against persisted rows; caller-supplied
+        identities are selectors only. Raises ``ValueError`` on any mismatch.
+        """
+
+        def _digest(value: Any) -> str:
+            if (
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(ch not in "0123456789abcdef" for ch in value)
+            ):
+                raise ValueError("request-changes witness digest is malformed")
+            return value
+
+        if not isinstance(acceptance_authority, dict) or (
+            acceptance_authority.get("acceptance_mode") != "request_changes"
+        ):
+            raise ValueError("issuance witness requires request-changes authority")
+        if not isinstance(change_set, dict):
+            raise ValueError("request-changes issuance requires a source ChangeSet")
+        prior = acceptance_authority.get("prior_change_set")
+        if not isinstance(prior, dict):
+            raise ValueError("request-changes authority has no source ChangeSet")
+        change_set_id = prior.get("change_set_id")
+        source_execution_id = prior.get("task_execution_id")
+        selected = (
+            change_set.get("change_set_id"),
+            change_set.get("task_execution_id"),
+        )
+        if (change_set_id, source_execution_id) != selected:
+            raise ValueError("request-changes source ChangeSet selection changed")
+        bounded_sha256 = _digest(prior.get("bounded_fields_sha256"))
+        if bounded_sha256 != dispatch_value_sha256(
+            self.request_changes_change_set_fields(change_set)
+        ):
+            raise ValueError("request-changes bounded ChangeSet digest mismatch")
+
+        current_id = task_execution.id
+        if (
+            type(current_id) is not int
+            or task_execution.task_id != task.id
+            or current_id == source_execution_id
+        ):
+            raise ValueError("request-changes current TaskExecution is invalid")
+        invocation_sha256 = _digest(task_execution.dispatch_invocation_sha256)
+        if invocation_sha256 != dispatch_value_sha256(
+            task_execution.dispatch_invocation
+        ):
+            raise ValueError("request-changes invocation digest mismatch")
+        invocation_authority = (task_execution.dispatch_invocation or {}).get(
+            "acceptance_authority"
+        )
+        if invocation_authority != acceptance_authority:
+            raise ValueError("request-changes invocation authority mismatch")
+
+        record = (
+            self.db.query(TaskExecutionChangeSet)
+            .filter(TaskExecutionChangeSet.id == change_set_id)
+            .first()
+        )
+        source = (
+            self.db.query(TaskExecution)
+            .filter(TaskExecution.id == source_execution_id)
+            .first()
+        )
+        if (
+            record is None
+            or source is None
+            or record.task_id != task.id
+            or record.project_id != task.project_id
+            or record.task_execution_id != source.id
+            or record.session_id is None
+            or source.task_id != task.id
+            or source.session_id != record.session_id
+        ):
+            raise ValueError("request-changes source ChangeSet provenance is invalid")
+
+        witness = RequestChangesIssuanceWitness(
+            current_task_execution_id=current_id,
+            source_task_execution_id=source.id,
+            source_session_id=record.session_id,
+            change_set_id=record.id,
+            bounded_fields_sha256=bounded_sha256,
+            invocation_sha256=invocation_sha256,
+            witness_schema_version=self.REQUEST_CHANGES_WITNESS_SCHEMA_VERSION,
+        )
+        self.db.add(witness)
+        self.db.flush()
+        return witness
+
+    def verify_request_changes_issuance_witness(
+        self,
+        *,
+        task: Task,
+        task_execution: TaskExecution,
+    ) -> dict[str, Any]:
+        """Verify persisted request-changes authority against its issuance row.
+
+        The witness is independent of the mutable dispatch invocation. This
+        method deliberately resolves the ChangeSet by the witnessed primary
+        key and never consults the Task's latest ChangeSet (Policy P1).
+        """
+
+        def _reject(reason: str) -> None:
+            raise ValueError(f"request_changes_witness_{reason}")
+
+        current_id = getattr(task_execution, "id", None)
+        task_id = getattr(task, "id", None)
+        if (
+            type(current_id) is not int
+            or current_id <= 0
+            or type(task_id) is not int
+            or task_id <= 0
+        ):
+            _reject("execution_identity_invalid")
+
+        current = (
+            self.db.query(TaskExecution)
+            .populate_existing()
+            .filter(TaskExecution.id == current_id)
+            .first()
+        )
+        persisted_task = (
+            self.db.query(Task).populate_existing().filter(Task.id == task_id).first()
+        )
+        if (
+            current is None
+            or persisted_task is None
+            or current.id != current_id
+            or current.task_id != task_id
+            or task_execution.task_id != task_id
+        ):
+            _reject("current_execution_mismatch")
+
+        witnesses = (
+            self.db.query(RequestChangesIssuanceWitness)
+            .filter(
+                RequestChangesIssuanceWitness.current_task_execution_id == current_id
+            )
+            .limit(2)
+            .all()
+        )
+        if not witnesses:
+            _reject("missing")
+        if len(witnesses) != 1:
+            _reject("duplicate")
+        witness = witnesses[0]
+        if (
+            type(witness.witness_schema_version) is not int
+            or witness.witness_schema_version != 1
+        ):
+            _reject("schema_unsupported")
+        if witness.current_task_execution_id != current.id:
+            _reject("current_execution_mismatch")
+
+        invocation = current.dispatch_invocation
+        if not isinstance(invocation, dict):
+            _reject("invocation_missing")
+        if (
+            type(invocation.get("version")) is not int
+            or invocation.get("version") != 1
+            or invocation.get("session_id") != current.session_id
+            or invocation.get("task_id") != task_id
+            or current.dispatch_kind != "ROOT"
+            or current.dispatch_parent_task_execution_id is not None
+        ):
+            _reject("dispatch_binding_invalid")
+
+        authority = invocation.get("acceptance_authority")
+        if (
+            not valid_acceptance_authority(authority)
+            or authority.get("acceptance_mode") != "request_changes"
+            or authority.get("trusted_source_kind") != "operator_task_description"
+        ):
+            _reject("authority_invalid")
+        description = persisted_task.description
+        if (
+            not isinstance(description, str)
+            or not description.strip()
+            or authority.get("task_description_sha256")
+            != dispatch_value_sha256(description)
+        ):
+            _reject("task_description_changed")
+        expected_prompt_digest = hashlib.sha256(
+            description.strip().encode("utf-8")
+        ).hexdigest()
+        if (
+            invocation.get("prompt_source") != "description"
+            or invocation.get("prompt_sha256") != expected_prompt_digest
+        ):
+            _reject("managed_prompt_changed")
+        promotion_note = persisted_task.promotion_note
+        if (
+            persisted_task.workspace_status
+            not in {"changes_requested", "isolated", "in_progress"}
+            or not isinstance(promotion_note, str)
+            or not promotion_note.strip()
+            or authority.get("promotion_note_sha256")
+            != dispatch_value_sha256(promotion_note)
+        ):
+            _reject("review_state_changed")
+
+        prior = authority.get("prior_change_set")
+        if not isinstance(prior, dict):
+            _reject("change_set_missing")
+        if (
+            prior.get("change_set_id") != witness.change_set_id
+            or prior.get("task_execution_id") != witness.source_task_execution_id
+            or prior.get("bounded_fields_sha256") != witness.bounded_fields_sha256
+        ):
+            _reject("invocation_change_set_mismatch")
+        try:
+            invocation_digest = dispatch_value_sha256(invocation)
+        except (TypeError, ValueError):
+            _reject("invocation_invalid")
+        if (
+            not isinstance(current.dispatch_invocation_sha256, str)
+            or invocation_digest != current.dispatch_invocation_sha256
+            or witness.invocation_sha256 != current.dispatch_invocation_sha256
+        ):
+            _reject("invocation_digest_mismatch")
+        source_execution_id = witness.source_task_execution_id
+        if (
+            type(source_execution_id) is not int
+            or source_execution_id <= 0
+            or source_execution_id == current.id
+        ):
+            _reject("source_execution_invalid")
+        source = (
+            self.db.query(TaskExecution)
+            .populate_existing()
+            .filter(TaskExecution.id == source_execution_id)
+            .first()
+        )
+        if source is None or source.task_id != task_id:
+            _reject("source_execution_invalid")
+        source_session = (
+            self.db.query(SessionModel)
+            .populate_existing()
+            .filter(SessionModel.id == witness.source_session_id)
+            .first()
+        )
+        if (
+            source_session is None
+            or source.session_id != witness.source_session_id
+            or source_session.project_id != persisted_task.project_id
+        ):
+            _reject("source_session_invalid")
+
+        change_set = (
+            self.db.query(TaskExecutionChangeSet)
+            .populate_existing()
+            .filter(TaskExecutionChangeSet.id == witness.change_set_id)
+            .first()
+        )
+        if (
+            change_set is None
+            or change_set.task_id != task_id
+            or change_set.project_id != persisted_task.project_id
+            or change_set.task_execution_id != source.id
+            or change_set.session_id != witness.source_session_id
+        ):
+            _reject("change_set_provenance_invalid")
+        change_set_payload = self.changesets.record_payload(change_set)
+        change_set_record = {
+            "change_set_id": change_set.id,
+            "task_execution_id": change_set.task_execution_id,
+            "task_id": change_set.task_id,
+            "project_id": change_set.project_id,
+            "session_id": change_set.session_id,
+            "change_set": change_set_payload,
+        }
+        try:
+            fields = self.request_changes_change_set_fields(change_set_record)
+            bounded_digest = dispatch_value_sha256(fields)
+        except (TypeError, ValueError):
+            _reject("change_set_malformed")
+        if bounded_digest != witness.bounded_fields_sha256:
+            _reject("change_set_fields_changed")
+
+        return change_set_record
+
+    @staticmethod
+    def build_request_changes_repair_prompt(
+        *,
+        task: Task,
+        base_prompt: str,
+        change_set: Optional[dict[str, Any]],
+    ) -> str:
+        """Build feedback-only instructions after Worker provenance verification."""
+
+        note = (getattr(task, "promotion_note", None) or "").strip()
+        if not note:
+            raise ValueError("request-changes promotion note is missing")
+        sections = [
+            base_prompt.strip(),
+            "",
+            "Operator request-changes feedback (not acceptance criteria):",
+            "Operator requested changes before this task can be accepted.",
+            f"Request changes note: {note}",
+        ]
+        if change_set is not None:
+            fields = TaskService.request_changes_change_set_fields(change_set)
+            sections.extend(
+                [
+                    "",
+                    "Latest deterministic workspace change set:",
+                    "- counts: "
+                    f"added={fields['added_count']}, "
+                    f"modified={fields['modified_count']}, "
+                    f"deleted={fields['deleted_count']}",
+                ]
+            )
+            if fields["warning_flags"]:
+                sections.append(
+                    "- warning flags: " + ", ".join(fields["warning_flags"])
+                )
+            for label, key in (
+                ("added", "added_files"),
+                ("modified", "modified_files"),
+                ("deleted", "deleted_files"),
+            ):
+                if fields[key]:
+                    sections.append(f"- {label} files: " + ", ".join(fields[key]))
+        sections.extend(
+            [
+                "",
+                "Repair instructions:",
+                "- Address the operator note directly.",
+                "- Preserve accepted existing project files unless the note requires a change.",
+                "- Do not recreate unrelated scaffolding or parallel task folders.",
+                "- Verify the repaired result before finishing.",
+            ]
+        )
+        return "\n".join(sections).strip()
 
     def reject_task_execution_change_set(
         self,

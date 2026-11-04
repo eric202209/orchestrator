@@ -3280,6 +3280,8 @@ class ValidatorService:
         plan: List[Dict[str, Any]],
         task_prompt: str,
         execution_profile: str,
+        acceptance_task_prompt: Optional[str] = None,
+        acceptance_authority_status: Optional[str] = None,
         workspace_consistency: Optional[Dict[str, Any]] = None,
         title: Optional[str] = None,
         description: Optional[str] = None,
@@ -4038,6 +4040,8 @@ class ValidatorService:
                 change_set=change_set,
                 plan=plan,
                 task_prompt=task_prompt,
+                acceptance_task_prompt=acceptance_task_prompt,
+                acceptance_authority_status=acceptance_authority_status,
                 include_static_checks=bool(
                     completion_evidence.get("include_static_checks", True)
                 ),

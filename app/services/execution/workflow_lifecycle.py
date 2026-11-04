@@ -37,10 +37,12 @@ from app.models import (
     OneShotExecutionAuthorization,
     PlanningSession,
     ProviderRequestReservation,
+    RequestChangesIssuanceWitness,
     Session as SessionModel,
     SessionTask,
     Task,
     TaskExecution,
+    TaskExecutionChangeSet,
     TaskStatus,
     WorkflowBudget,
     WorkflowTaskExecutionBinding,
@@ -188,6 +190,23 @@ def retained_execution_evidence_exists(
     ):
         return True
     if exists(OneShotAuthorizationClaim, direct_execution(OneShotAuthorizationClaim)):
+        return True
+    witness = RequestChangesIssuanceWitness
+    witness_scope = []
+    if execution_ids:
+        witness_scope.append(witness.current_task_execution_id.in_(execution_ids))
+        witness_scope.append(witness.source_task_execution_id.in_(execution_ids))
+    if session_ids:
+        witness_scope.append(witness.source_session_id.in_(session_ids))
+    if task_ids:
+        witness_scope.append(
+            witness.change_set_id.in_(
+                db.query(TaskExecutionChangeSet.id).filter(
+                    TaskExecutionChangeSet.task_id.in_(task_ids)
+                )
+            )
+        )
+    if exists(witness, *witness_scope):
         return True
 
     workflow_scope = []
@@ -414,6 +433,72 @@ def _dispatch_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def dispatch_value_sha256(value: Any) -> str:
+    """Hash a value with the same canonical encoding as a dispatch envelope."""
+
+    return hashlib.sha256(_dispatch_json(value).encode("utf-8")).hexdigest()
+
+
+def _valid_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def valid_acceptance_authority(value: Any) -> bool:
+    """Validate the bounded, versioned authority object stored in an invocation."""
+
+    if (
+        not isinstance(value, dict)
+        or type(value.get("version")) is not int
+        or value.get("version") != 1
+    ):
+        return False
+    expected_keys = {
+        "version",
+        "acceptance_mode",
+        "trusted_source_kind",
+        "task_description_sha256",
+        "promotion_note_sha256",
+        "prior_change_set",
+    }
+    if set(value) != expected_keys or not _valid_sha256(
+        value.get("task_description_sha256")
+    ):
+        return False
+    mode = value.get("acceptance_mode")
+    source = value.get("trusted_source_kind")
+    promotion_digest = value.get("promotion_note_sha256")
+    change_set = value.get("prior_change_set")
+    if mode == "ordinary":
+        return (
+            source == "managed_task_prompt"
+            and promotion_digest is None
+            and change_set is None
+        )
+    if mode != "request_changes" or source != "operator_task_description":
+        return False
+    if not _valid_sha256(promotion_digest):
+        return False
+    if change_set is None:
+        return True
+    if not isinstance(change_set, dict) or set(change_set) != {
+        "change_set_id",
+        "task_execution_id",
+        "bounded_fields_sha256",
+    }:
+        return False
+    return (
+        type(change_set.get("change_set_id")) is int
+        and change_set["change_set_id"] > 0
+        and type(change_set.get("task_execution_id")) is int
+        and change_set["task_execution_id"] > 0
+        and _valid_sha256(change_set.get("bounded_fields_sha256"))
+    )
+
+
 def _contains_dispatch_secret(value: Any) -> bool:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -444,6 +529,7 @@ def configure_task_execution_dispatch(
     continuation_kind: str | None = None,
     continuation_retry_count: int | None = None,
     resume_checkpoint_name: str | None = None,
+    acceptance_authority: dict[str, Any] | None = None,
 ) -> bool:
     """Attach a bounded replay contract before the caller's T1 commit.
 
@@ -472,6 +558,15 @@ def configure_task_execution_dispatch(
     elif prompt == (task.title or "").strip() and prompt:
         source = "title"
     if source is None:
+        return False
+    if acceptance_authority is not None and not valid_acceptance_authority(
+        acceptance_authority
+    ):
+        return False
+    if acceptance_authority is not None and (
+        acceptance_authority["acceptance_mode"] == "request_changes"
+        and source != "description"
+    ):
         return False
 
     if settings.CONTROLLED_WORKER_IDENTITY_REQUIRED:
@@ -517,6 +612,11 @@ def configure_task_execution_dispatch(
         "context": context,
         "planning_backend_override": planning_backend_override,
         "planning_escalation_metadata": planning_escalation_metadata,
+        **(
+            {"acceptance_authority": acceptance_authority}
+            if acceptance_authority is not None
+            else {}
+        ),
         "continuation": (
             {
                 "task_id": continuation_task_id,
@@ -542,9 +642,7 @@ def configure_task_execution_dispatch(
     task_execution.dispatch_parent_task_execution_id = parent_task_execution_id
     task_execution.dispatch_celery_task_id = str(uuid.uuid4())
     task_execution.dispatch_invocation = invocation
-    task_execution.dispatch_invocation_sha256 = hashlib.sha256(
-        encoded.encode("utf-8")
-    ).hexdigest()
+    task_execution.dispatch_invocation_sha256 = dispatch_value_sha256(invocation)
     task_execution.dispatch_lease_owner = None
     task_execution.dispatch_lease_fence = 0
     task_execution.dispatch_lease_expires_at = None
@@ -555,6 +653,23 @@ def configure_task_execution_dispatch(
     task_execution.dispatch_claimed_at = None
     db.flush()
     return True
+
+
+def has_active_operator_request_changes_review(task: Task | None) -> bool:
+    """Return whether the persisted Task carries an active operator review.
+
+    C1 enters review with ``workspace_status == "changes_requested"`` and a
+    nonblank persisted promotion note. Task.status is execution lifecycle
+    state: issuance changes it from DONE to PENDING/RUNNING while that review
+    remains active. A witness belongs to one issuance and can outlive review,
+    so it is deliberately not consulted here. Acceptance-authority validation
+    separately requires the persisted Task description and its bound digest.
+    """
+
+    if task is None or getattr(task, "workspace_status", None) != "changes_requested":
+        return False
+    promotion_note = getattr(task, "promotion_note", None)
+    return isinstance(promotion_note, str) and bool(promotion_note.strip())
 
 
 def _dispatch_now() -> datetime:
@@ -696,6 +811,12 @@ def _dispatch_replay_arguments(
         continuation = current_continuation
     elif session.status not in {"pending", "running"}:
         return None, f"session_not_runnable:{session.status}"
+    recovery_identity = execution.dispatch_kind == "RECOVERY" or (
+        isinstance(continuation, dict)
+        and continuation.get("kind") == "automatic_recovery"
+    )
+    if recovery_identity and has_active_operator_request_changes_review(task):
+        return None, "request_changes_review_active"
     prompt_source = invocation.get("prompt_source")
     prompt = (
         (task.description or "").strip()
@@ -706,6 +827,45 @@ def _dispatch_replay_arguments(
         prompt.encode("utf-8")
     ).hexdigest() != invocation.get("prompt_sha256"):
         return None, "task_prompt_reference_changed"
+    authority_present = "acceptance_authority" in invocation
+    authority = invocation.get("acceptance_authority")
+    if authority_present:
+        if not valid_acceptance_authority(authority):
+            return None, "acceptance_authority_invalid"
+        if authority["task_description_sha256"] != dispatch_value_sha256(
+            task.description
+        ):
+            return None, "acceptance_task_description_changed"
+        if authority["acceptance_mode"] == "request_changes":
+            if (
+                task.workspace_status
+                not in {
+                    "changes_requested",
+                    "isolated",
+                    "in_progress",
+                }
+                or not isinstance(task.promotion_note, str)
+                or not task.promotion_note.strip()
+                or authority["promotion_note_sha256"]
+                != dispatch_value_sha256(task.promotion_note)
+            ):
+                return None, "acceptance_request_changes_source_changed"
+            from app.services.tasks.service import TaskService
+
+            try:
+                TaskService(db).verify_request_changes_issuance_witness(
+                    task=task,
+                    task_execution=execution,
+                )
+            except ValueError as exc:
+                return None, str(exc)
+        elif task.workspace_status == "changes_requested":
+            return None, "acceptance_authority_mode_conflicts_with_review"
+    elif (
+        execution.dispatch_kind != "RECOVERY"
+        and task.workspace_status == "changes_requested"
+    ):
+        return None, "acceptance_authority_missing_for_request_changes"
     if _contains_dispatch_secret(invocation):
         return None, "invocation_contains_secret_field"
 

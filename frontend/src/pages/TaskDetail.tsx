@@ -149,7 +149,11 @@ function TaskDetail() {
       setRequestChangesSubmitting(true);
       await tasksAPI.requestWorkspaceChanges(task.id, requestChangesNote.trim());
       if (requestChangesRerun) {
-        await tasksAPI.retry(task.id, { execution_scope: 'new_session', create_new_session: true });
+        await tasksAPI.retry(task.id, {
+          execution_scope: 'new_session',
+          create_new_session: true,
+          retry_intent: 'request_changes',
+        });
       }
       await fetchTask();
       setRequestChangesOpen(false);
@@ -168,7 +172,10 @@ function TaskDetail() {
       setSaveError(null);
       await tasksAPI.retry(
         task.id,
-        isolated ? { execution_scope: 'new_session', create_new_session: true } : undefined
+        {
+          ...(isolated ? { execution_scope: 'new_session' as const, create_new_session: true } : {}),
+          retry_intent: task.workspace_status === 'changes_requested' ? 'request_changes' : 'ordinary',
+        }
       );
       await fetchTask();
     } catch (error) {
@@ -579,7 +586,7 @@ function TaskDetail() {
                     Accept Changes
                   </Button>
                 )}
-                {task.task_subfolder && task.workspace_status !== 'promoted' && (
+                {task.status === 'done' && task.task_subfolder && task.workspace_status !== 'promoted' && (
                   <Button size="sm" variant="outline" onClick={openRequestChanges}>
                     Request Changes
                   </Button>

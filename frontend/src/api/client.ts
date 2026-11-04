@@ -504,6 +504,7 @@ export const tasksAPI = {
       session_id?: number;
       execution_scope?: "workflow_session" | "new_session";
       create_new_session?: boolean;
+      retry_intent?: "ordinary" | "request_changes";
     },
   ) => apiClient.post(`/tasks/${id}/retry`, data || {}),
   acceptWorkspace: (

@@ -707,15 +707,100 @@ def _run_task_acceptance(
     *,
     project_dir: Path,
     task_prompt: str,
+    acceptance_task_prompt: str | None = None,
+    acceptance_authority_status: str | None = None,
     focused_command: str,
     focused_returncode: int | None,
     timeout_seconds: int,
     findings: list[CandidateFinding],
     commands_run: list[str],
 ) -> dict[str, Any]:
-    """Run task-declared acceptance pytest commands in addition to focused tests."""
+    """Run task-declared acceptance pytest commands in addition to focused tests.
 
-    extraction = task_acceptance_pytest_commands(task_prompt, project_dir=project_dir)
+    ``acceptance_task_prompt`` can preserve the trusted Task description when
+    ``task_prompt`` also contains non-authoritative retry feedback.
+    """
+
+    if acceptance_authority_status not in {
+        None,
+        "verified_request_changes",
+        "verified_ordinary",
+        "verified_legacy_ordinary",
+        "verified_recovery_legacy",
+        "unverified_legacy",
+    }:
+        findings.append(
+            _task_acceptance_finding(
+                rule_id="task_acceptance_provenance_refused",
+                category="task_contract",
+                message="Task acceptance provenance is unsupported or refused",
+                evidence={"authority_status": acceptance_authority_status},
+            )
+        )
+        return {
+            "status": "blocked_provenance_refused",
+            "authority_status": acceptance_authority_status,
+            "section_found": False,
+            "extracted": [],
+            "admitted": [],
+            "refused": [],
+            "ignored": [],
+            "results": [],
+            "declared_forms": [],
+        }
+    if acceptance_authority_status == "unverified_legacy":
+        findings.append(
+            _task_acceptance_finding(
+                rule_id="task_acceptance_provenance_unverified",
+                category="task_contract",
+                message=(
+                    "Task acceptance was not verified because this execution "
+                    "has no trusted persisted acceptance provenance"
+                ),
+                evidence={"authority_status": acceptance_authority_status},
+            )
+        )
+        return {
+            "status": "blocked_unverified_provenance",
+            "authority_status": acceptance_authority_status,
+            "section_found": False,
+            "extracted": [],
+            "admitted": [],
+            "refused": [],
+            "ignored": [],
+            "results": [],
+            "declared_forms": [],
+        }
+    if acceptance_authority_status == "verified_request_changes" and not (
+        isinstance(acceptance_task_prompt, str) and acceptance_task_prompt.strip()
+    ):
+        findings.append(
+            _task_acceptance_finding(
+                rule_id="task_acceptance_trusted_source_missing",
+                category="task_contract",
+                message=(
+                    "Request-changes acceptance was not verified because its "
+                    "persisted Operator description is unavailable"
+                ),
+                evidence={"authority_status": acceptance_authority_status},
+            )
+        )
+        return {
+            "status": "blocked_missing_trusted_source",
+            "authority_status": acceptance_authority_status,
+            "section_found": False,
+            "extracted": [],
+            "admitted": [],
+            "refused": [],
+            "ignored": [],
+            "results": [],
+            "declared_forms": [],
+        }
+
+    extraction = task_acceptance_pytest_commands(
+        task_prompt if acceptance_task_prompt is None else acceptance_task_prompt,
+        project_dir=project_dir,
+    )
     for refusal in extraction.refused:
         findings.append(
             _task_acceptance_finding(
@@ -871,7 +956,7 @@ def _run_task_acceptance(
                     evidence=evidence,
                 )
             )
-    return {
+    result = {
         "section_found": extraction.section_found,
         "extracted": list(extraction.extracted),
         "admitted": [command.text for command in extraction.admitted],
@@ -880,6 +965,9 @@ def _run_task_acceptance(
         "results": results,
         "declared_forms": list(declared_acceptance_forms(task_prompt)),
     }
+    if acceptance_authority_status is not None:
+        result["authority_status"] = acceptance_authority_status
+    return result
 
 
 def validate_candidate_delta(
@@ -888,6 +976,8 @@ def validate_candidate_delta(
     change_set: Mapping[str, Any],
     plan: Sequence[Mapping[str, Any]],
     task_prompt: str,
+    acceptance_task_prompt: str | None = None,
+    acceptance_authority_status: str | None = None,
     include_static_checks: bool = True,
     allow_broad_fallback: bool = False,
     timeout_seconds: int = 180,
@@ -984,6 +1074,8 @@ def validate_candidate_delta(
         task_acceptance = _run_task_acceptance(
             project_dir=project_dir,
             task_prompt=task_prompt,
+            acceptance_task_prompt=acceptance_task_prompt,
+            acceptance_authority_status=acceptance_authority_status,
             # A never-started focused run is not reusable acceptance evidence.
             focused_command=selection.command if start_error is None else "",
             focused_returncode=focused_returncode,
@@ -991,6 +1083,11 @@ def validate_candidate_delta(
             findings=findings,
             commands_run=commands_run,
         )
+    elif acceptance_authority_status is not None:
+        task_acceptance = {
+            "status": "disabled_by_configuration",
+            "authority_status": acceptance_authority_status,
+        }
 
     if include_static_checks:
         observed_paths = tuple(

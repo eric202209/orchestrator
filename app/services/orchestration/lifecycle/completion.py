@@ -381,6 +381,8 @@ class TaskCompletionFinalizer:
                 started_at=None,
             )
             next_prompt = next_task.description or next_task.title
+            from app.services.tasks.service import TaskService
+
             dispatch_managed = configure_task_execution_dispatch(
                 db,
                 task_execution=next_task_execution,
@@ -389,6 +391,13 @@ class TaskCompletionFinalizer:
                 dispatch_kind="ROOT",
                 prompt=next_prompt,
                 timeout_seconds=ctx.timeout_seconds,
+                acceptance_authority=(
+                    TaskService.build_request_changes_acceptance_authority(
+                        task=next_task,
+                        acceptance_mode="ordinary",
+                        change_set=None,
+                    )
+                ),
             )
             if not dispatch_managed and enforcement_enabled():
                 auto_advance_failure = "invocation_not_replayable"

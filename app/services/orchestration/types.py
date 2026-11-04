@@ -363,6 +363,12 @@ class OrchestrationRunContext:
     runtime_workspace_used: bool = False
     intent_mode: str = "default"
     planner_contract: Optional[Dict[str, Any]] = None
+    # Trusted Task.description captured before request-changes status is
+    # replaced with the active execution status.
+    acceptance_task_prompt: Optional[str] = None
+    # Provenance state distinguishes a verified source from legacy ambiguity
+    # and from acceptance verification disabled by configuration.
+    acceptance_authority_status: Optional[str] = None
     planner_source_materialization: Any = None
     # Request-local advisory evidence; never persisted as planning authority.
     read_only_observation: Any = None

@@ -6,13 +6,13 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from app.schemas.pagination import paginate
 
 from app.database import get_db
@@ -187,10 +187,13 @@ class BackupResponse(BaseModel):
 
 
 class TaskRetryRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+
     session_id: Optional[int] = None
     execution_scope: Optional[str] = None
     create_new_session: bool = False
     planner_contract: Optional[Dict[str, Any]] = None
+    retry_intent: Optional[Literal["ordinary", "request_changes"]] = None
 
 
 class DirectExecuteRequest(BaseModel):
@@ -341,6 +344,11 @@ def _resume_automatic_chain_after_promotion(
         prompt=auto_advance_prompt,
         timeout_seconds=DEFAULT_TASK_RETRY_TIMEOUT_SECONDS,
         context=auto_advance_context,
+        acceptance_authority=TaskService.build_request_changes_acceptance_authority(
+            task=next_task,
+            acceptance_mode="ordinary",
+            change_set=None,
+        ),
     )
     if not dispatch_managed and (
         enforcement_enabled() or settings.CONTROLLED_WORKER_IDENTITY_REQUIRED
@@ -436,50 +444,13 @@ def _build_request_changes_repair_prompt(
     base_prompt: str,
     change_set: Optional[dict],
 ) -> str:
-    note = (getattr(task, "promotion_note", None) or "").strip()
-    if not note:
+    if not (getattr(task, "promotion_note", None) or "").strip():
         return base_prompt
-
-    sections = [
-        base_prompt.strip(),
-        "",
-        "Operator requested changes before this task can be accepted.",
-        f"Request changes note: {note}",
-    ]
-    payload = (change_set or {}).get("change_set") or {}
-    if payload:
-        sections.append("")
-        sections.append("Latest deterministic workspace change set:")
-        sections.append(
-            "- counts: "
-            f"added={int(payload.get('added_count') or 0)}, "
-            f"modified={int(payload.get('modified_count') or 0)}, "
-            f"deleted={int(payload.get('deleted_count') or 0)}"
-        )
-        warning_flags = payload.get("warning_flags") or []
-        if warning_flags:
-            sections.append(
-                "- warning flags: " + ", ".join(map(str, warning_flags[:8]))
-            )
-        for label, key in (
-            ("added", "added_files"),
-            ("modified", "modified_files"),
-            ("deleted", "deleted_files"),
-        ):
-            files = [str(item) for item in payload.get(key, [])[:12]]
-            if files:
-                sections.append(f"- {label} files: " + ", ".join(files))
-    sections.extend(
-        [
-            "",
-            "Repair instructions:",
-            "- Address the operator note directly.",
-            "- Preserve accepted existing project files unless the note requires a change.",
-            "- Do not recreate unrelated scaffolding or parallel task folders.",
-            "- Verify the repaired result before finishing.",
-        ]
+    return TaskService.build_request_changes_repair_prompt(
+        task=task,
+        base_prompt=base_prompt,
+        change_set=change_set,
     )
-    return "\n".join(sections).strip()
 
 
 def _change_set_has_changes(change_set: Optional[dict]) -> bool:
@@ -639,6 +610,92 @@ def _clear_terminal_task_mutation_lock(
     return True
 
 
+def _archive_repair_workspace_before_issuance(db: Session, task: Task) -> dict | None:
+    """Archive the reviewed workspace for a new-Session request-changes retry.
+
+    Runs before any retry row exists, in its own short transaction, so the
+    filesystem move never happens while a SQLite write transaction is open and
+    a failure leaves no publishable TaskExecution. Only workspace bookkeeping
+    (``task_subfolder``) changes; review state and the Operator note remain the
+    authority inputs captured later by the invocation.
+    """
+
+    from app.services.tasks.service import TaskService
+    from app.services.workspace.project_mutation_lock import ProjectMutationLockError
+
+    project = db.query(Project).filter(Project.id == task.project_id).first()
+    if project is None:
+        return None
+    if db.new or db.dirty or db.deleted:
+        raise RuntimeError("repair workspace archive requires a clean Session")
+    try:
+        result = TaskService(db).archive_task_workspace_for_repair_rerun(project, task)
+    except (ProjectMutationLockError, OSError) as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Request-changes workspace archive did not complete; "
+                "no retry execution was created"
+            ),
+        ) from exc
+    if result.get("archived") or result.get("reason") == "workspace_missing":
+        db.add(
+            LogEntry(
+                task_id=task.id,
+                level="INFO",
+                message=f"Repair workspace archived before retry: {task.title}",
+                log_metadata=json.dumps({"repair_archive_result": result}),
+            )
+        )
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return result
+
+
+def _begin_request_changes_issuance(db: Session, task: Task) -> None:
+    """Open the SQLite write transaction that linearizes request-changes issuance.
+
+    ``BEGIN IMMEDIATE`` is taken before the authoritative review-state read, so
+    the Task reload, ChangeSet selection, invocation and witness all happen
+    under one writer lock and commit together. It runs after any pre-issuance
+    archive has committed; no filesystem work happens while the lock is held.
+    """
+
+    if db.new or db.dirty or db.deleted:
+        raise RuntimeError("request-changes issuance requires a clean Session")
+    if db.in_transaction():
+        db.rollback()
+    try:
+        db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+    except OperationalError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Request-changes issuance could not acquire the database write "
+                "lock; no retry execution was created"
+            ),
+        ) from exc
+    db.refresh(task)
+    if (
+        task.status != TaskStatus.DONE
+        or getattr(task, "workspace_status", None) != "changes_requested"
+        or not isinstance(task.promotion_note, str)
+        or not task.promotion_note.strip()
+        or not isinstance(task.description, str)
+        or not task.description.strip()
+    ):
+        db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Request-changes review state is incomplete or stale",
+        )
+
+
 def _queue_task_retry(
     db: Session,
     task: Task,
@@ -652,15 +709,78 @@ def _queue_task_retry(
     from app.services.tasks.service import TaskService
 
     retry_request = retry_request or TaskRetryRequest()
+    active_request_changes = (
+        getattr(task, "workspace_status", None) == "changes_requested"
+    )
+    if active_request_changes:
+        if db.get_bind().dialect.name != "sqlite":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "UNSUPPORTED_DATABASE: managed request-changes issuance "
+                    "requires SQLite"
+                ),
+            )
+        if retry_request.retry_intent != "request_changes":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "An active request-changes review requires explicit "
+                    "retry_intent=request_changes"
+                ),
+            )
+        if (
+            task.status != TaskStatus.DONE
+            or not isinstance(task.promotion_note, str)
+            or not task.promotion_note.strip()
+            or not isinstance(task.description, str)
+            or not task.description.strip()
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Request-changes review state is incomplete or stale",
+            )
+        # Early refusal so a certain no-source refusal never archives the
+        # repair workspace; the authoritative check repeats under the lock.
+        if TaskService(db).get_latest_task_change_set_for_task(task.id) is None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Request-changes issuance requires a prior ChangeSet; "
+                    "no retry execution was created"
+                ),
+            )
+    elif retry_request.retry_intent == "request_changes":
+        raise HTTPException(
+            status_code=409,
+            detail="No active request-changes review exists for this Task",
+        )
+
+    retry_intent = retry_request.retry_intent or "ordinary"
     explicit_new_session = (
         retry_request.create_new_session
         or str(retry_request.execution_scope or "").lower() == "new_session"
     )
-    prompt = (prompt_override or task.description or task.title or "").strip()
+    prompt = (
+        (task.description or "").strip()
+        if retry_intent == "request_changes"
+        else (prompt_override or task.description or task.title or "").strip()
+    )
     if not prompt:
         raise HTTPException(
             status_code=400, detail="Task is missing a description or title to execute"
         )
+
+    repair_archive_result = None
+    if explicit_new_session and active_request_changes:
+        # Prepare before issuance: no TaskExecution exists until the archive is
+        # durable, so neither this request nor the Beat reconciler can publish
+        # an attempt whose repair workspace is still being archived.
+        repair_archive_result = _archive_repair_workspace_before_issuance(db, task)
+    if active_request_changes:
+        # Every read from here to the commit below is under the write lock.
+        _begin_request_changes_issuance(db, task)
+        prompt = task.description.strip()
 
     planner_context = (
         {"planner_contract": retry_request.planner_contract}
@@ -815,13 +935,28 @@ def _queue_task_retry(
         TaskStatus.CANCELLED,
     )
     latest_change_set = None
-    if getattr(task, "workspace_status", None) == "changes_requested":
+    if retry_intent == "request_changes":
         latest_change_set = TaskService(db).get_latest_task_change_set_for_task(task.id)
-        prompt = _build_request_changes_repair_prompt(
+        if latest_change_set is None:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Request-changes issuance requires a prior ChangeSet; "
+                    "no retry execution was created"
+                ),
+            )
+    try:
+        acceptance_authority = TaskService.build_request_changes_acceptance_authority(
             task=task,
-            base_prompt=prompt,
+            acceptance_mode=retry_intent,
             change_set=latest_change_set,
         )
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Task acceptance authority cannot be persisted: {exc}",
+        ) from exc
     _prepare_task_for_fresh_execution(task, clear_saved_plan=should_clear_saved_plan)
     mark_session_running(
         selected_session,
@@ -848,19 +983,31 @@ def _queue_task_retry(
                 prompt=prompt,
                 timeout_seconds=timeout_seconds,
                 context=planner_context,
+                acceptance_authority=acceptance_authority,
             )
-            if not dispatch_managed and settings.CONTROLLED_WORKER_IDENTITY_REQUIRED:
+            if not dispatch_managed:
                 raise HTTPException(
                     status_code=409,
-                    detail=(
-                        "Task invocation cannot be persisted for controlled identity-bound dispatch"
-                    ),
+                    detail="Task invocation and acceptance authority cannot be persisted for safe dispatch",
                 )
-            if not dispatch_managed and enforcement_enabled():
-                raise HTTPException(
-                    status_code=409,
-                    detail="Task invocation cannot be persisted for safe dispatch replay",
-                )
+            if retry_intent == "request_changes":
+                # Policy P1: pin the issuance-selected ChangeSet in the same
+                # transaction as the invocation; nothing publishes before commit.
+                try:
+                    TaskService(db).record_request_changes_issuance_witness(
+                        task=task,
+                        task_execution=task_execution,
+                        change_set=latest_change_set,
+                        acceptance_authority=acceptance_authority,
+                    )
+                except (ValueError, IntegrityError) as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            "Request-changes issuance witness cannot be persisted; "
+                            "no retry execution was created"
+                        ),
+                    ) from exc
             db.commit()
     except ProjectExecutionSerializationConflict as exc:
         db.rollback()
@@ -868,18 +1015,6 @@ def _queue_task_retry(
     except HTTPException:
         db.rollback()
         raise
-    repair_archive_result = None
-    if (
-        explicit_new_session
-        and getattr(task, "workspace_status", None) == "changes_requested"
-    ):
-        if project:
-            repair_archive_result = TaskService(
-                db
-            ).archive_task_workspace_for_repair_rerun(
-                project,
-                task,
-            )
     task_workspace = ensure_task_workspace(db, selected_session, task.id)
     event_project_dir = _resolve_retry_event_project_dir(
         project=project,
@@ -2081,6 +2216,16 @@ def request_task_workspace_changes(
 ):
     """Mark a completed task workspace as needing follow-up before promotion."""
     task = require_task_runtime_eligibility(db, task_id, current_user)
+    if task.status != TaskStatus.DONE:
+        raise HTTPException(
+            status_code=409,
+            detail="Only a completed Task can enter request-changes review",
+        )
+    if task.workspace_status == "promoted":
+        raise HTTPException(
+            status_code=409,
+            detail="A promoted Task workspace cannot enter request-changes review",
+        )
     if not task.task_subfolder:
         raise HTTPException(
             status_code=409, detail="Task has no workspace folder to review"

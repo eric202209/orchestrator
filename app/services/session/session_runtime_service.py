@@ -652,6 +652,17 @@ def queue_task_for_session(
             dispatch_kind = (
                 "RECOVERY" if continuation_kind == "automatic_recovery" else "ROOT"
             )
+            if (
+                dispatch_kind != "RECOVERY"
+                and getattr(task, "workspace_status", None) == "changes_requested"
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "An active request-changes review requires an explicit "
+                        "request-changes retry intent"
+                    ),
+                )
             dispatch_managed = configure_task_execution_dispatch(
                 db,
                 task_execution=task_execution,
@@ -671,6 +682,15 @@ def queue_task_for_session(
                 continuation_task_id=(task.id if e3_continuation_dispatch else None),
                 continuation_kind=continuation_kind,
                 continuation_retry_count=continuation_retry_count,
+                acceptance_authority=(
+                    TaskService.build_request_changes_acceptance_authority(
+                        task=task,
+                        acceptance_mode="ordinary",
+                        change_set=None,
+                    )
+                    if dispatch_kind != "RECOVERY"
+                    else None
+                ),
             )
             if not dispatch_managed and enforcement_enabled():
                 raise HTTPException(

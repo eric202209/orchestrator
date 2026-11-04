@@ -43,8 +43,11 @@ from app.services.execution.process_identity import current_worker_identity
 from app.services.execution.workflow_lifecycle import (
     attach_workflow_identity,
     close_task_workflow,
+    dispatch_value_sha256,
+    has_active_operator_request_changes_review,
     managed_continuation_retry_arguments,
     require_dispatch_identity,
+    valid_acceptance_authority,
 )
 
 
@@ -808,6 +811,152 @@ def _route_one_shot_if_requested(
         db.close()
 
 
+class AcceptanceAuthorityRefusal(ValueError):
+    """An execution cannot prove which persisted text has acceptance authority."""
+
+
+def _resolve_worker_acceptance_authority(
+    db,
+    *,
+    task: Optional[Task],
+    session: Optional[SessionModel],
+    task_execution: Optional[TaskExecution],
+    task_execution_id: Optional[int],
+    session_id: int,
+    task_id: int,
+    prompt: str,
+    expected_session_instance_id: Optional[str],
+    celery_task_id: Optional[str],
+    continuation_claimed: bool,
+    continuation_kind: Optional[str],
+) -> tuple[Optional[str], str, str]:
+    """Verify persisted attempt provenance and return acceptance/repair sources."""
+
+    def _refuse(reason: str):
+        raise AcceptanceAuthorityRefusal(f"acceptance_provenance_refused:{reason}")
+
+    if (
+        task is None
+        or session is None
+        or task_execution is None
+        or task_execution_id is None
+        or task_execution.id != task_execution_id
+        or task_execution.task_id != task_id
+        or task_execution.session_id != session_id
+        or task.id != task_id
+        or session.id != session_id
+        or task_execution.status != TaskStatus.RUNNING
+    ):
+        _refuse("task_execution_binding_mismatch")
+
+    invocation = task_execution.dispatch_invocation
+    managed = task_execution.dispatch_state is not None
+    if managed:
+        if (
+            task_execution.dispatch_state != "CLAIMED"
+            or task_execution.dispatch_kind not in {"ROOT", "RETRY", "RECOVERY"}
+            or not isinstance(invocation, dict)
+            or not expected_session_instance_id
+            or task_execution.dispatch_session_instance_id
+            != expected_session_instance_id
+            or session.instance_id != expected_session_instance_id
+            or not celery_task_id
+            or task_execution.dispatch_celery_task_id != celery_task_id
+        ):
+            _refuse("managed_dispatch_identity_mismatch")
+        if (
+            dispatch_value_sha256(invocation)
+            != task_execution.dispatch_invocation_sha256
+        ):
+            _refuse("invocation_digest_mismatch")
+        if (
+            type(invocation.get("version")) is not int
+            or invocation.get("version") != 1
+            or invocation.get("session_id") != session_id
+            or invocation.get("task_id") != task_id
+        ):
+            _refuse("invocation_execution_binding_mismatch")
+        prompt_source = invocation.get("prompt_source")
+        persisted_prompt = (
+            (task.description or "").strip()
+            if prompt_source == "description"
+            else (task.title or "").strip() if prompt_source == "title" else None
+        )
+        if persisted_prompt is None:
+            _refuse("invocation_prompt_source_invalid")
+        if (
+            hashlib.sha256(persisted_prompt.encode("utf-8")).hexdigest()
+            != invocation.get("prompt_sha256")
+            or prompt != persisted_prompt
+        ):
+            _refuse("broker_prompt_differs_from_persisted_reference")
+    elif (
+        invocation is not None or task_execution.dispatch_invocation_sha256 is not None
+    ):
+        _refuse("partial_managed_invocation")
+
+    recovery_identity = task_execution.dispatch_kind == "RECOVERY" or (
+        continuation_claimed and continuation_kind == "automatic_recovery"
+    )
+    if recovery_identity and has_active_operator_request_changes_review(task):
+        _refuse("request_changes_review_active")
+
+    authority_present = managed and "acceptance_authority" in invocation
+    if not authority_present:
+        if recovery_identity:
+            return None, "verified_recovery_legacy", prompt
+        if task.workspace_status == "changes_requested":
+            _refuse("request_changes_metadata_missing")
+        if managed:
+            return None, "verified_legacy_ordinary", prompt
+        return None, "unverified_legacy", prompt
+
+    authority = invocation.get("acceptance_authority")
+    if not valid_acceptance_authority(authority):
+        _refuse("authority_metadata_invalid")
+    if authority["task_description_sha256"] != dispatch_value_sha256(task.description):
+        _refuse("task_description_changed")
+
+    if recovery_identity:
+        _refuse("authority_mode_conflicts_with_recovery")
+    if authority["acceptance_mode"] == "ordinary":
+        if task.workspace_status == "changes_requested":
+            _refuse("ordinary_mode_conflicts_with_active_review")
+        return None, "verified_ordinary", prompt
+
+    if authority["acceptance_mode"] != "request_changes":
+        _refuse("authority_mode_unsupported")
+    if (
+        authority["trusted_source_kind"] != "operator_task_description"
+        or not isinstance(task.description, str)
+        or not task.description.strip()
+        or task.workspace_status not in {"changes_requested", "isolated", "in_progress"}
+        or not isinstance(task.promotion_note, str)
+        or not task.promotion_note.strip()
+        or authority["promotion_note_sha256"]
+        != dispatch_value_sha256(task.promotion_note)
+    ):
+        _refuse("request_changes_source_changed")
+
+    from app.services.tasks.service import TaskService
+
+    task_service = TaskService(db)
+    try:
+        repair_change_set = task_service.verify_request_changes_issuance_witness(
+            task=task,
+            task_execution=task_execution,
+        )
+    except ValueError as exc:
+        _refuse(str(exc))
+
+    repair_prompt = task_service.build_request_changes_repair_prompt(
+        task=task,
+        base_prompt=task.description,
+        change_set=repair_change_set,
+    )
+    return task.description, "verified_request_changes", repair_prompt
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
@@ -911,6 +1060,8 @@ def execute_orchestration_task(
     # one; only non-canonical task-subfolder dispatch leaves it None.
     _runtime_context: Optional[RuntimeExecutorContext] = None
     runtime_service = None
+    acceptance_task_prompt: Optional[str] = None
+    acceptance_authority_status: Optional[str] = None
     is_e3_continuation_dispatch = any(
         value is not None
         for value in (
@@ -1004,6 +1155,13 @@ def execute_orchestration_task(
             # Missing TE identity is a legacy transport shape. It may keep
             # working while enforcement is disabled, but enforcement never
             # reconstructs lineage from Session/Task matching.
+            if (
+                getattr(task, "workspace_status", None) == "changes_requested"
+                or bool(getattr(task, "promotion_note", None))
+            ):
+                raise AcceptanceAuthorityRefusal(
+                    "acceptance_provenance_refused:task_execution_identity_missing"
+                )
             require_dispatch_identity(
                 db,
                 task_execution=None,
@@ -1915,6 +2073,27 @@ def execute_orchestration_task(
         # later lifecycle handoff is fenced on this exact value so an old
         # worker cannot reconcile a newer Session generation.
         _claimed_session_instance_id = session.instance_id
+        if task_execution is not None:
+            db.refresh(task_execution)
+        task_execution = get_task_execution(db, task_execution_id)
+        (
+            acceptance_task_prompt,
+            acceptance_authority_status,
+            prompt,
+        ) = _resolve_worker_acceptance_authority(
+            db,
+            task=task,
+            session=session,
+            task_execution=task_execution,
+            task_execution_id=task_execution_id,
+            session_id=session_id,
+            task_id=task_id,
+            prompt=prompt,
+            expected_session_instance_id=_claimed_session_instance_id,
+            celery_task_id=getattr(getattr(self, "request", None), "id", None),
+            continuation_claimed=continuation_claimed,
+            continuation_kind=continuation_kind,
+        )
         # Phase 40E-4R3B-1: under enforcement the claimed attempt must own an
         # OPEN workflow bound in this generation, refused before any provider
         # request (retry-exempt). Disabled: None, with no database access.
@@ -2957,6 +3136,8 @@ def execute_orchestration_task(
             planning_backend=effective_guidance_planning_backend,
             execution_backend=_resolved_execution_backend,
             guidance_backend=guidance_backend,
+            acceptance_task_prompt=acceptance_task_prompt,
+            acceptance_authority_status=acceptance_authority_status,
             guidance_model_name=guidance_model_name,
             guidance_model_family=guidance_model_family,
             runtime_workspace_used=_runtime_sandbox is not None,
@@ -3858,6 +4039,8 @@ def execute_orchestration_task(
                         intent_mode=normalize_task_intent(
                             getattr(task, "intent_mode", None)
                         ),
+                        acceptance_task_prompt=acceptance_task_prompt,
+                        acceptance_authority_status=acceptance_authority_status,
                     )
                     if session and task
                     else None

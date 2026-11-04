@@ -2680,13 +2680,34 @@ def test_changes_requested_new_session_retry_archives_old_workspace(
         project_id=project.id,
         title="Repair rerun task",
         description="repair prompt",
-        status=TaskStatus.FAILED,
-        workspace_status="blocked",
+        status=TaskStatus.DONE,
+        workspace_status="ready",
         task_subfolder="task-old",
     )
     db_session.add_all([workflow_session, task])
     db_session.commit()
     db_session.refresh(task)
+    # C1-I1 (D-5): request-changes issuance requires a legitimate source.
+    prior_execution = TaskExecution(
+        session_id=workflow_session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.DONE,
+    )
+    db_session.add(prior_execution)
+    db_session.flush()
+    db_session.add(
+        TaskExecutionChangeSet(
+            project_id=project.id,
+            task_id=task.id,
+            session_id=workflow_session.id,
+            task_execution_id=prior_execution.id,
+            base_snapshot_key=f"prior:{prior_execution.id}",
+            status="completed",
+            created_at=datetime.now(timezone.utc),
+        )
+    )
+    db_session.commit()
 
     request_response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/request-changes",
@@ -2698,7 +2719,11 @@ def test_changes_requested_new_session_retry_archives_old_workspace(
     _stub_retry_dispatch(monkeypatch, captured_kwargs)
     retry_response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/retry",
-        json={"execution_scope": "new_session", "create_new_session": True},
+        json={
+            "execution_scope": "new_session",
+            "create_new_session": True,
+            "retry_intent": "request_changes",
+        },
     )
 
     assert retry_response.status_code == 200
@@ -2713,7 +2738,8 @@ def test_changes_requested_new_session_retry_archives_old_workspace(
     db_session.refresh(task)
     assert task.task_subfolder is None
     assert task.status == TaskStatus.PENDING
-    assert "needs repair" in (task.promotion_note or "")
-    assert "Archived previous workspace" in (task.promotion_note or "")
+    # Archive bookkeeping stays out of the request-changes authority inputs.
+    assert task.promotion_note == "needs repair"
+    assert task.workspace_status == "changes_requested"
     assert payload["execution_scope"] == "isolated_session"
     assert captured_kwargs["task_id"] == task.id

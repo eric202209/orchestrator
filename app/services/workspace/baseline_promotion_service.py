@@ -1180,9 +1180,12 @@ class BaselinePromotionService:
             return {"archived": False, "reason": "task_has_no_workspace"}
 
         workspace_dir = (project_root / task_subfolder).resolve()
+        # Repair-rerun archiving is workspace bookkeeping only. The active
+        # review (workspace_status) and the Operator note (promotion_note) are
+        # request-changes authority inputs and must not change here; the
+        # archive location is recorded in the caller's log metadata instead.
         if not workspace_dir.exists():
             task.task_subfolder = None
-            task.workspace_status = "not_created"
             return {
                 "archived": False,
                 "reason": "workspace_missing",
@@ -1214,14 +1217,8 @@ class BaselinePromotionService:
         archive_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(workspace_dir), str(archive_dir))
 
-        existing_note = (getattr(task, "promotion_note", None) or "").strip()
-        archive_note = f"Archived previous workspace for repair rerun at {archive_dir}"
         task.task_subfolder = None
-        task.workspace_status = "not_created"
         task.promoted_at = None
-        task.promotion_note = (
-            f"{existing_note}\n{archive_note}" if existing_note else archive_note
-        )
         task.updated_at = archived_at
         return {
             "archived": True,
