@@ -220,11 +220,21 @@ def _run_worker(
             details={},
         )
 
+    def claim_worker_attempt(**kwargs):
+        # The production claim commits the TaskExecution as RUNNING before the
+        # Worker resolves acceptance provenance. Keep that lifecycle invariant
+        # in this provider-isolated seam.
+        claimed_execution = db.get(TaskExecution, kwargs["task_execution_id"])
+        if claimed_execution is not None:
+            claimed_execution.status = TaskStatus.RUNNING
+            db.commit()
+        return True, "claimed", None, None
+
     for name, value in {
         "get_db_session": lambda: db,
         "resolve_runtime_configuration": lambda db, role: config[role],
         "create_agent_runtime": lambda *args, **kwargs: runtime,
-        "_claim_queued_task_for_worker": lambda **kwargs: (True, "claimed", None, None),
+        "_claim_queued_task_for_worker": claim_worker_attempt,
         "_runtime_selection_details": lambda db, **kwargs: {},
         "_build_claimed_details": lambda **kwargs: {},
         "_run_start_runtime_identity": lambda *args: {"config": {}},

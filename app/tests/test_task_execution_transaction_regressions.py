@@ -1403,10 +1403,14 @@ def test_task_retry_with_requested_changes_injects_operator_note_and_change_set(
 
     response = authenticated_client.post(
         f"/api/v1/tasks/{task.id}/retry",
-        json={"execution_scope": "new_session", "create_new_session": True},
+        json={
+            "execution_scope": "new_session",
+            "create_new_session": True,
+            "retry_intent": "request_changes",
+        },
     )
 
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     prompt = captured_kwargs["prompt"]
     assert "Operator requested changes" in prompt
     assert "Tighten the README" in prompt

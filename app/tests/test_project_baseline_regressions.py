@@ -2368,7 +2368,7 @@ def test_cleanup_retained_task_workspaces_preserves_promoted_and_running(
         title="Blocked task",
         description="Failed",
         status=TaskStatus.DONE,
-        workspace_status="ready",
+        workspace_status="blocked",
         task_subfolder="task-blocked",
     )
     running_task = Task(

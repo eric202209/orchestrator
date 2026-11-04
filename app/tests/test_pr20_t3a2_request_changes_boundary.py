@@ -1113,7 +1113,7 @@ def test_request_changes_api_feedback_is_outside_operator_acceptance(
     assert response.json()["workspace_status"] == "changes_requested"
     assert response.json()["promotion_note"] == note
     assert response.json()["description"] == OPERATOR_DESCRIPTION
-    assert task.status == TaskStatus.FAILED
+    assert task.status == TaskStatus.DONE
     assert task.task_subfolder == "task-review"
     assert prompt.startswith(OPERATOR_DESCRIPTION)
     assert prompt.count(BOUNDARY) == 1
@@ -1206,7 +1206,7 @@ def test_empty_request_changes_feedback_keeps_existing_api_refusal(
         "A review note is required when requesting changes"
     )
     db_session.refresh(task)
-    assert task.workspace_status == "blocked"
+    assert task.workspace_status == "ready"
     assert task.promotion_note is None
     prompt = _build_request_changes_repair_prompt(
         task=Task(

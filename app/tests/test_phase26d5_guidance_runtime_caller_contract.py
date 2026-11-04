@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.models import Session as SessionModel
-from app.models import Task
+from app.models import Task, TaskStatus
 from app.services.agents.agent_runtime import BackendRole
 from app.services.agents.runtime_configuration import RoleRuntimeConfiguration
 from app.services.human_guidance.service import resolve_guidance_runtime_target
@@ -45,6 +45,9 @@ class _DB:
         self._session = session
         self._task = task
         self.closed = False
+
+    def refresh(self, _instance):
+        return None
 
     def query(self, model):
         if model is SessionModel:
@@ -131,9 +134,17 @@ def _run_worker_handoff(monkeypatch, tmp_path, *, mixed_lane, legacy_nulls=False
         started_at=None,
         current_step=0,
         workflow_stage=None,
+        workspace_status=None,
     )
     task_execution = SimpleNamespace(
         id=126,
+        task_id=task.id,
+        session_id=session.id,
+        status=TaskStatus.RUNNING,
+        dispatch_state=None,
+        dispatch_kind=None,
+        dispatch_invocation=None,
+        dispatch_invocation_sha256=None,
         backend_id=None,
         planner_backend=None if legacy_nulls else planning.backend_name,
         planner_model=None if legacy_nulls else planning.model_family,

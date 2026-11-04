@@ -3943,11 +3943,25 @@ def test_c2r3_managed_initial_root_remains_admissible_at_transport_zero(
         raise _RuntimeReached()
 
     monkeypatch.setattr(worker_module, "create_agent_runtime", stop_at_runtime)
+    invocation = execution.dispatch_invocation
     with pytest.raises(_RuntimeReached):
         _run_delivery(
             celery_delivery,
             celery_id=execution.dispatch_celery_task_id,
-            kwargs=_request_kwargs(session, task, execution),
+            kwargs=_request_kwargs(
+                session,
+                task,
+                execution,
+                prompt=task.description,
+                timeout_seconds=invocation["timeout_seconds"],
+                context=invocation["context"],
+                planning_backend_override=invocation["planning_backend_override"],
+                planning_escalation_metadata=invocation[
+                    "planning_escalation_metadata"
+                ],
+                resume_checkpoint_name=None,
+                queued_event_id=invocation["queued_event_id"],
+            ),
             retries=0,
         )
 
@@ -4003,13 +4017,22 @@ def test_c2r3_automatic_recovery_keeps_logical_count_separate_from_transport(
         retry_count=1,
     )
     db.commit()
+    invocation = child.dispatch_invocation
+    continuation = invocation["continuation"]
     kwargs = _request_kwargs(
         session,
         task,
         child,
-        continuation_task_id=task.id,
-        continuation_kind="automatic_recovery",
-        continuation_retry_count=1,
+        prompt=task.description,
+        timeout_seconds=invocation["timeout_seconds"],
+        context=invocation["context"],
+        planning_backend_override=invocation["planning_backend_override"],
+        planning_escalation_metadata=invocation["planning_escalation_metadata"],
+        resume_checkpoint_name=None,
+        queued_event_id=invocation["queued_event_id"],
+        continuation_task_id=continuation["task_id"],
+        continuation_kind=continuation["kind"],
+        continuation_retry_count=continuation["retry_count"],
     )
     runtime_calls = _patch_worker_boundaries(monkeypatch, db, capacity_blocked=False)
     from app.tasks import worker as worker_module
