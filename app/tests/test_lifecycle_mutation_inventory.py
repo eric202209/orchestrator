@@ -158,9 +158,9 @@ EXPECTED_DIRECT_STATUS_MUTATIONS = {
         "execution.status": 1,
         "latest_link.status": 1,
         "link.status": 1,
-        "session_task_link.status": 5,
-        "task.status": 7,
-        "task_execution.status": 5,
+        "session_task_link.status": 4,
+        "task.status": 6,
+        "task_execution.status": 4,
     },
 }
 
