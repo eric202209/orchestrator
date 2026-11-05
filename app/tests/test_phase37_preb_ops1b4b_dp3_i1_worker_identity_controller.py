@@ -101,6 +101,21 @@ def test_celery_builtin_policy_is_version_aware_and_sender_preserves_raw_tasks()
     )
 
 
+def test_celery_dependency_stays_within_reviewed_builtin_minor():
+    root = Path(__file__).resolve().parents[2]
+    requirement_files = (
+        root / "requirements.txt",
+        root / "scripts/maintenance/phase39_p0b/worker-requirements.in",
+    )
+    for requirements in requirement_files:
+        celery_declarations = [
+            line.strip()
+            for line in requirements.read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("celery[redis]")
+        ]
+        assert celery_declarations == ["celery[redis]>=5.6.3,<5.7"]
+
+
 @pytest.fixture
 def candidate(tmp_path: Path) -> tuple[Path, CandidateSourceManifest]:
     root = tmp_path / "candidate"
