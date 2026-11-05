@@ -23,6 +23,7 @@ from app.services.orchestration.run_state import (
     mark_task_attempt_pending,
     mark_task_attempt_running,
 )
+from app.services.orchestration.run_state.transitions import TaskCompletionRejected
 from app.services.orchestration.state.session_state import (
     normalize_session_status,
     SessionStatus,
@@ -213,7 +214,7 @@ def mark_execution_done(
     """Mark an attempt complete through the session execution service boundary."""
 
     if timeout_terminal_state_blocks_late_success(task_execution):
-        return task_execution.completed_at or completed_at or datetime.now(timezone.utc)
+        raise TaskCompletionRejected("backend_timeout_terminal")
 
     return mark_task_attempt_done(
         task=task,

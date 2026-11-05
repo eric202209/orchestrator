@@ -375,6 +375,7 @@ from app.services.orchestration.policy import (
 )
 from app.task_intent import normalize_task_intent
 from app.services.orchestration.state.execution_states import TerminalReason
+from app.services.orchestration.run_state.transitions import TaskCompletionRejected
 from app.services.workspace.system_settings import get_effective_policy_profile
 from app.services.orchestration.validation.workspace_guard import (
     verify_workspace_contract,
@@ -1074,6 +1075,7 @@ def execute_orchestration_task(
     capacity_retry_scheduled = False
     capacity_claim_result = None
     capacity_acquisition_uncertain = False
+    completion_rejected = False
 
     # Phase 23D-3: if this worker process is force-terminated (SIGTERM, e.g.
     # via the intervention/pause path's `revoke_session_celery_tasks
@@ -3794,6 +3796,21 @@ def execute_orchestration_task(
             )
         return step_loop_result
 
+    except TaskCompletionRejected as exc:
+        completion_rejected = True
+        db.rollback()
+        logger.info(
+            "[ORCHESTRATION] Rejected stale task completion for task %s: %s",
+            task_id,
+            exc.reason,
+        )
+        update_langfuse_observation(
+            trace_observation,
+            output={"status": "rejected", "reason": exc.reason},
+            metadata={"completion_rejected": True},
+            status_message=exc.reason,
+        )
+        return {"status": "rejected", "reason": exc.reason}
     except Exception as exc:
         from celery.exceptions import Retry as _CeleryRetry
 
@@ -4072,7 +4089,13 @@ def execute_orchestration_task(
             if planning_backend_override and session is not None:
                 session.escalation_backend_id = None
                 db.add(session)
-            if project and task and task_execution_id and orchestration_state:
+            if (
+                not completion_rejected
+                and project
+                and task
+                and task_execution_id
+                and orchestration_state
+            ):
                 task_service_for_change_set = TaskService(db)
                 _change_set_snapshot_key = _workspace_snapshot_key(
                     task_id, task_execution_id
@@ -4128,12 +4151,13 @@ def execute_orchestration_task(
                         # Review projection for the same candidate (FPS).
                         preserve_review_decision=True,
                     )
-            _sync_task_execution_from_task_state(
-                db,
-                task_execution_id,
-                task=task,
-                session_task_link=session_task_link,
-            )
+            if not completion_rejected:
+                _sync_task_execution_from_task_state(
+                    db,
+                    task_execution_id,
+                    task=task,
+                    session_task_link=session_task_link,
+                )
         except Exception as sync_exc:
             logger.warning(
                 "[ORCHESTRATION] Failed to sync task execution %s: %s",

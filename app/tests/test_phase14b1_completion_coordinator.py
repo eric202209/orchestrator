@@ -213,6 +213,10 @@ def _patch_coordinator_delegates(
         _make_mock_finalizer(),
     )
     monkeypatch.setattr(
+        "app.services.orchestration.coordinators.completion_coordinator.reserve_task_completion",
+        _NOOP_FN,
+    )
+    monkeypatch.setattr(
         "app.services.orchestration.coordinators.completion_coordinator._generate_task_summary_with_fallback",
         lambda ctx, summary_prompt: {"output": "Task done", "pn_summary": "Task done"},
     )
@@ -336,6 +340,18 @@ def test_completion_propagates_registered_intent_and_publishes_when_eligible(
     accepted_verdict = _make_validation_verdict(status="accepted", accepted=True)
     _patch_coordinator_delegates(monkeypatch, validation_verdict=accepted_verdict)
     validator_calls = []
+    publication_order = []
+    import app.services.orchestration.coordinators.completion_coordinator as completion_module
+
+    monkeypatch.setattr(
+        completion_module,
+        "reserve_task_completion",
+        lambda *_args: publication_order.append("guarded"),
+    )
+    ctx.task_service.promote_change_set_into_baseline.side_effect = (
+        lambda *_args, **_kwargs: publication_order.append("promoted")
+        or {"files_copied": 2, "auto_publish_skipped": False}
+    )
 
     def validate_baseline_publish(**kwargs):
         validator_calls.append(kwargs)
@@ -363,6 +379,7 @@ def test_completion_propagates_registered_intent_and_publishes_when_eligible(
     assert review_kwargs["planner_contract"] == ctx.planner_contract
     assert review_kwargs["template_review_policy"] is None
     assert ctx.task_service.promote_change_set_into_baseline.called
+    assert publication_order == ["guarded", "promoted"]
     ctx.task_service.auto_publish_task_into_baseline.assert_not_called()
     assert len(validator_calls) == 2
     assert validator_calls[0]["candidate_change_set"] is not None

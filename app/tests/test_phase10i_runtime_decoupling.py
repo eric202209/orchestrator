@@ -874,6 +874,7 @@ def test_timeout_terminal_state_blocks_late_success(db_session):
 def test_mark_execution_done_does_not_promote_after_backend_timeout(db_session):
     from app.models import SessionTask
     from app.services.session.session_execution_service import mark_execution_done
+    from app.services.orchestration.run_state.transitions import TaskCompletionRejected
 
     _, session, task = _make_project_session_task(db_session)
     task.status = TaskStatus.FAILED
@@ -895,13 +896,15 @@ def test_mark_execution_done_does_not_promote_after_backend_timeout(db_session):
     db_session.add_all([link, execution])
     db_session.flush()
 
-    mark_execution_done(
-        task=task,
-        session_task_link=link,
-        task_execution=execution,
-        completed_at=datetime.now(timezone.utc),
-    )
+    with pytest.raises(TaskCompletionRejected) as rejected:
+        mark_execution_done(
+            task=task,
+            session_task_link=link,
+            task_execution=execution,
+            completed_at=datetime.now(timezone.utc),
+        )
 
+    assert rejected.value.reason == "backend_timeout_terminal"
     assert execution.status == TaskStatus.FAILED
     assert task.status == TaskStatus.FAILED
     assert link.status == TaskStatus.FAILED

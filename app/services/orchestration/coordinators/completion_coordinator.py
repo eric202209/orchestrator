@@ -49,6 +49,7 @@ from app.services.orchestration.phases.completion_workspace import (
 )
 from app.services.orchestration.review_policy import decide_change_set_review
 from app.services.orchestration.run_state import mark_task_attempt_failed
+from app.services.orchestration.run_state.transitions import reserve_task_completion
 from app.services.orchestration.state.execution_states import (
     OrchestrationPhase,
     TerminalReason,
@@ -1497,6 +1498,7 @@ class CompletionCoordinator:
                         "status": "failed",
                         "reason": "baseline_publish_validation_failed",
                     }
+                reserve_task_completion(db, task.id)
                 if publish_captured_change_set:
                     baseline_publish_result = _checkpointed(
                         "baseline_promotion",
@@ -1573,7 +1575,9 @@ class CompletionCoordinator:
                     orchestration_state,
                     baseline_publish_validation,
                 )
-                db.commit()
+                # Keep the Task write lock acquired before promotion until
+                # either failure finalization or the success finalizer commits.
+                db.flush()
                 if baseline_publish_validation.warning:
                     emit_live(
                         "WARN",

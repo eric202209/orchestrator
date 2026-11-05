@@ -3,13 +3,138 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import socket
 from datetime import datetime, timezone
 
-from sqlalchemy.orm import Session
+from sqlalchemy import update
+from sqlalchemy.orm import Session, object_session
+from sqlalchemy.orm.attributes import set_committed_value
+from sqlalchemy.orm.exc import UnmappedInstanceError
 
 from app.models import SessionTask, Task, TaskExecution, TaskStatus
 from app.services.execution.process_identity import current_process_start_identity
+
+
+class TaskCompletionRejected(RuntimeError):
+    """A persisted Task or related attempt row is no longer completable."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+class TaskCompletionTransactionAborted(TaskCompletionRejected):
+    """A CAS database failure requires the caller to roll back its transaction."""
+
+    def __init__(self, database_reason: str, *, sqlite_error_code: int | None = None):
+        self.database_reason = database_reason
+        self.sqlite_error_code = sqlite_error_code
+        super().__init__("task_completion_transaction_aborted")
+
+
+def _task_completion_transaction_aborted(
+    db: Session, error: Exception
+) -> TaskCompletionTransactionAborted:
+    sqlite_error_code = getattr(getattr(error, "orig", None), "sqlite_errorcode", None)
+    if db.get_bind().dialect.name != "sqlite":
+        reason = "database_error"
+    elif sqlite_error_code == getattr(sqlite3, "SQLITE_BUSY_SNAPSHOT", 517):
+        reason = "sqlite_stale_snapshot"
+    elif isinstance(sqlite_error_code, int) and sqlite_error_code & 0xFF in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }:
+        reason = "sqlite_write_lock_conflict"
+    else:
+        reason = "sqlite_database_error"
+    return TaskCompletionTransactionAborted(
+        reason,
+        sqlite_error_code=(
+            sqlite_error_code if isinstance(sqlite_error_code, int) else None
+        ),
+    )
+
+
+def _begin_task_completion_savepoint(db: Session):
+    connection = db.connection()
+    if connection.dialect.name == "sqlite":
+        # SQLAlchemy's Session.begin_nested() flushes all pending ORM state
+        # before SAVEPOINT. Use the Connection API so caller-owned changes stay
+        # outside the CAS savepoint. Under sqlite3 legacy transaction control,
+        # SELECT does not start a physical transaction and RELEASE of a top-level
+        # SAVEPOINT commits; explicitly open the outer transaction first.
+        raw_connection = connection.connection.driver_connection
+        if not raw_connection.in_transaction:
+            connection.exec_driver_sql("BEGIN")
+    return connection.begin_nested()
+
+
+def _completion_session_for_rows(*rows: object | None) -> Session | None:
+    attached_sessions: list[Session] = []
+    for row in rows:
+        if row is None:
+            continue
+        try:
+            attached = object_session(row)
+        except UnmappedInstanceError as exc:
+            raise TaskCompletionRejected("completion_row_not_persisted") from exc
+        if attached is None:
+            raise TaskCompletionRejected("completion_row_not_persisted")
+        attached_sessions.append(attached)
+    if not attached_sessions:
+        return None
+    db = attached_sessions[0]
+    if any(attached is not db for attached in attached_sessions[1:]):
+        raise TaskCompletionRejected("completion_rows_use_different_transactions")
+    return db
+
+
+def _conditionally_mark_done(db: Session, row: object) -> bool:
+    row_type = type(row)
+    result = db.execute(
+        update(row_type)
+        .where(
+            row_type.id == row.id,
+            row_type.status.in_(
+                [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.DONE]
+            ),
+        )
+        .values(status=TaskStatus.DONE)
+        .execution_options(synchronize_session=False)
+    )
+    return result.rowcount == 1
+
+
+def reserve_task_completion(db: Session, task_id: int) -> None:
+    """Acquire a conditional Task write lock before completion publication.
+
+    The status is unchanged.  Holding this transaction through finalization
+    serializes a concurrent operator cancellation with baseline promotion and
+    terminal completion commit. An ordinary predicate miss changes no row and
+    leaves the caller transaction available. A database failure raises
+    TaskCompletionTransactionAborted; the caller must roll back the full
+    transaction before doing more database work.
+    """
+
+    try:
+        with db.no_autoflush:
+            result = db.execute(
+                update(Task)
+                .where(
+                    Task.id == task_id,
+                    Task.status.in_(
+                        [TaskStatus.PENDING, TaskStatus.RUNNING, TaskStatus.DONE]
+                    ),
+                )
+                .values(status=Task.status, updated_at=Task.updated_at)
+                .execution_options(synchronize_session=False)
+            )
+    except Exception as exc:
+        raise _task_completion_transaction_aborted(db, exc) from exc
+
+    if result.rowcount != 1:
+        raise TaskCompletionRejected("task_completion_not_active")
 
 
 def _release_task_execution_runtime_ownership(
@@ -255,18 +380,57 @@ def mark_task_attempt_done(
     task_execution: TaskExecution | None = None,
     completed_at: datetime | None = None,
 ) -> datetime:
-    """Mark a task attempt as done across domain rows."""
+    """Conditionally mark supplied attempt rows done in one CAS savepoint.
+
+    This helper participates in, but never commits or rolls back, the caller's
+    transaction. Predicate rejection rolls back only the CAS savepoint. A
+    database failure raises TaskCompletionTransactionAborted and requires the
+    caller to roll back the full transaction.
+    """
 
     completed_at = completed_at or datetime.now(timezone.utc)
+
+    # The Task row is the cancellation authority.  Conditional writes on every
+    # supplied row keep a stale completion from overwriting a committed
+    # cancellation and make the related terminal changes one DB transaction.
+    db = _completion_session_for_rows(task, session_task_link, task_execution)
+    if db is not None:
+        savepoint = None
+        try:
+            savepoint = _begin_task_completion_savepoint(db)
+            with db.no_autoflush:
+                for row in (task, session_task_link, task_execution):
+                    if row is not None and not _conditionally_mark_done(db, row):
+                        raise TaskCompletionRejected("task_completion_not_active")
+            savepoint.commit()
+        except TaskCompletionTransactionAborted:
+            raise
+        except TaskCompletionRejected:
+            if savepoint is not None and savepoint.is_active:
+                try:
+                    savepoint.rollback()
+                except Exception as rollback_error:
+                    raise _task_completion_transaction_aborted(
+                        db, rollback_error
+                    ) from rollback_error
+            raise
+        except Exception as exc:
+            if savepoint is not None and savepoint.is_active:
+                try:
+                    savepoint.rollback()
+                except Exception as rollback_error:
+                    exc = rollback_error
+            raise _task_completion_transaction_aborted(db, exc) from exc
+
     if task:
-        task.status = TaskStatus.DONE
+        set_committed_value(task, "status", TaskStatus.DONE)
         task.completed_at = completed_at
         task.error_message = None
     if session_task_link:
-        session_task_link.status = TaskStatus.DONE
+        set_committed_value(session_task_link, "status", TaskStatus.DONE)
         session_task_link.completed_at = completed_at
     if task_execution:
-        task_execution.status = TaskStatus.DONE
+        set_committed_value(task_execution, "status", TaskStatus.DONE)
         task_execution.completed_at = task_execution.completed_at or completed_at
         if task_execution.dispatch_state is not None:
             task_execution.dispatch_state = "TERMINAL"

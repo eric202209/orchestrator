@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 import json
+import threading
+from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from app.database import Base
 from app.services.workspace.control_state_paths import (
     project_control_state_root,
 )
@@ -23,6 +29,627 @@ from app.models import (
 )
 from app.services.tasks.service import TASK_CHANGE_SET_LOG_MESSAGE
 from app.services.orchestration.task_rules import run_virtual_merge_gate
+
+
+def _file_backed_session_factory(path):
+    engine = create_engine(
+        f"sqlite:///{path}",
+        connect_args={"check_same_thread": False, "timeout": 10},
+    )
+    with engine.connect() as connection:
+        connection.exec_driver_sql("PRAGMA journal_mode=WAL")
+    Base.metadata.create_all(bind=engine)
+    return sessionmaker(autocommit=False, autoflush=False, bind=engine), engine
+
+
+def _create_running_attempt(db):
+    project = Project(name="Terminal CAS Project")
+    db.add(project)
+    db.flush()
+    session = SessionModel(
+        project_id=project.id,
+        name="Terminal CAS Session",
+        status="running",
+        is_active=True,
+    )
+    task = Task(
+        project_id=project.id,
+        title="Terminal CAS Task",
+        description="Exercise stale terminal completion.",
+        status=TaskStatus.RUNNING,
+    )
+    db.add_all([session, task])
+    db.flush()
+    link = SessionTask(
+        session_id=session.id,
+        task_id=task.id,
+        status=TaskStatus.RUNNING,
+    )
+    execution = TaskExecution(
+        session_id=session.id,
+        task_id=task.id,
+        attempt_number=1,
+        status=TaskStatus.RUNNING,
+    )
+    db.add_all([link, execution])
+    db.commit()
+    return task.id, link.id, execution.id
+
+
+def test_stale_task_completion_does_not_overwrite_committed_cancellation(tmp_path):
+    from app.services.orchestration.run_state.transitions import (
+        TaskCompletionRejected,
+        mark_task_attempt_cancelled,
+        mark_task_attempt_done,
+    )
+
+    session_factory, engine = _file_backed_session_factory(
+        tmp_path / "terminal-cas-repro.sqlite3"
+    )
+    try:
+        setup_db = session_factory()
+        task_id, link_id, execution_id = _create_running_attempt(setup_db)
+        setup_db.close()
+
+        session_a = session_factory()
+        stale_task = session_a.get(Task, task_id)
+        stale_link = session_a.get(SessionTask, link_id)
+        stale_execution = session_a.get(TaskExecution, execution_id)
+        session_a.commit()  # retain loaded values while ending SQLite's read transaction
+
+        session_b = session_factory()
+        mark_task_attempt_cancelled(
+            task=session_b.get(Task, task_id),
+            session_task_link=session_b.get(SessionTask, link_id),
+            task_execution=session_b.get(TaskExecution, execution_id),
+            completed_at=datetime.now(timezone.utc),
+        )
+        session_b.commit()
+        session_b.close()
+
+        with pytest.raises(TaskCompletionRejected) as rejected:
+            mark_task_attempt_done(
+                task=stale_task,
+                session_task_link=stale_link,
+                task_execution=stale_execution,
+                completed_at=datetime.now(timezone.utc),
+            )
+        assert rejected.value.reason == "task_completion_not_active"
+        session_a.close()
+
+        verify_db = session_factory()
+        assert verify_db.get(Task, task_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(SessionTask, link_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(TaskExecution, execution_id).status == TaskStatus.CANCELLED
+        verify_db.close()
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize("stale_cas", ["reservation", "attempt"])
+def test_task_completion_and_cancellation_competing_orders_are_serialized(
+    tmp_path, stale_cas
+):
+    from app.services.orchestration.run_state.transitions import (
+        TaskCompletionRejected,
+        TaskCompletionTransactionAborted,
+        mark_task_attempt_cancelled,
+        mark_task_attempt_done,
+        reserve_task_completion,
+    )
+
+    session_factory, engine = _file_backed_session_factory(
+        tmp_path / "terminal-cas-concurrency.sqlite3"
+    )
+    errors = []
+    outcomes = {}
+    try:
+        setup_db = session_factory()
+        task_id, link_id, execution_id = _create_running_attempt(setup_db)
+        setup_db.close()
+
+        loaded = threading.Barrier(2)
+        cancellation_committed = threading.Barrier(2)
+
+        def complete_stale_snapshot():
+            db = session_factory()
+            try:
+                # A WAL reader can retain its old snapshot while session B
+                # commits cancellation; SQLite then rejects the stale write.
+                db.connection().exec_driver_sql("BEGIN")
+                task = db.get(Task, task_id)
+                link = db.get(SessionTask, link_id)
+                execution = db.get(TaskExecution, execution_id)
+                stale_session = db.query(SessionModel).one()
+                stale_session.name = "discarded by required full rollback"
+                loaded.wait(timeout=10)
+                cancellation_committed.wait(timeout=10)
+                try:
+                    if stale_cas == "reservation":
+                        reserve_task_completion(db, task_id)
+                    mark_task_attempt_done(
+                        task=task,
+                        session_task_link=link,
+                        task_execution=execution,
+                    )
+                    db.commit()
+                    outcomes["stale_completion"] = "completed"
+                except TaskCompletionRejected as exc:
+                    outcomes["stale_completion"] = exc.reason
+                    outcomes["stale_transaction_aborted"] = isinstance(
+                        exc, TaskCompletionTransactionAborted
+                    )
+                    outcomes["stale_database_reason"] = getattr(
+                        exc, "database_reason", None
+                    )
+                    outcomes["stale_session_in_transaction"] = db.in_transaction()
+                    db.rollback()
+                    outcomes["stale_session_after_explicit_rollback"] = (
+                        db.in_transaction()
+                    )
+            except BaseException as exc:  # capture thread failures for pytest
+                errors.append(exc)
+            finally:
+                db.close()
+
+        def cancel_after_stale_read():
+            db = session_factory()
+            try:
+                loaded.wait(timeout=10)
+                mark_task_attempt_cancelled(
+                    task=db.get(Task, task_id),
+                    session_task_link=db.get(SessionTask, link_id),
+                    task_execution=db.get(TaskExecution, execution_id),
+                )
+                db.commit()
+                outcomes["cancellation"] = "committed"
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                cancellation_committed.wait(timeout=10)
+                db.close()
+
+        completion_thread = threading.Thread(target=complete_stale_snapshot)
+        cancellation_thread = threading.Thread(target=cancel_after_stale_read)
+        completion_thread.start()
+        cancellation_thread.start()
+        completion_thread.join(timeout=15)
+        cancellation_thread.join(timeout=15)
+        assert not completion_thread.is_alive()
+        assert not cancellation_thread.is_alive()
+        assert not errors
+        assert outcomes["cancellation"] == "committed"
+        assert outcomes["stale_completion"] == "task_completion_transaction_aborted"
+        assert outcomes["stale_transaction_aborted"] is True
+        assert outcomes["stale_database_reason"] == "sqlite_stale_snapshot"
+        assert outcomes["stale_session_in_transaction"] is True
+        assert outcomes["stale_session_after_explicit_rollback"] is False
+
+        verify_db = session_factory()
+        assert verify_db.get(Task, task_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(SessionTask, link_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(TaskExecution, execution_id).status == TaskStatus.CANCELLED
+        assert verify_db.query(SessionModel).one().name == "Terminal CAS Session"
+        verify_db.close()
+
+        # In the other serial order completion commits first; a later operator
+        # cancellation is still durable and remains the final terminal state.
+        setup_db = session_factory()
+        second_task_id, second_link_id, second_execution_id = _create_running_attempt(
+            setup_db
+        )
+        setup_db.close()
+        completion_committed = threading.Barrier(2)
+        second_errors = []
+
+        def complete_first():
+            db = session_factory()
+            try:
+                task = db.get(Task, second_task_id)
+                link = db.get(SessionTask, second_link_id)
+                execution = db.get(TaskExecution, second_execution_id)
+                mark_task_attempt_done(
+                    task=task,
+                    session_task_link=link,
+                    task_execution=execution,
+                )
+                db.commit()
+                completion_committed.wait(timeout=10)
+            except BaseException as exc:
+                second_errors.append(exc)
+                completion_committed.abort()
+            finally:
+                db.close()
+
+        def cancel_after_completion():
+            db = session_factory()
+            try:
+                completion_committed.wait(timeout=10)
+                mark_task_attempt_cancelled(
+                    task=db.get(Task, second_task_id),
+                    session_task_link=db.get(SessionTask, second_link_id),
+                    task_execution=db.get(TaskExecution, second_execution_id),
+                )
+                db.commit()
+            except BaseException as exc:
+                second_errors.append(exc)
+            finally:
+                db.close()
+
+        completion_thread = threading.Thread(target=complete_first)
+        cancellation_thread = threading.Thread(target=cancel_after_completion)
+        completion_thread.start()
+        cancellation_thread.start()
+        completion_thread.join(timeout=15)
+        cancellation_thread.join(timeout=15)
+        assert not completion_thread.is_alive()
+        assert not cancellation_thread.is_alive()
+        assert not second_errors
+        verify_db = session_factory()
+        assert verify_db.get(Task, second_task_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(SessionTask, second_link_id).status == TaskStatus.CANCELLED
+        assert (
+            verify_db.get(TaskExecution, second_execution_id).status
+            == TaskStatus.CANCELLED
+        )
+        verify_db.close()
+    finally:
+        engine.dispose()
+
+
+def test_related_terminal_cas_failure_rolls_back_task_completion(tmp_path):
+    from app.services.orchestration.run_state.transitions import (
+        TaskCompletionRejected,
+        mark_task_attempt_done,
+    )
+
+    session_factory, engine = _file_backed_session_factory(
+        tmp_path / "terminal-cas-rollback.sqlite3"
+    )
+    try:
+        setup_db = session_factory()
+        task_id, link_id, execution_id = _create_running_attempt(setup_db)
+        link = setup_db.get(SessionTask, link_id)
+        link.status = TaskStatus.CANCELLED
+        link.completed_at = datetime.now(timezone.utc)
+        setup_db.commit()
+        setup_db.close()
+
+        db = session_factory()
+        caller_change = db.query(SessionModel).one()
+        caller_change.name = "caller-owned change survives"
+        with pytest.raises(TaskCompletionRejected) as rejected:
+            mark_task_attempt_done(
+                task=db.get(Task, task_id),
+                session_task_link=db.get(SessionTask, link_id),
+                task_execution=db.get(TaskExecution, execution_id),
+            )
+        assert rejected.value.reason == "task_completion_not_active"
+        assert db.in_transaction()
+        assert caller_change.name == "caller-owned change survives"
+        assert caller_change in db.dirty
+        db.commit()
+
+        caller_change.name = "caller explicitly rolls this back"
+        with pytest.raises(TaskCompletionRejected):
+            mark_task_attempt_done(
+                task=db.get(Task, task_id),
+                session_task_link=db.get(SessionTask, link_id),
+                task_execution=db.get(TaskExecution, execution_id),
+            )
+        assert db.in_transaction()
+        db.rollback()
+
+        verify_db = session_factory()
+        assert verify_db.get(SessionModel, caller_change.id).name == (
+            "caller-owned change survives"
+        )
+        assert verify_db.get(Task, task_id).status == TaskStatus.RUNNING
+        assert verify_db.get(SessionTask, link_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(TaskExecution, execution_id).status == TaskStatus.RUNNING
+        verify_db.close()
+        db.close()
+    finally:
+        engine.dispose()
+
+
+def test_ordinary_terminal_cas_rejection_preserves_caller_owned_changes(tmp_path):
+    from app.services.orchestration.run_state.transitions import (
+        TaskCompletionRejected,
+        mark_task_attempt_done,
+    )
+
+    session_factory, engine = _file_backed_session_factory(
+        tmp_path / "terminal-cas-caller-transaction.sqlite3"
+    )
+    try:
+        setup_db = session_factory()
+        task_id, link_id, execution_id = _create_running_attempt(setup_db)
+        link = setup_db.get(SessionTask, link_id)
+        link.status = TaskStatus.CANCELLED
+        setup_db.commit()
+        setup_db.close()
+
+        caller_db = session_factory()
+        caller_change = caller_db.query(SessionModel).one()
+        caller_change.name = "caller-owned change survives"
+
+        with pytest.raises(TaskCompletionRejected) as rejected:
+            mark_task_attempt_done(
+                task=caller_db.get(Task, task_id),
+                session_task_link=caller_db.get(SessionTask, link_id),
+                task_execution=caller_db.get(TaskExecution, execution_id),
+            )
+
+        assert rejected.value.reason == "task_completion_not_active"
+        assert caller_db.in_transaction()
+        assert caller_change.name == "caller-owned change survives"
+        assert caller_change in caller_db.dirty
+        caller_db.commit()
+
+        verify_db = session_factory()
+        assert verify_db.get(SessionModel, caller_change.id).name == (
+            "caller-owned change survives"
+        )
+        assert verify_db.get(Task, task_id).status == TaskStatus.RUNNING
+        assert verify_db.get(SessionTask, link_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(TaskExecution, execution_id).status == TaskStatus.RUNNING
+        verify_db.close()
+        caller_db.close()
+    finally:
+        engine.dispose()
+
+
+def test_task_completion_reservation_rejection_preserves_caller_changes(tmp_path):
+    from app.services.orchestration.run_state.transitions import (
+        TaskCompletionRejected,
+        reserve_task_completion,
+    )
+
+    session_factory, engine = _file_backed_session_factory(
+        tmp_path / "terminal-cas-reservation-caller-transaction.sqlite3"
+    )
+    try:
+        setup_db = session_factory()
+        task_id, link_id, execution_id = _create_running_attempt(setup_db)
+        task = setup_db.get(Task, task_id)
+        task.status = TaskStatus.CANCELLED
+        setup_db.commit()
+        setup_db.close()
+
+        caller_db = session_factory()
+        caller_change = caller_db.query(SessionModel).one()
+        caller_change.name = "reservation caller change survives"
+        with pytest.raises(TaskCompletionRejected) as rejected:
+            reserve_task_completion(caller_db, task_id)
+
+        assert rejected.value.reason == "task_completion_not_active"
+        assert caller_db.in_transaction()
+        assert caller_change.name == "reservation caller change survives"
+        assert caller_change in caller_db.dirty
+        caller_db.commit()
+
+        verify_db = session_factory()
+        assert verify_db.get(SessionModel, caller_change.id).name == (
+            "reservation caller change survives"
+        )
+        assert verify_db.get(Task, task_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(SessionTask, link_id).status == TaskStatus.RUNNING
+        assert verify_db.get(TaskExecution, execution_id).status == TaskStatus.RUNNING
+        verify_db.close()
+        caller_db.close()
+    finally:
+        engine.dispose()
+
+
+def test_successful_task_completion_can_be_rolled_back_by_caller(tmp_path):
+    from app.services.orchestration.run_state.transitions import mark_task_attempt_done
+
+    session_factory, engine = _file_backed_session_factory(
+        tmp_path / "terminal-cas-caller-rollback.sqlite3"
+    )
+    try:
+        setup_db = session_factory()
+        task_id, link_id, execution_id = _create_running_attempt(setup_db)
+        setup_db.close()
+
+        db = session_factory()
+        task = db.get(Task, task_id)
+        link = db.get(SessionTask, link_id)
+        execution = db.get(TaskExecution, execution_id)
+        caller_change = db.query(SessionModel).one()
+        caller_change.name = "unflushed until caller decides"
+        connection = db.connection()
+        raw_connection = connection.connection.driver_connection
+        assert not raw_connection.in_transaction
+
+        mark_task_attempt_done(
+            task=task,
+            session_task_link=link,
+            task_execution=execution,
+        )
+
+        assert raw_connection.in_transaction
+        assert caller_change in db.dirty
+        assert task.status == TaskStatus.DONE
+        assert link.status == TaskStatus.DONE
+        assert execution.status == TaskStatus.DONE
+
+        observer = session_factory()
+        assert observer.get(Task, task_id).status == TaskStatus.RUNNING
+        assert observer.get(SessionTask, link_id).status == TaskStatus.RUNNING
+        assert observer.get(TaskExecution, execution_id).status == TaskStatus.RUNNING
+        observer.close()
+
+        db.rollback()
+        assert not raw_connection.in_transaction
+        assert task.status == TaskStatus.RUNNING
+        assert link.status == TaskStatus.RUNNING
+        assert execution.status == TaskStatus.RUNNING
+        assert caller_change.name == "Terminal CAS Session"
+
+        verify_db = session_factory()
+        assert verify_db.get(Task, task_id).status == TaskStatus.RUNNING
+        assert verify_db.get(SessionTask, link_id).status == TaskStatus.RUNNING
+        assert verify_db.get(TaskExecution, execution_id).status == TaskStatus.RUNNING
+        assert verify_db.get(SessionModel, caller_change.id).name == (
+            "Terminal CAS Session"
+        )
+        verify_db.close()
+        db.close()
+    finally:
+        engine.dispose()
+
+
+def test_valid_running_task_completion_updates_all_terminal_rows(tmp_path):
+    from app.services.orchestration.run_state.transitions import (
+        mark_task_attempt_done,
+        reserve_task_completion,
+    )
+
+    session_factory, engine = _file_backed_session_factory(
+        tmp_path / "terminal-cas-valid.sqlite3"
+    )
+    try:
+        setup_db = session_factory()
+        task_id, link_id, execution_id = _create_running_attempt(setup_db)
+        setup_db.close()
+
+        db = session_factory()
+        completed_at = datetime.now(timezone.utc)
+        task = db.get(Task, task_id)
+        link = db.get(SessionTask, link_id)
+        execution = db.get(TaskExecution, execution_id)
+        reserve_task_completion(db, task_id)
+        assert task.status == TaskStatus.RUNNING
+        mark_task_attempt_done(
+            task=task,
+            session_task_link=link,
+            task_execution=execution,
+            completed_at=completed_at,
+        )
+        verify_before_commit = session_factory()
+        assert verify_before_commit.get(Task, task_id).status == TaskStatus.RUNNING
+        verify_before_commit.close()
+        db.commit()
+
+        verify_db = session_factory()
+        completed_task = verify_db.get(Task, task_id)
+        completed_link = verify_db.get(SessionTask, link_id)
+        completed_execution = verify_db.get(TaskExecution, execution_id)
+        assert completed_task.status == TaskStatus.DONE
+        assert completed_task.completed_at.replace(tzinfo=timezone.utc) == completed_at
+        assert completed_link.status == TaskStatus.DONE
+        assert completed_link.completed_at.replace(tzinfo=timezone.utc) == completed_at
+        assert completed_execution.status == TaskStatus.DONE
+        assert (
+            completed_execution.completed_at.replace(tzinfo=timezone.utc)
+            == completed_at
+        )
+        verify_db.close()
+        db.close()
+    finally:
+        engine.dispose()
+
+
+def test_rejected_completion_publishes_no_success_event_or_follow_on(
+    tmp_path, monkeypatch
+):
+    from app.services.orchestration import lifecycle
+    from app.services.orchestration.events.event_types import EventType
+    from app.services.orchestration.lifecycle.completion import TaskCompletionFinalizer
+    from app.services.orchestration.run_state.transitions import (
+        TaskCompletionRejected,
+        mark_task_attempt_cancelled,
+        reserve_task_completion,
+    )
+
+    session_factory, engine = _file_backed_session_factory(
+        tmp_path / "terminal-cas-publication.sqlite3"
+    )
+    event_calls = []
+    dispatch_calls = []
+    try:
+        setup_db = session_factory()
+        task_id, link_id, execution_id = _create_running_attempt(setup_db)
+        setup_db.close()
+
+        stale_db = session_factory()
+        stale_task = stale_db.get(Task, task_id)
+        stale_link = stale_db.get(SessionTask, link_id)
+        stale_execution = stale_db.get(TaskExecution, execution_id)
+        stale_db.commit()
+
+        cancel_db = session_factory()
+        mark_task_attempt_cancelled(
+            task=cancel_db.get(Task, task_id),
+            session_task_link=cancel_db.get(SessionTask, link_id),
+            task_execution=cancel_db.get(TaskExecution, execution_id),
+        )
+        cancel_db.commit()
+        cancel_db.close()
+
+        publication_calls = []
+        with pytest.raises(TaskCompletionRejected) as guard_rejected:
+            reserve_task_completion(stale_db, task_id)
+            publication_calls.append("promote")
+        assert guard_rejected.value.reason == "task_completion_not_active"
+        assert publication_calls == []
+
+        monkeypatch.setattr(
+            lifecycle.completion,
+            "record_outcome_checkpoint",
+            lambda **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            lifecycle.completion,
+            "append_orchestration_event",
+            lambda **kwargs: event_calls.append(kwargs.get("event_type")),
+        )
+        ctx = SimpleNamespace(
+            db=stale_db,
+            session=None,
+            project=None,
+            task=stale_task,
+            session_task_link=stale_link,
+            session_id=1,
+            task_id=task_id,
+            task_execution_id=execution_id,
+            orchestration_state=SimpleNamespace(plan=[]),
+            logger=None,
+            execution_profile="standard",
+            prompt="completion",
+            timeout_seconds=30,
+            runs_in_canonical_baseline=False,
+            runtime_workspace_used=False,
+        )
+        finalizer = TaskCompletionFinalizer(db=stale_db, task_service=object())
+
+        with pytest.raises(TaskCompletionRejected):
+            finalizer.finalize_success(
+                ctx=ctx,
+                summary="completed",
+                baseline_publish_result=None,
+                completion_validation=object(),
+                write_project_state_snapshot_fn=lambda *_args: None,
+                write_progress_notes_fn=lambda **_kwargs: None,
+                get_next_pending_project_task_fn=lambda *_args: object(),
+                get_latest_session_task_link_fn=lambda *_args: None,
+                execute_orchestration_task_delay_fn=lambda **kwargs: dispatch_calls.append(
+                    kwargs
+                ),
+            )
+
+        assert EventType.TASK_COMPLETED not in event_calls
+        assert dispatch_calls == []
+        verify_db = session_factory()
+        assert verify_db.get(Task, task_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(SessionTask, link_id).status == TaskStatus.CANCELLED
+        assert verify_db.get(TaskExecution, execution_id).status == TaskStatus.CANCELLED
+        verify_db.close()
+        stale_db.close()
+    finally:
+        engine.dispose()
 
 
 class _FakeAsyncResult:
