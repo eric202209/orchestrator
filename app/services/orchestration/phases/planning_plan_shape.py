@@ -133,19 +133,20 @@ def split_repaired_single_step_full_lifecycle_plan(
     ]
     material_paths = list(dict.fromkeys(op_paths or expected_files))
     original_verification = str(original.get("verification") or "").strip()
-    verifier = (
+    file_presence_verification = (
         _python_exists_verification_command(material_paths)
         if material_paths
         else original_verification
     )
-    if not (ops or commands) or not verifier:
+    final_verification = original_verification or file_presence_verification
+    if not (ops or commands) or not final_verification:
         return None
 
     implementation_step: dict[str, Any] = {
         "step_number": 2,
         "description": str(original.get("description") or "Apply requested change"),
         "commands": commands,
-        "verification": verifier,
+        "verification": file_presence_verification,
         "rollback": original.get("rollback"),
         "expected_files": material_paths,
     }
@@ -157,7 +158,7 @@ def split_repaired_single_step_full_lifecycle_plan(
             "step_number": 1,
             "description": "Inspect the current workspace",
             "commands": ["rg --files . | sort"],
-            "verification": 'python -c "import sys; sys.exit(0)"',
+            "verification": None,
             "rollback": None,
             "expected_files": [],
         },
@@ -165,8 +166,8 @@ def split_repaired_single_step_full_lifecycle_plan(
         {
             "step_number": 3,
             "description": "Verify the requested change",
-            "commands": [verifier],
-            "verification": verifier,
+            "commands": [final_verification],
+            "verification": final_verification,
             "rollback": None,
             "expected_files": [],
         },

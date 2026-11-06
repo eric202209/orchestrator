@@ -124,11 +124,11 @@ def test_repaired_single_step_full_lifecycle_plan_is_split_for_execution():
     assert split_plan is not None
     assert [step["step_number"] for step in split_plan] == [1, 2, 3]
     assert split_plan[0]["commands"] == ["rg --files . | sort"]
+    assert split_plan[0]["verification"] is None
     assert split_plan[1]["ops"] == plan[0]["ops"]
     assert split_plan[1]["expected_files"] == ["about.html"]
     assert split_plan[2]["commands"] == [split_plan[2]["verification"]]
-    assert split_plan[2]["verification"].startswith("python -c ")
-    assert "about.html" in split_plan[2]["verification"]
+    assert split_plan[2]["verification"] == plan[0]["verification"]
 
 
 def test_weak_expected_file_verification_is_strengthened():

@@ -19,12 +19,21 @@ def test_repaired_single_step_split_uses_actual_edit_paths_not_speculative_expec
     (site_root / "css").mkdir(parents=True)
     (site_root / "index.html").write_text("<main></main>", encoding="utf-8")
     (site_root / "css" / "style.css").write_text("body {}", encoding="utf-8")
+    (tmp_path / "test_status_site.py").write_text(
+        "from pathlib import Path\n\n\n"
+        "def test_incident_summary_and_style_are_present():\n"
+        "    assert '<section>API Queue Knowledge</section>' in "
+        "Path('public/status-site/index.html').read_text()\n"
+        "    assert 'body { color: #111; }' in "
+        "Path('public/status-site/css/style.css').read_text()\n",
+        encoding="utf-8",
+    )
     repaired_single_step = [
         {
             "step_number": 1,
             "description": "Add incident summary to existing status site",
             "commands": [],
-            "verification": "python -c \"from pathlib import Path; assert Path('public/status-site/index.html').exists()\"",
+            "verification": "python3 -m pytest -q test_status_site.py",
             "rollback": "true",
             "expected_files": [
                 "public/status-site/index.html",
@@ -64,6 +73,37 @@ def test_repaired_single_step_split_uses_actual_edit_paths_not_speculative_expec
     )
     assert verdict.accepted
     assert "unmaterialized_expected_files" not in verdict.details
+
+
+def test_single_step_split_preserves_declared_test_as_separate_verification():
+    verification = "python3 -m pytest -q test_calculator.py"
+    plan = [
+        {
+            "step_number": 1,
+            "description": "Modify calculator.py and verify the requested behavior",
+            "commands": [],
+            "verification": verification,
+            "rollback": None,
+            "expected_files": ["calculator.py"],
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "calculator.py",
+                    "old": "    return 1\n",
+                    "new": "    return 2\n",
+                }
+            ],
+        }
+    ]
+
+    split_plan = _split_repaired_single_step_full_lifecycle_plan(plan)
+
+    assert split_plan is not None
+    assert split_plan[0]["commands"] == ["rg --files . | sort"]
+    assert split_plan[0]["verification"] is None
+    assert split_plan[1]["verification"] != verification
+    assert split_plan[2]["commands"] == [verification]
+    assert split_plan[2]["verification"] == verification
 
 
 def test_repair_removed_source_materialization_detects_no_op_salvage():
