@@ -59,7 +59,6 @@ from app.tests.test_phase36_maint_gr4_long_file_grounding_continuation import (
     ROUTER,
     TARGET,
     TASK,
-    VERIFY,
 )
 
 PERM = "app/api/v1/endpoints/permissions.py"
@@ -107,7 +106,7 @@ def _narrow_router_plan() -> list[dict]:
             "step_number": 1,
             "description": "Drop the doubled permissions prefix",
             "commands": [],
-            "verification": VERIFY,
+            "verification": "python -m py_compile app/api/v1/router.py",
             "rollback": None,
             "expected_files": [TARGET],
             "ops": [
