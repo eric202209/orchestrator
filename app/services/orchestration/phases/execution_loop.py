@@ -384,17 +384,6 @@ def _restore_authority_bound_step(
     return True
 
 
-def _plan_has_semantic_region_selector(plan: list[dict[str, Any]]) -> bool:
-    """Return whether a Plan carries the D8R semantic replacement contract."""
-
-    return any(
-        isinstance(operation, dict) and isinstance(operation.get("selector"), dict)
-        for step in plan
-        if isinstance(step, dict)
-        for operation in (step.get("ops") or [])
-    )
-
-
 def _debug_knowledge_ref_allowed(item: Any, retrieval_reason: str) -> bool:
     knowledge_type = str(getattr(item, "knowledge_type", "") or "")
     if knowledge_type not in {"failure_memory", "debug_case"}:
@@ -598,9 +587,6 @@ def execute_step_loop(
     # retries may temporarily rewrite a step to rerun a command, but Candidate
     # must receive this same accepted projection after the step succeeds.
     accepted_plan_snapshot = deepcopy(orchestration_state.plan)
-    accepted_plan_is_semantic = _plan_has_semantic_region_selector(
-        accepted_plan_snapshot
-    )
 
     # Synthesize a minimal artifact when resuming from an old checkpoint that
     # predates the reasoning_artifact field (stored None).
@@ -1701,14 +1687,10 @@ def execute_step_loop(
                         "cove_changes": cove_changes[:20],
                     },
                 )
-            if (
-                accepted_plan_is_semantic
-                and plan_revision_count == 0
-                and _restore_authority_bound_step(
-                    orchestration_state.plan,
-                    accepted_plan_snapshot,
-                    step_index=step_index,
-                )
+            if plan_revision_count == 0 and _restore_authority_bound_step(
+                orchestration_state.plan,
+                accepted_plan_snapshot,
+                step_index=step_index,
             ):
                 task.steps = json.dumps(orchestration_state.plan)
             orchestration_state.record_success(step_record)
@@ -2160,14 +2142,10 @@ def execute_step_loop(
                 _patch_path = _step_recovery_result.get("patch_path")
                 if _patch_path and _patch_path not in _recovery_changed:
                     _recovery_changed.append(_patch_path)
-                if (
-                    accepted_plan_is_semantic
-                    and plan_revision_count == 0
-                    and _restore_authority_bound_step(
-                        orchestration_state.plan,
-                        accepted_plan_snapshot,
-                        step_index=step_index,
-                    )
+                if plan_revision_count == 0 and _restore_authority_bound_step(
+                    orchestration_state.plan,
+                    accepted_plan_snapshot,
+                    step_index=step_index,
                 ):
                     task.steps = json.dumps(orchestration_state.plan)
                 orchestration_state.record_success(
@@ -3111,14 +3089,10 @@ def execute_step_loop(
                     )
                 except Exception:
                     pass
-                if (
-                    accepted_plan_is_semantic
-                    and plan_revision_count == 0
-                    and _restore_authority_bound_step(
-                        orchestration_state.plan,
-                        accepted_plan_snapshot,
-                        step_index=step_index,
-                    )
+                if plan_revision_count == 0 and _restore_authority_bound_step(
+                    orchestration_state.plan,
+                    accepted_plan_snapshot,
+                    step_index=step_index,
                 ):
                     task.steps = json.dumps(orchestration_state.plan)
                 orchestration_state.record_success(

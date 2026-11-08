@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import ast
+from copy import deepcopy
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -53,9 +54,14 @@ from app.services.orchestration.phases.execution_loop import (
     _same_simple_verification_command,
     execute_step_loop,
 )
-from app.services.orchestration.state.persistence import read_orchestration_events
+from app.services.orchestration.state.persistence import (
+    read_orchestration_events,
+    read_orchestration_state_snapshots,
+)
+from app.services.workspace.control_state_paths import control_state_of
 from app.services.orchestration.types import OrchestrationRunContext
 from app.services.orchestration.prompt_templates import OrchestrationState
+from app.services.workspace.checkpoint_service import CheckpointService
 from app.tests.phase33c4_test_helpers import executor_test_authority
 
 
@@ -217,6 +223,36 @@ def _extract_structured_text(value):
 
 def _normalize_step(raw_step, project_dir, logger_obj, step_number):
     return dict(raw_step)
+
+
+def _retry_time_steps(ctx, step_index):
+    """Steps journaled when a debug fix was applied, just before the retry.
+
+    P41-PRODUCT-04: after the retried step succeeds, the in-memory Plan is
+    restored to the accepted step, so the repair that actually ran is read
+    from the append-only state snapshot journal written on ``retrying_step``.
+    """
+
+    events = {
+        event["event_id"]: event
+        for event in read_orchestration_events(
+            control_state_of(ctx.orchestration_state), ctx.session_id, ctx.task_id
+        )
+    }
+    steps = []
+    for snapshot in read_orchestration_state_snapshots(
+        control_state_of(ctx.orchestration_state), ctx.session_id, ctx.task_id
+    ):
+        details = (events.get(snapshot.get("related_event_id")) or {}).get(
+            "details"
+        ) or {}
+        if (
+            snapshot.get("trigger") == "phase_finished"
+            and details.get("status") == "retrying_step"
+            and details.get("step_index") == step_index + 1
+        ):
+            steps.append(snapshot["plan_steps"][step_index])
+    return steps
 
 
 def _make_run_context(
@@ -1480,6 +1516,7 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
         "def test_import():\n    assert True\n", encoding="utf-8"
     )
 
+    accepted_plan = deepcopy(ctx.orchestration_state.plan)
     result = execute_step_loop(
         ctx=ctx,
         extract_structured_text=_extract_structured_text,
@@ -1509,9 +1546,17 @@ def test_phase7f_valid_bounded_repair_is_retried_and_succeeds(db_session, tmp_pa
     assert runtime.kwargs[1]["diagnostic_metadata"]["task_execution_id"] == execution.id
     assert runtime.kwargs[1]["diagnostic_metadata"]["step_index"] == 1
     assert ctx.orchestration_state.debug_repair_task_execution_ids == [execution.id]
-    assert ctx.orchestration_state.plan[0]["commands"] == [
-        "python3 -m py_compile tests/test_demo.py"
-    ]
+    retried = _retry_time_steps(ctx, 0)
+    assert len(retried) == 1
+    assert retried[0]["commands"] == ["python3 -m py_compile tests/test_demo.py"]
+    assert ctx.orchestration_state.plan == accepted_plan
+    assert ctx.orchestration_state.plan[0]["commands"] == ["custom-test-command"]
+    # Resume input: the latest checkpoint and Task.steps hold the accepted Plan.
+    checkpoint = CheckpointService(db_session).load_checkpoint(
+        ctx.session_id, checkpoint_name="autosave_latest"
+    )
+    assert checkpoint["orchestration_state"]["plan"] == accepted_plan
+    assert json.loads(ctx.task.steps) == accepted_plan
     assert ctx.orchestration_state.current_step_index == 1
 
 
@@ -2079,6 +2124,7 @@ def test_command_fix_replaces_failed_structured_ops_before_retry(db_session, tmp
         encoding="utf-8",
     )
 
+    accepted_plan = deepcopy(ctx.orchestration_state.plan)
     result = execute_step_loop(
         ctx=ctx,
         extract_structured_text=_extract_structured_text,
@@ -2090,9 +2136,12 @@ def test_command_fix_replaces_failed_structured_ops_before_retry(db_session, tmp
     )
 
     assert result["status"] == "completed"
-    repaired_step = ctx.orchestration_state.plan[0]
+    retried = _retry_time_steps(ctx, 0)
+    assert len(retried) == 1
+    repaired_step = retried[0]
     assert repaired_step["commands"] == ["node -e \"console.log('patched')\""]
     assert repaired_step.get("ops") == []
+    assert ctx.orchestration_state.plan == accepted_plan
 
 
 def test_code_fix_verification_replaces_stale_commands_before_retry(
@@ -2143,6 +2192,7 @@ def test_code_fix_verification_replaces_stale_commands_before_retry(
         encoding="utf-8",
     )
 
+    accepted_plan = deepcopy(ctx.orchestration_state.plan)
     result = execute_step_loop(
         ctx=ctx,
         extract_structured_text=_extract_structured_text,
@@ -2154,10 +2204,15 @@ def test_code_fix_verification_replaces_stale_commands_before_retry(
     )
 
     assert result["status"] == "completed"
-    repaired_step = ctx.orchestration_state.plan[0]
+    retried = _retry_time_steps(ctx, 0)
+    # The first retry reran the unchanged step; the last one ran the fix.
+    assert len(retried) == 2
+    assert retried[0]["commands"] == ["cat index.html", "cat style.css"]
+    repaired_step = retried[-1]
     assert repaired_step["commands"] == ["ls css"]
     assert repaired_step["verification"] == "ls css"
     assert repaired_step["expected_files"] == ["index.html", "css/style.css"]
+    assert ctx.orchestration_state.plan == accepted_plan
 
 
 def test_non_actionable_code_fix_for_structured_ops_is_rejected(db_session, tmp_path):
@@ -2319,6 +2374,7 @@ def test_typed_ops_fix_replaces_failed_structured_ops_before_retry(
         encoding="utf-8",
     )
 
+    accepted_plan = deepcopy(ctx.orchestration_state.plan)
     result = execute_step_loop(
         ctx=ctx,
         extract_structured_text=_extract_structured_text,
@@ -2330,7 +2386,9 @@ def test_typed_ops_fix_replaces_failed_structured_ops_before_retry(
     )
 
     assert result["status"] == "completed"
-    repaired_step = ctx.orchestration_state.plan[0]
+    retried = _retry_time_steps(ctx, 0)
+    assert len(retried) == 1
+    repaired_step = retried[0]
     assert repaired_step["commands"] == []
     assert repaired_step["ops"] == [
         {
@@ -2339,6 +2397,10 @@ def test_typed_ops_fix_replaces_failed_structured_ops_before_retry(
             "content": '{"name":"demo","version":"1.1.0","scripts":{"test":"echo test ok"}}\n',
         }
     ]
+    assert (ctx.orchestration_state.project_dir / "package.json").read_text(
+        encoding="utf-8"
+    ) == '{"name":"demo","version":"1.1.0","scripts":{"test":"echo test ok"}}\n'
+    assert ctx.orchestration_state.plan == accepted_plan
 
 
 def test_wrapped_typed_ops_fix_applies_to_repeated_structured_op_failures(
@@ -2455,6 +2517,7 @@ def test_wrapped_typed_ops_fix_applies_to_repeated_structured_op_failures(
         encoding="utf-8",
     )
 
+    accepted_plan = deepcopy(ctx.orchestration_state.plan)
     result = execute_step_loop(
         ctx=ctx,
         extract_structured_text=_extract_structured_text,
@@ -2467,8 +2530,12 @@ def test_wrapped_typed_ops_fix_applies_to_repeated_structured_op_failures(
 
     assert result["status"] == "completed", result
     assert len(runtime.prompts) == 2
-    assert ctx.orchestration_state.plan[0]["ops"][0]["op"] == "write_file"
-    assert ctx.orchestration_state.plan[1]["ops"] == [
+    retried_first = _retry_time_steps(ctx, 0)
+    assert len(retried_first) == 1
+    assert retried_first[0]["ops"][0]["op"] == "write_file"
+    retried_second = _retry_time_steps(ctx, 1)
+    assert len(retried_second) == 1
+    assert retried_second[0]["ops"] == [
         {
             "op": "write_file",
             "path": "README.md",
@@ -2477,6 +2544,7 @@ def test_wrapped_typed_ops_fix_applies_to_repeated_structured_op_failures(
             ),
         }
     ]
+    assert ctx.orchestration_state.plan == accepted_plan
     assert "1.1.0" in (ctx.orchestration_state.project_dir / "README.md").read_text(
         encoding="utf-8"
     )
