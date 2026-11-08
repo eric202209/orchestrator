@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from app.config import settings
-from app.models import TaskExecution, TaskStatus
+from app.models import Session as SessionModel, TaskExecution, TaskStatus
 from app.services.orchestration.context.assembly import (
     DebugPromptInputs,
     assemble_debugging_prompt,
@@ -251,6 +251,28 @@ def _persist_step_verification_evidence_records(
         summary["bounded_output_ref"] = evidence_ref
         summaries.append(summary)
     return evidence_ref, summaries
+
+
+_SESSION_STOP_STATUSES = ("stopped", "paused", "awaiting_input")
+
+
+def _committed_session_stop_status(db: Any, session_id: int) -> Optional[str]:
+    """P41-G2-B: the Session stop state as committed, or None if still running.
+
+    Column query, so the Worker's stale ORM ``session`` instance (and any
+    unflushed state on it) is neither trusted nor overwritten.
+    """
+
+    row = (
+        db.query(SessionModel.status, SessionModel.is_active)
+        .filter(SessionModel.id == session_id)
+        .first()
+    )
+    if row is None:
+        return "missing"
+    if row.status in _SESSION_STOP_STATUSES or not row.is_active:
+        return str(row.status)
+    return None
 
 
 def _execution_topology_for_runtime(runtime_service: Any) -> Any:
@@ -667,51 +689,53 @@ def execute_step_loop(
     except Exception:
         pass
 
-    # Stop check is at step boundaries only. A step already in progress (e.g. a
-    # long LLM call) runs to completion even after revoke_session_celery_tasks
-    # fires. SIGTERM from terminate=True may also be delayed if the worker is
-    # mid-HTTP-request. The pause is "guaranteed before the next step" not
-    # "instantaneous".
+    # Stop check is at step start, plus (P41-G2-B) a committed-state read
+    # before each structured file op and before step commands. It is a read,
+    # not a fence: an in-flight op, command, or LLM call still runs to
+    # completion after revoke_session_celery_tasks fires, and SIGTERM from
+    # terminate=True may be delayed if the worker is mid-HTTP-request.
+    def _cancel_for_session_stop(session_status: str, boundary: str) -> Dict[str, Any]:
+        logger.info(
+            "[ORCHESTRATION] Session %s marked %s; stopping task execution %s",
+            session_id,
+            session_status,
+            boundary,
+        )
+        save_orchestration_checkpoint(
+            db, session_id, task_id, prompt, orchestration_state
+        )
+        task_execution = (
+            db.query(TaskExecution)
+            .filter(TaskExecution.id == ctx.task_execution_id)
+            .first()
+            if ctx.task_execution_id
+            else None
+        )
+        mark_task_attempt_cancelled(
+            task=task,
+            session_task_link=session_task_link,
+            task_execution=task_execution,
+            completed_at=datetime.now(timezone.utc),
+        )
+        db.commit()
+        restore_workspace_snapshot_if_needed(f"session {session_status}")
+        write_project_state_snapshot_fn(db, project, task, session_id)
+        return {
+            "status": "cancelled",
+            "task_id": task_id,
+            "session_id": session_id,
+            "reason": f"session_{session_status}",
+        }
+
     plan_revision_count = 0
     while orchestration_state.current_step_index < len(orchestration_state.plan):
         step_index = orchestration_state.current_step_index
         step = orchestration_state.plan[step_index]
         db.refresh(session)
-        if (
-            session.status in ["stopped", "paused", "awaiting_input"]
-            or not session.is_active
-        ):
-            logger.info(
-                "[ORCHESTRATION] Session %s marked %s; stopping task execution before step %s",
-                session_id,
-                session.status,
-                step_index + 1,
+        if session.status in _SESSION_STOP_STATUSES or not session.is_active:
+            return _cancel_for_session_stop(
+                session.status, f"before step {step_index + 1}"
             )
-            save_orchestration_checkpoint(
-                db, session_id, task_id, prompt, orchestration_state
-            )
-            task_execution = (
-                db.query(TaskExecution)
-                .filter(TaskExecution.id == ctx.task_execution_id)
-                .first()
-                if ctx.task_execution_id
-                else None
-            )
-            mark_task_attempt_cancelled(
-                task=task,
-                session_task_link=session_task_link,
-                task_execution=task_execution,
-                completed_at=datetime.now(timezone.utc),
-            )
-            db.commit()
-            restore_workspace_snapshot_if_needed(f"session {session.status}")
-            write_project_state_snapshot_fn(db, project, task, session_id)
-            return {
-                "status": "cancelled",
-                "task_id": task_id,
-                "session_id": session_id,
-                "reason": f"session_{session.status}",
-            }
 
         orchestration_state.current_step_index = step_index
         task.current_step = step_index + 1
@@ -890,7 +914,14 @@ def execute_step_loop(
             Path(orchestration_state.project_dir),
             step_ops,
             accepted_path_authority=accepted_path_authority,
+            authority_check=lambda: _committed_session_stop_status(db, session_id),
         )
+        # P41-G2-B boundary A: a stop committed mid-step leaves the op unapplied.
+        if ops_result.get("failure_category") == "execution_authority_lost":
+            return _cancel_for_session_stop(
+                ops_result["authority_lost"],
+                f"before step {step_index + 1} structured file ops",
+            )
         runtime_phase_timestamps["T1"] = datetime.now(timezone.utc).isoformat()
         if not ops_result.get("success", False):
             step_result = {
@@ -1029,6 +1060,13 @@ def execute_step_loop(
             }
         if ops_result.get("success", False):
             if any(str(command or "").strip() for command in (step_commands or [])):
+                # P41-G2-B boundary B: no step command, verification, or
+                # runtime dispatch after a committed operator stop.
+                lost_status = _committed_session_stop_status(db, session_id)
+                if lost_status is not None:
+                    return _cancel_for_session_stop(
+                        lost_status, f"before step {step_index + 1} commands"
+                    )
                 local_inspection_result = _execute_read_only_inspection_step(
                     project_dir=orchestration_state.project_dir,
                     commands=step_commands,

@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -556,8 +556,13 @@ class ExecutorService:
         ops: Any,
         *,
         accepted_path_authority: AcceptedPathAuthority | None = None,
+        authority_check: Callable[[], Optional[str]] | None = None,
     ) -> Dict[str, Any]:
-        """Execute structured file operations without shell quoting."""
+        """Execute structured file operations without shell quoting.
+
+        ``authority_check`` returns a reason when the caller's execution
+        authority is gone; no further op touches the workspace after that.
+        """
 
         if not ops:
             return {
@@ -684,6 +689,20 @@ class ExecutorService:
                     "success": False,
                     "files_changed": files_changed,
                     "output": str(exc),
+                }
+            # P41-G2-B: re-read execution authority immediately before this
+            # op's filesystem mutation (a committed operator stop wins).
+            authority_lost = authority_check() if authority_check else None
+            if authority_lost is not None:
+                return {
+                    "success": False,
+                    "files_changed": files_changed,
+                    "output": (
+                        f"op {index} not applied: execution authority lost "
+                        f"({authority_lost})"
+                    ),
+                    "failure_category": "execution_authority_lost",
+                    "authority_lost": authority_lost,
                 }
             relative = target.relative_to(normalized_project_dir).as_posix()
 
