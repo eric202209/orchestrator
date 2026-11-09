@@ -28,8 +28,10 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     _debug_repair_normalization_rejected,
     bounded_debug_repair_ops_authority_rejection,
     build_bounded_debug_repair_prompt_with_metadata,
+    build_bounded_debug_repair_changed_file_context,
     build_bounded_debug_repair_observability,
     build_debug_feedback_envelope,
+    debug_repair_source_path,
     normalize_bounded_debug_repair_payload_detailed,
     parse_bounded_debug_repair_output_strict,
     persist_debug_feedback_envelope,
@@ -133,7 +135,10 @@ from app.services.orchestration.types import (
     classify_failure_root_cause,
 )
 from app.services.orchestration.validation.validator import ValidatorService
-from app.services.orchestration.validation.path_authority import PathAuthorityError
+from app.services.orchestration.validation.path_authority import (
+    PathAuthorityError,
+    declare,
+)
 from app.services.orchestration.validation.workspace_guard import (
     TaskOperationContractViolation,
     compute_workspace_checksum,
@@ -2373,6 +2378,7 @@ def execute_step_loop(
                         "commands_run": _evidence_capsule.commands_run,
                     },
                 )
+            diff_repair_fallback_reason = None
             diff_capsule = build_diff_capsule(
                 pre_checksum=pre_step_file_snapshot,
                 project_dir=orchestration_state.project_dir,
@@ -2380,14 +2386,86 @@ def execute_step_loop(
                 envelope=debug_feedback_envelope,
             )
             if diff_capsule is not None:
-                debug_prompt = build_bounded_diff_repair_prompt(
-                    diff_capsule,
-                    _evidence_capsule,
-                    envelope=debug_feedback_envelope,
+                project_dir = Path(orchestration_state.project_dir)
+                prior_source_paths = _bounded_debug_repair_prior_source_paths(
+                    orchestration_state,
+                    step_index,
                 )
-                debug_prompt_mode = DIFF_SCOPED_DEBUG_REPAIR_PROMPT_MODE
-                diff_repair_fallback_reason = None
-            else:
+                candidate_source_paths = list(prior_source_paths)
+                current_expected_files = step.get("expected_files") or []
+                if isinstance(current_expected_files, (list, tuple, set)):
+                    candidate_source_paths.extend(current_expected_files)
+                else:
+                    candidate_source_paths.append(current_expected_files)
+                candidate_source_paths.extend(
+                    operation.get("path")
+                    for operation in step.get("ops") or []
+                    if isinstance(operation, dict)
+                    and operation.get("op")
+                    in {"write_file", "append_file", "replace_in_file"}
+                )
+                authorized_source_paths: list[str] = []
+                for raw_path in candidate_source_paths:
+                    source_path = debug_repair_source_path(raw_path, project_dir)
+                    if not source_path or source_path in authorized_source_paths:
+                        continue
+                    try:
+                        declaration = declare(source_path)
+                    except PathAuthorityError:
+                        continue
+                    if (
+                        accepted_path_authority is not None
+                        and accepted_path_authority.grant_for(declaration) is not None
+                    ):
+                        authorized_source_paths.append(source_path)
+
+                source_context, source_context_metadata = (
+                    build_bounded_debug_repair_changed_file_context(
+                        debug_feedback_envelope,
+                        prior_source_paths=authorized_source_paths,
+                        allowed_source_paths=authorized_source_paths,
+                    )
+                )
+                context_paths = list(
+                    source_context_metadata.get(
+                        "bounded_execution_debug_repair_changed_file_context_paths"
+                    )
+                    or []
+                )
+                repair_target_paths = [
+                    path for path in context_paths if path in authorized_source_paths
+                ]
+                complete_source_paths = [
+                    path
+                    for path in source_context_metadata.get(
+                        "bounded_execution_debug_repair_changed_file_context_complete_paths"
+                    )
+                    or []
+                    if path in repair_target_paths
+                ]
+                if repair_target_paths:
+                    debug_prompt = build_bounded_diff_repair_prompt(
+                        diff_capsule,
+                        _evidence_capsule,
+                        envelope=debug_feedback_envelope,
+                        source_context=source_context,
+                        repair_target_paths=repair_target_paths,
+                        complete_source_paths=complete_source_paths,
+                    )
+                    debug_source_api_contract_metadata.update(
+                        {
+                            **source_context_metadata,
+                            "bounded_execution_debug_repair_changed_file_context_complete_paths": complete_source_paths,
+                        }
+                    )
+                    debug_prompt_mode = DIFF_SCOPED_DEBUG_REPAIR_PROMPT_MODE
+                    diff_repair_fallback_reason = None
+                else:
+                    diff_capsule = None
+                    diff_repair_fallback_reason = (
+                        "diff_repair_source_context_unavailable"
+                    )
+            if diff_capsule is None:
                 source_edit_context_for_prompt = (
                     _bounded_debug_repair_source_edit_context(
                         step,
@@ -2409,7 +2487,9 @@ def execute_step_loop(
                 )
                 debug_prompt_mode = BOUNDED_DEBUG_REPAIR_PROMPT_MODE
                 if not debug_feedback_envelope.changed_files:
-                    diff_repair_fallback_reason = "no_changed_files"
+                    diff_repair_fallback_reason = (
+                        diff_repair_fallback_reason or "no_changed_files"
+                    )
                 elif debug_feedback_envelope.failure_class not in {
                     "pytest_failure",
                     "runtime_assertion_failure",
@@ -2417,7 +2497,7 @@ def execute_step_loop(
                     "import_error",
                 }:
                     diff_repair_fallback_reason = "ineligible_failure_class"
-                else:
+                elif diff_repair_fallback_reason is None:
                     diff_repair_fallback_reason = "diff_capsule_unavailable"
             debug_prompt = _prepend_debug_knowledge_block(
                 debug_prompt, debug_knowledge_ctx

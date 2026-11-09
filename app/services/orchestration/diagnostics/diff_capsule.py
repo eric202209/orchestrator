@@ -186,7 +186,17 @@ def build_bounded_diff_repair_prompt(
     capsule: DiffCapsule,
     evidence_capsule: Optional[Any] = None,
     envelope: Optional[DebugFeedbackEnvelope] = None,
+    *,
+    source_context: str = "",
+    repair_target_paths: Optional[List[str]] = None,
+    complete_source_paths: Optional[List[str]] = None,
 ) -> str:
+    targets = [
+        str(path).strip() for path in repair_target_paths or [] if str(path).strip()
+    ]
+    complete = [
+        str(path).strip() for path in complete_source_paths or [] if str(path).strip()
+    ]
     workspace = render_workspace_path_for_prompt(Path(capsule.workspace_path or "."))
     evidence_section = ""
     if evidence_capsule is not None:
@@ -201,8 +211,23 @@ def build_bounded_diff_repair_prompt(
         build_debug_source_contract(envelope, evidence_capsule) if envelope else ""
     )
     source_contract_section = f"\n{source_contract}\n" if source_contract else ""
+    target_section = (
+        "\n".join(f"- {path}" for path in targets)
+        if targets
+        else "- (none supplied; do not propose filesystem edits)"
+    )
+    complete_section = (
+        ", ".join(complete)
+        if complete
+        else "(none; whole-file writes are not grounded)"
+    )
+    source_context_section = (
+        f"\nCurrent source context (bounded):\n{source_context}\n"
+        if source_context
+        else "\nCurrent source context: (none supplied)\n"
+    )
     return (
-        "Return a bare JSON array of one minimal debug repair step. "
+        "Return a bare JSON array of exactly one structured source repair object. "
         "Do not return prose, markdown, comments, explanations, or fenced code.\n\n"
         f"Workspace scope: {workspace}\n"
         f"Failure class: {capsule.failure_class}\n"
@@ -212,11 +237,26 @@ def build_bounded_diff_repair_prompt(
         f"{capsule.diff_text}\n"
         f"{evidence_section}\n"
         f"{source_contract_section}"
+        "Repair target paths from the accepted plan's executed source operations "
+        "(each operation is still checked by Path Authority):\n"
+        f"{target_section}\n"
+        f"Complete current source files shown: {complete_section}\n"
+        f"{source_context_section}"
         "Rules:\n"
-        "1. Output exactly one JSON array containing one step object.\n"
-        "2. The step object must include title, command, and verification_command.\n"
-        "3. Touch only files shown in the diff capsule.\n"
-        "4. Do not rewrite full files unless the diff shows the whole file.\n"
-        "5. Use relative paths only; no absolute paths, `..`, or `~`.\n"
-        "6. Do not include full stdout/stderr, planning context, or session history.\n"
+        "1. The parser accepts one object with repair_type or fix_type set to ops_fix, "
+        "an ops array, and verification_command.\n"
+        "2. Use only replace_in_file (exact old and new), write_file (complete content), "
+        "or append_file (content) operations.\n"
+        "3. Use only a repair target path listed above. The diff capsule and source "
+        "context provide evidence; neither grants write authority.\n"
+        "4. For replace_in_file, copy old exactly from the visible current source context.\n"
+        "5. Use write_file only for paths listed as complete current source files above.\n"
+        "6. Do not modify tests or rewrite unrelated files.\n"
+        "7. verification_command must be a runnable verification shell string, not a "
+        "mutation command.\n"
+        "8. Use relative paths only; no absolute paths, `..`, or `~`.\n"
+        "9. Do not include full stdout/stderr, planning context, or session history.\n"
+        '10. Output this shape: [{"title":"...","repair_type":"ops_fix",'
+        '"ops":[{"op":"replace_in_file","path":"...","old":"exact current text",'
+        '"new":"replacement"}],"verification_command":"..."}].\n'
     )

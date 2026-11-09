@@ -551,6 +551,7 @@ def build_bounded_debug_repair_changed_file_context(
     envelope: DebugFeedbackEnvelope,
     *,
     prior_source_paths: Optional[Iterable[str]] = None,
+    allowed_source_paths: Optional[Iterable[str]] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Render bounded current source content for a Phase 7F repair prompt.
 
@@ -568,11 +569,26 @@ def build_bounded_debug_repair_changed_file_context(
     if not project_dir.is_dir():
         return "", metadata
 
+    allowed = (
+        None
+        if allowed_source_paths is None
+        else {
+            normalized
+            for raw_path in allowed_source_paths
+            if (
+                normalized := _normalize_bounded_debug_repair_source_path(
+                    raw_path, project_dir
+                )
+            )
+        }
+    )
     ordered_paths: list[str] = []
     seen: set[str] = set()
 
     def add_path(raw_path: Any) -> None:
         normalized = _normalize_bounded_debug_repair_source_path(raw_path, project_dir)
+        if allowed is not None and normalized not in allowed:
+            return
         if normalized and normalized not in seen:
             seen.add(normalized)
             ordered_paths.append(normalized)

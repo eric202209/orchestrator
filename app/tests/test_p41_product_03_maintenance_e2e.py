@@ -134,9 +134,14 @@ class _MaintenanceProviderAdapter(_DeterministicProviderAdapter):
             self.calls.append({"kind": "discovery", "prompt": prompt})
             output = {"action": "read_file", "path": "textkit/slug.py"}
             return {"status": "completed", "output": json.dumps(output)}
-        if self.repair is not None and "debug repair" in prompt:
-            self.calls.append({"kind": "debug_repair", "prompt": prompt})
-            return {"status": "completed", "output": json.dumps(self.repair)}
+        if self.repair is not None and (
+            "debug repair" in prompt.lower() or DIFF_REPAIR_PROMPT_MARKER in prompt
+        ):
+            repair = self.repair(prompt) if callable(self.repair) else self.repair
+            self.calls.append(
+                {"kind": "debug_repair", "prompt": prompt, "response": repair}
+            )
+            return {"status": "completed", "output": json.dumps(repair)}
         return await super().execute_task(prompt, **kwargs)
 
 
@@ -151,6 +156,44 @@ def _slugify_probe(workspace: Path) -> str:
     return subprocess.run(
         [sys.executable, "-c", code], cwd=workspace, capture_output=True, text=True
     ).stdout
+
+
+def _source_repair_derived_from_prompt(prompt: str) -> list[dict[str, Any]]:
+    """Build an ops_fix only from exact source text supplied to the adapter."""
+
+    marker = "--- textkit/slug.py\n"
+    start = prompt.find(marker)
+    if start < 0:
+        return []
+    start += len(marker)
+    end = prompt.find("\n--- ", start)
+    source = prompt[start : end if end >= 0 else None]
+    old = next(
+        (
+            line
+            for line in source.splitlines(keepends=True)
+            if "re.sub(" in line and ".strip()" in line
+        ),
+        "",
+    )
+    if not old:
+        return []
+    new = old.replace(".strip()", '.strip("-")')
+    return [
+        {
+            "title": "Strip edge hyphens in slugify",
+            "repair_type": "ops_fix",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "textkit/slug.py",
+                    "old": old,
+                    "new": new,
+                }
+            ],
+            "verification_command": FOCUSED_TEST,
+        }
+    ]
 
 
 def _run_scenario(
@@ -489,6 +532,14 @@ VALID_SOURCE_REPAIR = [
     }
 ]
 
+UNSUPPORTED_COMMAND_REPAIR = [
+    {
+        "title": "Strip edge hyphens in slugify",
+        "command": "sed -i 's/\\.strip()/\\.strip(\"-\")/' textkit/slug.py",
+        "verification_command": FOCUSED_TEST,
+    }
+]
+
 
 class RepairedTaskFalseFailure(AssertionError):
     """A successful, fully verified debug repair was not allowed to complete."""
@@ -500,6 +551,13 @@ def test_successful_debug_repair_reaches_verified_completion(scenario):
     trace = result["trace"]
     _assert_plan_admitted(result)
     events = result["events"]
+    debug_call = next(
+        call for call in result["provider"].calls if call["kind"] == "debug_repair"
+    )
+    assert DIFF_REPAIR_PROMPT_MARKER in debug_call["prompt"]
+    assert "Primary file: tests/test_slug.py" in debug_call["prompt"]
+    assert WRONG_FIX in debug_call["prompt"]
+    assert debug_call["response"] == VALID_SOURCE_REPAIR
 
     # Preconditions: the failure is genuine and the production repair fixed it.
     assert any(
@@ -588,3 +646,126 @@ def test_successful_debug_repair_reaches_verified_completion(scenario):
         _git(workspace, "diff", "--name-only", result["baseline_sha"]).split()
     )
     assert changed == {"textkit/slug.py", "tests/test_slug.py"}
+
+
+@pytest.mark.integration_contract
+def test_diff_scoped_prompt_rejects_unsupported_command_repair(scenario):
+    result = scenario(WRONG_FIX, UNSUPPORTED_COMMAND_REPAIR)
+    debug_call = next(
+        call for call in result["provider"].calls if call["kind"] == "debug_repair"
+    )
+    prompt = debug_call["prompt"]
+    rejected = [
+        event
+        for event in result["events"]
+        if event["event_type"] == "repair_rejected"
+        and event["details"].get("debug_repair_rejection_reason")
+    ]
+
+    # The command response remains rejected by the real production parser.
+    assert DIFF_REPAIR_PROMPT_MARKER in prompt
+    assert (
+        "step object must include title, command, and verification_command"
+        not in prompt
+    )
+    assert "Touch only files shown in the diff capsule" not in prompt
+    assert "Primary file: tests/test_slug.py" in prompt
+    assert '"repair_type":"ops_fix"' in prompt
+    assert "- textkit/slug.py" in prompt
+    assert debug_call["response"] == UNSUPPORTED_COMMAND_REPAIR
+    assert rejected, result["trace"]
+    assert rejected[-1]["details"]["debug_repair_rejection_reason"] == (
+        "semantic_string_edit_rejected"
+    )
+    assert result["statuses"] == (TaskStatus.FAILED,) * 3
+    assert not [
+        event for event in result["events"] if event["event_type"] == "task_completed"
+    ]
+
+
+@pytest.mark.integration_contract
+def test_prompt_supplied_source_is_sufficient_for_an_accepted_repair(scenario):
+    result = scenario(WRONG_FIX, _source_repair_derived_from_prompt)
+    debug_call = next(
+        call for call in result["provider"].calls if call["kind"] == "debug_repair"
+    )
+    prompt = debug_call["prompt"]
+    response = debug_call["response"]
+
+    assert "--- textkit/slug.py\n" in prompt
+    assert response, "The deterministic adapter must derive the repair from prompt text"
+    repair = response[0]
+    assert repair["ops"][0]["old"] in prompt
+    assert repair["ops"][0]["new"] not in prompt
+    assert repair["ops"][0]["path"] == "textkit/slug.py"
+    assert "Primary file: tests/test_slug.py" in prompt
+    assert "Complete current source files shown: textkit/slug.py" in prompt
+    source_context_start = prompt.index("Current source context (bounded):\n") + len(
+        "Current source context (bounded):\n"
+    )
+    source_context_end = prompt.index("\nRules:\n", source_context_start)
+    assert len(prompt[source_context_start:source_context_end]) <= 3000
+    attempt = next(
+        event
+        for event in result["events"]
+        if event["event_type"] == "debug_repair_attempted"
+    )
+    assert attempt["details"]["diff_capsule_line_count"] <= 120
+    assert not any(
+        event["event_type"] == "repair_rejected" for event in result["events"]
+    )
+    assert result["statuses"] == (TaskStatus.DONE,) * 3, result["trace"]
+    assert result["session_status"] == "completed", result["trace"]
+    assert (
+        len([e for e in result["events"] if e["event_type"] == "task_completed"]) == 1
+    )
+    assert (result["workspace"] / "textkit" / "slug.py").read_text() == FIXED_SOURCE
+    assert (result["workspace"] / "tests" / "test_slug.py").read_text() == (
+        EXISTING_TEST + REGRESSION_TEST
+    )
+    assert any(
+        record["declared_command"] == FOCUSED_TEST
+        and record["verification_status"] == "passed"
+        and record["process_exit_code"] == 0
+        for record in result["verification_records"]
+    )
+    assert any(
+        record["declared_command"] == SUITE_TEST
+        and record["verification_status"] == "passed"
+        and record["process_exit_code"] == 0
+        for record in result["verification_records"]
+    )
+
+
+@pytest.mark.integration_contract
+def test_diff_scoped_prompt_keeps_unauthorized_source_paths_rejected(scenario):
+    unauthorized_repair = [
+        {
+            "title": "Attempt an out-of-workspace repair",
+            "repair_type": "ops_fix",
+            "ops": [
+                {
+                    "op": "replace_in_file",
+                    "path": "../outside.py",
+                    "old": "x = 1\n",
+                    "new": "x = 2\n",
+                }
+            ],
+            "verification_command": FOCUSED_TEST,
+        }
+    ]
+    result = scenario(WRONG_FIX, unauthorized_repair)
+    rejection = next(
+        event
+        for event in result["events"]
+        if event["event_type"] == "repair_rejected"
+        and event["details"].get("debug_repair_rejection_reason")
+    )
+
+    assert rejection["details"]["debug_repair_rejection_reason"] == (
+        "unauthorized_source_path"
+    )
+    assert result["statuses"] == (TaskStatus.FAILED,) * 3
+    assert not [
+        event for event in result["events"] if event["event_type"] == "task_completed"
+    ]
