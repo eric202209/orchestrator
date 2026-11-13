@@ -322,10 +322,17 @@ def test_stale_target_id_is_not_remapped_after_materialization_changes(tmp_path)
 
 def test_semantic_construction_failure_does_not_downgrade_to_legacy(tmp_path):
     materialization = _materialize(tmp_path)
-    target_id = build_semantic_target_inventory(materialization).handles[0].target_id
+    # Production builds the inventory once, before the provider call.
+    inventory = build_semantic_target_inventory(materialization)
+    target_id = inventory.handles[0].target_id
     (tmp_path / "target.txt").write_text("needle()\nchanged\n", encoding="utf-8")
     with pytest.raises(SemanticTargetContractError) as exc_info:
-        _normalize(_semantic_provider_response(target_id), tmp_path, materialization)
+        normalize_provider_semantic_intents(
+            _semantic_provider_response(target_id),
+            inventory=inventory,
+            project_dir=tmp_path,
+            source_materialization=materialization,
+        )
     assert exc_info.value.code == "semantic_target_construction_version_mismatch"
     assert "old" not in str(exc_info.value).lower()
 

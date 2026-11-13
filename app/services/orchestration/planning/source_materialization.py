@@ -353,6 +353,10 @@ class SourceTargetHint:
     hint_type: str
     authority: str
     target_path: str | None = None
+    # True when any occurrence of the literal sits in a preservation clause
+    # ("preserve the existing `f(x)` interface").  It still locates context
+    # but never becomes a replacement region.
+    preservation_reference: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -367,6 +371,17 @@ _HINT_CALL_RE = re.compile(r"\b([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\(\s*\))")
 _HINT_DEFINITION_RE = re.compile(r"\b(?:def|class|function|method)\s+([A-Za-z_]\w*)")
 _HINT_PATH_LIKE_RE = re.compile(r"[/\\]|\.(py|js|jsx|ts|tsx|css|html|md)$")
 _CLAUSE_SEPARATORS = (",", ";", "\n")
+# Clause scope for preservation detection: separators, sentence ends, and
+# contrastive conjunctions.  A dot inside a path or dotted name is not a break.
+_PRESERVATION_CLAUSE_BOUNDARY_RE = re.compile(
+    r"[,;\n]|[.!?](?=\s|$)|\b(?:and|but|while|whereas)\b", re.IGNORECASE
+)
+_PRESERVATION_MARKER_RE = re.compile(
+    r"\b(?:preserv\w*|keep(?:s|ing)?|kept|retain\w*|maintain\w*|unchanged|intact)\b"
+    r"|\b(?:do not|don't|must not|should not|never|without)\s+"
+    r"(?:chang\w*|modif\w*|alter\w*|edit\w*|touch\w*|renam\w*|break\w*)\b",
+    re.IGNORECASE,
+)
 _HINT_MINIMUM_LENGTH = 3
 _HINT_PATH_ASSOCIATION_WINDOW = 200
 _MAXIMUM_TARGET_HINTS = 12
@@ -403,6 +418,25 @@ def _clause_span(text: str, position: int) -> tuple[int, int]:
         if index >= 0
     ]
     return max(start, 0), min(ends) if ends else len(text)
+
+
+def _in_preservation_clause(body: str, start: int, end: int) -> bool:
+    """Whether the clause holding ``body[start:end]`` states a preservation rule.
+
+    Deliberately narrow and fail-closed: any preservation marker in the same
+    clause disqualifies the literal as a replacement region, even if the clause
+    also asks for a change.  It never qualifies a hint.
+    """
+
+    clause_start = 0
+    clause_end = len(body)
+    for match in _PRESERVATION_CLAUSE_BOUNDARY_RE.finditer(body):
+        if match.end() <= start:
+            clause_start = match.end()
+        elif match.start() >= end:
+            clause_end = match.start()
+            break
+    return bool(_PRESERVATION_MARKER_RE.search(body[clause_start:clause_end]))
 
 
 def _associated_hint_path(
@@ -457,6 +491,7 @@ def extract_source_target_hints(
 
     hints: list[SourceTargetHint] = []
     seen: set[tuple[str, str]] = set()
+    preserved = _preserved_hint_literals(text, contract_text)
 
     for authority, body in (
         (HINT_AUTHORITY_TASK_DESCRIPTION, text),
@@ -506,6 +541,7 @@ def extract_source_target_hints(
                     hint_type=hint_type,
                     authority=authority,
                     target_path=_associated_hint_path(path_spans, position, body),
+                    preservation_reference=candidate in preserved,
                 )
             )
             if len(hints) >= _MAXIMUM_TARGET_HINTS:
@@ -524,6 +560,52 @@ def extract_source_target_hints(
         if len(hints) >= _MAXIMUM_TARGET_HINTS:
             break
     return tuple(hints)
+
+
+def _preserved_hint_literals(*bodies: str) -> set[str]:
+    """Literals with at least one occurrence inside a preservation clause."""
+
+    preserved: set[str] = set()
+    for body in bodies:
+        if not body:
+            continue
+        for regex in (_HINT_BACKTICK_RE, _HINT_QUOTED_RE, _HINT_CALL_RE):
+            for match in regex.finditer(body):
+                group = next(
+                    (
+                        index
+                        for index in range(1, (regex.groups or 0) + 1)
+                        if match.group(index)
+                    ),
+                    None,
+                )
+                if group is None:
+                    continue
+                candidate = match.group(group).strip()
+                if candidate and _in_preservation_clause(
+                    body, match.start(group), match.end(group)
+                ):
+                    preserved.add(candidate)
+    return preserved
+
+
+def replacement_target_hints(
+    task_description: str,
+    *,
+    planner_contract: Mapping[str, Any] | None = None,
+) -> tuple[SourceTargetHint, ...]:
+    """Task hints that may name a replacement region.
+
+    A preservation-only literal is not a target read-only discovery could resolve.
+    """
+
+    return tuple(
+        hint
+        for hint in extract_source_target_hints(
+            task_description, planner_contract=planner_contract
+        )
+        if not hint.preservation_reference
+    )
 
 
 def _literal_hint_type(candidate: str) -> str:
@@ -910,7 +992,9 @@ def _select_hint_for_source(
     """Return the best (hint, match_start, match_end, match_count) for a file."""
 
     encoded = text.encode("utf-8")
-    ranked: list[tuple[tuple[int, int, int, int, int], SourceTargetHint, int, int]] = []
+    ranked: list[
+        tuple[tuple[int, int, int, int, int, int], SourceTargetHint, int, int]
+    ] = []
     for index, hint in enumerate(hints):
         needle = hint.text.encode("utf-8")
         if not needle:
@@ -928,6 +1012,7 @@ def _select_hint_for_source(
             (
                 (
                     _HINT_AUTHORITY_RANK.get(hint.authority, 1),
+                    int(hint.preservation_reference),
                     path_rank,
                     _HINT_TYPE_RANK.get(hint.hint_type, 3),
                     count,
@@ -1304,6 +1389,11 @@ def materialize_planner_source_context(
                     match_end,
                     selected_hint.hint_type,
                 )
+                if (
+                    target_region_eligibility_reason is None
+                    and selected_hint.preservation_reference
+                ):
+                    target_region_eligibility_reason = "preservation_reference"
             elif target_hints:
                 hint_status = TARGET_HINT_NOT_FOUND
             remaining = maximum_total_source_bytes - total_bytes
@@ -1674,7 +1764,9 @@ def _render_provider_planner_source_materialization(
     ]
     if inventory.handles:
         lines[4:4] = [
-            "When a target_id is listed for a path, it may be used for replace_in_file.",
+            "A listed target_id may be used for replace_in_file; its `new` replaces only "
+            "target_region_text (JSON string), not the file or function; for changes "
+            "outside it, use another grounded operation.",
             "Do not invent target IDs or emit selector internals, offsets, versions, or hashes.",
             "When no target_id is listed, legacy replace_in_file uses exact old/new source evidence.",
         ]
@@ -1702,13 +1794,7 @@ def _render_provider_planner_source_materialization(
             f"omission_reason: {item.omission_reason or '(none)'}",
         ]
         if handle is not None:
-            record_lines.extend(
-                [
-                    f"target_id: {handle.target_id}",
-                    f"target_label: {handle.label}",
-                    f"target_context: {handle.context}",
-                ]
-            )
+            record_lines.extend(handle.provider_disclosure_lines())
         lines.extend(record_lines)
         if item.content is not None:
             lines.extend(["content:", item.content])
@@ -1952,6 +2038,12 @@ def _render_provider_repair_source_materialization(
         "Use listed Orchestrator-issued target IDs only; selector internals are not provider data.",
         "Legacy old/new remains available when no target ID is listed.",
     ]
+    if inventory.handles:
+        lines.insert(
+            3,
+            "A target_id's `new` replaces only its target_region_text (JSON string), not "
+            "the file or function; for changes outside it, use another grounded operation.",
+        )
     for item in materialization.files:
         priority = _repair_projection_priority(item, rejected)
         if compaction_level >= 4 and priority not in {"R0", "R1"}:
@@ -1975,13 +2067,7 @@ def _render_provider_repair_source_materialization(
             f"truncated: {str(item.truncated).lower()}",
         ]
         if handle is not None:
-            record_lines.extend(
-                [
-                    f"target_id: {handle.target_id}",
-                    f"target_label: {handle.label}",
-                    f"target_context: {handle.context}",
-                ]
-            )
+            record_lines.extend(handle.provider_disclosure_lines())
         lines.extend(record_lines)
         if metadata_only:
             lines.append("repair_projection: metadata_only")

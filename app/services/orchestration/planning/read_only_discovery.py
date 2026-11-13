@@ -25,7 +25,7 @@ from app.services.orchestration.planning.source_materialization import (
     SOURCE_STATUS_NEW,
     TARGET_HINT_ABSENT,
     PlannerSourceMaterialization,
-    extract_source_target_hints,
+    replacement_target_hints,
 )
 from app.services.orchestration.planning.repository_orientation import (
     RepositoryOrientation,
@@ -214,7 +214,7 @@ def assess_discovery_admission(
                     "direct_first_party_import_not_grounded",
                 )
 
-    hints = extract_source_target_hints(prompt, planner_contract=planner_contract)
+    hints = replacement_target_hints(prompt, planner_contract=planner_contract)
     if hints:
         from app.services.orchestration.planning.semantic_target_inventory import (
             build_semantic_target_inventory,

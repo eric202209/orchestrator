@@ -86,7 +86,8 @@ def render_operation_choice_contract(
     if semantic_mode_available and legacy_replace_available:
         return (
             "Accepted replace shapes are `{op,path,old,new}` or `{op,path,target_id,new}`. "
-            "For replace_in_file, use a listed Orchestrator `target_id` for the exact path; "
+            "For replace_in_file, use a listed Orchestrator `target_id` for the exact path "
+            "only when the change lies entirely within its `target_region_text`; "
             "otherwise use exact `old` plus `new` from current evidence. Never mix `old` "
             "with `target_id`, invent IDs, or emit selector internals (offsets, versions, "
             "hashes, or derivation data)."
@@ -94,7 +95,8 @@ def render_operation_choice_contract(
     if semantic_mode_available:
         return (
             "Semantic target mode is available. Use only a listed Orchestrator "
-            "`target_id` for `replace_in_file`; do not emit `old` or selector internals."
+            "`target_id` for `replace_in_file`, and only when the change lies entirely "
+            "within its `target_region_text`; do not emit `old` or selector internals."
         )
     if legacy_replace_available:
         return (

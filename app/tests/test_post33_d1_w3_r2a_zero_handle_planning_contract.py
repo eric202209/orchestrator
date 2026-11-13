@@ -34,7 +34,8 @@ from app.services.orchestration.validation.validator import ValidatorService
 
 BEFORE_OPERATION_CONTRACT = (
     "Accepted replace shapes are `{op,path,old,new}` or `{op,path,target_id,new}`. "
-    "For replace_in_file, use a listed Orchestrator `target_id` for the exact path; "
+    "For replace_in_file, use a listed Orchestrator `target_id` for the exact path "
+    "only when the change lies entirely within its `target_region_text`; "
     "otherwise use exact `old` plus `new` from current evidence. Never mix `old` "
     "with `target_id`, invent IDs, or emit selector internals (offsets, versions, "
     "hashes, or derivation data)."

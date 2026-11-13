@@ -28,6 +28,7 @@ from app.services.orchestration.planning.source_materialization import (
     SPAN_PRIMARY_TARGET,
     MaterializedSourceSpan,
     PlannerSourceMaterialization,
+    current_source_version_identity,
 )
 from app.services.orchestration.validation.path_authority import (
     EntryType,
@@ -80,6 +81,8 @@ class SemanticTargetHandle:
     label: str
     context: str
     semantic_target: SemanticTargetIntent
+    # Exact source text of the selector-owned replacement region.
+    region_text: str = ""
 
     def to_provider_dict(self) -> dict[str, str]:
         return {
@@ -88,6 +91,16 @@ class SemanticTargetHandle:
             "label": self.label,
             "context": self.context,
         }
+
+    def provider_disclosure_lines(self) -> list[str]:
+        """Provider-facing handle lines, including the exact replacement region."""
+
+        return [
+            f"target_id: {self.target_id}",
+            f"target_region_text: {json.dumps(self.region_text, ensure_ascii=False)}",
+            f"target_label: {self.label}",
+            f"target_context: {self.context}",
+        ]
 
 
 @dataclass(frozen=True)
@@ -239,6 +252,44 @@ def _record_is_eligible(
     return path
 
 
+def _authoritative_region_text(
+    source_materialization: PlannerSourceMaterialization,
+    path: CanonicalPath,
+    workspace_root: Path,
+) -> str | None:
+    """Return the exact bytes the selector for ``path`` would replace.
+
+    Uses the production selector constructor, then confirms the reread bytes
+    against the selector's own region hash and version fence.  ``None`` means
+    the region cannot be disclosed exactly, so no handle is issued.
+    """
+
+    construction = construct_source_region_identity(
+        root=workspace_root,
+        canonical_path=path,
+        semantic_target=SemanticTargetIntent(MaterializedRegionReference()),
+        accepted_source_materialization=source_materialization,
+        eligible_existing_mutable_paths=(path.value,),
+    )
+    selector = construction.selector
+    if construction.status != CONSTRUCTED_UNIQUE or selector is None:
+        return None
+    target = workspace_root / path.value
+    try:
+        source_bytes = target.read_bytes()
+    except OSError:
+        return None
+    if current_source_version_identity(target) != selector.expected_source_version:
+        return None
+    region = source_bytes[selector.start_byte : selector.end_byte]
+    if hashlib.sha256(region).hexdigest() != selector.selected_region_sha256:
+        return None
+    try:
+        return region.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def _target_id_for_record(item: Any, path: CanonicalPath) -> str:
     primary_spans = _primary_spans(item)
     span_payload = [span.to_dict() for span in primary_spans]
@@ -297,6 +348,11 @@ def build_semantic_target_inventory(
         )
         if path is None:
             continue
+        region_text = _authoritative_region_text(
+            source_materialization, path, workspace_root
+        )
+        if not region_text:
+            continue
         target_id = _target_id_for_record(item, path)
         if target_id in seen_ids:
             raise SemanticTargetInventoryError(
@@ -309,12 +365,11 @@ def build_semantic_target_inventory(
         label = "primary target region"
         if hint:
             label += f" ({hint[:120]})"
-        context = (
-            "Orchestrator-issued handle for the one supported current source "
-            f"region in {path.value}; use it only for replace_in_file."
-        )
+        context = "Use only for replace_in_file."
         if strategy:
-            context += f" Materialization context: {strategy}."
+            context = (
+                f"Shown content ({strategy}) is context, not the replacement region."
+            )
         handles.append(
             SemanticTargetHandle(
                 target_id=target_id,
@@ -322,6 +377,7 @@ def build_semantic_target_inventory(
                 label=label,
                 context=context,
                 semantic_target=SemanticTargetIntent(MaterializedRegionReference()),
+                region_text=region_text,
             )
         )
     handles.sort(key=lambda handle: (handle.path, handle.target_id))
@@ -343,14 +399,10 @@ def render_semantic_target_inventory(
         "semantic target handles (Orchestrator-issued; choose only listed IDs):",
     ]
     for handle in inventory.handles:
-        lines.extend(
-            [
-                f"- target_id: {handle.target_id}",
-                f"  path: {handle.path}",
-                f"  label: {handle.label}",
-                f"  context: {handle.context}",
-            ]
-        )
+        disclosure = handle.provider_disclosure_lines()
+        lines.append(f"- {disclosure[0]}")
+        lines.append(f"  path: {handle.path}")
+        lines.extend(f"  {line}" for line in disclosure[1:])
     return lines
 
 
