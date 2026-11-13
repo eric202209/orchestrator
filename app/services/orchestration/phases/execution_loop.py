@@ -14,7 +14,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 from app.config import settings
-from app.models import Session as SessionModel, TaskExecution, TaskStatus
+from sqlalchemy import update
+
+from app.models import Session as SessionModel, Task, TaskExecution, TaskStatus
 from app.services.orchestration.context.assembly import (
     DebugPromptInputs,
     assemble_debugging_prompt,
@@ -278,6 +280,28 @@ def _committed_session_stop_status(db: Any, session_id: int) -> Optional[str]:
     if row.status in _SESSION_STOP_STATUSES or not row.is_active:
         return str(row.status)
     return None
+
+
+def _reserve_mutation_authority(
+    db: Any, session_id: int, task_id: int
+) -> Optional[str]:
+    """Serialize mutation with cancellation using the caller-owned transaction.
+
+    As in G1 completion reservation, the unchanged Task update holds a row
+    write lock (SQLite: database writer lock) until caller commit/rollback.
+    No filesystem atomicity is implied. Never commit inside this helper.
+    Database errors propagate before mutation; the Worker owns rollback.
+    """
+    with db.no_autoflush:
+        result = db.execute(
+            update(Task)
+            .where(Task.id == task_id, Task.status == TaskStatus.RUNNING)
+            .values(status=Task.status, updated_at=Task.updated_at)
+            .execution_options(synchronize_session=False)
+        )
+    if result.rowcount != 1:
+        return "task_authority_lost"
+    return _committed_session_stop_status(db, session_id)
 
 
 def _execution_topology_for_runtime(runtime_service: Any) -> Any:
@@ -680,11 +704,8 @@ def execute_step_loop(
     except Exception:
         pass
 
-    # Stop check is at step start, plus (P41-G2-B) a committed-state read
-    # before each structured file op and before step commands. It is a read,
-    # not a fence: an in-flight op, command, or LLM call still runs to
-    # completion after revoke_session_celery_tasks fires, and SIGTERM from
-    # terminate=True may be delayed if the worker is mid-HTTP-request.
+    # Mutation authorization reserves the Task in the existing Worker
+    # transaction. Cancellation cannot commit until that transaction ends.
     def _cancel_for_session_stop(session_status: str, boundary: str) -> Dict[str, Any]:
         logger.info(
             "[ORCHESTRATION] Session %s marked %s; stopping task execution %s",
@@ -905,7 +926,9 @@ def execute_step_loop(
             Path(orchestration_state.project_dir),
             step_ops,
             accepted_path_authority=accepted_path_authority,
-            authority_check=lambda: _committed_session_stop_status(db, session_id),
+            authority_check=lambda: _reserve_mutation_authority(
+                db, session_id, task_id
+            ),
         )
         # P41-G2-B boundary A: a stop committed mid-step leaves the op unapplied.
         if ops_result.get("failure_category") == "execution_authority_lost":
@@ -1053,7 +1076,7 @@ def execute_step_loop(
             if any(str(command or "").strip() for command in (step_commands or [])):
                 # P41-G2-B boundary B: no step command, verification, or
                 # runtime dispatch after a committed operator stop.
-                lost_status = _committed_session_stop_status(db, session_id)
+                lost_status = _reserve_mutation_authority(db, session_id, task_id)
                 if lost_status is not None:
                     return _cancel_for_session_stop(
                         lost_status, f"before step {step_index + 1} commands"
@@ -1273,6 +1296,11 @@ def execute_step_loop(
             1 if orchestration_state.relaxed_mode else 0
         )
 
+        # Assessment can launch the declared verification even when commands
+        # are empty. Reserve again in case an intervening checkpoint committed.
+        lost_status = _reserve_mutation_authority(db, session_id, task_id)
+        if lost_status is not None:
+            return _cancel_for_session_stop(lost_status, "before step verification")
         assessment = assess_step_execution(
             db=db,
             session_id=session_id,

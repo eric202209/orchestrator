@@ -19,7 +19,7 @@ from typing import Any
 from celery.result import allow_join_result
 from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
 from app.config import settings
@@ -321,7 +321,42 @@ def _run_scenario(
         observed["provider_calls_at_pause"] = len(provider.calls)
 
         if revoke_authority:
-            stop = client.post(f"/api/v1/sessions/{session_id}/stop")
+            if barrier == "after_authority_check":
+                stop_started = threading.Event()
+                stop_done = threading.Event()
+                stop_box = {}
+                engine = db_session_factory.kw["bind"]
+
+                def before_sql(conn, cursor, statement, parameters, context, many):
+                    if statement.lstrip().upper().startswith("UPDATE"):
+                        stop_started.set()
+
+                def stop_actor():
+                    try:
+                        stop_box["response"] = client.post(
+                            f"/api/v1/sessions/{session_id}/stop"
+                        )
+                    finally:
+                        stop_done.set()
+
+                event.listen(engine, "before_cursor_execute", before_sql)
+                stopper = threading.Thread(target=stop_actor, name="operator-stop")
+                stopper.start()
+                try:
+                    assert stop_started.wait(10)
+                    assert not stop_done.wait(
+                        0.2
+                    ), "Stop completed during protected mutation"
+                    observed["stop_blocked"] = True
+                    resume.set()
+                    stopper.join(30)
+                    assert not stopper.is_alive()
+                    stop = stop_box["response"]
+                finally:
+                    resume.set()
+                    event.remove(engine, "before_cursor_execute", before_sql)
+            else:
+                stop = client.post(f"/api/v1/sessions/{session_id}/stop")
             assert stop.status_code == 200, stop.text
             observed["stop_response_status"] = stop.json().get("status")
             check = db_session_factory()
@@ -500,15 +535,6 @@ def test_g2a_stopped_worker_must_not_mutate_workspace_after_committed_stop(
 
 
 @pytest.mark.security
-@pytest.mark.xfail(
-    raises=ActiveWorkerAuthorityViolation,
-    strict=True,
-    reason=(
-        "P41-G2-B residual check-to-write window: the per-op authority check "
-        "is a read, not a fence, so a stop that commits after it passes and "
-        "before the write is not prevented (needs OWN-F2 Task-wide fencing)."
-    ),
-)
 def test_g2b_stop_committed_between_authority_check_and_file_write(
     api_app,
     db_session_factory,
@@ -529,21 +555,11 @@ def test_g2b_stop_committed_between_authority_check_and_file_write(
     # The production check ran and passed before the stop.
     assert resumed["authority_check_passed"] is True
     assert observed["paused_state"]["session"] == "running"
-    # No Worker lock prevents the stop from committing inside the window.
+    assert observed["stop_blocked"] is True
     assert observed["stop_response_status"] == "stopped"
     assert observed["committed_state"]["task"] == TaskStatus.CANCELLED
-    assert observed["calculator_after_stop"] == "def value():\n    return 1\n"
-
-    # Boundary B: the next consequential operation is still refused.
-    assert not observed["verification_records"]
-    assert observed["provider_calls_total"] == observed["provider_calls_at_pause"]
+    assert resumed["files_changed"] == ["calculator.py"]
+    assert observed["calculator_after_stop"] == "def value():\n    return 2\n"
+    assert observed["calculator_final"] == observed["calculator_after_stop"]
     assert observed["final_state"]["task"] == TaskStatus.CANCELLED
-    assert observed["final_state"]["task_execution"] == TaskStatus.CANCELLED
     assert observed["task_completed_events"] == 0
-    assert observed["dispatches"] == 1
-
-    _security_check(
-        resumed.get("files_changed") == [],
-        "stop committed inside the check-to-write window; op applied: "
-        f"{resumed.get('files_changed')}",
-    )
