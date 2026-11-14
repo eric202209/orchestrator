@@ -451,6 +451,16 @@ def test_there_is_never_a_third_grounding_request():
 # --------------------------------------------------------------------------
 
 
+def _expected_get_projects_region():
+    # Independent textual boundaries keep this a byte-accurate assertion while
+    # allowing unrelated imports/handlers before this route to change length.
+    source = (REPO_ROOT / "app/api/v1/endpoints/projects.py").read_bytes()
+    start = source.index(b'@router.get("/projects")\ndef get_projects(')
+    terminal = b"    return page_data"
+    end = source.index(terminal, start) + len(terminal)
+    return start, end
+
+
 def test_route_resolves_to_its_handler_region():
     harness = GroundingHarness(REPO_ROOT)
     action = P.GroundingAction(
@@ -466,7 +476,10 @@ def test_route_resolves_to_its_handler_region():
     assert identity is not None
     assert identity.kind == "route"
     assert identity.name == "get_projects"
-    assert (identity.region_start_byte, identity.region_end_byte) == (5543, 7246)
+    assert (
+        identity.region_start_byte,
+        identity.region_end_byte,
+    ) == _expected_get_projects_region()
     # The decorator is part of the region, not just the body.
     assert observations[0].bounded_content.startswith(b'@router.get("/projects")')
 
@@ -484,7 +497,10 @@ def test_symbol_resolves_to_its_definition_region():
     identity = observations[0].structural_identity
     assert identity is not None
     assert identity.name == "get_projects"
-    assert identity.region_start_byte == 5543
+    assert (
+        identity.region_start_byte,
+        identity.region_end_byte,
+    ) == _expected_get_projects_region()
 
 
 def test_repeated_generic_literal_does_not_force_first_occurrence(tmp_path):

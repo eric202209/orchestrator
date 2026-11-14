@@ -73,6 +73,61 @@ class WorkerDependencyResolutionTests(unittest.TestCase):
         self.assertIn("app.tasks.tasks", graph.local_modules)
         self.assertIn("app.tasks.worker_support", graph.local_modules)
 
+    def test_local_direct_celery_subclass_preserves_literal_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._fixture(root)
+            entry = root / "app/celery_app.py"
+            entry.write_text(
+                entry.read_text().replace(
+                    "celery_app = Celery(",
+                    "class GuardedCelery(Celery):\n    pass\n"
+                    "celery_app = GuardedCelery(",
+                )
+            )
+            discovered = discover_worker_roots(root)
+        self.assertEqual(
+            discovered.explicit_task_modules,
+            ("app.tasks.worker", "app.tasks.maintenance"),
+        )
+
+    def test_non_celery_or_dynamic_subclass_constructors_are_not_guessed(self) -> None:
+        for declaration in (
+            "class GuardedCelery(object):\n    pass\n",
+            "class GuardedCelery(make_base()):\n    pass\n",
+            "@decorate\nclass GuardedCelery(Celery):\n    pass\n",
+        ):
+            with (
+                self.subTest(declaration=declaration),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                root = Path(directory)
+                self._fixture(root)
+                (root / "app/celery_app.py").write_text(
+                    "from celery import Celery\n"
+                    + declaration
+                    + "celery_app = GuardedCelery('x', include=['app.tasks.worker'])\n"
+                )
+                with self.assertRaisesRegex(
+                    WorkerDependencyInventoryError,
+                    "celery_explicit_task_modules_missing",
+                ):
+                    discover_worker_roots(root)
+
+    def test_nonliteral_subclass_includes_are_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._fixture(root)
+            (root / "app/celery_app.py").write_text(
+                "from celery import Celery\n"
+                "class GuardedCelery(Celery):\n    pass\n"
+                "celery_app = GuardedCelery('x', include=task_modules)\n"
+            )
+            with self.assertRaisesRegex(
+                WorkerDependencyInventoryError, "celery_include_not_static"
+            ):
+                discover_worker_roots(root)
+
     def test_production_dynamic_import_targets_are_classified(self) -> None:
         graph = build_import_graph(REPOSITORY_ROOT)
         self.assertEqual(len(graph.dynamic_imports), 2)

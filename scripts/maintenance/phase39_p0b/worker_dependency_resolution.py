@@ -257,11 +257,26 @@ def discover_worker_roots(project_root: Path) -> WorkerRoots:
 
     explicit: list[str] = []
     candidates: list[str] = []
+    # Recognize a locally declared, direct Celery subclass without importing
+    # application code or accepting arbitrary calls with an include keyword.
+    constructors = {"Celery"}
+    for node in tree.body:
+        if (
+            isinstance(node, ast.ClassDef)
+            and len(node.bases) == 1
+            and isinstance(node.bases[0], ast.Name)
+            and node.bases[0].id == "Celery"
+            and not node.decorator_list
+            and not node.keywords
+        ):
+            constructors.add(node.name)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Celery":
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in constructors:
             for keyword in node.keywords:
-                if keyword.arg != "include" or not isinstance(keyword.value, (ast.List, ast.Tuple)):
+                if keyword.arg != "include":
                     continue
+                if not isinstance(keyword.value, (ast.List, ast.Tuple)):
+                    raise WorkerDependencyInventoryError("celery_include_not_static")
                 for item in keyword.value.elts:
                     if not isinstance(item, ast.Constant) or not isinstance(item.value, str):
                         raise WorkerDependencyInventoryError("celery_include_not_static")
