@@ -99,7 +99,7 @@ def parse_launcher_context(value: Any) -> dict[str, Any]:
     return {**value, "concurrency": int(concurrency[0].group(1))}
 
 
-def _require_candidate_process(root: Path) -> None:
+def _require_candidate_process(root: Path, *, cwd: Path | None = None) -> None:
     """Code and configuration must come from the candidate checkout itself."""
 
     from app.services.orchestration import worker_identity as wi
@@ -107,7 +107,7 @@ def _require_candidate_process(root: Path) -> None:
     if Path(wi.__file__).resolve().parents[3] != root:
         raise WorksheetError("helper_code_not_from_source_root")
     # Settings read .env relative to the process cwd.
-    if Path.cwd().resolve() != root:
+    if Path.cwd().resolve() != (cwd or root).resolve():
         raise WorksheetError("helper_cwd_not_source_root")
 
 
@@ -135,7 +135,7 @@ def derive_worksheet(
 
     context = parse_launcher_context(launcher_context)
     root = Path(source_root).expanduser().resolve(strict=True)
-    _require_candidate_process(root)
+    _require_candidate_process(root, cwd=Path(context["cwd"]))
 
     script = Path(context["script"])
     if not script.is_file():

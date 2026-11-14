@@ -904,12 +904,57 @@ main() {
     echo ""
 }
 
-# The dedicated entry point dispatches before the full-stack startup path.
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    if [[ "${1-}" == "start_worker_only" ]]; then
-        shift
-        start_worker_only "$@"
-    else
-        main
+# Explicit development routing must happen before main/load_env/prepare_logs:
+# the isolated runtime owns a different database, ports and process directory.
+start_isolated_development() {
+    local protected_source="/root/.openclaw/workspace/vault/orchestrator-production"
+    local protected_runtime="/root/.openclaw/workspace/vault/orchestrator-production-runtime"
+    case "${PROJECT_ROOT}" in
+        "${protected_source}"|"${protected_source}/"*|"${protected_runtime}"|"${protected_runtime}/"*)
+            echo "Isolated development startup refuses protected production paths." >&2
+            return 1
+            ;;
+    esac
+    if [[ "$#" -eq 0 ]]; then
+        echo "Usage: ./start.sh dev <init-evaluator|worker-worksheet|preflight|start|status|stop|cleanup> [options]" >&2
+        return 2
     fi
+    if [[ ! -x "${VENV_DIR}/bin/python3" || ! -f "${PROJECT_ROOT}/scripts/dev_runtime.py" ]]; then
+        echo "Existing development interpreter and scripts/dev_runtime.py are required; nothing was installed." >&2
+        return 1
+    fi
+    exec "${VENV_DIR}/bin/python3" "${PROJECT_ROOT}/scripts/dev_runtime.py" "$@"
+}
+
+startup_usage() {
+    echo "Usage: ./start.sh dev <command> [options]"
+    echo "  Isolated development: init-evaluator, worker-worksheet, preflight, start, status, stop, cleanup."
+    echo "  Development API: 127.0.0.1:18740; frontend is started separately (see P42-V3 report)."
+    echo "  ./start.sh without arguments retains conventional checkout startup (default API 8080)."
+    echo "  That conventional startup does not select the isolated development runtime."
+    echo "  Production source/runtime remain separate and require operator authorization."
+}
+
+dispatch_startup() {
+    case "${1-}" in
+        dev)
+            shift
+            start_isolated_development "$@"
+            ;;
+        --help|-h)
+            startup_usage
+            ;;
+        start_worker_only)
+            shift
+            start_worker_only "$@"
+            ;;
+        *)
+            main
+            ;;
+    esac
+}
+
+# Dispatch without sourcing checkout configuration or touching runtime state.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    dispatch_startup "$@"
 fi

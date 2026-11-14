@@ -119,7 +119,9 @@ def _derive(root: Path, entry_script: Path, **overrides) -> dict:
 def _candidate_process(monkeypatch):
     # Fixture checkouts are not where the test code is imported from; the
     # real guard is exercised separately below.
-    monkeypatch.setattr(worksheet_tool, "_require_candidate_process", lambda root: None)
+    monkeypatch.setattr(
+        worksheet_tool, "_require_candidate_process", lambda root, **kwargs: None
+    )
 
 
 def _probe(root: Path, script: Path, args=WORKER_ARGS) -> dict:
@@ -497,3 +499,85 @@ def test_proposed_pin_matches_worker_equivalent_boot(
         for reason in boot.identity_status_reasons
         if "mismatch" in reason or "pin" in reason
     ]
+
+
+def test_development_launch_matches_worksheet_and_controlled_source(
+    candidate_repo, launcher_script, tmp_path
+):
+    from scripts import dev_runtime
+    from app.services.orchestration.controlled_worker_identity import (
+        verify_candidate_pin_source,
+    )
+
+    # Execute a harmless manifest-only probe, with the exact development CLI
+    # arguments and isolated cwd. No Celery Worker or approval is activated.
+    config = dev_runtime.RuntimeConfig.for_repo(candidate_repo)
+    command = dev_runtime.development_worker_command(config)
+    assert command[0] == str(candidate_repo / "venv/bin/celery")
+    assert "--pool=solo" in command and "--concurrency=1" in command
+    cwd = tmp_path / "isolated-cwd"
+    cwd.mkdir()
+    sheet = _derive(
+        candidate_repo,
+        launcher_script,
+        args=command[1:],
+        cwd=str(cwd),
+        worker_node_identity=config.worker_name,
+    )
+    env = dev_runtime.build_environment(config)
+    env.update(PYTHONPATH=str(REAL_ROOT), PROBE_SOURCE_ROOT=str(candidate_repo))
+    probe = json.loads(
+        subprocess.run(
+            [str(launcher_script), *command[1:]],
+            cwd=cwd,
+            env=env,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        .stdout.strip()
+        .splitlines()[-1]
+    )
+    assert sheet["pin_launcher_identity"]["argv"] == probe["process"]["argv"]
+    assert sheet["pin_launcher_identity"]["cwd"] == probe["process"]["cwd"]
+    assert (
+        sheet["OBSERVED_SOURCE"]["source_manifest_digest"]
+        == probe["manifest"]["source_manifest_digest"]
+    )
+    # Synthetic approval exists only in memory in this temporary fixture.
+    pin = worker_identity._parse_candidate_pin(
+        {
+            **sheet["proposed_pin_body"],
+            "approval": {
+                "operator_identity": "fixture-only",
+                "approval_id": "FIXTURE-ONLY",
+                "approved_at": "2026-01-01T00:00:00Z",
+                "expires_at": "2999-01-01T00:00:00Z",
+            },
+        },
+        datetime.now(UTC),
+    )
+    source, reasons = verify_candidate_pin_source(source_root=candidate_repo, pin=pin)
+    assert source is not None, reasons
+    assert source.source_manifest_digest == probe["manifest"]["source_manifest_digest"]
+    from dataclasses import replace
+
+    altered = replace(
+        pin,
+        launcher_identity={
+            **pin.launcher_identity,
+            "argv": [*pin.launcher_identity["argv"], "--unexpected"],
+        },
+    )
+    source, reasons = verify_candidate_pin_source(
+        source_root=candidate_repo, pin=altered
+    )
+    assert source is None and reasons
+
+
+def test_explicit_worker_cwd_guard(monkeypatch, tmp_path):
+    monkeypatch.undo()
+    monkeypatch.chdir(tmp_path)
+    worksheet_tool._require_candidate_process(REAL_ROOT, cwd=tmp_path)
+    with pytest.raises(WorksheetError, match="helper_cwd_not_source_root"):
+        worksheet_tool._require_candidate_process(REAL_ROOT, cwd=tmp_path / "other")

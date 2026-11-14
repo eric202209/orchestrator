@@ -107,10 +107,20 @@ def verify_candidate_pin_source(
 
     root = Path(source_root).expanduser().resolve(strict=False)
     try:
+        argv = tuple(str(item) for item in pin.launcher_identity["argv"])
+        # Worksheet pins contain /proc argv, including the shebang interpreter.
+        # The source manifest binds Python sys.argv, which excludes that entry.
+        # Full /proc argv is still independently compared to the live process.
+        if (
+            len(argv) > 1
+            and Path(argv[0]).resolve()
+            == Path(str(pin.launcher_identity["executable"])).resolve()
+        ):
+            argv = argv[1:]
         launcher = wi.worker_source_launcher_identity(
             root,
             executable=str(pin.launcher_identity["executable"]),
-            argv=tuple(str(item) for item in pin.launcher_identity["argv"]),
+            argv=argv,
         )
         candidate = wi.build_candidate_source_manifest(
             root,

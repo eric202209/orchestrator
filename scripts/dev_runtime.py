@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import getpass
 import json
 import os
 import secrets
@@ -19,10 +20,12 @@ import socket
 import stat
 import subprocess
 import sys
+import termios
 import time
 import urllib.error
 import urllib.request
 import uuid
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1581,7 +1584,148 @@ def initialize_database(config: RuntimeConfig, env: dict[str, str]) -> None:
     )
     if result.returncode != 0 or not config.database_file.is_file():
         raise RuntimeToolError("development database initialization failed")
-    config.database_file.chmod(0o666)
+    config.database_file.chmod(0o600)
+
+
+def worker_worksheet(config: RuntimeConfig, head: str, tree: str) -> dict[str, Any]:
+    """Derive a NOT_APPROVED proposal in the exact isolated Worker environment."""
+    _require_runtime_root(config)
+    _validate_existing_root(config)
+    if not config.process_cwd.is_dir():
+        raise RuntimeToolError(
+            "run explicit init-evaluator before deriving the worksheet"
+        )
+    env = build_environment(config)
+    validate_isolation(config, env)
+    command = development_worker_command(config)
+    script = Path(command[0])
+    try:
+        with script.open("rb") as handle:
+            first = handle.readline(4096)
+    except OSError as exc:
+        raise RuntimeToolError(
+            "development Celery shebang launcher is unavailable"
+        ) from exc
+    if not first.startswith(b"#!"):
+        raise RuntimeToolError("development Celery launcher requires a shebang")
+    interpreter = first[2:].decode().strip()
+    if Path(interpreter).absolute() != Path(sys.executable).absolute():
+        raise RuntimeToolError(
+            "invoke development tooling with the Celery shebang interpreter"
+        )
+    context = {
+        "context_schema_version": 1,
+        "launcher": "scripts/dev_runtime.py",
+        "interpreter": interpreter,
+        "script": str(script),
+        "args": command[1:],
+        "cwd": str(config.process_cwd),
+        "worker_node_identity": config.worker_name,
+    }
+    code = """
+import json, sys
+from scripts.maintenance.worker_pin_worksheet import derive_worksheet
+value = json.load(sys.stdin)
+try:
+    result = derive_worksheet(value['root'], expected_head=value['head'], expected_tree=value['tree'], launcher_context=value['context'])
+except Exception:
+    sys.exit(2)
+print(json.dumps(result))
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=config.process_cwd,
+        env=env,
+        input=json.dumps(
+            {
+                "root": str(config.repo_root),
+                "head": head,
+                "tree": tree,
+                "context": context,
+            }
+        ),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode:
+        raise RuntimeToolError(
+            "development worksheet derivation failed; clean reviewed source and exact HEAD/tree required"
+        )
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise RuntimeToolError("development worksheet returned invalid output") from exc
+
+
+def initialize_evaluator(config: RuntimeConfig, password: str) -> dict[str, Any]:
+    """Explicit offline setup; never called by normal startup or reset an account."""
+    # This command belongs exclusively to this development checkout. A caller
+    # cannot substitute a production checkout, even with a canonical derived root.
+    if config.repo_root != Path(__file__).resolve().parents[1]:
+        raise RuntimeToolError(
+            "evaluator initialization requires this development checkout"
+        )
+    if config.repo_root.name in {
+        "orchestrator-production",
+        "orchestrator-production-runtime",
+    }:
+        raise RuntimeToolError("evaluator initialization refuses production checkouts")
+    _require_runtime_root(config)
+    env = build_environment(config)
+    validate_isolation(config, env)
+    if not 8 <= len(password) or len(password.encode("utf-8")) > 72:
+        raise RuntimeToolError(
+            "evaluator password must have at least 8 characters and at most 72 UTF-8 bytes"
+        )
+    if config.root.exists():
+        _validate_existing_root(config)
+        _validate_cleanup_tree(config)
+        state = _load_state(config, _owner_record(config))
+        for record in state.get("processes", {}).values():
+            if _process_identity(record)[0] != "stopped":
+                raise RuntimeToolError(
+                    "evaluator initialization requires a stopped runtime"
+                )
+    _ensure_owner(config)
+    _make_directories(config)
+    initialize_database(config, env)
+    # Password travels only over stdin; neither argv, environment, nor logs.
+    code = """
+import sys
+from app.database import SessionLocal
+from app.models import User
+from app.auth import get_password_hash
+password = sys.stdin.read()
+with SessionLocal() as db:
+    if db.query(User).filter(User.email == 'eval@local.dev').first() is not None:
+        sys.exit(3)
+    db.add(User(email='eval@local.dev', hashed_password=get_password_hash(password), is_active=True))
+    db.commit()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=config.process_cwd,
+        env=env,
+        input=password,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if result.returncode == 3:
+        raise RuntimeToolError(
+            "development evaluator already exists; no password or account changed"
+        )
+    if result.returncode:
+        raise RuntimeToolError("explicit development evaluator initialization failed")
+    return {
+        "status": "evaluator_initialized",
+        "email": EVALUATOR_EMAIL,
+        "database": str(config.database_file),
+    }
 
 
 def _mint_dev_token(config: RuntimeConfig, env: dict[str, str]) -> str:
@@ -1615,7 +1759,9 @@ def _ensure_evaluator_and_project(config: RuntimeConfig, env: dict[str, str]) ->
     try:
         me_status, me = _http_json(f"{config.api_url}/api/v1/auth/me", token=token)
         if me_status != 200 or (me or {}).get("email") != EVALUATOR_EMAIL:
-            raise RuntimeToolError("development evaluator identity did not resolve")
+            raise RuntimeToolError(
+                "development evaluator identity did not resolve; run explicit init-evaluator first"
+            )
 
         projects_status, projects = _http_json(
             f"{config.api_url}/api/v1/projects?skip=0&limit=100", token=token
@@ -1742,6 +1888,26 @@ def _qdrant_environment(config: RuntimeConfig) -> dict[str, str]:
     return env
 
 
+def development_worker_command(config: RuntimeConfig) -> list[str]:
+    """Use the existing worksheet-supported shebang launch, with fixed solo capacity."""
+    return [
+        str(config.repo_root / "venv" / "bin" / "celery"),
+        "-A",
+        "app.celery_app",
+        "worker",
+        "--loglevel=INFO",
+        "--hostname",
+        config.worker_name,
+        "--queues",
+        config.queue_name,
+        "--pool=solo",
+        "--concurrency=1",
+        "--without-gossip",
+        "--without-mingle",
+        "--without-heartbeat",
+    ]
+
+
 def start_runtime(config: RuntimeConfig) -> dict[str, Any]:
     preflight_info = preflight(config)
     owner = _ensure_owner(config)
@@ -1843,23 +2009,7 @@ def start_runtime(config: RuntimeConfig) -> dict[str, Any]:
         _wait_until(config, "api", lambda: _api_ready(config))
         _ensure_evaluator_and_project(config, app_env)
 
-        worker_command = [
-            sys.executable,
-            "-m",
-            "celery",
-            "-A",
-            "app.celery_app",
-            "worker",
-            "--loglevel=INFO",
-            "--hostname",
-            config.worker_name,
-            "--queues",
-            config.queue_name,
-            "--pool=solo",
-            "--without-gossip",
-            "--without-mingle",
-            "--without-heartbeat",
-        ]
+        worker_command = development_worker_command(config)
         _spawn(
             config,
             state,
@@ -2068,20 +2218,60 @@ def _default_config() -> RuntimeConfig:
     return RuntimeConfig.for_repo(Path(__file__).resolve().parents[1])
 
 
+def _read_hidden_evaluator_password(prompt: str) -> str:
+    """Refuse getpass's warning-before-read fallback, including confirmation."""
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            return getpass.getpass(prompt)
+    except (getpass.GetPassWarning, EOFError, OSError, termios.error):
+        # Do not include terminal/subprocess diagnostics or credential input.
+        raise RuntimeToolError("hidden evaluator password input unavailable") from None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "command", choices=("preflight", "start", "status", "stop", "cleanup")
+        "command",
+        choices=(
+            "preflight",
+            "start",
+            "status",
+            "stop",
+            "cleanup",
+            "init-evaluator",
+            "worker-worksheet",
+        ),
     )
     parser.add_argument(
         "--preserve-evidence",
         action="store_true",
         help="for cleanup, stop services but retain the owned runtime state and logs",
     )
+    parser.add_argument("--expected-head")
+    parser.add_argument("--expected-tree")
     args = parser.parse_args(argv)
     config = _default_config()
     try:
-        if args.command == "preflight":
+        if args.command == "worker-worksheet":
+            if not args.expected_head or not args.expected_tree:
+                raise RuntimeToolError(
+                    "worker-worksheet requires --expected-head and --expected-tree"
+                )
+            result = worker_worksheet(config, args.expected_head, args.expected_tree)
+        elif args.command == "init-evaluator":
+            if not sys.stdin.isatty():
+                raise RuntimeToolError(
+                    "init-evaluator requires an interactive terminal"
+                )
+            password = _read_hidden_evaluator_password(
+                "Development evaluator password: "
+            )
+            if password != _read_hidden_evaluator_password("Confirm password: "):
+                raise RuntimeToolError("password confirmation did not match")
+            result = initialize_evaluator(config, password)
+            del password
+        elif args.command == "preflight":
             result = preflight(config)
         elif args.command == "start":
             result = start_runtime(config)
