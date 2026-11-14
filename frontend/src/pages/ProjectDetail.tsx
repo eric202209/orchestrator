@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '@/lib/apiError';
 import { useState, useEffect, useCallback } from 'react';
 import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { projectsAPI, tasksAPI, sessionsAPI } from '../api/client';
@@ -468,10 +469,7 @@ function ProjectDetail() {
       setAcceptTaskExecutionId(null);
     } catch (error) {
       console.error('Failed to accept task workspace:', error);
-      const detail = (
-        error as { response?: { data?: { detail?: string } } }
-      )?.response?.data?.detail;
-      alert(detail || 'Failed to accept task workspace. Please try again.');
+      alert(apiErrorMessage(error, 'Failed to accept task workspace. Please try again.'));
     } finally {
       setAcceptingWorkspace(false);
     }
@@ -727,8 +725,7 @@ function ProjectDetail() {
       );
     } catch (error) {
       console.error('Failed to rerun task:', error);
-      const apiError = error as { response?: { data?: { detail?: string } } };
-      alert(apiError.response?.data?.detail || 'Failed to queue the task. Please try again.');
+      alert(apiErrorMessage(error, 'Failed to queue the task. Please try again.'));
     } finally {
       setQueueingTaskId(null);
     }

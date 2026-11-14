@@ -1301,8 +1301,8 @@ def test_31_task_deletion_without_budget_evidence_succeeds(r3b):
     from app.services.tasks.task_deletion import delete_task_owned_graph
 
     path, _, db = r3b
-    _, session, task = _graph(db)
-    _attempt(db, session, task, 1)
+    _, session, task = _graph(db, status="stopped")
+    _attempt(db, session, task, 1, status=TaskStatus.DONE)
     delete_task_owned_graph(db, [task.id])
     db.commit()
     assert _count(path, "task_executions") == 0
@@ -1596,7 +1596,7 @@ def test_project_purge_without_evidence_commits_before_file_cleanup(
     from app.api.v1.endpoints import projects
 
     path, _, db = r3b
-    project, session, _ = _graph(db)
+    project, session, _ = _graph(db, status="stopped")
     session_id = session.id
     project.deleted_at = datetime.now(timezone.utc) - timedelta(days=365)
     db.commit()
@@ -1636,7 +1636,7 @@ def test_project_delete_reports_postcommit_checkpoint_cleanup_failure(
     from app.config import settings
 
     path, _, db = r3b
-    project, session, _ = _graph(db)
+    project, session, _ = _graph(db, status="stopped")
     checkpoint_root = tmp_path / "checkpoints"
     checkpoint_root.mkdir()
     monkeypatch.setattr(settings, "CHECKPOINT_DIR", str(checkpoint_root))
@@ -1671,7 +1671,7 @@ def test_project_delete_preserves_unrelated_integrity_error(r3b, r3b_http, monke
     from app.api.v1.endpoints import projects
 
     path, _, db = r3b
-    project, _, _ = _graph(db)
+    project, _, _ = _graph(db, status="stopped")
 
     def unrelated_integrity_error(*_args, **_kwargs):
         raise IntegrityError("DELETE", {}, RuntimeError("unrelated constraint"))

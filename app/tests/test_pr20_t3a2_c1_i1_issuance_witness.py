@@ -1785,7 +1785,11 @@ def test_task_delete_foreign_key_race_is_409_not_500(
 ):
     import app.services.tasks.task_deletion as task_deletion
 
-    # Bypass the preflight so the delete reaches the RESTRICT foreign key.
+    # Bypass both preflights to exercise the RESTRICT foreign key itself.
+    # Public active-deletion refusals have separate V12 regression coverage.
+    monkeypatch.setattr(
+        task_deletion, "require_safe_task_deletion", lambda *a, **k: None
+    )
     monkeypatch.setattr(
         task_deletion, "require_no_retained_execution_evidence", lambda *a, **k: None
     )

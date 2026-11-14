@@ -2265,12 +2265,10 @@ def update_task(
     editable_fields = {
         "title",
         "description",
-        "status",
         "intent_mode",
         "priority",
         "steps",
         "current_step",
-        "error_message",
     }
 
     unsupported_fields = sorted(set(update_data) - editable_fields)

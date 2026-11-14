@@ -124,9 +124,10 @@ class TaskCreate(TaskBase):
 
 
 class TaskUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: Optional[str] = None
     description: Optional[str] = None
-    status: Optional[TaskStatusEnum] = None
     execution_profile: Optional[str] = None
     intent_mode: Optional[TaskIntentMode] = None
     workflow_stage: Optional[str] = None
@@ -134,7 +135,6 @@ class TaskUpdate(BaseModel):
     plan_position: Optional[int] = None
     steps: Optional[str] = None
     current_step: Optional[int] = None
-    error_message: Optional[str] = None
     workspace_status: Optional[str] = None
     promotion_note: Optional[str] = None
 

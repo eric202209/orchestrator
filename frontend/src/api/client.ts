@@ -519,9 +519,7 @@ export const tasksAPI = {
     data?: { task_execution_id?: number; note?: string },
   ) => apiClient.post(`/tasks/${id}/change-set/reject`, data || {}),
 
-  start: (id: number) => apiClient.post(`/tasks/${id}/start`),
 
-  complete: (id: number) => apiClient.post(`/tasks/${id}/complete`),
 
   // Get sorted logs for a task
   getSortedLogs: (

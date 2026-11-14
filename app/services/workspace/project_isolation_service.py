@@ -72,6 +72,46 @@ def resolve_project_workspace_path(
     return (_resolve_workspace_root(db=db) / relative).resolve()
 
 
+def validate_project_workspace_path(
+    workspace_path: Optional[str],
+    project_name: Optional[str],
+    db: Optional[Session] = None,
+) -> str:
+    """Validate public paths before normalization can hide an absolute escape.
+
+    Empty paths retain the existing generated-name default. Existing symlink
+    components are resolved; hostile concurrent replacement needs OS isolation.
+    """
+    from fastapi import HTTPException
+
+    try:
+        root = _resolve_workspace_root(db=db).resolve()
+        raw = (workspace_path or "").strip().replace("\\", "/")
+        if "\x00" in raw:
+            raise ValueError("NUL in path")
+        if raw and Path(raw).is_absolute():
+            candidate = Path(raw).resolve()
+            if candidate == root or not candidate.is_relative_to(root):
+                raise ValueError("absolute path outside workspace")
+            normalized = str(candidate.relative_to(root))
+        else:
+            normalized = normalize_project_workspace_path(raw, project_name, db=db)
+            candidate = (root / normalized).resolve()
+        if candidate == root or not candidate.is_relative_to(root):
+            raise ValueError("path outside workspace")
+        if any(
+            path.exists() and not path.is_dir()
+            for path in (candidate, *candidate.parents)
+        ):
+            raise ValueError("workspace contains a non-directory component")
+        return str(candidate.relative_to(root))
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="Project workspace must be a child directory inside the configured workspace root",
+        ) from exc
+
+
 class ProjectIsolationError(Exception):
     """Custom exception for project isolation violations"""
 

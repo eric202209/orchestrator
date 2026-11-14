@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import false, or_
+from sqlalchemy import false, or_, update
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
@@ -26,7 +26,7 @@ from app.models import (
 )
 from app.schemas import ProjectCreate, ProjectUpdate, ProjectResponse
 from app.services.workspace.project_isolation_service import (
-    normalize_project_workspace_path,
+    validate_project_workspace_path,
     resolve_project_workspace_path,
 )
 from app.services.workspace.checkpoint_service import CheckpointService
@@ -34,6 +34,7 @@ from app.services.project.name_formatter import humanize_display_name
 from app.services.tasks.service import TaskService
 from app.services.tasks.task_deletion import (
     delete_task_owned_graph,
+    require_safe_task_deletion,
 )
 from app.services.execution.workflow_lifecycle import (
     RETAINED_EXECUTION_EVIDENCE_CONFLICT,
@@ -142,7 +143,7 @@ def create_project(
     """Create a new project"""
     project_data = project.model_dump()
     project_data["name"] = humanize_display_name(project_data.get("name", ""))
-    project_data["workspace_path"] = normalize_project_workspace_path(
+    project_data["workspace_path"] = validate_project_workspace_path(
         project.workspace_path, project_data["name"], db=db
     )
     validate_api_only_project_path(
@@ -262,6 +263,12 @@ def purge_soft_deleted_projects(
         return {"message": "No projects to purge", "purged_count": 0}
 
     project_ids = [project.id for project in old_deleted_projects]
+    db.execute(
+        update(Project)
+        .where(Project.id.in_(project_ids))
+        .values(id=Project.id, updated_at=Project.updated_at)
+        .execution_options(synchronize_session=False)
+    )
     session_ids_by_project: dict[int, list[int]] = {
         project_id: [] for project_id in project_ids
     }
@@ -306,6 +313,9 @@ def purge_soft_deleted_projects(
         )
 
     try:
+        require_safe_task_deletion(
+            db, [tid for ids in task_ids_by_project.values() for tid in ids]
+        )
         checkpoint_service = CheckpointService(db)
         for project_id in project_ids:
             session_ids = session_ids_by_project.get(project_id, [])
@@ -614,10 +624,13 @@ def update_project(
     if "name" in update_data and update_data["name"] is not None:
         update_data["name"] = humanize_display_name(update_data["name"])
     if "workspace_path" in update_data or "name" in update_data:
-        update_data["workspace_path"] = normalize_project_workspace_path(
+        update_data["workspace_path"] = validate_project_workspace_path(
             update_data.get("workspace_path", db_project.workspace_path),
             update_data.get("name", db_project.name),
             db=db,
+        )
+        validate_api_only_project_path(
+            update_data["workspace_path"], update_data.get("name", db_project.name), db
         )
         _assert_unique_resolved_workspace(
             db,
@@ -644,6 +657,12 @@ def delete_project(
     from app.models import TaskCheckpoint
 
     db_project = get_project_for_user(db, project_id, current_user)
+    db.execute(
+        update(Project)
+        .where(Project.id == project_id)
+        .values(id=Project.id, updated_at=Project.updated_at)
+        .execution_options(synchronize_session=False)
+    )
 
     session_ids = [
         session_id
@@ -667,6 +686,7 @@ def delete_project(
 
     checkpoint_service = CheckpointService(db)
     try:
+        require_safe_task_deletion(db, task_ids)
         # Soft delete: mark as deleted instead of hard delete. This preserves
         # the Session rows and their generation history.
         deleted_at = datetime.now(timezone.utc)

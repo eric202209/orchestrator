@@ -5,7 +5,8 @@ import json
 from datetime import datetime
 from typing import Any, Iterator
 
-from sqlalchemy import func
+from fastapi import HTTPException
+from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
 from app.models import Project, PlanningSession, Task, TaskExecution, TaskStatus
@@ -127,6 +128,18 @@ def create_task_execution(
     status: TaskStatus = TaskStatus.PENDING,
     started_at: datetime | None = None,
 ) -> TaskExecution:
+    # Serialize against public deletion before creating an attempt. A caller
+    # may have loaded the Task before a concurrent delete committed.
+    present = db.execute(
+        update(Task)
+        .where(Task.id == task_id)
+        .values(id=Task.id, updated_at=Task.updated_at)
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if present != 1:
+        raise HTTPException(
+            status_code=409, detail="Task was deleted before execution admission"
+        )
     identity = active_execution_identity(db)
     identity.pop("execution_adaptation_profile", None)
     planning_session = _originating_planning_session(db, task_id)

@@ -650,3 +650,26 @@ describe('ProjectDetail — navigation links', () => {
     expect(link?.getAttribute('href')).toContain('/sessions/7');
   });
 });
+
+describe('ProjectDetail API execution errors', () => {
+  it.each([
+    ['A readable refusal', 'A readable refusal'],
+    [{ code: 'DEVELOPMENT_EXECUTION_DISABLED', message: 'Execution is disabled in this development mode.' }, 'Execution is disabled in this development mode.'],
+    [{ code: 'EXECUTION_DISABLED' }, 'EXECUTION_DISABLED'],
+  ])('shows readable Run refusal %j', async (detail, expected) => {
+    setupMocks();
+    (tasksAPI.retry as Mock).mockRejectedValue({ response: { data: { detail } } });
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await render();
+    const tasks = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Tasks');
+    await act(async () => { tasks!.click(); });
+    const run = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Run');
+    expect(run).toBeDefined();
+    await act(async () => { run!.click(); });
+    expect(alert).toHaveBeenCalledWith(expected);
+    expect(container.textContent).toContain('Task One');
+    alert.mockRestore();
+    log.mockRestore();
+  });
+});

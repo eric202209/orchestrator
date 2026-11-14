@@ -1,3 +1,4 @@
+import { apiErrorMessage } from '@/lib/apiError';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
 import { projectsAPI, tasksAPI } from '@/api/client';
@@ -107,7 +108,7 @@ function TaskDetail() {
       setEditing(false);
     } catch (error) {
       console.error('Failed to update task:', error);
-      setSaveError('Failed to save changes');
+      setSaveError(apiErrorMessage(error, 'Failed to save changes'));
     }
   };
 
@@ -129,10 +130,7 @@ function TaskDetail() {
       await fetchTask();
     } catch (error) {
       console.error('Failed to accept task workspace:', error);
-      const detail =
-        (error as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        'Failed to accept task workspace';
-      setSaveError(detail);
+      setSaveError(apiErrorMessage(error, 'Failed to accept task workspace'));
     }
   };
 
@@ -180,8 +178,7 @@ function TaskDetail() {
       await fetchTask();
     } catch (error) {
       console.error('Failed to rerun task:', error);
-      const apiError = error as { response?: { data?: { detail?: string } } };
-      setSaveError(apiError.response?.data?.detail || 'Failed to queue the task for another run');
+      setSaveError(apiErrorMessage(error, 'Failed to queue the task for another run'));
     } finally {
       setRerunningTask(false);
     }
