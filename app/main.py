@@ -19,6 +19,10 @@ from app.config import (
 from app.api.v1.router import api_router
 from app.api.v1.endpoints.auth import router as auth_router
 from app.database import init_db, get_db_session
+from app.dev_api_only import (
+    DevelopmentAPIOnlyMiddleware,
+    validate_api_only_settings,
+)
 from app.services.observability import flush_langfuse
 from app.services.observability import runtime_queue_metrics
 from app.services.workspace.checkpoint_service import CheckpointService
@@ -44,6 +48,13 @@ async def lifespan(app: FastAPI):
     """Manage application startup and shutdown lifecycle"""
     # Startup
     validate_runtime_secrets()
+    if settings.DEV_API_ONLY:
+        # Use only previously initialized/authorized state. No migrations,
+        # checkpoint cleanup, planning recovery, or startup publication.
+        validate_api_only_settings()
+        logger.warning("Development API-only mode: execution disabled")
+        yield
+        return
     init_db()
     cleanup_db = None
     try:
@@ -127,6 +138,7 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+app.add_middleware(DevelopmentAPIOnlyMiddleware)
 
 
 # Phase 19E: read-only total-request-wall-time sample for a small set of

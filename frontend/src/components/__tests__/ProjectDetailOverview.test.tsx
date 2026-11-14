@@ -520,8 +520,12 @@ describe('ProjectDetail — Tasks tab pagination', () => {
     expect(container.textContent).toContain('Next');
   });
 
-  it('fetches the next task page from the backend', async () => {
+  it.each([false, true])('fetches the next task page with workspace inspection disabled=%s', async (disabled) => {
     setupMocks({ tasks: [makeTask({ id: 1, title: 'Page One Task' })] });
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    if (disabled) {
+      (projectsAPI.getWorkspaceOverview as Mock).mockRejectedValue(new Error('DEVELOPMENT_EXECUTION_DISABLED'));
+    }
     (tasksAPI.getByProject as Mock)
       .mockResolvedValueOnce({
         data: makeTaskPage([makeTask({ id: 1, title: 'Page One Task' })], {
@@ -551,6 +555,7 @@ describe('ProjectDetail — Tasks tab pagination', () => {
       expect.objectContaining({ page: 2, per_page: 25 }),
     );
     expect(container.textContent).toContain('Page Two Task');
+    consoleError.mockRestore();
   });
 });
 

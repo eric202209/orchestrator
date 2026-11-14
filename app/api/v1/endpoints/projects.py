@@ -42,6 +42,7 @@ from app.services.execution.workflow_lifecycle import (
 )
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.config import settings
+from app.dev_api_only import validate_api_only_project_path
 from app.dependencies import get_current_active_user
 from app.services.auth.authorization import get_project_for_user, project_access_filter
 from app.services.workspace.workspace_admission import (
@@ -143,6 +144,9 @@ def create_project(
     project_data["name"] = humanize_display_name(project_data.get("name", ""))
     project_data["workspace_path"] = normalize_project_workspace_path(
         project.workspace_path, project_data["name"], db=db
+    )
+    validate_api_only_project_path(
+        project_data["workspace_path"], project_data["name"], db
     )
     _assert_unique_resolved_workspace(
         db,

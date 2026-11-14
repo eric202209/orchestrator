@@ -70,6 +70,8 @@ class Settings(BaseSettings):
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api/v1"
     ENVIRONMENT: str = "development"
+    # Explicit control-plane-only development mode; never enables task execution.
+    DEV_API_ONLY: bool = False
 
     # Server
     HOST: str = "0.0.0.0"
@@ -545,6 +547,12 @@ def validate_runtime_secrets() -> None:
         raise RuntimeError(
             "SECRET_KEY is unset; configure a unique SECRET_KEY before starting the API"
         )
+    if settings.DEV_API_ONLY:
+        if settings.ENVIRONMENT != "development":
+            raise RuntimeError("DEV_API_ONLY requires ENVIRONMENT=development")
+        # Authentication still needs its signing key. No execution backend is
+        # needed or probed when every executable route/submission is disabled.
+        return
 
     # Validate the configured backend is registered and its required env vars are set.
     try:

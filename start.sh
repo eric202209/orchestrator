@@ -916,7 +916,7 @@ start_isolated_development() {
             ;;
     esac
     if [[ "$#" -eq 0 ]]; then
-        echo "Usage: ./start.sh dev <init-evaluator|worker-worksheet|preflight|start|status|stop|cleanup> [options]" >&2
+        echo "Usage: ./start.sh dev <api-only|init-evaluator|worker-worksheet|preflight|start|status|stop|cleanup> [options]" >&2
         return 2
     fi
     # Help must work before a checkout-local interpreter or runtime exists.
@@ -936,6 +936,7 @@ start_isolated_development() {
 startup_usage() {
     echo "Usage: ./start.sh dev <command> [options]"
     echo "  Isolated development: init-evaluator, worker-worksheet, preflight, start, status, stop, cleanup."
+    echo "  api-only: foreground API with execution disabled; requires separately authorized existing runtime state."
     echo "  Development API: 127.0.0.1:18740; frontend is started separately (see P42-V3 report)."
     echo "  ./start.sh without arguments retains conventional checkout startup (default API 8080)."
     echo "  That conventional startup does not select the isolated development runtime."

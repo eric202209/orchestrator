@@ -113,9 +113,8 @@ const getWebSocketHost = (): string => {
       // Fall through to the local backend default below.
     }
 
-    // In local dev, a relative API base like "/api/v1" means the HTTP calls
-    // are using the Vite proxy. WebSockets should target the backend directly.
-    return `${getBrowserSafeHost(window.location.hostname || "127.0.0.1")}:8080`;
+    // Relative API URLs use the same Vite proxy for HTTP and WebSockets.
+    return getBrowserSafeHost(window.location.host);
   }
 
   // Keep WS host aligned with the API base URL when possible.

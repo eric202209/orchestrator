@@ -1908,6 +1908,53 @@ def development_worker_command(config: RuntimeConfig) -> list[str]:
     ]
 
 
+def run_api_only(config: RuntimeConfig) -> int:
+    """Foreground API only, using already initialized state; never provision it.
+
+    Invocation still requires separate operator activation authorization and
+    resolution of the retained filesystem/writer hold. These checks are not
+    an isolation boundary against same-root writers.
+    """
+    _require_runtime_root(config)
+    _validate_existing_root(config)
+    if not config.database_file.is_file() or not config.process_cwd.is_dir():
+        raise RuntimeToolError(
+            "API-only requires an already authorized initialized runtime; "
+            "no database/account/directory was created"
+        )
+    state = _load_state(config, _owner_record(config))
+    if any(
+        _process_identity(record)[0] != "stopped"
+        for record in state.get("processes", {}).values()
+    ):
+        raise RuntimeToolError(
+            "API-only requires all recorded runtime processes stopped"
+        )
+    if (config.process_cwd / ".env").exists():
+        raise RuntimeToolError("API-only refuses an unexpected process-directory .env")
+    env = build_environment(config)
+    validate_isolation(config, env)
+    env["DEV_API_ONLY"] = "true"
+    env["ENVIRONMENT"] = "development"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # Both submission gates and route admission remain active even if an
+    # existing feature flag would otherwise select inline execution.
+    command = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(config.api_port),
+        "--no-access-log",
+    ]
+    return subprocess.run(
+        command, cwd=config.process_cwd, env=env, check=False
+    ).returncode
+
+
 def start_runtime(config: RuntimeConfig) -> dict[str, Any]:
     preflight_info = preflight(config)
     owner = _ensure_owner(config)
@@ -2241,6 +2288,7 @@ def main(argv: list[str] | None = None) -> int:
             "cleanup",
             "init-evaluator",
             "worker-worksheet",
+            "api-only",
         ),
     )
     parser.add_argument(
@@ -2253,7 +2301,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     config = _default_config()
     try:
-        if args.command == "worker-worksheet":
+        if args.command == "api-only":
+            return run_api_only(config)
+        elif args.command == "worker-worksheet":
             if not args.expected_head or not args.expected_tree:
                 raise RuntimeToolError(
                     "worker-worksheet requires --expected-head and --expected-tree"

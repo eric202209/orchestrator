@@ -19,12 +19,37 @@ except Exception:
 
 from datetime import UTC, datetime
 
-from celery import Celery
+from celery import Celery, Task
 from celery.signals import after_task_publish, before_task_publish, worker_process_init
 from .config import settings
 
-celery_app = Celery(
+
+def _require_execution_enabled() -> None:
+    if settings.DEV_API_ONLY:
+        raise RuntimeError("DEVELOPMENT_EXECUTION_DISABLED")
+
+
+class DevelopmentGatedTask(Task):
+    def apply_async(self, *args, **kwargs):
+        _require_execution_enabled()
+        return super().apply_async(*args, **kwargs)
+
+    def apply(self, *args, **kwargs):
+        _require_execution_enabled()
+        return super().apply(*args, **kwargs)
+
+
+class DevelopmentGatedCelery(Celery):
+    def send_task(self, *args, **kwargs):
+        # A before_task_publish signal cannot enforce this: Celery signals
+        # can swallow receiver exceptions. Refuse before reaching transport.
+        _require_execution_enabled()
+        return super().send_task(*args, **kwargs)
+
+
+celery_app = DevelopmentGatedCelery(
     "orchestrator",
+    task_cls=DevelopmentGatedTask,
     broker=settings.CELERY_BROKER_URL,
     backend=settings.CELERY_RESULT_BACKEND,
     include=[

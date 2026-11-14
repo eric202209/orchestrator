@@ -271,11 +271,12 @@ function ProjectDetail() {
     try {
       const [response, workspaceResponse] = await Promise.all([
         tasksAPI.getByProject(Number(id), taskPageParams(nextPage)),
-        projectsAPI.getWorkspaceOverview(Number(id)),
+        // Task state remains usable when execution/workspace inspection is disabled.
+        projectsAPI.getWorkspaceOverview(Number(id)).catch(() => null),
       ]);
       const taskItems = applyTaskPageResponse(response.data);
       setTaskPage(nextPage);
-      const workspace = workspaceResponse.data || null;
+      const workspace = workspaceResponse?.data || null;
       setWorkspaceOverview(workspace);
       await loadReviewTaskDetails(workspace, taskItems);
     } catch (error) {
