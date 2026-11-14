@@ -242,7 +242,7 @@ def test_e1_t10_api_projection_exposes_additive_fields_and_terminal_alias(
 ):
     project_response = authenticated_client.post(
         "/api/v1/projects",
-        json={"name": "LA1 API", "workspace_path": "/tmp/la1-api"},
+        json={"name": "LA1 API", "workspace_path": "la1-api"},
     )
     assert project_response.status_code == 201
     session_response = authenticated_client.post(
@@ -339,7 +339,7 @@ def test_e1_t11_migration_is_idempotent_and_backfills_conservative_defaults(
 def test_e1_t12_legacy_api_fields_remain_present(authenticated_client):
     project_response = authenticated_client.post(
         "/api/v1/projects",
-        json={"name": "LA1 Compatibility", "workspace_path": "/tmp/la1-compat"},
+        json={"name": "LA1 Compatibility", "workspace_path": "la1-compat"},
     )
     assert project_response.status_code == 201
     session_response = authenticated_client.post(

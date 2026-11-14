@@ -104,7 +104,7 @@ def _api_session(client, name: str) -> int:
         "/api/v1/projects",
         json={
             "name": name,
-            "workspace_path": f"/tmp/{name.lower().replace(' ', '-')}",
+            "workspace_path": name.lower().replace(" ", "-"),
         },
     )
     assert project_response.status_code == 201

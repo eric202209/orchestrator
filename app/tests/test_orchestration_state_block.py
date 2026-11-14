@@ -273,7 +273,7 @@ def test_dashboard_session_endpoint_includes_orchestration_state(authenticated_c
     client = authenticated_client
     project_resp = client.post(
         "/api/v1/projects",
-        json={"name": "OrcStateEndpointTest", "workspace_path": "/tmp/oset"},
+        json={"name": "OrcStateEndpointTest", "workspace_path": "oset"},
     )
     assert project_resp.status_code == 201
     project_id = project_resp.json()["id"]
