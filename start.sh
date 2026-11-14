@@ -936,8 +936,9 @@ start_isolated_development() {
 startup_usage() {
     echo "Usage: ./start.sh dev <command> [options]"
     echo "  Isolated development: init-evaluator, worker-worksheet, preflight, start, status, stop, cleanup."
-    echo "  api-only: foreground API with execution disabled; requires separately authorized existing runtime state."
-    echo "  Development API: 127.0.0.1:18740; frontend is started separately (see P42-V3 report)."
+    echo "  api-only: foreground API + Vite frontend with execution disabled."
+    echo "  Initialize the disposable M1 state first with: ./start.sh dev init-evaluator"
+    echo "  Development API: 127.0.0.1:18740; frontend: http://localhost:3000."
     echo "  ./start.sh without arguments retains conventional checkout startup (default API 8080)."
     echo "  That conventional startup does not select the isolated development runtime."
     echo "  Production source/runtime remain separate and require operator authorization."

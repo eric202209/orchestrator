@@ -279,7 +279,7 @@ def test_direct_production_and_missing_database_configuration_refused(
         validate_api_only_settings()
 
 
-def test_api_only_launcher_never_bootstraps_services(tmp_path, monkeypatch):
+def test_api_only_launcher_starts_only_api_and_frontend(tmp_path, monkeypatch):
     repo = tmp_path / "checkout"
     repo.mkdir()
     config = dev_runtime.RuntimeConfig.for_repo(repo)
@@ -290,19 +290,41 @@ def test_api_only_launcher_never_bootstraps_services(tmp_path, monkeypatch):
     dev_runtime._ensure_owner(config)
     dev_runtime._make_directories(config)
     config.database_file.touch()
+    (repo / "frontend" / "node_modules").mkdir(parents=True)
+    monkeypatch.setattr(dev_runtime, "validate_api_only_state", lambda _config: None)
+    monkeypatch.setattr(dev_runtime, "_port_available", lambda _port: True)
+    monkeypatch.setattr(dev_runtime, "_which_required", lambda name: f"/bin/{name}")
     calls = []
+
+    class FakeProcess:
+        def poll(self):
+            return None
+
+    def fake_spawn(config, state, kind, command, env, expected_cmdline, **kwargs):
+        calls.append((kind, command, env, kwargs.get("cwd")))
+        state["processes"][kind] = {"kind": kind}
+        return FakeProcess()
+
+    monkeypatch.setattr(dev_runtime, "_spawn", fake_spawn)
+    monkeypatch.setattr(dev_runtime, "_wait_until", lambda *args, **kwargs: None)
     monkeypatch.setattr(
-        dev_runtime.subprocess,
-        "run",
-        lambda command, **kwargs: calls.append((command, kwargs))
-        or SimpleNamespace(returncode=0),
+        dev_runtime,
+        "_stop_processes",
+        lambda config, state, child_processes=None: [],
+    )
+    monkeypatch.setattr(
+        dev_runtime.time,
+        "sleep",
+        lambda _seconds: (_ for _ in ()).throw(KeyboardInterrupt),
     )
     assert dev_runtime.run_api_only(config) == 0
-    assert len(calls) == 1
-    command, kwargs = calls[0]
-    assert command[1:4] == ["-m", "uvicorn", "app.main:app"]
-    assert kwargs["env"]["DEV_API_ONLY"] == "true"
-    assert kwargs["env"]["CELERY_BROKER_URL"] == "redis://127.0.0.1:16379/0"
+    assert [call[0] for call in calls] == ["api", "frontend"]
+    assert calls[0][1][1:4] == ["-m", "uvicorn", "app.main:app"]
+    assert calls[0][2]["DEV_API_ONLY"] == "true"
+    assert calls[0][2]["CELERY_BROKER_URL"] == "redis://127.0.0.1:16379/0"
+    assert calls[1][1] == ["/bin/pnpm", "dev"]
+    assert calls[1][2]["ORCHESTRATOR_DEV_API_TARGET"] == config.api_url
+    assert calls[1][3] == repo / "frontend"
     assert not (config.root / "logs" / "worker.log").exists()
     monkeypatch.setattr(
         dev_runtime, "_load_state", lambda *args: {"processes": {"worker": {}}}
@@ -314,4 +336,4 @@ def test_api_only_launcher_never_bootstraps_services(tmp_path, monkeypatch):
         dev_runtime.RuntimeToolError, match="recorded runtime processes stopped"
     ):
         dev_runtime.run_api_only(config)
-    assert len(calls) == 1
+    assert len(calls) == 2

@@ -17,6 +17,7 @@ import secrets
 import shutil
 import signal
 import socket
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -34,6 +35,7 @@ from urllib.parse import urlsplit
 
 
 API_PORT = 18740
+FRONTEND_PORT = 3000
 REDIS_PORT = 16379
 QDRANT_PORT = 16333
 QUEUE_NAME = "phase40b-r1-dev"
@@ -149,6 +151,10 @@ class RuntimeConfig:
         return f"http://127.0.0.1:{self.api_port}"
 
     @property
+    def frontend_url(self) -> str:
+        return f"http://localhost:{FRONTEND_PORT}"
+
+    @property
     def qdrant_url(self) -> str:
         return f"http://127.0.0.1:{self.qdrant_port}"
 
@@ -257,6 +263,9 @@ def build_environment(
         "ARTIFACTS_DIR": str(root / "artifacts"),
         "HOST": "127.0.0.1",
         "PORT": str(config.api_port),
+        # Vite reads this server-only variable; it is intentionally not
+        # VITE-prefixed and therefore is never bundled into browser code.
+        "ORCHESTRATOR_DEV_API_TARGET": config.api_url,
         "DATABASE_URL": f"sqlite:///{config.database_file}",
         "SECRET_KEY": secret_key,
         "ADMIN_EMAILS": EVALUATOR_EMAIL,
@@ -665,8 +674,16 @@ def _qdrant_binary(config: RuntimeConfig) -> str | None:
 
 
 def _port_available(port: int) -> bool:
+    # A refused loopback connection means there is no live listener. A plain
+    # bind probe can still reject a just-closed TCP port because of TIME_WAIT,
+    # which would make immediate API-only restart needlessly fail.
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+            return False
+    except OSError:
+        pass
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             probe.bind(("127.0.0.1", port))
         except OSError:
@@ -1310,13 +1327,15 @@ def _spawn(
     command: list[str],
     process_env: dict[str, str],
     expected_cmdline: list[str],
+    *,
+    cwd: Path | None = None,
 ) -> subprocess.Popen[Any]:
     log_path = config.root / "logs" / f"{kind}.log"
     with log_path.open("ab") as log_stream:
         log_path.chmod(0o666)
         process = subprocess.Popen(
             command,
-            cwd=config.process_cwd,
+            cwd=cwd or config.process_cwd,
             env=process_env,
             stdin=subprocess.DEVNULL,
             stdout=log_stream,
@@ -1408,7 +1427,7 @@ def _stop_processes(
     errors: list[str] = []
     processes = state.get("processes", {})
     diagnostic_path = _redis_diagnostic_path(config, state)
-    for kind in ("api", "worker", "qdrant", "redis"):
+    for kind in ("api", "frontend", "worker", "qdrant", "redis"):
         record = processes.get(kind)
         if not record:
             continue
@@ -1480,6 +1499,14 @@ def _api_ready(config: RuntimeConfig) -> bool:
         status, _payload = _http_json(f"{config.api_url}/health")
         return status == 200
     except (OSError, ValueError, urllib.error.URLError):
+        return False
+
+
+def _frontend_ready(config: RuntimeConfig) -> bool:
+    try:
+        with urllib.request.urlopen(config.frontend_url, timeout=2) as response:
+            return response.status == 200
+    except (OSError, urllib.error.URLError):
         return False
 
 
@@ -1585,6 +1612,100 @@ def initialize_database(config: RuntimeConfig, env: dict[str, str]) -> None:
     if result.returncode != 0 or not config.database_file.is_file():
         raise RuntimeToolError("development database initialization failed")
     config.database_file.chmod(0o600)
+
+
+def validate_api_only_state(config: RuntimeConfig) -> None:
+    """Validate the disposable M1 state before starting either service."""
+
+    if not config.database_file.is_file() or config.database_file.is_symlink():
+        raise RuntimeToolError(
+            "API-only development state is not initialized. Initialize it with: "
+            "./start.sh dev init-evaluator"
+        )
+    required_tables = {
+        "schema_migrations",
+        "users",
+        "projects",
+        "tasks",
+        "sessions",
+        "planning_sessions",
+        "task_executions",
+    }
+    try:
+        with sqlite3.connect(config.database_file) as connection:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            missing = required_tables - tables
+            if missing:
+                raise RuntimeToolError(
+                    "API-only development database schema is incomplete; "
+                    "initialize a disposable state with ./start.sh dev init-evaluator"
+                )
+            if (
+                connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[
+                    0
+                ]
+                == 0
+            ):
+                raise RuntimeToolError(
+                    "API-only development database has no applied migrations; "
+                    "initialize a disposable state with ./start.sh dev init-evaluator"
+                )
+            evaluator = connection.execute(
+                "SELECT 1 FROM users WHERE email = ? AND is_active = 1 LIMIT 1",
+                (EVALUATOR_EMAIL,),
+            ).fetchone()
+            if evaluator is None:
+                raise RuntimeToolError(
+                    "API-only development evaluator account is missing or inactive; "
+                    "initialize a disposable state with ./start.sh dev init-evaluator"
+                )
+
+            active_execution = connection.execute(
+                """
+                SELECT 'task_execution' FROM task_executions
+                WHERE lower(coalesce(status, '')) IN ('pending', 'running')
+                   OR upper(coalesce(dispatch_state, '')) IN
+                      ('PENDING_BINDING', 'READY', 'CLAIMED')
+                UNION ALL
+                SELECT 'session' FROM sessions
+                WHERE coalesce(is_active, 0) = 1
+                   OR lower(coalesce(status, '')) IN
+                      ('pending', 'running', 'recovering', 'retry_pending',
+                       'paused', 'awaiting_input')
+                UNION ALL
+                SELECT 'planning_session' FROM planning_sessions
+                WHERE lower(coalesce(status, '')) IN ('active', 'waiting_for_input')
+                LIMIT 1
+                """
+            ).fetchone()
+            if active_execution is not None:
+                raise RuntimeToolError(
+                    "API-only refuses to start with active execution state; "
+                    "stop or explicitly inspect the disposable runtime first"
+                )
+    except sqlite3.Error as exc:
+        raise RuntimeToolError(
+            "API-only development database could not be validated"
+        ) from exc
+
+
+def api_only_frontend_command(config: RuntimeConfig) -> tuple[list[str], Path]:
+    """Return the existing Vite development command and its checkout directory."""
+
+    frontend_dir = config.repo_root / "frontend"
+    if not frontend_dir.is_dir():
+        raise RuntimeToolError("API-only frontend directory is missing")
+    if not (frontend_dir / "node_modules").is_dir():
+        raise RuntimeToolError(
+            "API-only frontend dependencies are missing; the existing frontend "
+            "startup requires its installed node_modules"
+        )
+    return [_which_required("pnpm"), "dev"], frontend_dir
 
 
 def worker_worksheet(config: RuntimeConfig, head: str, tree: str) -> dict[str, Any]:
@@ -1909,18 +2030,13 @@ def development_worker_command(config: RuntimeConfig) -> list[str]:
 
 
 def run_api_only(config: RuntimeConfig) -> int:
-    """Foreground API only, using already initialized state; never provision it.
-
-    Invocation still requires separate operator activation authorization and
-    resolution of the retained filesystem/writer hold. These checks are not
-    an isolation boundary against same-root writers.
-    """
+    """Run the execution-disabled API and its Vite frontend in one session."""
     _require_runtime_root(config)
     _validate_existing_root(config)
     if not config.database_file.is_file() or not config.process_cwd.is_dir():
         raise RuntimeToolError(
-            "API-only requires an already authorized initialized runtime; "
-            "no database/account/directory was created"
+            "API-only development state is not initialized. Initialize a "
+            "disposable M1 state with: ./start.sh dev init-evaluator"
         )
     state = _load_state(config, _owner_record(config))
     if any(
@@ -1932,6 +2048,14 @@ def run_api_only(config: RuntimeConfig) -> int:
         )
     if (config.process_cwd / ".env").exists():
         raise RuntimeToolError("API-only refuses an unexpected process-directory .env")
+    validate_api_only_state(config)
+    frontend_command, frontend_cwd = api_only_frontend_command(config)
+    for port in (config.api_port, FRONTEND_PORT):
+        if not _port_available(port):
+            raise RuntimeToolError(
+                f"API-only startup refuses occupied port {port}; "
+                "the existing process was not changed"
+            )
     env = build_environment(config)
     validate_isolation(config, env)
     env["DEV_API_ONLY"] = "true"
@@ -1950,9 +2074,92 @@ def run_api_only(config: RuntimeConfig) -> int:
         str(config.api_port),
         "--no-access-log",
     ]
-    return subprocess.run(
-        command, cwd=config.process_cwd, env=env, check=False
-    ).returncode
+    state["processes"] = {}
+    state["status"] = "starting_api_only"
+    state["mode"] = "api_only"
+    state["execution_enabled"] = False
+    state["started_at_epoch"] = time.time()
+    state["error"] = None
+    _save_state(config, state)
+    child_processes: dict[str, subprocess.Popen[Any]] = {}
+    try:
+        api_process = _spawn(
+            config,
+            state,
+            "api",
+            command,
+            env,
+            ["uvicorn", "app.main:app", "127.0.0.1", str(config.api_port)],
+        )
+        child_processes["api"] = api_process
+        _wait_until(
+            config, "api", lambda: _api_ready(config), child_process=api_process
+        )
+
+        frontend_process = _spawn(
+            config,
+            state,
+            "frontend",
+            frontend_command,
+            env,
+            ["pnpm", "dev"],
+            cwd=frontend_cwd,
+        )
+        child_processes["frontend"] = frontend_process
+        _wait_until(
+            config,
+            "frontend",
+            lambda: _frontend_ready(config),
+            child_process=frontend_process,
+        )
+        state["status"] = "ready_api_only"
+        state["ready_at_epoch"] = time.time()
+        _save_state(config, state)
+        print("========================================")
+        print("  Orchestrator M1 API-only development")
+        print("========================================")
+        print(f"Frontend: available at {config.frontend_url}")
+        print(f"FastAPI: available at {config.api_url}")
+        print("SQLite: ready")
+        print("Authentication: available")
+        print("Redis: not required")
+        print("Worker: disabled")
+        print("Beat: disabled")
+        print("Provider: disabled")
+        print("Execution: disabled")
+        print(f"State: {config.root}")
+        print("Stop: press Ctrl-C, or run ./start.sh dev stop from another terminal")
+        print("========================================")
+        while True:
+            for kind, process in child_processes.items():
+                returncode = process.poll()
+                if returncode is not None:
+                    current = _load_state(config, _owner_record(config))
+                    if current.get("status") == "stopped":
+                        return 0
+                    raise RuntimeToolError(
+                        f"API-only {kind} process exited with status {returncode}"
+                    )
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\nStopping API-only development services...")
+        return 0
+    except Exception as exc:
+        cleanup_errors = _rollback_startup(
+            config, state, exc, child_processes=child_processes
+        )
+        if cleanup_errors:
+            raise RuntimeToolError(
+                f"API-only startup failed ({exc}); owned-process cleanup was incomplete: "
+                f"{cleanup_errors}"
+            ) from exc
+        raise
+    finally:
+        errors = _stop_processes(config, state, child_processes)
+        if errors:
+            raise RuntimeToolError(
+                "could not safely stop API-only services: " + "; ".join(errors)
+            )
 
 
 def start_runtime(config: RuntimeConfig) -> dict[str, Any]:
