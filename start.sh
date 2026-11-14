@@ -919,6 +919,13 @@ start_isolated_development() {
         echo "Usage: ./start.sh dev <init-evaluator|worker-worksheet|preflight|start|status|stop|cleanup> [options]" >&2
         return 2
     fi
+    # Help must work before a checkout-local interpreter or runtime exists.
+    case "$1" in
+        --help|-h)
+            startup_usage
+            return 0
+            ;;
+    esac
     if [[ ! -x "${VENV_DIR}/bin/python3" || ! -f "${PROJECT_ROOT}/scripts/dev_runtime.py" ]]; then
         echo "Existing development interpreter and scripts/dev_runtime.py are required; nothing was installed." >&2
         return 1
