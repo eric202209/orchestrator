@@ -1881,21 +1881,10 @@ async def stop_session_lifecycle(
     except Exception as exc:
         # Discard flushed stop mutations so a failed stop never commits them.
         db.rollback()
-        db.add(
-            LogEntry(
-                session_id=session_id,
-                level="ERROR",
-                message=f"Failed to stop session: {str(exc)}",
-                log_metadata=json.dumps(
-                    {
-                        "event_type": "session_stop_failed",
-                        "session_id": session_id,
-                        "error": str(exc),
-                    }
-                ),
-            )
-        )
-        db.commit()
+        # Failure reporting must not reacquire the database writer lock that
+        # may have caused cancellation to fail.  Use only scalar request data;
+        # ORM attributes expire on rollback and could trigger another DB access.
+        logger.exception("Failed to stop session: session_id=%s", session_id)
         raise HTTPException(status_code=500, detail=str(exc))
 
 
