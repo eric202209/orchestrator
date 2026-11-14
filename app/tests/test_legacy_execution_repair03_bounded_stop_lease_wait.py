@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import pytest
 from fastapi import HTTPException
@@ -153,7 +154,7 @@ def _assert_not_stopped(db, session, execution, redis, runtime):
 
 
 def test_live_unverifiable_owner_fails_stop_after_bound_without_release(
-    db_session, monkeypatch
+    db_session, monkeypatch, caplog
 ):
     session, execution = _running_execution(db_session)
     redis = _LeaseRedis({session.id})
@@ -167,15 +168,21 @@ def test_live_unverifiable_owner_fails_stop_after_bound_without_release(
     assert "not confirmed" in exc_info.value.detail
     _assert_not_stopped(db_session, session, execution, redis, runtime)
     assert runtime.stop_calls == 0
-    failure = (
-        db_session.query(LogEntry)
-        .filter(
-            LogEntry.session_id == session.id,
-            LogEntry.message.like("Failed to stop session:%"),
-        )
-        .one()
+    failures = [
+        record
+        for record in caplog.records
+        if record.name == session_lifecycle_service.__name__
+        and record.levelno == logging.ERROR
+        and record.getMessage() == f"Failed to stop session: session_id={session.id}"
+    ]
+    assert len(failures) == 1
+    assert failures[0].exc_info is not None
+    assert "not confirmed" in str(failures[0].exc_info[1])
+    # Failure reporting must not write to the database that may be contended.
+    assert not any(
+        message.startswith("Failed to stop session:")
+        for message in _messages(db_session, session.id)
     )
-    assert json.loads(failure.log_metadata)["event_type"] == "session_stop_failed"
 
 
 def test_lease_reacquired_before_terminal_commit_rolls_back_stop(
