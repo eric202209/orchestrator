@@ -27,6 +27,8 @@ from .config import settings
 def _require_execution_enabled() -> None:
     if settings.DEV_API_ONLY:
         raise RuntimeError("DEVELOPMENT_EXECUTION_DISABLED")
+    if not settings.EXECUTION_ENABLED:
+        raise RuntimeError("EXECUTION_DISABLED")
 
 
 class DevelopmentGatedTask(Task):

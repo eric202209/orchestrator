@@ -14,6 +14,14 @@ DISABLED_DETAIL = {
     "message": "Execution is disabled in development API-only mode.",
 }
 
+EXECUTION_DISABLED_DETAIL = {
+    "code": "EXECUTION_DISABLED",
+    "message": (
+        "Execution, provider planning, and background recovery are disabled; "
+        "normal control-plane CRUD remains available."
+    ),
+}
+
 # Intentionally an allowlist: new routes and alternate execution APIs stay closed.
 # Existing dependencies still authenticate and authorize every product request.
 _READ_PATHS = re.compile(
@@ -26,6 +34,33 @@ _WRITE_PATHS = {
     ("POST", "/api/v1/projects"),
     ("POST", "/api/v1/tasks"),
 }
+_CONTROL_PLANE_AUTH_PATHS = {
+    ("POST", "/api/v1/auth/login"),
+    ("POST", "/api/v1/auth/tokens"),
+    ("POST", "/api/v1/auth/refresh"),
+    ("POST", "/api/v1/auth/session/login"),
+    ("POST", "/api/v1/auth/session/logout"),
+}
+_CONTROL_PLANE_WRITE_PATTERNS = (
+    ("PUT", re.compile(r"/api/v1/projects/[0-9]+")),
+    ("DELETE", re.compile(r"/api/v1/projects/[0-9]+")),
+    ("PUT", re.compile(r"/api/v1/tasks/[0-9]+")),
+    ("DELETE", re.compile(r"/api/v1/tasks/[0-9]+")),
+)
+
+
+def _is_control_plane_write(method: str, path: str) -> bool:
+    if (method, path) in _CONTROL_PLANE_AUTH_PATHS:
+        return True
+    if (method, path) in {
+        ("POST", "/api/v1/projects"),
+        ("POST", "/api/v1/tasks"),
+    }:
+        return True
+    return any(
+        method == pattern_method and pattern.fullmatch(path)
+        for pattern_method, pattern in _CONTROL_PLANE_WRITE_PATTERNS
+    )
 
 
 def validate_api_only_settings() -> None:
@@ -78,7 +113,8 @@ class DevelopmentAPIOnlyMiddleware:
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if not settings.DEV_API_ONLY or scope["type"] not in {"http", "websocket"}:
+        guarded_mode = settings.DEV_API_ONLY or not settings.EXECUTION_ENABLED
+        if not guarded_mode or scope["type"] not in {"http", "websocket"}:
             return await self.app(scope, receive, send)
         if scope["type"] == "websocket":
             await send({"type": "websocket.close", "code": 1008})
@@ -88,29 +124,43 @@ class DevelopmentAPIOnlyMiddleware:
             response = JSONResponse(
                 {
                     "status": "ok",
-                    "mode": "development_api_only",
+                    "mode": (
+                        "development_api_only" if settings.DEV_API_ONLY else "normal"
+                    ),
                     "execution_enabled": False,
                     "dependencies_checked": False,
                 }
             )
             return await response(scope, receive, send)
-        allowed = (method == "GET" and _READ_PATHS.fullmatch(path)) or (
-            method,
-            path,
-        ) in _WRITE_PATHS
+        if settings.DEV_API_ONLY:
+            allowed = (method == "GET" and _READ_PATHS.fullmatch(path)) or (
+                method,
+                path,
+            ) in _WRITE_PATHS
+        else:
+            # In a normal execution-disabled process, all reads remain normal
+            # API reads. Only explicit metadata CRUD/auth writes are admitted;
+            # session, retry, planning, workspace, and completion mutations are
+            # denied before dependencies or DB writes run.
+            allowed = method == "GET" or _is_control_plane_write(method, path)
         if method == "OPTIONS":
             requested_method = (
                 dict(scope["headers"])
                 .get(b"access-control-request-method", b"")
                 .decode("ascii", errors="replace")
             )
-            allowed = (requested_method == "GET" and _READ_PATHS.fullmatch(path)) or (
-                requested_method,
-                path,
-            ) in _WRITE_PATHS
+            if settings.DEV_API_ONLY:
+                allowed = (
+                    requested_method == "GET" and _READ_PATHS.fullmatch(path)
+                ) or (requested_method, path) in _WRITE_PATHS
+            else:
+                allowed = requested_method == "GET" or _is_control_plane_write(
+                    requested_method, path
+                )
         if not allowed:
-            response = JSONResponse(
-                status_code=503, content={"detail": DISABLED_DETAIL}
+            detail = (
+                DISABLED_DETAIL if settings.DEV_API_ONLY else EXECUTION_DISABLED_DETAIL
             )
+            response = JSONResponse(status_code=503, content={"detail": detail})
             return await response(scope, receive, send)
         await self.app(scope, receive, send)

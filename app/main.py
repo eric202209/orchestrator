@@ -55,6 +55,17 @@ async def lifespan(app: FastAPI):
         logger.warning("Development API-only mode: execution disabled")
         yield
         return
+    if not settings.EXECUTION_ENABLED:
+        # This is still the normal application and normal writable ORM/API
+        # surface. Only execution-side startup work is suppressed so a
+        # migrated historical copy cannot initialize, recover, or publish old
+        # work.
+        logger.warning(
+            "Execution-disabled control-plane startup: recovery and background "
+            "startup mutation are disabled; schema initialization is skipped"
+        )
+        yield
+        return
     init_db()
     cleanup_db = None
     try:

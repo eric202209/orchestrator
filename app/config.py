@@ -72,6 +72,11 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     # Explicit control-plane-only development mode; never enables task execution.
     DEV_API_ONLY: bool = False
+    # Capability gate for a normal control-plane process. The default keeps
+    # existing product behavior; a bounded non-execution startup can keep
+    # authentication and Project/Task CRUD available while refusing dispatch,
+    # provider checks, and automatic recovery.
+    EXECUTION_ENABLED: bool = True
 
     # Server
     HOST: str = "0.0.0.0"
@@ -552,6 +557,11 @@ def validate_runtime_secrets() -> None:
             raise RuntimeError("DEV_API_ONLY requires ENVIRONMENT=development")
         # Authentication still needs its signing key. No execution backend is
         # needed or probed when every executable route/submission is disabled.
+        return
+    if not settings.EXECUTION_ENABLED:
+        # Authentication and normal control-plane CRUD do not require a
+        # broker, provider, or execution backend. The API middleware and
+        # Celery guard independently refuse execution submissions.
         return
 
     # Validate the configured backend is registered and its required env vars are set.
