@@ -110,6 +110,23 @@ def _with_lifecycle_projection(
     return result
 
 
+def _with_stopped_session_projection(
+    db: Session,
+    session: SessionModel,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Enrich a committed Stop acknowledgement without making it fail."""
+    try:
+        return _with_lifecycle_projection(db, session, payload)
+    except Exception:
+        db.rollback()
+        logger.exception(
+            "Stopped session projection failed: session_id=%s", payload["session_id"]
+        )
+        # Do not manufacture authority or quiescence when projection is unavailable.
+        return payload
+
+
 def _coerce_naive_utc_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -1712,7 +1729,7 @@ async def stop_session_lifecycle(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
     if session.status == "stopped":
-        return _with_lifecycle_projection(
+        return _with_stopped_session_projection(
             db,
             session,
             {
@@ -1739,6 +1756,15 @@ async def stop_session_lifecycle(
     )
     if not stop_transition.allowed:
         raise HTTPException(status_code=400, detail="Session is not stoppable")
+
+    # Capture response scalars before commit/rollback expires ORM attributes.
+    response = {
+        "status": "stopped",
+        "session_id": session_id,
+        "initiated_by": initiated_by or "unknown",
+        "source": source or "unspecified",
+        "message": f"Session '{session.name}' stopped successfully",
+    }
 
     try:
         checkpoint_name = None
@@ -1839,6 +1865,20 @@ async def stop_session_lifecycle(
             )
         )
         db.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Discard flushed stop mutations so a failed stop never commits them.
+        db.rollback()
+        # Failure reporting must not reacquire the database writer lock that
+        # may have caused cancellation to fail.  Use only scalar request data;
+        # ORM attributes expire on rollback and could trigger another DB access.
+        logger.exception("Failed to stop session: session_id=%s", session_id)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    # Only the transaction above decides whether cancellation succeeded. Workflow
+    # closure and the success log are ancillary and cannot undo that commit.
+    try:
         # Stop terminalized every attempt; the Session's logical runs end.
         close_session_workflows(db, session_id, reason="session_stopped")
 
@@ -1865,27 +1905,13 @@ async def stop_session_lifecycle(
         )
         db.commit()
 
-        return _with_lifecycle_projection(
-            db,
-            session,
-            {
-                "status": "stopped",
-                "session_id": session_id,
-                "initiated_by": initiated_by or "unknown",
-                "source": source or "unspecified",
-                "message": f"Session '{session.name}' stopped successfully",
-            },
-        )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        # Discard flushed stop mutations so a failed stop never commits them.
+    except Exception:
         db.rollback()
-        # Failure reporting must not reacquire the database writer lock that
-        # may have caused cancellation to fail.  Use only scalar request data;
-        # ORM attributes expire on rollback and could trigger another DB access.
-        logger.exception("Failed to stop session: session_id=%s", session_id)
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception(
+            "Stop committed; post-commit cleanup failed: session_id=%s", session_id
+        )
+
+    return _with_stopped_session_projection(db, session, response)
 
 
 async def pause_session_lifecycle(db: Session, session_id: int) -> Dict[str, Any]:
