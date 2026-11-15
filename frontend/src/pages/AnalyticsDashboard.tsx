@@ -67,6 +67,23 @@ function fmtGeneratedAt(iso: string): string {
   return `${month} ${day} at ${h}:${min} UTC`;
 }
 
+type AnalyticsLoadError = 'forbidden' | 'error' | null;
+
+function isForbiddenAnalyticsError(error: unknown): boolean {
+  const status = (error as { response?: { status?: unknown } } | null)?.response?.status;
+  return status === 403;
+}
+
+function analyticsErrorMessage(
+  error: AnalyticsLoadError,
+  resource: string,
+  fallback: string,
+): string {
+  return error === 'forbidden'
+    ? `Admin access is required to view ${resource}`
+    : fallback;
+}
+
 // ── section summaries ─────────────────────────────────────────────────────────
 
 function operationalSummary(w: OperationalWindow): string {
@@ -184,13 +201,23 @@ function DecisionSection({
 }: {
   data: DecisionAnalytics | null;
   loading: boolean;
-  error: boolean;
+  error: AnalyticsLoadError;
   window: AnalyticsWindow;
 }) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
   if (loading) return <LoadingPanel />;
-  if (error) return <ErrorPanel message="Failed to load decision intelligence" />;
+  if (error) {
+    return (
+      <ErrorPanel
+        message={analyticsErrorMessage(
+          error,
+          'decision intelligence',
+          'Failed to load decision intelligence',
+        )}
+      />
+    );
+  }
   if (!data) return null;
 
   const w = data.windows[win];
@@ -319,11 +346,17 @@ function OperationalSection({
 }: {
   data: OperationalAnalytics | null;
   loading: boolean;
-  error: boolean;
+  error: AnalyticsLoadError;
   window: AnalyticsWindow;
 }) {
   if (loading) return <LoadingPanel />;
-  if (error) return <ErrorPanel message="Failed to load operational data" />;
+  if (error) {
+    return (
+      <ErrorPanel
+        message={analyticsErrorMessage(error, 'operational data', 'Failed to load operational data')}
+      />
+    );
+  }
   if (!data) return null;
 
   const w = data.windows[win];
@@ -400,11 +433,17 @@ function FailureSection({
 }: {
   data: FailureAnalytics | null;
   loading: boolean;
-  error: boolean;
+  error: AnalyticsLoadError;
   window: AnalyticsWindow;
 }) {
   if (loading) return <LoadingPanel />;
-  if (error) return <ErrorPanel message="Failed to load failure data" />;
+  if (error) {
+    return (
+      <ErrorPanel
+        message={analyticsErrorMessage(error, 'failure data', 'Failed to load failure data')}
+      />
+    );
+  }
   if (!data) return null;
 
   const w = data.windows[win];
@@ -487,11 +526,17 @@ function KnowledgeSection({
 }: {
   data: KnowledgeAnalytics | null;
   loading: boolean;
-  error: boolean;
+  error: AnalyticsLoadError;
   window: AnalyticsWindow;
 }) {
   if (loading) return <LoadingPanel />;
-  if (error) return <ErrorPanel message="Failed to load knowledge data" />;
+  if (error) {
+    return (
+      <ErrorPanel
+        message={analyticsErrorMessage(error, 'knowledge data', 'Failed to load knowledge data')}
+      />
+    );
+  }
   if (!data) return null;
 
   const w = data.windows[win];
@@ -568,11 +613,17 @@ function ExecutionSection({
 }: {
   data: ExecutionAnalytics | null;
   loading: boolean;
-  error: boolean;
+  error: AnalyticsLoadError;
   window: AnalyticsWindow;
 }) {
   if (loading) return <LoadingPanel />;
-  if (error) return <ErrorPanel message="Failed to load execution data" />;
+  if (error) {
+    return (
+      <ErrorPanel
+        message={analyticsErrorMessage(error, 'execution data', 'Failed to load execution data')}
+      />
+    );
+  }
   if (!data) return null;
 
   const w = data.windows[win];
@@ -667,11 +718,17 @@ function OperatorSection({
 }: {
   data: OperatorAnalytics | null;
   loading: boolean;
-  error: boolean;
+  error: AnalyticsLoadError;
   window: AnalyticsWindow;
 }) {
   if (loading) return <LoadingPanel />;
-  if (error) return <ErrorPanel message="Failed to load operator data" />;
+  if (error) {
+    return (
+      <ErrorPanel
+        message={analyticsErrorMessage(error, 'operator data', 'Failed to load operator data')}
+      />
+    );
+  }
   if (!data) return null;
 
   const w = data.windows[win];
@@ -747,27 +804,27 @@ export default function AnalyticsDashboard() {
 
   const [operational, setOperational] = useState<OperationalAnalytics | null>(null);
   const [operationalLoading, setOperationalLoading] = useState(true);
-  const [operationalError, setOperationalError] = useState(false);
+  const [operationalError, setOperationalError] = useState<AnalyticsLoadError>(null);
 
   const [failures, setFailures] = useState<FailureAnalytics | null>(null);
   const [failuresLoading, setFailuresLoading] = useState(true);
-  const [failuresError, setFailuresError] = useState(false);
+  const [failuresError, setFailuresError] = useState<AnalyticsLoadError>(null);
 
   const [knowledge, setKnowledge] = useState<KnowledgeAnalytics | null>(null);
   const [knowledgeLoading, setKnowledgeLoading] = useState(true);
-  const [knowledgeError, setKnowledgeError] = useState(false);
+  const [knowledgeError, setKnowledgeError] = useState<AnalyticsLoadError>(null);
 
   const [execution, setExecution] = useState<ExecutionAnalytics | null>(null);
   const [executionLoading, setExecutionLoading] = useState(true);
-  const [executionError, setExecutionError] = useState(false);
+  const [executionError, setExecutionError] = useState<AnalyticsLoadError>(null);
 
   const [operators, setOperators] = useState<OperatorAnalytics | null>(null);
   const [operatorsLoading, setOperatorsLoading] = useState(true);
-  const [operatorsError, setOperatorsError] = useState(false);
+  const [operatorsError, setOperatorsError] = useState<AnalyticsLoadError>(null);
 
   const [decision, setDecision] = useState<DecisionAnalytics | null>(null);
   const [decisionLoading, setDecisionLoading] = useState(true);
-  const [decisionError, setDecisionError] = useState(false);
+  const [decisionError, setDecisionError] = useState<AnalyticsLoadError>(null);
 
   const anyLoading =
     operationalLoading ||
@@ -788,15 +845,15 @@ export default function AnalyticsDashboard() {
     const loadSection = async <T,>(
       request: () => Promise<{ data: T }>,
       setData: (value: T) => void,
-      setError: (value: boolean) => void,
+      setError: (value: AnalyticsLoadError) => void,
       setLoading: (value: boolean) => void,
     ) => {
       try {
         const response = await request();
         setData(response.data);
-        setError(false);
-      } catch {
-        setError(true);
+        setError(null);
+      } catch (error) {
+        setError(isForbiddenAnalyticsError(error) ? 'forbidden' : 'error');
       } finally {
         setLoading(false);
       }

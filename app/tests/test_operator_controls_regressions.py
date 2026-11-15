@@ -1,7 +1,8 @@
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
-from app.models import LogEntry, Project, Session as SessionModel
+from app.models import LogEntry, Project, Session as SessionModel, Task
 from app.services.orchestration.policy import (
     get_policy_profile,
     should_restore_workspace_on_failure,
@@ -12,6 +13,7 @@ from app.services.workspace.system_settings import (
     AGENT_BACKEND_KEY,
     LEGACY_WORKSPACE_ROOT_KEY,
     ORCHESTRATION_POLICY_PROFILE_KEY,
+    PLANNING_ADAPTATION_PROFILE_KEY,
     WORKSPACE_REVIEW_POLICY_KEY,
     WORKSPACE_ROOT_KEY,
     get_effective_workspace_root,
@@ -71,6 +73,51 @@ def test_settings_reject_unknown_workspace_review_policy(authenticated_client):
     )
 
     assert response.status_code == 422
+
+
+def test_settings_reads_legacy_planning_profile_with_effective_backend(
+    authenticated_client, db_session
+):
+    set_setting_value(db_session, AGENT_BACKEND_KEY, "local_openclaw")
+    set_setting_value(db_session, PLANNING_ADAPTATION_PROFILE_KEY, "ollama_default")
+
+    response = authenticated_client.get("/api/v1/settings")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["system"]["agent_backend"] == "local_openclaw"
+    assert payload["system"]["planning_adaptation_profile"] == "openclaw_default"
+    assert (
+        get_setting_value(db_session, PLANNING_ADAPTATION_PROFILE_KEY)
+        == "ollama_default"
+    )
+
+
+def test_dashboard_counts_match_non_retired_project_and_task_lists(
+    authenticated_client, db_session
+):
+    active_project = Project(name="Dashboard active project", user_id=1)
+    retired_project = Project(
+        name="Dashboard retired project",
+        user_id=1,
+        retired_at=datetime.now(timezone.utc),
+    )
+    db_session.add_all([active_project, retired_project])
+    db_session.flush()
+    db_session.add_all(
+        [
+            Task(title="Visible dashboard task", project_id=active_project.id),
+            Task(title="Retired dashboard task", project_id=retired_project.id),
+        ]
+    )
+    db_session.commit()
+
+    response = authenticated_client.get("/api/v1/dashboard/attention")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total_projects"] == 1
+    assert payload["total_tasks"] == 1
 
 
 def test_workspace_root_save_keeps_legacy_workspace_key_in_sync(db_session):

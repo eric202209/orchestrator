@@ -46,6 +46,10 @@ _CONTROL_PLANE_WRITE_PATTERNS = (
     ("DELETE", re.compile(r"/api/v1/projects/[0-9]+")),
     ("PUT", re.compile(r"/api/v1/tasks/[0-9]+")),
     ("DELETE", re.compile(r"/api/v1/tasks/[0-9]+")),
+    # System settings remain normal control-plane state. The endpoint keeps
+    # its existing admin dependency; this only lets an authorized operator
+    # restore deployment settings while task execution is disabled.
+    ("PATCH", re.compile(r"/api/v1/settings/system")),
 )
 
 

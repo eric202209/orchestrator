@@ -41,3 +41,31 @@ def test_start_uses_bounded_expected_node_celery_control_readiness():
     assert "CELERY_CONTROL_READINESS_TIMEOUT_SECONDS:-30" in START
     assert "CELERY_CONTROL_READINESS_INTERVAL_SECONDS:-1" in START
     assert 'local expected_worker_node="celery@$(hostname)"' in START
+
+
+def test_execution_disabled_normal_start_skips_execution_services_and_database_init():
+    main = START[
+        START.index("# Start all services in order") : START.index("# Check health")
+    ]
+    assert "if execution_enabled; then" in main
+    gated_services = main[main.index("if execution_enabled; then") :]
+    for call in ("ensure_database", "start_redis", "start_qdrant", "start_workers"):
+        assert call in gated_services
+    assert gated_services.index("start_backend") > gated_services.index("fi")
+    assert "execution_enabled()" in START
+
+
+def test_execution_disabled_health_check_does_not_require_redis_worker_beat_or_qdrant():
+    health = START[START.index("check_health()") : START.index("# Main execution")]
+    assert "if execution_enabled; then" in health
+    assert "redis-cli ping" in health
+    assert "wait_for_celery_worker.py" in health
+    assert "http://localhost:6333/healthz" in health
+
+
+def test_execution_disabled_start_does_not_initialize_checkout_database():
+    database = START[
+        START.index("ensure_database()") : START.index("# Function to stop existing")
+    ]
+    assert "if ! execution_enabled; then" in database
+    assert "return 0" in database

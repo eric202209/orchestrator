@@ -110,6 +110,19 @@ require_port_available() {
     process_helper port-check --host "${host}" --port "${port}"
 }
 
+execution_enabled() {
+    local execution_value="${EXECUTION_ENABLED:-true}"
+    execution_value="${execution_value,,}"
+    case "${execution_value}" in
+        false|0|no|off|disabled)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
 owned_processes_running() {
     local service result
     for service in backend worker beat frontend qdrant redis; do
@@ -270,6 +283,11 @@ ensure_frontend_deps() {
 
 ensure_database() {
     echo -e "${BLUE}🗄️  Checking database...${NC}"
+    if ! execution_enabled; then
+        echo -e "${YELLOW}Execution disabled; skipping database initialization.${NC}"
+        echo ""
+        return 0
+    fi
     cd "${PROJECT_ROOT}"
     if [ ! -f "${PROJECT_ROOT}/orchestrator.db" ]; then
         "${VENV_DIR}/bin/python" -c "from app.database import init_db; init_db(); print('✅ Database initialized')"
@@ -770,54 +788,58 @@ check_health() {
         success=false
     fi
     
-    # Check Redis
-    if redis-cli ping > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ Redis is responding${NC}"
-    else
-        echo -e "${RED}❌ Redis is not responding${NC}"
-        success=false
-    fi
+    if execution_enabled; then
+        # Check Redis
+        if redis-cli ping > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ Redis is responding${NC}"
+        else
+            echo -e "${RED}❌ Redis is not responding${NC}"
+            success=false
+        fi
 
-    # A worker process and its log-level "ready" message are not sufficient:
-    # Celery remote control can become available just after process startup.
-    # Require the worker started by this topology to answer within a bounded
-    # monotonic window; the helper fails closed on PID exit, no response,
-    # broker/probe failure, or an unexpected node.
-    local worker_pid=""
-    if process_helper status --root "${PROJECT_ROOT}" --service worker; then
-        worker_pid="$(cat "${PID_DIR}/worker.pid")"
-    fi
-    local expected_worker_node="celery@$(hostname)"
-    if [ -n "${worker_pid}" ] && "${VENV_DIR}/bin/python3" \
-        "${PROJECT_ROOT}/scripts/maintenance/wait_for_celery_worker.py" \
-        --celery "${VENV_DIR}/bin/celery" \
-        --pid "${worker_pid}" \
-        --expected-node "${expected_worker_node}" \
-        --timeout-seconds "${CELERY_CONTROL_READINESS_TIMEOUT_SECONDS:-30}" \
-        --interval-seconds "${CELERY_CONTROL_READINESS_INTERVAL_SECONDS:-1}"; then
-        echo -e "${GREEN}✅ Celery worker is responding${NC}"
-    else
-        echo -e "${RED}❌ Celery worker is not responding${NC}"
-        echo -e "${YELLOW}Expected worker node: ${expected_worker_node}${NC}"
-        echo -e "${YELLOW}Check logs: tail -40 logs/worker.log${NC}"
-        success=false
-    fi
+        # A worker process and its log-level "ready" message are not sufficient:
+        # Celery remote control can become available just after process startup.
+        # Require the worker started by this topology to answer within a bounded
+        # monotonic window; the helper fails closed on PID exit, no response,
+        # broker/probe failure, or an unexpected node.
+        local worker_pid=""
+        if process_helper status --root "${PROJECT_ROOT}" --service worker; then
+            worker_pid="$(cat "${PID_DIR}/worker.pid")"
+        fi
+        local expected_worker_node="celery@$(hostname)"
+        if [ -n "${worker_pid}" ] && "${VENV_DIR}/bin/python3" \
+            "${PROJECT_ROOT}/scripts/maintenance/wait_for_celery_worker.py" \
+            --celery "${VENV_DIR}/bin/celery" \
+            --pid "${worker_pid}" \
+            --expected-node "${expected_worker_node}" \
+            --timeout-seconds "${CELERY_CONTROL_READINESS_TIMEOUT_SECONDS:-30}" \
+            --interval-seconds "${CELERY_CONTROL_READINESS_INTERVAL_SECONDS:-1}"; then
+            echo -e "${GREEN}✅ Celery worker is responding${NC}"
+        else
+            echo -e "${RED}❌ Celery worker is not responding${NC}"
+            echo -e "${YELLOW}Expected worker node: ${expected_worker_node}${NC}"
+            echo -e "${YELLOW}Check logs: tail -40 logs/worker.log${NC}"
+            success=false
+        fi
 
-    # Beat has no remote-control ping; its singleton PID is the bounded
-    # startup liveness contract. Durable dispatch freshness remains visible
-    # through /api/v1/ops/health.
-    if process_helper status --root "${PROJECT_ROOT}" --service beat; then
-        echo -e "${GREEN}✅ Celery Beat is running${NC}"
-    else
-        echo -e "${RED}❌ Celery Beat is not running${NC}"
-        success=false
-    fi
+        # Beat has no remote-control ping; its singleton PID is the bounded
+        # startup liveness contract. Durable dispatch freshness remains visible
+        # through /api/v1/ops/health.
+        if process_helper status --root "${PROJECT_ROOT}" --service beat; then
+            echo -e "${GREEN}✅ Celery Beat is running${NC}"
+        else
+            echo -e "${RED}❌ Celery Beat is not running${NC}"
+            success=false
+        fi
 
-    # Check Qdrant
-    if curl -fsS http://localhost:6333/healthz > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ Qdrant is responding${NC}"
+        # Check Qdrant
+        if curl -fsS http://localhost:6333/healthz > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ Qdrant is responding${NC}"
+        else
+            echo -e "${YELLOW}⚠️  Qdrant is not responding (knowledge layer degraded)${NC}"
+        fi
     else
-        echo -e "${YELLOW}⚠️  Qdrant is not responding (knowledge layer degraded)${NC}"
+        echo -e "${YELLOW}Execution disabled; Redis, Worker, Beat, and Qdrant checks skipped.${NC}"
     fi
     
     echo ""
@@ -871,13 +893,23 @@ main() {
     # Bootstrap local runtime automatically
     ensure_venv
     ensure_frontend_deps
-    ensure_database
 
+    # Execution services are intentionally absent from the normal control-plane
+    # topology when execution is disabled. This preserves an existing Redis and
+    # prevents Worker/Beat/recovery from touching historical pending work.
     # Start all services in order
-    start_redis
-    start_qdrant
+    if execution_enabled; then
+        ensure_database
+        start_redis
+        start_qdrant
+    else
+        echo -e "${YELLOW}Execution disabled; starting control plane without database initialization, Redis, Qdrant, Worker, or Beat.${NC}"
+    fi
+
     start_backend
-    start_workers
+    if execution_enabled; then
+        start_workers
+    fi
     start_frontend
     
     # Check health
@@ -891,7 +923,11 @@ main() {
     echo "📱 Frontend Dashboard: http://localhost:3000"
     echo "🔧 Backend API: http://${LOCALHOST}:${BACKEND_PORT}"
     echo "📚 API Docs: http://${LOCALHOST}:${BACKEND_PORT}/docs"
-    echo "🐘 Redis: localhost:6379"
+    if execution_enabled; then
+        echo "🐘 Redis: localhost:6379"
+    else
+        echo "⏸️  Execution services: disabled (Redis/Worker/Beat/Qdrant)"
+    fi
     echo ""
     echo "📝 View logs (permanent storage):"
     echo "  Backend:    tail -f logs/backend.log"

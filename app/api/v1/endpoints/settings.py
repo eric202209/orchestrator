@@ -23,7 +23,9 @@ from app.services.agents.agent_backends import (
     list_supported_backends,
 )
 from app.services.agents.agent_runtime import (
+    BackendRole,
     UnsupportedRuntimeProfileError,
+    resolve_backend_name_for_role,
     resolve_planning_runtime_configuration,
 )
 from app.services.model_adaptation import (
@@ -176,7 +178,15 @@ def get_app_settings(
         get_effective_adaptation_profile(db=db),
         backend_name=effective_backend_name,
     )
-    planning_configuration = resolve_planning_runtime_configuration(db)
+    planning_backend_name = resolve_backend_name_for_role(db, BackendRole.PLANNING)
+    planning_profile = _normalize_requested_adaptation_profile(
+        get_setting_value(db, PLANNING_ADAPTATION_PROFILE_KEY),
+        backend_name=planning_backend_name,
+    )
+    planning_configuration = resolve_planning_runtime_configuration(
+        db,
+        adaptation_profile_override=planning_profile,
+    )
     effective_policy_profile = get_effective_policy_profile(db=db)
     effective_workspace_review_policy = get_effective_workspace_review_policy(
         settings.WORKSPACE_REVIEW_POLICY, db=db

@@ -42,6 +42,7 @@ class AttentionQueryService:
                 InterventionRequest.status == "pending",
                 SessionModel.deleted_at.is_(None),
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 project_access_filter(self.db, current_user),
             )
             .order_by(InterventionRequest.created_at.asc())
@@ -76,6 +77,7 @@ class AttentionQueryService:
             .filter(
                 SessionModel.deleted_at.is_(None),
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 SessionModel.status.in_(ATTENTION_STATUSES),
                 project_access_filter(self.db, current_user),
             )
@@ -92,6 +94,7 @@ class AttentionQueryService:
             .filter(
                 SessionModel.deleted_at.is_(None),
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 SessionModel.status.in_(ATTENTION_STATUSES),
                 project_access_filter(self.db, current_user),
             )
@@ -111,6 +114,7 @@ class AttentionQueryService:
             .join(Project, Project.id == Task.project_id)
             .filter(
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 Task.workspace_status == "ready",
                 project_access_filter(self.db, current_user),
             )
@@ -124,6 +128,7 @@ class AttentionQueryService:
             .join(Project, Project.id == Task.project_id)
             .filter(
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 Task.workspace_status == "ready",
                 project_access_filter(self.db, current_user),
             )
@@ -153,6 +158,7 @@ class AttentionQueryService:
             .filter(
                 SessionModel.deleted_at.is_(None),
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 SessionModel.status.in_(("running", "awaiting_input")),
                 project_access_filter(self.db, current_user),
             )
@@ -167,6 +173,7 @@ class AttentionQueryService:
             .filter(
                 SessionModel.deleted_at.is_(None),
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 SessionModel.is_active.is_(True),
                 project_access_filter(self.db, current_user),
             )
@@ -179,6 +186,7 @@ class AttentionQueryService:
             self.db.query(Project)
             .filter(
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 project_access_filter(self.db, current_user),
             )
             .count()
@@ -191,6 +199,7 @@ class AttentionQueryService:
             .join(Project, Project.id == Task.project_id)
             .filter(
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 project_access_filter(self.db, current_user),
             )
             .count()
@@ -203,6 +212,7 @@ class AttentionQueryService:
             .join(Project, Project.id == Task.project_id)
             .filter(
                 Project.deleted_at.is_(None),
+                Project.retired_at.is_(None),
                 Task.status == "done",
                 project_access_filter(self.db, current_user),
             )

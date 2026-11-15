@@ -9,6 +9,7 @@ def test_execution_disabled_control_plane_write_allowlist():
     assert _is_control_plane_write("PUT", "/api/v1/projects/12")
     assert _is_control_plane_write("DELETE", "/api/v1/tasks/18")
     assert _is_control_plane_write("POST", "/api/v1/auth/session/login")
+    assert _is_control_plane_write("PATCH", "/api/v1/settings/system")
 
     assert not _is_control_plane_write("POST", "/api/v1/tasks/18/retry")
     assert not _is_control_plane_write("POST", "/api/v1/tasks/18/execute")
@@ -64,7 +65,10 @@ def test_execution_disabled_middleware_rejects_dispatch_before_inner_app(monkeyp
 
     allowed = asyncio.run(invoke("PUT", "/api/v1/projects/12"))
     assert allowed[0]["status"] == 200
-    assert called == ["/api/v1/projects/12"]
+
+    settings_allowed = asyncio.run(invoke("PATCH", "/api/v1/settings/system"))
+    assert settings_allowed[0]["status"] == 200
+    assert called == ["/api/v1/projects/12", "/api/v1/settings/system"]
 
 
 def test_celery_dispatch_refuses_execution_disabled(monkeypatch):

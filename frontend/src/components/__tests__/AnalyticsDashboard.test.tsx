@@ -340,6 +340,20 @@ describe('AnalyticsDashboard', () => {
       await render();
       expect(container.textContent).toContain('Failed to load operational data');
     });
+
+    it('shows an access-denied message for an admin-only 403', async () => {
+      (analyticsAPI.getOperational as Mock).mockRejectedValue({
+        response: { status: 403 },
+      });
+      (analyticsAPI.getFailures as Mock).mockResolvedValue({ data: failures });
+      (analyticsAPI.getKnowledge as Mock).mockResolvedValue({ data: knowledge });
+      (analyticsAPI.getExecution as Mock).mockResolvedValue({ data: execution });
+      (analyticsAPI.getOperators as Mock).mockResolvedValue({ data: operators });
+      (analyticsAPI.getDecision as Mock).mockResolvedValue({ data: decision });
+      await render();
+      expect(container.textContent).toContain('Admin access is required to view operational data');
+      expect(container.textContent).not.toContain('Failed to load operational data');
+    });
   });
 
   describe('failure section', () => {
