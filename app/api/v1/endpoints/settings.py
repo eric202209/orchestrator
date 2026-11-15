@@ -40,6 +40,7 @@ from app.services.workspace.system_settings import (
     ADAPTATION_PROFILE_KEY,
     AGENT_BACKEND_KEY,
     AGENT_MODEL_FAMILY_KEY,
+    MOBILE_API_KEY_KEY,
     ORCHESTRATION_POLICY_PROFILE_KEY,
     PLANNING_ADAPTATION_PROFILE_KEY,
     PLANNING_MODEL_FAMILY_KEY,
@@ -53,6 +54,7 @@ from app.services.workspace.system_settings import (
     get_effective_workspace_review_policy,
     get_effective_workspace_root,
     get_setting_value,
+    generate_mobile_gateway_key,
     normalize_workspace_review_policy,
     set_setting_value,
 )
@@ -281,14 +283,39 @@ def update_system_settings(
 ):
     changes: dict[str, dict[str, str | None]] = {}
 
-    if payload.rotate_mobile_api_key or payload.mobile_api_key is not None:
+    if payload.rotate_mobile_api_key and payload.mobile_api_key is not None:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "Mobile gateway key rotation is not available from this endpoint "
-                "until admin-only controls are implemented"
-            ),
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Choose either a custom mobile API key or key rotation, not both",
         )
+
+    if payload.rotate_mobile_api_key or payload.mobile_api_key is not None:
+        _, previous_key_source = get_effective_mobile_gateway_key(
+            settings.MOBILE_GATEWAY_API_KEY,
+            settings.OPENCLAW_API_KEY,
+            db=db,
+        )
+        if payload.rotate_mobile_api_key:
+            mobile_key = generate_mobile_gateway_key()
+            change_target = "generated"
+        else:
+            mobile_key = (payload.mobile_api_key or "").strip()
+            if not mobile_key:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Mobile API key must not be blank",
+                )
+            change_target = "custom"
+        set_setting_value(
+            db,
+            MOBILE_API_KEY_KEY,
+            mobile_key,
+            description="Operator-selected mobile gateway API key",
+        )
+        changes["mobile_api_key"] = {
+            "from": previous_key_source,
+            "to": change_target,
+        }
 
     next_backend_name = _effective_next_backend(payload, db)
     next_workspace_root = (
@@ -536,21 +563,23 @@ def update_system_settings(
 @router.get("/mobile-secret")
 def reveal_mobile_secret(
     current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
 ):
     mobile_key, key_source = get_effective_mobile_gateway_key(
         settings.MOBILE_GATEWAY_API_KEY,
         settings.OPENCLAW_API_KEY,
+        db=db,
     )
-    if not mobile_key:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No mobile API key is configured",
-        )
 
     return {
         "user_email": current_user.email,
         "header_name": "X-OpenClaw-API-Key",
+        "api_key_configured": bool(mobile_key),
         "api_key_preview": _mask_secret(mobile_key),
         "api_key_source": key_source,
-        "detail": "Raw mobile gateway secrets are not returned by the API",
+        "detail": (
+            "Raw mobile gateway secrets are not returned by the API"
+            if mobile_key
+            else "No mobile API key is configured"
+        ),
     }

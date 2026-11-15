@@ -12,6 +12,7 @@ from app.services.workspace.system_settings import (
     ADAPTATION_PROFILE_KEY,
     AGENT_BACKEND_KEY,
     LEGACY_WORKSPACE_ROOT_KEY,
+    MOBILE_API_KEY_KEY,
     ORCHESTRATION_POLICY_PROFILE_KEY,
     PLANNING_ADAPTATION_PROFILE_KEY,
     WORKSPACE_REVIEW_POLICY_KEY,
@@ -64,6 +65,56 @@ def test_settings_can_persist_operator_backend_and_policy_profile(
     assert metadata["changes"]["workspace_review_policy"]["to"] == "hold_all"
 
 
+def test_reveal_mobile_secret_reports_unconfigured_key_without_404(
+    authenticated_client, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "MOBILE_GATEWAY_API_KEY", "")
+    monkeypatch.setattr(settings, "OPENCLAW_API_KEY", "")
+
+    response = authenticated_client.get("/api/v1/settings/mobile-secret")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["api_key_configured"] is False
+    assert payload["api_key_preview"] is None
+    assert payload["api_key_source"] is None
+    assert payload["detail"] == "No mobile API key is configured"
+
+
+def test_settings_can_rotate_mobile_api_key_without_exposing_secret(
+    authenticated_client, db_session, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "MOBILE_GATEWAY_API_KEY", "")
+    monkeypatch.setattr(settings, "OPENCLAW_API_KEY", "")
+
+    response = authenticated_client.patch(
+        "/api/v1/settings/system",
+        json={"rotate_mobile_api_key": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    stored_key = get_setting_value(db_session, MOBILE_API_KEY_KEY)
+    assert stored_key
+    assert len(stored_key) == 64
+    assert payload["system"]["mobile_api_key_configured"] is True
+    assert payload["system"]["mobile_api_key_source"] == MOBILE_API_KEY_KEY
+    assert payload["system"]["mobile_api_key_preview"] == (
+        f"{stored_key[:8]}...{stored_key[-4:]}"
+    )
+    assert stored_key not in response.text
+
+    reveal_response = authenticated_client.get("/api/v1/settings/mobile-secret")
+    assert reveal_response.status_code == 200
+    assert reveal_response.json()["api_key_preview"] == (
+        f"{stored_key[:8]}...{stored_key[-4:]}"
+    )
+
+
 def test_settings_reject_unknown_workspace_review_policy(authenticated_client):
     response = authenticated_client.patch(
         "/api/v1/settings/system",
@@ -76,8 +127,11 @@ def test_settings_reject_unknown_workspace_review_policy(authenticated_client):
 
 
 def test_settings_reads_legacy_planning_profile_with_effective_backend(
-    authenticated_client, db_session
+    authenticated_client, db_session, monkeypatch
 ):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PLANNING_BACKEND", "local_openclaw")
     set_setting_value(db_session, AGENT_BACKEND_KEY, "local_openclaw")
     set_setting_value(db_session, PLANNING_ADAPTATION_PROFILE_KEY, "ollama_default")
 
