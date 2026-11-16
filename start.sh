@@ -1007,62 +1007,18 @@ main() {
     echo ""
 }
 
-# Explicit development routing must happen before main/load_env/prepare_logs:
-# the isolated runtime owns a different database, ports and process directory.
-development_path_is_protected() {
-    local candidate
-    candidate="$(realpath -m -- "${PROJECT_ROOT}")"
-    case "${candidate}" in
-        /root/.openclaw/workspace/vault/orchestrator-production|\
-        /root/.openclaw/workspace/vault/orchestrator-production/*|\
-        /root/.openclaw/workspace/vault/orchestrator-production-runtime|\
-        /root/.openclaw/workspace/vault/orchestrator-production-runtime/*|\
-        /root/.openclaw/workspace/vault/.orchestrator-dev-runtime|\
-        /root/.openclaw/workspace/vault/.orchestrator-dev-runtime/*)
-            return 0
-            ;;
-    esac
-    return 1
-}
-
-start_isolated_development() {
-    if [[ "$#" -eq 0 ]]; then
-        echo "Usage: ./start.sh dev <api-only|init-evaluator|worker-worksheet|preflight|start|status|stop|cleanup> [options]" >&2
-        return 2
-    fi
-    # Help must work before a checkout-local interpreter or runtime exists.
-    case "$1" in
-        --help|-h)
-            startup_usage
-            return 0
-            ;;
-    esac
-    if development_path_is_protected; then
-        echo "Isolated development startup refuses protected production paths: ${PROJECT_ROOT}" >&2
-        return 1
-    fi
-    if [[ ! -x "${VENV_DIR}/bin/python3" || ! -f "${PROJECT_ROOT}/scripts/dev_runtime.py" ]]; then
-        echo "Existing development interpreter and scripts/dev_runtime.py are required; nothing was installed." >&2
-        return 1
-    fi
-    exec "${VENV_DIR}/bin/python3" "${PROJECT_ROOT}/scripts/dev_runtime.py" "$@"
-}
-
 startup_usage() {
-    echo "Usage: ./start.sh dev <command> [options]"
-    echo "  Isolated development: init-evaluator, worker-worksheet, preflight, start, status, stop, cleanup."
-    echo "  api-only: foreground API + Vite frontend with execution disabled."
-    echo "  Initialize the disposable M1 state first with: ./start.sh dev init-evaluator"
-    echo "  Development API: 127.0.0.1:18740; frontend: http://localhost:3000."
-    echo "  ./start.sh without arguments retains conventional checkout startup (default API 8080)."
-    echo "  All active native deployment state remains below the canonical checkout."
+    echo "Usage: ./start.sh [start_worker_only <service>]"
+    echo "  Canonical API/frontend startup uses the checkout database and runtime."
+    echo "  ./start.sh dev is retired; no disposable development runtime is created."
+    echo "  ./start.sh without arguments starts the execution-disabled control plane by default."
 }
 
 dispatch_startup() {
     case "${1-}" in
         dev)
-            shift
-            start_isolated_development "$@"
+            echo "Phase 40B isolated development runtime is retired; no runtime was created." >&2
+            return 78
             ;;
         --help|-h)
             startup_usage

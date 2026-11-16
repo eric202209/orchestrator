@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Run a disposable, loopback-only Orchestrator development runtime.
+"""Retained Phase 40B development-runtime helpers.
 
-This launcher deliberately creates a clean process environment. It never reads
-the repository's ``.env`` file and never inherits credentials or provider
-settings from the invoking shell.
+The Phase 40B launcher is retired. The helper functions remain available to
+offline characterization tests and historical benchmark readers, but the
+script entrypoint refuses to create or operate a development runtime.
 """
 
 from __future__ import annotations
@@ -2539,4 +2539,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    print(
+        "Phase 40B isolated development runtime is retired; no runtime was created.",
+        file=sys.stderr,
+    )
+    raise SystemExit(78)

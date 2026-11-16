@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Phase 39 A2: read-only backup/restore preflight for the GX10 deployment.
+"""Retained Phase 39 A2 backup/restore preflight helpers.
 
 Dry-run only. This script never copies data or writes to production paths.
 It reads the production ``DATABASE_URL`` setting (or its explicit config.py
@@ -14,8 +14,9 @@ It has no execute mode. It reports:
 - a read-only quiescence probe (Redis queue/unacked/persistence counters
   and active SQLite executions) when ``--probe`` is given.
 
-The operator runs the actual capture commands from the A2 readiness
-report after reviewing this output.
+The historical CLI targeted the retired external production checkout and is
+no longer an active deployment command. The helper functions remain available
+to offline characterization tests and historical readers.
 """
 
 from __future__ import annotations
@@ -568,4 +569,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    print(
+        "Phase 39 external-deployment backup preflight is retired; no target was selected.",
+        file=sys.stderr,
+    )
+    sys.exit(78)

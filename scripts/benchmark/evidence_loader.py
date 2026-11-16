@@ -532,7 +532,7 @@ class HistoryLoader:
                 "configuration_fingerprint": (
                     execution["configuration_fingerprint"] if execution else None
                 ),
-                "runtime": "isolated development runtime (.dev-runtime/phase40b-r1)",
+                "runtime": "retained historical isolated benchmark runtime",
                 "review_policy": RETENTION_POLICY,
             },
         )

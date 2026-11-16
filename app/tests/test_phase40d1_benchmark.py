@@ -791,20 +791,45 @@ def test_cli_evaluate_history_writes_output_and_guards_evidence(tmp_path, capsys
     if not HAS_HISTORY:
         pytest.skip("isolated development runtime evidence not present")
     output = tmp_path / "out.json"
-    assert cli.main(["evaluate-history", "--output", str(output)]) == cli.EXIT_OK
+    args = [
+        "evaluate-history",
+        "--runtime-root",
+        str(DEV_RUNTIME),
+        "--output",
+        str(output),
+    ]
+    assert cli.main(args) == cli.EXIT_OK
     assert (
         json.loads(output.read_text())["schema_version"]
         == "benchmark.history_result.v1"
     )
-    assert (
-        cli.main(["evaluate-history", "--output", str(output)]) == cli.EXIT_INVALID
-    )  # no silent overwrite
+    assert cli.main(args) == cli.EXIT_INVALID  # no silent overwrite
     protected = REPO / "docs/roadmap/reports/evidence/phase40c4/should-not-exist.json"
     assert (
-        cli.main(["evaluate-history", "--output", str(protected)]) == cli.EXIT_INVALID
+        cli.main(
+            [
+                "evaluate-history",
+                "--runtime-root",
+                str(DEV_RUNTIME),
+                "--output",
+                str(protected),
+            ]
+        )
+        == cli.EXIT_INVALID
     )
-    control = DEV_RUNTIME / "runtime/control/x.json"
-    assert cli.main(["evaluate-history", "--output", str(control)]) == cli.EXIT_INVALID
+    control = DEV_RUNTIME / "runtime/control/p42-v16i-guard-test.json"
+    assert (
+        cli.main(
+            [
+                "evaluate-history",
+                "--runtime-root",
+                str(DEV_RUNTIME),
+                "--output",
+                str(control),
+            ]
+        )
+        == cli.EXIT_INVALID
+    )
     assert not protected.exists() and not control.exists()
 
 
@@ -933,9 +958,11 @@ def test_live_run_fails_closed_without_campaign(capsys):
     assert outcome["is_benchmark_attempt"] is False
     assert (
         cli.main(["run", "--case", "workflow-a", "--max-attempts", "1", "--live"])
-        == cli.EXIT_INVALID
+        == cli.EXIT_BLOCKED
     )
-    assert json.loads(capsys.readouterr().out)["status"] == runner.STATUS_INVALID_CONFIG
+    assert (
+        json.loads(capsys.readouterr().out)["status"] == "DEVELOPMENT_RUNTIME_RETIRED"
+    )
     with pytest.raises(SystemExit):
         cli.main(["run", "--case", "workflow-a"])  # mode must be explicit
 

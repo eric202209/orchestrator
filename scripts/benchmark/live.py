@@ -151,8 +151,8 @@ def protected_output_problem(output: Path, repo_root: Path) -> str | None:
         if resolved.is_relative_to(evidence_dir):
             return f"refusing to write into historical evidence directory {phase['evidence_dir']}"
     runtime_roots = (
+        (repo_root / "runtime").resolve(),
         dev_runtime._trusted_runtime_root(repo_root).resolve(),
-        (repo_root / ".dev-runtime" / "phase40b-r1").resolve(),
     )
     if any(resolved.is_relative_to(runtime) for runtime in runtime_roots):
         return "refusing to write into the development runtime"
@@ -1610,7 +1610,7 @@ def _finalize(
         attempt_number=number,
     )
     record["identity"]["runtime_identity"].update(
-        runtime="isolated development runtime (.dev-runtime/phase40b-r1)",
+        runtime="explicit isolated benchmark runtime (operator-provided)",
         benchmark_configuration_fingerprint=manifest["runtime"][
             "configuration_fingerprint"
         ],
@@ -1836,9 +1836,8 @@ def independent_acceptance(
     config = ctx.config
     acceptance_dir.mkdir(parents=True, exist_ok=False)
     workdir = (
-        ctx.repo_root
-        / ".dev-runtime"
-        / "benchmark"
+        ctx.output_root
+        / "acceptance-workspaces"
         / _campaign_phase(campaign_id)
         / campaign_id
         / f"{case['case_id']}-a{number}-acceptance"

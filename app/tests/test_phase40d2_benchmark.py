@@ -604,7 +604,9 @@ def test_live_attempt_runs_through_api_and_independent_acceptance(world):
     workspace = world.ctx.config.root / "workspace" / f"{world.campaign}-{CASE_ID}-a1"
     assert "example.invalid" in _git(workspace, "remote", "get-url", "origin")
     # The independent clone is disposable and removed after recording.
-    clones = world.ctx.repo_root / ".dev-runtime/benchmark/phase40d2" / world.campaign
+    clones = (
+        world.ctx.output_root / "acceptance-workspaces" / "phase40d2" / world.campaign
+    )
     assert not list(clones.glob("*-acceptance"))
 
 
@@ -934,8 +936,8 @@ def test_runner_live_requires_campaign(world, capsys):
         runner.dry_run(config, repo_root=REPO)["status"] == runner.STATUS_INVALID_CONFIG
     )
     code = cli.main(["run", "--case", "workflow-a", "--max-attempts", "1", "--live"])
-    assert code == cli.EXIT_INVALID
-    assert "requires --campaign" in capsys.readouterr().out
+    assert code == cli.EXIT_BLOCKED
+    assert "DEVELOPMENT_RUNTIME_RETIRED" in capsys.readouterr().out
 
 
 # -- identity, redaction, evidence ---------------------------------------------

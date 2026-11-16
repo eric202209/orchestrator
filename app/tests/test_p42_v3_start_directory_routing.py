@@ -1,7 +1,5 @@
 """Shell routing probes only; never start a real service or initialize a DB."""
 
-import json
-import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -12,54 +10,32 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_dev_route_bypasses_legacy_configuration_and_bootstrap(tmp_path):
+def test_dev_route_is_retired_before_any_bootstrap(tmp_path):
     repo = tmp_path / "development-checkout"
     repo.mkdir()
     shutil.copyfile(ROOT / "start.sh", repo / "start.sh")
-    (repo / "venv/bin").mkdir(parents=True)
-    (repo / "venv/bin/python3").symlink_to(sys.executable)
-    (repo / "scripts").mkdir()
-    (repo / "scripts/dev_runtime.py").write_text(
-        "import json, os, sys\n"
-        'print(json.dumps({"args":sys.argv[1:], "legacy":os.environ.get("LEGACY_CHECKOUT_SENTINEL")}))\n'
-    )
-    (repo / ".env").write_text("LEGACY_CHECKOUT_SENTINEL=should-not-be-loaded\n")
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key != "LEGACY_CHECKOUT_SENTINEL"
-    }
     result = subprocess.run(
-        [
-            "bash",
-            str(repo / "start.sh"),
-            "dev",
-            "worker-worksheet",
-            "--expected-head",
-            "reviewed head",
-            "--expected-tree",
-            "reviewed tree",
-        ],
+        ["bash", str(repo / "start.sh"), "dev", "start"],
         cwd=tmp_path,
-        env=env,
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 0, result.stderr
-    value = json.loads(result.stdout)
-    assert value == {
-        "args": [
-            "worker-worksheet",
-            "--expected-head",
-            "reviewed head",
-            "--expected-tree",
-            "reviewed tree",
-        ],
-        "legacy": None,
-    }
+    assert result.returncode == 78, result.stderr
+    assert "retired" in result.stderr
     assert not (repo / "logs").exists()
     assert not (repo / "run").exists()
     assert not (repo / "orchestrator.db").exists()
+
+
+def test_direct_dev_runtime_entrypoint_is_retired(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/dev_runtime.py"), "start"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 78
+    assert "retired" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -83,8 +59,8 @@ def test_dev_route_refuses_protected_paths_before_any_action(root):
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 1
-    assert "refuses protected production paths" in result.stderr
+    assert result.returncode == 78
+    assert "retired" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -92,9 +68,9 @@ def test_dev_route_refuses_protected_paths_before_any_action(root):
     [
         (["--help"], 0),
         (["-h"], 0),
-        (["dev"], 2),
-        (["dev", "--help"], 0),
-        (["dev", "-h"], 0),
+        (["dev"], 78),
+        (["dev", "--help"], 78),
+        (["dev", "-h"], 78),
     ],
 )
 def test_help_and_missing_dev_command_have_no_startup_side_effects(
@@ -112,12 +88,15 @@ def test_help_and_missing_dev_command_have_no_startup_side_effects(
         text=True,
     )
     assert result.returncode == expected, result.stderr
-    assert "Usage:" in result.stdout + result.stderr
+    if args[0] == "dev":
+        assert "retired" in result.stderr
+    else:
+        assert "Usage:" in result.stdout + result.stderr
     assert "Starting Orchestrator Network" not in result.stdout
     assert set(repo.iterdir()) == before
 
 
-def test_dev_start_still_requires_existing_interpreter_and_launcher(tmp_path):
+def test_dev_start_is_retired_without_creating_runtime(tmp_path):
     repo = tmp_path / "development-checkout"
     repo.mkdir()
     shutil.copyfile(ROOT / "start.sh", repo / "start.sh")
@@ -126,8 +105,8 @@ def test_dev_start_still_requires_existing_interpreter_and_launcher(tmp_path):
         capture_output=True,
         text=True,
     )
-    assert result.returncode == 1
-    assert "Existing development interpreter" in result.stderr
+    assert result.returncode == 78
+    assert "retired" in result.stderr
     assert not (repo / "venv").exists()
     assert not (repo / "logs").exists()
     assert not (repo / "run").exists()

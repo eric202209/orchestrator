@@ -2,12 +2,14 @@
 
     venv/bin/python scripts/benchmark/cli.py evaluate-history \
         --evidence-root docs/roadmap/reports/evidence \
-        --output .dev-runtime/benchmark/history-results.json
+        --runtime-root /path/to/retained/benchmark-runtime \
+        --output /path/to/history-results.json
     venv/bin/python scripts/benchmark/cli.py validate-cases
     venv/bin/python scripts/benchmark/cli.py run --case workflow-a \
         --profile isolated-development --max-attempts 2 --dry-run
 
-Live campaign (Phase 40D-3), against a running isolated development runtime:
+Live campaigns are unavailable while the retired Phase 40B runtime lane has no
+operator-provided isolated runtime:
 
     venv/bin/python scripts/benchmark/cli.py campaign-init \
         --campaign phase40d3-c1 --cases workflow-a,workflow-b,workflow-c \
@@ -137,13 +139,11 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=REPO_ROOT / "docs/roadmap/reports/evidence",
     )
-    history.add_argument(
-        "--runtime-root", type=Path, default=REPO_ROOT / ".dev-runtime/phase40b-r1"
-    )
+    history.add_argument("--runtime-root", type=Path, required=True)
     history.add_argument(
         "--output",
         type=Path,
-        default=REPO_ROOT / ".dev-runtime/benchmark/history-results.json",
+        required=True,
     )
     history.add_argument("--overwrite", action="store_true")
 
@@ -185,6 +185,36 @@ def main(argv: list[str] | None = None) -> int:
             sub.add_argument("--stop-runtime", action="store_true")
 
     args = parser.parse_args(argv)
+
+    if args.command == "run" and args.live:
+        print(
+            json.dumps(
+                {
+                    "status": "DEVELOPMENT_RUNTIME_RETIRED",
+                    "is_benchmark_attempt": False,
+                    "errors": [
+                        "live benchmark runs are unavailable after Phase 40B runtime retirement"
+                    ],
+                },
+                sort_keys=True,
+            )
+        )
+        return EXIT_BLOCKED
+
+    if args.command in {"campaign-init", "campaign-close"}:
+        print(
+            json.dumps(
+                {
+                    "status": "DEVELOPMENT_RUNTIME_RETIRED",
+                    "is_benchmark_attempt": False,
+                    "errors": [
+                        "runtime-backed benchmark campaigns are unavailable after Phase 40B runtime retirement"
+                    ],
+                },
+                sort_keys=True,
+            )
+        )
+        return EXIT_BLOCKED
 
     if args.command in {"campaign-init", "campaign-metrics", "campaign-close"}:
         ctx = live.LiveContext(
