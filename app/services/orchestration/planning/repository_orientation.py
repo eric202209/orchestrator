@@ -14,7 +14,9 @@ never ``creation_authorized``, and never enters an APA.
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,10 +46,19 @@ IMPORT_FACTS_HEADER = (
 )
 
 ORIENTATION_SCOPE_TRACKED = "git-tracked"
+ORIENTATION_SCOPE_WORKSPACE = "workspace-listing"
 ORIENTATION_SCOPE_UNAVAILABLE = "unavailable"
 
 ORIENTATION_UNAVAILABLE_NOT_GIT = "project_is_not_a_git_work_tree"
 ORIENTATION_UNAVAILABLE_NO_CANDIDATES = "no_tracked_path_matched_a_task_literal"
+ORIENTATION_UNAVAILABLE_WORKSPACE_UNLISTABLE = "workspace_listing_unavailable"
+ORIENTATION_UNAVAILABLE_WORKSPACE_EMPTY = "no_workspace_product_path_observed"
+
+# P42-V17-K non-Git Discovery fallback walk bounds.  Emitted paths and bytes
+# stay bounded by ORIENTATION_PATH_LIMIT / ORIENTATION_BYTE_BUDGET above.
+WORKSPACE_LISTING_MAX_DEPTH = 4
+WORKSPACE_LISTING_MAX_DIR_ENTRIES = 512
+WORKSPACE_LISTING_MAX_VISITED = 4096
 
 _GIT_SYMLINK_MODE = "120000"
 _GIT_GITLINK_MODE = "160000"
@@ -216,6 +227,104 @@ def tracked_product_paths(project_dir: Path) -> tuple[str, ...] | None:
     return tuple(sorted(dict.fromkeys(paths)))
 
 
+def _confirmed_not_git_work_tree(project_dir: Path) -> bool:
+    """True only when ``project_dir`` is positively not inside a Git work tree.
+
+    A failing ``git ls-files`` alone is not enough: a real repository can fail
+    for unrelated reasons, and those must not be masked by a workspace listing.
+    """
+
+    try:
+        os.lstat(project_dir / ".git")
+        return False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(project_dir),
+            capture_output=True,
+            shell=False,
+            timeout=ORIENTATION_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode != 0
+
+
+def workspace_product_paths(project_dir: Path) -> tuple[str, ...] | None:
+    """Bounded, deterministic workspace-relative listing for non-Git projects.
+
+    Entries are ``lstat``-ed only; symlinks, special files and hidden
+    (dot-prefixed) segments are never emitted or traversed.  Every emitted
+    value passes ``path_authority.declare`` and is classified ``PRODUCT``.
+    Directories are emitted with a trailing ``/``, in breadth-first order with
+    names sorted inside each directory, so shallow entries survive truncation.  A directory with more than
+    ``WORKSPACE_LISTING_MAX_DIR_ENTRIES`` entries is omitted whole, and the walk
+    stops before exceeding ``WORKSPACE_LISTING_MAX_VISITED`` entries, so the
+    result never depends on filesystem enumeration order.  ``None`` means the
+    root is not a listable real directory.
+    """
+
+    import app.services.orchestration.validation.path_authority as path_authority
+
+    try:
+        if not stat.S_ISDIR(os.lstat(project_dir).st_mode):
+            return None
+    except OSError:
+        return None
+
+    paths: list[str] = []
+    visited = 0
+    queue: list[tuple[Path, tuple[str, ...]]] = [(Path(project_dir), ())]
+    while queue:
+        directory, prefix = queue.pop(0)
+        try:
+            with os.scandir(directory) as iterator:
+                names: list[str] = []
+                for entry in iterator:
+                    names.append(entry.name)
+                    if len(names) > WORKSPACE_LISTING_MAX_DIR_ENTRIES:
+                        break
+        except OSError:
+            if not prefix:
+                return None
+            continue
+        if len(names) > WORKSPACE_LISTING_MAX_DIR_ENTRIES:
+            continue
+        if visited + len(names) > WORKSPACE_LISTING_MAX_VISITED:
+            break
+        visited += len(names)
+        for name in sorted(names):
+            if name.startswith("."):
+                continue
+            segments = (*prefix, name)
+            try:
+                canonical = path_authority.declare("/".join(segments))
+            except (path_authority.PathAuthorityError, TypeError, ValueError):
+                continue
+            if (
+                path_authority.classify_trust(canonical)
+                is not path_authority.TrustClass.PRODUCT
+            ):
+                continue
+            child = directory / name
+            try:
+                mode = os.lstat(child).st_mode
+            except OSError:
+                continue
+            if stat.S_ISREG(mode):
+                paths.append(canonical.value)
+            elif stat.S_ISDIR(mode):
+                paths.append(f"{canonical.value}/")
+                if len(segments) < WORKSPACE_LISTING_MAX_DEPTH:
+                    queue.append((child, segments))
+    return tuple(paths)
+
+
 def derive_repository_orientation(
     project_dir: Path,
     task_description: str,
@@ -223,6 +332,7 @@ def derive_repository_orientation(
     explicit_paths: Iterable[str] = (),
     excluded_path_prefixes: Iterable[str] = (),
     include_import_neighbors: bool = False,
+    non_git_workspace_fallback: bool = False,
 ) -> RepositoryOrientation:
     """Derive the advisory candidate surface for the current request only.
 
@@ -233,11 +343,28 @@ def derive_repository_orientation(
     ``include_import_neighbors`` adds bounded one-hop reverse-import facts for
     shown lexical anchors (see ``_with_import_neighbors``).  The lexical
     derivation above it is unchanged either way.
+
+    ``non_git_workspace_fallback`` (P42-V17-K, Discovery only) substitutes the
+    bounded ``workspace_product_paths`` listing when the project is confirmed
+    not to be a Git work tree.  Listed paths that match no task literal still
+    follow the lexical matches inside the same budget, and import neighbors
+    are not derived for this scope.  Git-tracked orientation is unchanged.
     """
 
+    scope = ORIENTATION_SCOPE_TRACKED
     tracked = tracked_product_paths(Path(project_dir))
     if tracked is None:
-        return _unavailable(ORIENTATION_UNAVAILABLE_NOT_GIT)
+        if not non_git_workspace_fallback or not _confirmed_not_git_work_tree(
+            Path(project_dir)
+        ):
+            return _unavailable(ORIENTATION_UNAVAILABLE_NOT_GIT)
+        tracked = workspace_product_paths(Path(project_dir))
+        if tracked is None:
+            return _unavailable(ORIENTATION_UNAVAILABLE_WORKSPACE_UNLISTABLE)
+        if not tracked:
+            return _unavailable(ORIENTATION_UNAVAILABLE_WORKSPACE_EMPTY)
+        scope = ORIENTATION_SCOPE_WORKSPACE
+        include_import_neighbors = False
     excluded_prefixes = tuple(
         prefix
         for prefix in excluded_path_prefixes
@@ -277,6 +404,9 @@ def derive_repository_orientation(
     for _, _, matches in groups:
         for value in matches:
             _append(value)
+    if scope == ORIENTATION_SCOPE_WORKSPACE:
+        for value in scoped_tracked:
+            _append(value)
 
     if not candidates:
         return _unavailable(ORIENTATION_UNAVAILABLE_NO_CANDIDATES)
@@ -302,7 +432,7 @@ def derive_repository_orientation(
 
     return RepositoryOrientation(
         available=bool(shown),
-        scope=ORIENTATION_SCOPE_TRACKED,
+        scope=scope,
         entries_shown=len(shown),
         entries_total=len(candidates),
         truncated=len(shown) < len(candidates),
@@ -412,6 +542,26 @@ def _with_import_neighbors(
     return lexical, lexical_bytes, tuple(selected), neighbor_bytes, suppressed, skipped
 
 
+_TRACKED_ORIENTATION_FOOTER = (
+    "These are factual Git-tracked paths only. They are advisory candidates, "
+    "not an expected file list: a listed path is not authorized for "
+    "creation or mutation, and an omitted path does not mean it is absent "
+    "from the repository. Use these names to choose one bounded query and "
+    "at most the allowed number of scopes instead of guessing repository "
+    "vocabulary; search_text/read_file/stop behavior is unchanged."
+)
+_WORKSPACE_ORIENTATION_FOOTER = (
+    "The project is not a Git repository. These are factual paths observed in "
+    "the admitted workspace, relative to its root (a trailing / marks a "
+    "directory). They are advisory candidates, not an expected file list: a "
+    "listed path is not authorized for creation or mutation, and an omitted "
+    "path does not mean it is absent. Discovery paths must be written "
+    "relative to the workspace root exactly as listed here; absolute paths "
+    "and .. segments are rejected. search_text/read_file/stop behavior is "
+    "unchanged."
+)
+
+
 def render_repository_orientation(orientation: RepositoryOrientation | None) -> str:
     """Render the advisory block, or an empty string when unavailable."""
 
@@ -440,12 +590,11 @@ def render_repository_orientation(orientation: RepositoryOrientation | None) -> 
             else ()
         ),
         "",
-        "These are factual Git-tracked paths only. They are advisory candidates, "
-        "not an expected file list: a listed path is not authorized for "
-        "creation or mutation, and an omitted path does not mean it is absent "
-        "from the repository. Use these names to choose one bounded query and "
-        "at most the allowed number of scopes instead of guessing repository "
-        "vocabulary; search_text/read_file/stop behavior is unchanged.",
+        (
+            _WORKSPACE_ORIENTATION_FOOTER
+            if orientation.scope == ORIENTATION_SCOPE_WORKSPACE
+            else _TRACKED_ORIENTATION_FOOTER
+        ),
         "END REPOSITORY ORIENTATION",
     ]
     return "\n".join(lines)

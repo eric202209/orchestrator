@@ -477,6 +477,8 @@ def run_discovery_stage(
         ctx.prompt,
         explicit_paths=explicit_paths,
         include_import_neighbors=True,
+        # P42-V17-K: non-Git workspaces get bounded workspace-relative paths.
+        non_git_workspace_fallback=True,
     )
     prompt = build_discovery_prompt(
         ctx.prompt, ctx.orchestration_state.project_context or "", orientation
