@@ -40,36 +40,41 @@ BACKEND_PORT=${BACKEND_PORT:-8080}
 
 load_env() {
     local env_file="${PROJECT_ROOT}/.env"
-    [ -f "${env_file}" ] || return 0
+    if [ -f "${env_file}" ]; then
+        while IFS= read -r line || [ -n "$line" ]; do
+            line="${line%$'\r'}"
+            [[ -n "${line}" ]] || continue
+            [[ "${line}" =~ ^[[:space:]]*# ]] && continue
+            [[ "${line}" == *=* ]] || continue
 
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="${line%$'\r'}"
-        [[ -n "${line}" ]] || continue
-        [[ "${line}" =~ ^[[:space:]]*# ]] && continue
-        [[ "${line}" == *=* ]] || continue
+            local key="${line%%=*}"
+            local value="${line#*=}"
 
-        local key="${line%%=*}"
-        local value="${line#*=}"
+            key="${key#"${key%%[![:space:]]*}"}"
+            key="${key%"${key##*[![:space:]]}"}"
 
-        key="${key#"${key%%[![:space:]]*}"}"
-        key="${key%"${key##*[![:space:]]}"}"
+            case "${key}" in
+                ORCHESTRATOR_GIT_SHA|ORCHESTRATOR_REPO_GIT_SHA|ORCHESTRATOR_BUILD_TIME|ORCHESTRATOR_CONFIG_SHA256|ORCHESTRATOR_CONFIG_SOURCE)
+                    # The canonical deploy wrapper locks these values before
+                    # startup. A stale .env identity must not override them.
+                    if [[ -v "${key}" ]]; then
+                        continue
+                    fi
+                    ;;
+            esac
+            export "${key}=${value}"
+        done < "${env_file}"
+    fi
 
-        case "${key}" in
-            ORCHESTRATOR_GIT_SHA|ORCHESTRATOR_REPO_GIT_SHA|ORCHESTRATOR_BUILD_TIME|ORCHESTRATOR_CONFIG_SHA256|ORCHESTRATOR_CONFIG_SOURCE)
-                # The canonical deploy wrapper locks these values before
-                # startup. A stale .env identity must not override them.
-                if [[ -v "${key}" ]]; then
-                    continue
-                fi
-                ;;
-        esac
-        export "${key}=${value}"
-    done < "${env_file}"
-
+    # The canonical historical deployment is a control-plane launch unless
+    # execution is explicitly opted in through the environment or .env. This
+    # preserves an existing host Redis and prevents accidental Worker/Beat
+    # startup when the local .env omits the capability gate.
+    : "${EXECUTION_ENABLED:=false}"
     : "${DATABASE_URL:=${CANONICAL_DATABASE_URL}}"
     : "${WORKSPACE_ROOT:=${CANONICAL_WORKSPACE_ROOT}}"
     : "${RUNTIME_ROOT:=${CANONICAL_RUNTIME_ROOT}}"
-    export DATABASE_URL WORKSPACE_ROOT RUNTIME_ROOT
+    export DATABASE_URL WORKSPACE_ROOT RUNTIME_ROOT EXECUTION_ENABLED
 }
 
 validate_canonical_deployment_config() {
@@ -155,7 +160,7 @@ require_port_available() {
 }
 
 execution_enabled() {
-    local execution_value="${EXECUTION_ENABLED:-true}"
+    local execution_value="${EXECUTION_ENABLED:-false}"
     execution_value="${execution_value,,}"
     case "${execution_value}" in
         false|0|no|off|disabled)
@@ -1004,11 +1009,23 @@ main() {
 
 # Explicit development routing must happen before main/load_env/prepare_logs:
 # the isolated runtime owns a different database, ports and process directory.
+development_path_is_protected() {
+    local candidate
+    candidate="$(realpath -m -- "${PROJECT_ROOT}")"
+    case "${candidate}" in
+        /root/.openclaw/workspace/vault/orchestrator-production|\
+        /root/.openclaw/workspace/vault/orchestrator-production/*|\
+        /root/.openclaw/workspace/vault/orchestrator-production-runtime|\
+        /root/.openclaw/workspace/vault/orchestrator-production-runtime/*|\
+        /root/.openclaw/workspace/vault/.orchestrator-dev-runtime|\
+        /root/.openclaw/workspace/vault/.orchestrator-dev-runtime/*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
 start_isolated_development() {
-    if [[ "${PROJECT_ROOT}" != "/root/.openclaw/workspace/vault/orchestrator" ]]; then
-        echo "Isolated development startup must run from the canonical Orchestrator checkout." >&2
-        return 1
-    fi
     if [[ "$#" -eq 0 ]]; then
         echo "Usage: ./start.sh dev <api-only|init-evaluator|worker-worksheet|preflight|start|status|stop|cleanup> [options]" >&2
         return 2
@@ -1020,6 +1037,10 @@ start_isolated_development() {
             return 0
             ;;
     esac
+    if development_path_is_protected; then
+        echo "Isolated development startup refuses protected production paths: ${PROJECT_ROOT}" >&2
+        return 1
+    fi
     if [[ ! -x "${VENV_DIR}/bin/python3" || ! -f "${PROJECT_ROOT}/scripts/dev_runtime.py" ]]; then
         echo "Existing development interpreter and scripts/dev_runtime.py are required; nothing was installed." >&2
         return 1

@@ -18,7 +18,7 @@ from app.tasks import worker as worker_tasks
 from scripts import dev_runtime
 
 
-def test_development_runtime_default_layout_is_disjoint_and_requires_pin_opt_in(
+def test_development_runtime_default_layout_is_checkout_local_and_requires_pin_opt_in(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repo_root = tmp_path / "checkout"
@@ -27,8 +27,8 @@ def test_development_runtime_default_layout_is_disjoint_and_requires_pin_opt_in(
     runtime_root = config.root / "runtime"
     runtime_root.mkdir(parents=True)
 
-    assert config.root != repo_root / ".dev-runtime" / "phase40b-r1"
-    assert repo_root not in config.root.parents
+    assert config.root == (repo_root / ".dev-runtime" / "phase40b-r1").resolve()
+    assert repo_root in config.root.parents
     assert config.root not in repo_root.parents
     assert config.repo_root.resolve() == repo_root.resolve()
     paths = worker_identity.resolve_worker_identity_paths(

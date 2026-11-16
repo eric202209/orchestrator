@@ -1,4 +1,5 @@
 from pathlib import Path
+import shlex
 import subprocess
 
 from app.config import BASE_DIR, Settings
@@ -58,3 +59,59 @@ def test_startup_validates_the_canonical_deployment_contract() -> None:
 
     assert rejected.returncode == 78
     assert "RUNTIME_ROOT must resolve" in rejected.stderr
+
+
+def test_startup_load_env_supplies_defaults_without_env_file(tmp_path: Path) -> None:
+    command = (
+        "source {start}; PROJECT_ROOT={root}; unset DATABASE_URL WORKSPACE_ROOT "
+        "RUNTIME_ROOT EXECUTION_ENABLED; load_env; "
+        "validate_canonical_deployment_config"
+    ).format(
+        start=shlex.quote(str(BASE_DIR / "start.sh")),
+        root=shlex.quote(str(tmp_path)),
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", command],
+        cwd=BASE_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_startup_defaults_to_control_plane_when_execution_is_unset(
+    tmp_path: Path,
+) -> None:
+    command = (
+        "source {start}; PROJECT_ROOT={root}; unset EXECUTION_ENABLED; "
+        "load_env; if execution_enabled; then echo enabled; else echo disabled; fi"
+    ).format(
+        start=shlex.quote(str(BASE_DIR / "start.sh")),
+        root=shlex.quote(str(tmp_path)),
+    )
+
+    defaulted = subprocess.run(
+        ["bash", "-c", command],
+        cwd=BASE_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert defaulted.returncode == 0
+    assert defaulted.stdout.strip().endswith("disabled")
+
+    (tmp_path / ".env").write_text("EXECUTION_ENABLED=true\n", encoding="utf-8")
+    explicit = subprocess.run(
+        ["bash", "-c", command],
+        cwd=BASE_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert explicit.returncode == 0
+    assert explicit.stdout.strip().endswith("enabled")
