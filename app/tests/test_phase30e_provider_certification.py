@@ -51,6 +51,7 @@ for what was and was not covered and why.
 from __future__ import annotations
 
 import json
+import os
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -85,6 +86,10 @@ REAL_OPENCLAW_CONFIG_PATH = Path("/root/.openclaw/openclaw.json")
 # live certification jobs can select them explicitly with ``-m live``.
 pytestmark = pytest.mark.live
 
+# Live scenarios also need an explicit opt-in: the ``live`` marker alone does
+# not stop a plain ``pytest`` run from selecting them.
+PHASE30_LIVE_OPT_IN_ENV = "PHASE30_LIVE_CERTIFICATION"
+
 
 def _write_evidence(name: str, record: dict[str, Any]) -> None:
     EVIDENCE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -108,7 +113,14 @@ def real_pipeline(db_session_factory, isolated_workspace_root, monkeypatch, tmp_
         `queue_task_for_session`, which internally reaches the REAL
         `execute_orchestration_task` synchronously (via Celery `.apply()`,
         never mocked) and therefore makes real provider network calls.
+
+    Every Phase 30E/G/H/I/J certification scenario depends on this fixture,
+    so it is the single default-off gate: without the explicit opt-in the
+    scenario is skipped before any dispatch or evidence write (P42-V17-J).
     """
+    if os.environ.get(PHASE30_LIVE_OPT_IN_ENV) != "1":
+        pytest.skip(f"{PHASE30_LIVE_OPT_IN_ENV}=1 is required for live certification")
+
     import app.tasks.worker as worker_module
 
     db = db_session_factory()

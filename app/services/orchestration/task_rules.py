@@ -74,7 +74,6 @@ _REVIEW_INTENT_MARKERS = (
     "analyzes",
     "analyzed",
     "analyzing",
-    "inventory",
     "extension points",
     "current project structure",
     "current project architecture",
@@ -84,6 +83,15 @@ _REVIEW_INTENT_MARKER_RE = re.compile(
     r"\b(?:"
     + "|".join(re.escape(marker) for marker in _REVIEW_INTENT_MARKERS)
     + r")\b",
+    re.IGNORECASE,
+)
+# "inventory" is both review shorthand ("inventory extension points") and a
+# domain noun. It only signals review intent when the title lacks unambiguous
+# implementation intent; as a strong marker it forced "Add Inventory
+# Reservation Support" (Task 304, P42-V17-H) into review_only.
+_CONTEXTUAL_REVIEW_INTENT_MARKER_RE = re.compile(r"\binventory\b", re.IGNORECASE)
+_TITLE_REVIEW_VERB_RE = re.compile(
+    r"\b(?:review|reviews|reviewed|reviewing|audit|audits|audited|auditing)\b",
     re.IGNORECASE,
 )
 
@@ -141,6 +149,15 @@ class VirtualMergeGateFailure(str):
 
 def _title_has_negated_implementation_intent(title: str) -> bool:
     return bool(_NEGATED_IMPLEMENTATION_TITLE_INTENT_RE.search(title))
+
+
+def _title_has_unambiguous_implementation_intent(title: Optional[str]) -> bool:
+    normalized_title = str(title or "").strip().lower()
+    return (
+        bool(_IMPLEMENTATION_TITLE_INTENT_RE.search(normalized_title))
+        and not _title_has_negated_implementation_intent(normalized_title)
+        and not _TITLE_REVIEW_VERB_RE.search(normalized_title)
+    )
 
 
 def classify_task_intent(
@@ -233,6 +250,10 @@ def should_force_review_execution_profile(
         return False
     combined = " ".join([task_prompt or "", title or "", description or ""]).lower()
     if _REVIEW_INTENT_MARKER_RE.search(combined):
+        return True
+    if _CONTEXTUAL_REVIEW_INTENT_MARKER_RE.search(
+        combined
+    ) and not _title_has_unambiguous_implementation_intent(title):
         return True
 
     implementation_markers = get_implementation_intent_markers()

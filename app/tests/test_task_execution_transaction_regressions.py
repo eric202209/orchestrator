@@ -1470,11 +1470,32 @@ def test_admitted_dogfood_session_isolates_legacy_project_queue(
         "app.services.session.session_runtime_service._maybe_compact_checkpoint_before_dispatch",
         lambda *args, **kwargs: None,
     )
+    # The admitted path publishes through publisher_from_task, which prefers
+    # apply_async; patching only .delay leaked real messages to the canonical
+    # broker (P42-V17-I/J). Capture apply_async and fail on any broker publish.
+    published = []
+
+    def _capture_apply_async(*args, **options):
+        published.append(options)
+        return _FakeAsyncResult()
+
+    broker_publishes = []
+
+    def _deny_broker_publish(self, name, *args, **kwargs):
+        # Celery's Task.apply_async/delay and direct send_task all reach the
+        # broker through Celery.send_task, before any connection is opened.
+        broker_publishes.append(name)
+        raise AssertionError("test attempted a real broker publish")
+
+    monkeypatch.setattr(
+        worker_module.execute_orchestration_task, "apply_async", _capture_apply_async
+    )
     monkeypatch.setattr(
         worker_module.execute_orchestration_task,
         "delay",
-        lambda **kwargs: _FakeAsyncResult(),
+        lambda **kwargs: pytest.fail("unexpected delay() publication"),
     )
+    monkeypatch.setattr("celery.app.base.Celery.send_task", _deny_broker_publish)
 
     standard_response = authenticated_client.post(
         f"/api/v1/sessions/{standard_session.id}/tasks/{selected_task.id}/run"
@@ -1487,6 +1508,20 @@ def test_admitted_dogfood_session_isolates_legacy_project_queue(
 
     assert admitted_response.status_code == 200
     assert admitted_response.json()["queued_task"]["task_id"] == selected_task.id
+    assert broker_publishes == []
+    assert len(published) == 1
+    # Default routing: no queue/exchange/routing override is passed.
+    assert set(published[0]) == {"kwargs", "task_id", "retries"}
+    published_kwargs = published[0]["kwargs"]
+    assert published_kwargs["task_id"] == selected_task.id
+    assert published_kwargs["session_id"] == admitted_session.id
+    assert (
+        published_kwargs["expected_session_instance_id"]
+        == "admitted-dogfood-session-instance"
+    )
+    assert published[0]["task_id"] == (
+        db_session.query(TaskExecution).one().dispatch_celery_task_id
+    )
     assert db_session.query(SessionTask).count() == 1
     assert db_session.query(TaskExecution).count() == 1
     assert db_session.get(Task, historical_pending.id).status == TaskStatus.PENDING
