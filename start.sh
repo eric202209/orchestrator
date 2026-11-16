@@ -21,6 +21,10 @@ QDRANT_HOME="${PROJECT_ROOT}/qdrant"
 QDRANT_BIN_DIR="${QDRANT_HOME}/bin"
 QDRANT_DATA_DIR="${QDRANT_HOME}/data"
 QDRANT_SNAPSHOTS_DIR="${QDRANT_HOME}/snapshots"
+CANONICAL_WORKSPACE_ROOT="/root/.openclaw/workspace/vault/projects"
+CANONICAL_DATABASE_PATH="${PROJECT_ROOT}/orchestrator.db"
+CANONICAL_DATABASE_URL="sqlite:///${CANONICAL_DATABASE_PATH}"
+CANONICAL_RUNTIME_ROOT="${PROJECT_ROOT}/runtime"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -61,12 +65,52 @@ load_env() {
         esac
         export "${key}=${value}"
     done < "${env_file}"
+
+    : "${DATABASE_URL:=${CANONICAL_DATABASE_URL}}"
+    : "${WORKSPACE_ROOT:=${CANONICAL_WORKSPACE_ROOT}}"
+    : "${RUNTIME_ROOT:=${CANONICAL_RUNTIME_ROOT}}"
+    export DATABASE_URL WORKSPACE_ROOT RUNTIME_ROOT
+}
+
+validate_canonical_deployment_config() {
+    local database_url="${DATABASE_URL}"
+    local database_path
+    local workspace_root
+    local runtime_root
+
+    case "${database_url}" in
+        sqlite:///*)
+            database_path="${database_url#sqlite:///}"
+            database_path="${database_path%%\?*}"
+            ;;
+        *)
+            echo -e "${RED}❌ Canonical deployment requires a SQLite DATABASE_URL.${NC}" >&2
+            return 78
+            ;;
+    esac
+    if [ "${database_path}" != "${CANONICAL_DATABASE_PATH}" ]; then
+        echo -e "${RED}❌ DATABASE_URL must resolve to ${CANONICAL_DATABASE_PATH}.${NC}" >&2
+        return 78
+    fi
+
+    workspace_root="$(realpath -m -- "${WORKSPACE_ROOT}")"
+    if [ "${workspace_root}" != "${CANONICAL_WORKSPACE_ROOT}" ]; then
+        echo -e "${RED}❌ WORKSPACE_ROOT must resolve to ${CANONICAL_WORKSPACE_ROOT}.${NC}" >&2
+        return 78
+    fi
+
+    runtime_root="$(realpath -m -- "${RUNTIME_ROOT}")"
+    if [ "${runtime_root}" != "${CANONICAL_RUNTIME_ROOT}" ]; then
+        echo -e "${RED}❌ RUNTIME_ROOT must resolve to ${CANONICAL_RUNTIME_ROOT}.${NC}" >&2
+        return 78
+    fi
 }
 
 prepare_logs() {
     mkdir -p "${LOG_DIR}"
     mkdir -p "${PID_DIR}"
     mkdir -p "${PROJECT_ROOT}/checkpoints"
+    mkdir -p "${RUNTIME_ROOT}"
     mkdir -p "${QDRANT_BIN_DIR}"
     mkdir -p "${QDRANT_DATA_DIR}"
     mkdir -p "${QDRANT_SNAPSHOTS_DIR}"
@@ -130,9 +174,18 @@ owned_processes_running() {
             return 0
         else
             result=$?
-            if [ "${result}" -ne 1 ]; then
-                return "${result}"
+            if [ "${result}" -eq 1 ]; then
+                continue
             fi
+            # A dead identity record is safe for project_process.py to retire
+            # without signalling a process. Keep refusing startup when the
+            # record cannot be fully validated (PID reuse, root mismatch,
+            # malformed metadata, or a legacy-only PID file).
+            if process_helper stop --root "${PROJECT_ROOT}" --service "${service}" > /dev/null 2>&1; then
+                echo -e "${YELLOW}Retired stale ${service} process identity record.${NC}"
+                continue
+            fi
+            return "${result}"
         fi
     done
     return 1
@@ -731,10 +784,18 @@ start_frontend() {
     cd "${FRONTEND_DIR}"
     
     require_port_available 0.0.0.0 3000
+
+    local vite_bin="${FRONTEND_DIR}/node_modules/.bin/vite"
+    if [ ! -x "${vite_bin}" ]; then
+        echo -e "${RED}❌ Vite executable is missing: ${vite_bin}${NC}" >&2
+        return 1
+    fi
     
     # Start frontend in background
     # LOGS DIRECTIVE: Write directly to root logs/ for history preservation.
-    setsid nohup pnpm dev >> "${LOG_DIR}/frontend.log" 2>&1 &
+    # Launch Vite directly so the recorded project process is the server
+    # itself; a pnpm wrapper can exit while orphaning its Vite child.
+    setsid nohup "${vite_bin}" >> "${LOG_DIR}/frontend.log" 2>&1 &
     local frontend_pid=$!
     record_service_process frontend "${frontend_pid}"
     normalize_runtime_ownership
@@ -863,6 +924,7 @@ main() {
     echo ""
     
     load_env
+    validate_canonical_deployment_config
     prepare_logs
 
     # A start is either from a stopped topology or an explicit interactive
@@ -943,14 +1005,10 @@ main() {
 # Explicit development routing must happen before main/load_env/prepare_logs:
 # the isolated runtime owns a different database, ports and process directory.
 start_isolated_development() {
-    local protected_source="/root/.openclaw/workspace/vault/orchestrator-production"
-    local protected_runtime="/root/.openclaw/workspace/vault/orchestrator-production-runtime"
-    case "${PROJECT_ROOT}" in
-        "${protected_source}"|"${protected_source}/"*|"${protected_runtime}"|"${protected_runtime}/"*)
-            echo "Isolated development startup refuses protected production paths." >&2
-            return 1
-            ;;
-    esac
+    if [[ "${PROJECT_ROOT}" != "/root/.openclaw/workspace/vault/orchestrator" ]]; then
+        echo "Isolated development startup must run from the canonical Orchestrator checkout." >&2
+        return 1
+    fi
     if [[ "$#" -eq 0 ]]; then
         echo "Usage: ./start.sh dev <api-only|init-evaluator|worker-worksheet|preflight|start|status|stop|cleanup> [options]" >&2
         return 2
@@ -976,8 +1034,7 @@ startup_usage() {
     echo "  Initialize the disposable M1 state first with: ./start.sh dev init-evaluator"
     echo "  Development API: 127.0.0.1:18740; frontend: http://localhost:3000."
     echo "  ./start.sh without arguments retains conventional checkout startup (default API 8080)."
-    echo "  That conventional startup does not select the isolated development runtime."
-    echo "  Production source/runtime remain separate and require operator authorization."
+    echo "  All active native deployment state remains below the canonical checkout."
 }
 
 dispatch_startup() {

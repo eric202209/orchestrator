@@ -82,6 +82,9 @@ dump.rdb
 # Checkpoint files (runtime state)
 checkpoints/
 
+# Canonical Orchestrator runtime state
+/runtime/
+
 # Local Qdrant runtime bundle
 qdrant/
 

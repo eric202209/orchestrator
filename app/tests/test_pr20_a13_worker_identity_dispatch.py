@@ -170,13 +170,13 @@ def identity_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     )
 
 
-def test_dev_runtime_root_is_external_and_exact(tmp_path: Path) -> None:
+def test_dev_runtime_root_is_checkout_local_and_exact(tmp_path: Path) -> None:
     repo = tmp_path / "checkout"
     repo.mkdir()
     config = dev_runtime.RuntimeConfig.for_repo(repo)
 
-    assert config.root != repo / ".dev-runtime" / "phase40b-r1"
-    assert repo not in config.root.parents
+    assert config.root == (repo / ".dev-runtime" / "phase40b-r1").resolve()
+    assert repo.resolve() in config.root.parents
     assert config.root not in repo.parents
     dev_runtime._require_runtime_root(config)
 
@@ -206,11 +206,10 @@ def test_runtime_contract_rejects_overlapping_source_root(
 ) -> None:
     repo = tmp_path / "checkout"
     repo.mkdir()
-    overlapping = repo / "runtime"
-    monkeypatch.setattr(dev_runtime, "_trusted_runtime_root", lambda _repo: overlapping)
+    overlapping = repo / "other-runtime"
     substituted = dev_runtime.RuntimeConfig(repo_root=repo, root=overlapping)
 
-    with pytest.raises(dev_runtime.RuntimeToolError, match="overlaps"):
+    with pytest.raises(dev_runtime.RuntimeToolError, match="trusted.*runtime root"):
         dev_runtime._require_runtime_root(substituted)
 
     nested_source = overlapping / "source"
@@ -232,7 +231,7 @@ def test_source_symlink_alias_uses_canonical_checkout_root(tmp_path: Path) -> No
 
     assert config.repo_root == repo.resolve()
     assert config.root == dev_runtime._trusted_runtime_root(repo.resolve())
-    assert repo not in config.root.parents
+    assert repo in config.root.parents
 
 
 def test_stale_owner_contract_is_rejected(tmp_path: Path) -> None:
@@ -273,7 +272,7 @@ def test_cleanup_of_new_root_preserves_historical_a11_runtime(
 ) -> None:
     repo = tmp_path / "checkout"
     repo.mkdir()
-    legacy = repo / ".dev-runtime" / "phase40b-r1"
+    legacy = repo / ".dev-runtime" / "phase40b-r1-legacy"
     legacy.mkdir(parents=True)
     sentinel = legacy / "database" / "a11-preserved.txt"
     sentinel.parent.mkdir()

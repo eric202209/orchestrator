@@ -147,7 +147,11 @@ def _service_argv_matches(service: str, snapshot: ProcSnapshot, root: Path) -> b
     if service == "beat":
         return "app.celery_app" in args and "beat" in args and "-A" in args
     if service == "frontend":
-        return "dev" in args and any("pnpm" in arg or "vite" in arg for arg in args)
+        vite_script = str(root / "frontend" / "node_modules" / ".bin" / "vite")
+        return (
+            vite_script in args
+            or ("dev" in args and any("pnpm" in arg or "vite" in arg for arg in args))
+        )
     if service == "qdrant":
         qdrant_bin = (root / "qdrant" / "bin" / "qdrant").resolve()
         return snapshot.executable == str(qdrant_bin) or str(qdrant_bin) in args

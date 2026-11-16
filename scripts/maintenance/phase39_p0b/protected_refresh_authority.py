@@ -23,7 +23,9 @@ from typing import Any, Callable, Iterator, Mapping
 
 AUTHORITY_SCHEMA_VERSION = 1
 REFRESH_RECEIPT_SCHEMA_VERSION = 3
-DEFAULT_AUTHORITY_ROOT = "/root/.orchestrator/worker-refresh-authority"
+DEFAULT_AUTHORITY_ROOT = str(
+    Path(__file__).resolve().parents[3] / "runtime" / "worker-refresh-authority"
+)
 MAX_RECORD_BYTES = 4 * 1024 * 1024
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _STAGES = (

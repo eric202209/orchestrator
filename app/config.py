@@ -9,6 +9,7 @@ from app.runtime_naming import DEBUG_REPAIR_LEGACY_ENV_ALIASES
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_DATABASE_URL = f"sqlite:///{BASE_DIR}/orchestrator.db"
+DEFAULT_RUNTIME_ROOT = str(BASE_DIR / "runtime")
 
 READ_ONLY_INSPECTION_TIMEOUT_SECONDS = 30
 SIMPLE_LOCAL_COMMAND_TIMEOUT_SECONDS = 60
@@ -296,11 +297,10 @@ class Settings(BaseSettings):
     ALLOW_TEST_KEYPAIR_ENDPOINT: bool = False
     INLINE_PLANNING: bool = False
     WORKSPACE_REVIEW_POLICY: str = "hold_nontrivial"
-    # Phase 23B: Orchestrator-owned runtime root for Task Execution Sandboxes.
-    # Deliberately outside every project repo and outside the OpenClaw
-    # workspace tree (see phase23a-workspace-runtime-separation-plan.md §8
-    # Stage 1). Also anchors Worker boot identity records.
-    RUNTIME_ROOT: str = "~/.orchestrator/runtime"
+    # Orchestrator-owned runtime root for Task Execution Sandboxes. The
+    # canonical deployment keeps this state below the application directory;
+    # project workspaces remain under the separate Project Workspace Root.
+    RUNTIME_ROOT: str = DEFAULT_RUNTIME_ROOT
     # Explicit repository root used by Worker boot identity evidence. This is
     # intentionally derived from this config module, never from process cwd.
     WORKER_SOURCE_ROOT: str = str(BASE_DIR)

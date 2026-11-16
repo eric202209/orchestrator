@@ -9,7 +9,6 @@ settings from the invoking shell.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import getpass
 import json
 import os
@@ -44,7 +43,7 @@ PROJECT_NAME = "Phase 40B-R1 Development Runtime"
 OWNER_FILE = ".dev-runtime-owner.json"
 STATE_FILE = "runtime-state.json"
 SCHEMA_VERSION = 1
-RUNTIME_ROOT_CONTRACT = "phase40b-r1-external-checkout-root-v1"
+RUNTIME_ROOT_CONTRACT = "phase40b-r1-checkout-local-root-v2"
 STARTUP_TIMEOUT_SECONDS = 30
 SHUTDOWN_TIMEOUT_SECONDS = 10
 # The one operator-authorized inference service: the GX10 host Ollama, reached
@@ -164,16 +163,10 @@ def _inside(path: Path, parent: Path) -> bool:
 
 
 def _trusted_runtime_root(repo_root: Path) -> Path:
-    """Return the one cleanup-authorized, checkout-specific external root."""
+    """Return the one cleanup-authorized runtime below this checkout."""
 
     repo_root = repo_root.expanduser().resolve()
-    checkout_key = hashlib.sha256(str(repo_root).encode("utf-8")).hexdigest()[:16]
-    return (
-        repo_root.parent
-        / ".orchestrator-dev-runtime"
-        / f"{repo_root.name}-{checkout_key}"
-        / "phase40b-r1"
-    )
+    return repo_root / ".dev-runtime" / "phase40b-r1"
 
 
 def _require_runtime_root(config: RuntimeConfig) -> None:
@@ -182,8 +175,8 @@ def _require_runtime_root(config: RuntimeConfig) -> None:
         raise RuntimeToolError(
             "runtime root must equal the canonical trusted development-runtime root"
         )
-    if _inside(config.root, config.repo_root) or _inside(config.repo_root, config.root):
-        raise RuntimeToolError("runtime root overlaps the development checkout")
+    if not _inside(config.root, config.repo_root) or config.root == config.repo_root:
+        raise RuntimeToolError("runtime root must stay inside the development checkout")
     cursor = config.root
     while cursor != cursor.parent:
         if cursor.is_symlink():

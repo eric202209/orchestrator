@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import errno
+import json
 import os
+import shlex
 import socket
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -100,6 +103,25 @@ def test_development_start_cannot_record_or_adopt_production_process(tmp_path):
     with pytest.raises(pm.ProcessIdentityError, match="outside project root"):
         pm.record_process(development, "backend", PID, proc_root=proc_root, timeout=0)
     assert not pm.identity_path(development, "backend").exists()
+
+
+def test_frontend_identity_accepts_direct_vite_server_process(tmp_path):
+    root = tmp_path / "development"
+    root.mkdir()
+    proc_root = tmp_path / "proc"
+    vite_script = root / "frontend" / "node_modules" / ".bin" / "vite"
+    vite_script.parent.mkdir(parents=True)
+    vite_script.write_text("#!/usr/bin/env node\n")
+    _fake_process(
+        proc_root,
+        root,
+        service="frontend",
+        argv=("/usr/bin/node", str(vite_script)),
+    )
+
+    _record(root, proc_root, service="frontend")
+
+    assert pm.process_status(root, "frontend", proc_root=proc_root) is True
 
 
 def test_pid_reuse_is_rejected_before_pidfd_or_signal(tmp_path):
@@ -312,3 +334,46 @@ def test_launch_and_stop_scripts_have_no_global_termination():
         assert "kill -9" not in text
     assert "project_process.py" in start
     assert "project_process.py" in stop
+
+
+def test_startup_retires_dead_identity_before_refusing_mixed_topology(tmp_path):
+    repo = Path(__file__).resolve().parents[2]
+    root = tmp_path / "checkout"
+    (root / "frontend").mkdir(parents=True)
+    run_dir = root / "run"
+    run_dir.mkdir()
+    identity_path = run_dir / "frontend.process.json"
+    identity_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "service": "frontend",
+                "pid": 999999,
+                "start_ticks": 1,
+                "executable": "/usr/bin/node",
+                "argv": ["node", "/usr/bin/pnpm", "dev"],
+                "cwd": str((root / "frontend").resolve()),
+                "source_root": str(root.resolve()),
+            }
+        )
+    )
+    (run_dir / "frontend.pid").write_text("999999\n")
+
+    command = "source {start}; PROJECT_ROOT={root}; PROCESS_HELPER={helper}; owned_processes_running".format(
+        start=shlex.quote(str(repo / "start.sh")),
+        root=shlex.quote(str(root)),
+        helper=shlex.quote(
+            str(repo / "scripts" / "maintenance" / "project_process.py")
+        ),
+    )
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert not identity_path.exists()
+    assert not (run_dir / "frontend.pid").exists()

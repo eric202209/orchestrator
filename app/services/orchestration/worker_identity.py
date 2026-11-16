@@ -697,15 +697,23 @@ def resolve_worker_identity_paths(
     """Resolve the explicit Worker source/runtime identity path contract.
 
     Both roots must be absolute existing directories. Symlink aliases are
-    canonicalized before validation, source/runtime overlap is rejected, and
-    the runtime root must be writable. The identity directory is a fixed child
-    of that runtime root; it may be created by the existing atomic manifest
-    writer, but an existing file or symlink at that location is rejected.
+    canonicalized before validation. The canonical application deployment may
+    place its runtime root below the source checkout in the dedicated
+    ``runtime`` directory; the isolated development launcher may use its
+    ignored ``.dev-runtime`` subtree. All other source/runtime overlap is
+    rejected. The identity directory is a fixed child of that runtime root; it
+    may be created by the existing atomic manifest writer, but an existing
+    file or symlink at that location is rejected.
     """
 
     source = _configured_directory(source_root, name="source root")
     runtime = _configured_directory(runtime_root, name="runtime root")
-    if _under_root(source, runtime) or _under_root(runtime, source):
+    allowed_internal_runtime = (
+        runtime == source / "runtime" or source / ".dev-runtime" in runtime.parents
+    )
+    if (
+        _under_root(source, runtime) or _under_root(runtime, source)
+    ) and not allowed_internal_runtime:
         raise WorkerIdentityPathError(
             f"source/runtime root overlap: source={source} runtime={runtime}"
         )

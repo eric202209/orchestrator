@@ -1650,7 +1650,10 @@ class TaskService:
     def audit_project_workspace_shape(self, project: Project) -> dict:
         """Summarize accepted baseline state separately from retained task sandboxes."""
         project_root = self.get_project_root(project).resolve()
-        tasks = self.get_project_tasks(project.id)
+        tasks = self.get_project_tasks_readonly(project.id)
+        workspace_statuses = {
+            task.id: self.infer_workspace_status(task) for task in tasks
+        }
         task_subfolders = {
             task.task_subfolder
             for task in tasks
@@ -1675,7 +1678,7 @@ class TaskService:
                 continue
             workspace_dir = (project_root / task_subfolder).resolve()
             workspace_exists = workspace_dir.exists()
-            workspace_status = getattr(task, "workspace_status", None) or "unknown"
+            workspace_status = workspace_statuses[task.id]
             if not workspace_exists:
                 continue
             is_visible_task_workspace = workspace_dir.parent == project_root

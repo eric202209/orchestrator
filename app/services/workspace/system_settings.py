@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import DEFAULT_RUNTIME_ROOT, settings
 from app.database import get_db_session
 from app.models import SystemSetting
 
@@ -38,7 +38,6 @@ WORKSPACE_REVIEW_POLICY_KEY = "workspace_review_policy"
 WORKSPACE_REVIEW_POLICIES = {"auto_publish_all", "hold_nontrivial", "hold_all"}
 CONTAINER_WORKSPACE_ROOTS = {"/app/projects", "/app"}
 RUNTIME_ROOT_KEY = "orchestrator_runtime_root"
-DEFAULT_RUNTIME_ROOT = "~/.orchestrator/runtime"
 
 
 def normalize_workspace_review_policy(value: Optional[str]) -> str:

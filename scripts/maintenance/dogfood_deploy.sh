@@ -19,9 +19,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 cd "$REPO_ROOT"
 
-PRODUCTION_ROOT="/root/.openclaw/workspace/vault/orchestrator-production"
-if [ "$REPO_ROOT" = "$PRODUCTION_ROOT" ]; then
-    echo "FAIL: dogfood deployment is development-only; production checkout is protected." >&2
+CANONICAL_ROOT="/root/.openclaw/workspace/vault/orchestrator"
+if [ "$REPO_ROOT" != "$CANONICAL_ROOT" ]; then
+    echo "FAIL: dogfood deployment must run from the canonical Orchestrator checkout." >&2
     exit 1
 fi
 

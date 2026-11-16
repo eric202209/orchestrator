@@ -1861,12 +1861,15 @@ def get_project_workspace_overview(
         raise HTTPException(status_code=404, detail="Project not found")
 
     task_service = TaskService(db)
-    tasks = task_service.get_project_tasks(project_id)
+    tasks = task_service.get_project_tasks_readonly(project_id)
+    workspace_statuses = {
+        task.id: task_service.infer_workspace_status(task) for task in tasks
+    }
     baseline = task_service.get_project_baseline_overview(project)
     audit = task_service.audit_project_workspace_shape(project)
     counts: Dict[str, int] = {}
     for task in tasks:
-        key = getattr(task, "workspace_status", None) or "not_created"
+        key = workspace_statuses[task.id]
         counts[key] = counts.get(key, 0) + 1
 
     promoted_tasks = [
@@ -1874,7 +1877,7 @@ def get_project_workspace_overview(
             "id": task.id,
             "title": task.title,
             "plan_position": task.plan_position,
-            "workspace_status": task.workspace_status,
+            "workspace_status": workspace_statuses[task.id],
             "task_subfolder": task.task_subfolder,
             "promoted_at": (
                 task.promoted_at.isoformat()
@@ -1883,7 +1886,7 @@ def get_project_workspace_overview(
             ),
         }
         for task in tasks
-        if getattr(task, "workspace_status", None) == "promoted"
+        if workspace_statuses[task.id] == "promoted"
     ]
     pending_change_sets = []
     workspace_review_policy = get_effective_workspace_review_policy(
@@ -1903,7 +1906,7 @@ def get_project_workspace_overview(
             {
                 "task_id": task.id,
                 "title": task.title,
-                "workspace_status": getattr(task, "workspace_status", None),
+                "workspace_status": workspace_statuses[task.id],
                 "task_execution_id": latest_change_set.get("task_execution_id"),
                 "recorded_at": latest_change_set.get("recorded_at"),
                 "change_set": change_set_payload,
@@ -1924,9 +1927,7 @@ def get_project_workspace_overview(
         "promoted_tasks": promoted_tasks,
         "pending_change_sets": pending_change_sets,
         "ready_task_ids": [
-            task.id
-            for task in tasks
-            if getattr(task, "workspace_status", None) == "ready"
+            task.id for task in tasks if workspace_statuses[task.id] == "ready"
         ],
     }
 

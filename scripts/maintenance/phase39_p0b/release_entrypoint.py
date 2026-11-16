@@ -27,7 +27,8 @@ APPROVAL_ROOT = Path("/etc/orchestrator-maintenance/phase39-p0b/approvals")
 WORKSHEET_ROOT = Path("/etc/orchestrator-maintenance/phase39-p0b/worksheets")
 TRUSTED_KEY = Path("/etc/orchestrator-maintenance/phase39-p0b/approval-ed25519.pub")
 OPENSSL = Path("/usr/bin/openssl")
-APPROVED_PIN_DIR = Path("/root/.orchestrator/worker-pin")
+CANONICAL_RUNTIME_ROOT = _INITIAL_RELEASE_ROOT / "runtime"
+APPROVED_PIN_DIR = CANONICAL_RUNTIME_ROOT / "worker-pin"
 APPROVED_PIN_PATH = APPROVED_PIN_DIR / "candidate-pin.json"
 STALE_APPROVAL_IDS = frozenset({"P39-P0B-GATEB-001", "P39-P0B-GATEB-002"})
 APPROVAL_SCHEMA_VERSION = 1
@@ -633,7 +634,7 @@ def execute(
     )
     _configure_tooling(module, approval, root)
     _validate_operator_arguments(args.command, args.operator_args)
-    fixed_args = ["--source-root", str(root), "--runtime-root", "/root/.orchestrator"]
+    fixed_args = ["--source-root", str(root), "--runtime-root", str(CANONICAL_RUNTIME_ROOT)]
     if args.command == "install":
         fixed_args.extend(
             ["--worksheet", str(worksheet_path), "--pin-dir", str(APPROVED_PIN_DIR)]

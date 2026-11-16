@@ -198,7 +198,7 @@ def test_worker_identity_paths_reject_invalid_runtime_configuration(tmp_path):
 def test_worker_identity_paths_reject_overlap_and_identity_file(tmp_path):
     source_root = tmp_path / "source"
     source_root.mkdir()
-    overlapping_runtime = source_root / "runtime"
+    overlapping_runtime = source_root / "other-runtime"
     overlapping_runtime.mkdir()
     with pytest.raises(worker_identity.WorkerIdentityPathError, match="overlap"):
         worker_identity.resolve_worker_identity_paths(source_root, overlapping_runtime)
