@@ -602,10 +602,11 @@ def build_bounded_debug_repair_changed_file_context(
 
     lines = [
         "## CURRENT CONTENT OF IMPLICATED SOURCE FILES",
-        "Treat these files as the current source truth. Existing function signatures shown here are authoritative. Do not change parameter names, types, order, or count unless the task explicitly requests an API change. If a function body raises NotImplementedError, implement the body while keeping the exact signature. Do not redesign the API.",
+        "Only files labelled [COMPLETE] are full current source truth. A [TRUNCATED] file shows only a leading excerpt: never construct replace_in_file old text across its truncation boundary, and never write_file it. Existing function signatures shown here are authoritative. Do not change parameter names, types, order, or count unless the task explicitly requests an API change. If a function body raises NotImplementedError, implement the body while keeping the exact signature. Do not redesign the API.",
     ]
     included_paths: list[str] = []
     complete_paths: list[str] = []
+    truncated_paths: list[str] = []
     for relative_path in ordered_paths:
         if len(included_paths) >= _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_FILES:
             break
@@ -624,16 +625,45 @@ def build_bounded_debug_repair_changed_file_context(
         remaining = (
             _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_CHARS - current_length
         )
+        # P42-V17-N: visibility labels are charged to the existing budgets;
+        # neither the per-file nor the total limit grows.
+        complete_label = f"[COMPLETE: all {len(content)} characters shown]"
         content_limit = min(
             _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_PER_FILE_CHARS,
-            remaining - len(section_header) - 2,
+            remaining - len(section_header) - len(complete_label) - 3,
         )
         if content_limit < 4:
             break
-        lines.extend((section_header, _excerpt(content, content_limit)))
-        included_paths.append(relative_path)
         if len(content) <= content_limit:
+            lines.extend(
+                (section_header, complete_label, _excerpt(content, content_limit))
+            )
+            included_paths.append(relative_path)
             complete_paths.append(relative_path)
+            continue
+        # Reserve the longest labels (counts at full digit width) before
+        # choosing how much of the file is visible.
+        label_reserve = len(_truncated_source_label(len(content), len(content)))
+        boundary_reserve = len(_truncation_boundary_line(len(content)))
+        content_limit = min(
+            _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_PER_FILE_CHARS,
+            remaining - len(section_header) - label_reserve - boundary_reserve - 4,
+        )
+        if content_limit < 4:
+            break
+        # Same visible prefix as ``_excerpt``; the bare "..." suffix is replaced
+        # by an explicit boundary line.
+        visible = str(content).strip()[: content_limit - 3].rstrip()
+        lines.extend(
+            (
+                section_header,
+                _truncated_source_label(len(visible), len(content)),
+                visible,
+                _truncation_boundary_line(len(content) - len(visible)),
+            )
+        )
+        included_paths.append(relative_path)
+        truncated_paths.append(relative_path)
 
     if not included_paths:
         return "", metadata
@@ -648,10 +678,29 @@ def build_bounded_debug_repair_changed_file_context(
             "bounded_execution_debug_repair_changed_file_context_complete_paths": (
                 complete_paths if len(rendered) == len("\n".join(lines)) else []
             ),
+            "bounded_execution_debug_repair_changed_file_context_truncated_paths": (
+                truncated_paths
+                if len(rendered) == len("\n".join(lines))
+                else list(included_paths)
+            ),
             "bounded_execution_debug_repair_changed_file_context_chars": len(rendered),
         }
     )
     return rendered, metadata
+
+
+def _truncated_source_label(shown_chars: int, total_chars: int) -> str:
+    return (
+        f"[TRUNCATED: {shown_chars} of {total_chars} characters shown; "
+        "not complete source truth]"
+    )
+
+
+def _truncation_boundary_line(hidden_chars: int) -> str:
+    return (
+        f"[TRUNCATION BOUNDARY: {hidden_chars} characters not shown; "
+        "do not construct replace_in_file old text across this boundary]"
+    )
 
 
 def _normalize_bounded_debug_repair_source_path(

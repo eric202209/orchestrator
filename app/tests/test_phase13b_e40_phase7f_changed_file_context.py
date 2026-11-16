@@ -94,11 +94,20 @@ def test_phase7f_changed_source_context_enforces_file_and_character_budgets(tmp_
     )
     metadata = result.metadata
 
-    assert (
-        len(metadata["bounded_execution_debug_repair_changed_file_context_paths"]) == 3
-    )
+    # P42-V17-N: [TRUNCATED] labels and boundary lines are charged to the
+    # unchanged 3000-char total, so the third file's sub-100-char sliver that
+    # used to follow two capped files no longer fits.  Order is unchanged.
+    assert metadata["bounded_execution_debug_repair_changed_file_context_paths"] == [
+        "src/pkg/module_0.py",
+        "src/pkg/module_1.py",
+    ]
     assert metadata["bounded_execution_debug_repair_changed_file_context_chars"] <= 3000
-    assert "..." in result.prompt
+    assert (
+        metadata["bounded_execution_debug_repair_changed_file_context_complete_paths"]
+        == []
+    )
+    assert result.prompt.count("[TRUNCATED: ") == 2
+    assert result.prompt.count("[TRUNCATION BOUNDARY: ") == 2
 
 
 def test_phase7f_excludes_test_files_even_when_traceback_mentions_them(tmp_path):

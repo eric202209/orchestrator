@@ -215,6 +215,43 @@ class _FakeRuntime:
         return {"backend": "fake", "model_family": "test"}
 
 
+class _FakeDebugRepairRuntime:
+    # Role-owned DEBUG_REPAIR runtime (P42-V17-N): a no-tools backend reached
+    # only through ``invoke_prompt``; it has no ``execute_task``.
+    backend_descriptor = get_backend_descriptor("openai_chat_completions")
+
+    def __init__(self, responses, *, on_invoke=None):
+        self.responses = list(responses)
+        self.prompts = []
+        self.options = []
+        self.on_invoke = on_invoke
+
+    async def invoke_prompt(self, prompt, **kwargs):
+        self.prompts.append(str(prompt))
+        self.options.append(kwargs.get("invocation_options"))
+        if self.on_invoke is not None:
+            self.on_invoke(len(self.prompts))
+        if not self.responses:
+            raise AssertionError("Fake debug runtime received unexpected prompt")
+        return dict(self.responses.pop(0))
+
+
+def _install_role_owned_debug_runtime(monkeypatch, runtime, debug_runtime):
+    """Route DEBUG_REPAIR through ``debug_runtime`` the way production does."""
+
+    from app.services.agents import agent_runtime
+
+    runtime.runtime_configuration = SimpleNamespace(role="execution")
+    roles = []
+
+    def _create(db, session_id, task_id, *, role, **_kwargs):
+        roles.append(role)
+        return debug_runtime
+
+    monkeypatch.setattr(agent_runtime, "create_agent_runtime", _create)
+    return roles
+
+
 def _extract_structured_text(value):
     if isinstance(value, dict):
         return value.get("output", json.dumps(value))
@@ -2551,7 +2588,7 @@ def test_wrapped_typed_ops_fix_applies_to_repeated_structured_op_failures(
 
 
 def test_phase7f_ops_fix_stale_replace_correction_prevents_partial_mutation(
-    db_session, tmp_path
+    db_session, tmp_path, monkeypatch
 ):
     runtime = _FakeRuntime(
         [
@@ -2561,6 +2598,10 @@ def test_phase7f_ops_fix_stale_replace_correction_prevents_partial_mutation(
                 "error": "AssertionError: value missing",
                 "returncode": 1,
             },
+        ]
+    )
+    debug_runtime = _FakeDebugRepairRuntime(
+        [
             {
                 "output": json.dumps(
                     [
@@ -2611,6 +2652,7 @@ def test_phase7f_ops_fix_stale_replace_correction_prevents_partial_mutation(
             },
         ]
     )
+    _install_role_owned_debug_runtime(monkeypatch, runtime, debug_runtime)
     ctx, _execution = _make_run_context(
         db_session,
         tmp_path,
@@ -2646,11 +2688,14 @@ def test_phase7f_ops_fix_stale_replace_correction_prevents_partial_mutation(
     )
 
     assert result["status"] == "completed", result
-    assert len(runtime.prompts) == 3
+    # P42-V17-N: the Execution runtime only ran the step; primary repair and
+    # the stale-replace correction both ran on the role-owned DEBUG_REPAIR runtime.
+    assert len(runtime.prompts) == 1
+    assert len(debug_runtime.prompts) == 2
     assert "Failed replace_in_file targets with exact current file excerpts" in (
-        runtime.prompts[2]
+        debug_runtime.prompts[1]
     )
-    assert "def value(total: int) -> int:" in runtime.prompts[2]
+    assert "def value(total: int) -> int:" in debug_runtime.prompts[1]
     assert source_path.read_text(encoding="utf-8") == (
         "def implemented() -> bool:\n"
         "    return True\n"
@@ -2661,7 +2706,7 @@ def test_phase7f_ops_fix_stale_replace_correction_prevents_partial_mutation(
 
 
 def test_phase7f_ops_fix_stale_replace_correction_accepts_write_file(
-    db_session, tmp_path
+    db_session, tmp_path, monkeypatch
 ):
     runtime = _FakeRuntime(
         [
@@ -2671,6 +2716,10 @@ def test_phase7f_ops_fix_stale_replace_correction_accepts_write_file(
                 "error": "AssertionError: value missing",
                 "returncode": 1,
             },
+        ]
+    )
+    debug_runtime = _FakeDebugRepairRuntime(
+        [
             {
                 "output": json.dumps(
                     [
@@ -2708,6 +2757,7 @@ def test_phase7f_ops_fix_stale_replace_correction_accepts_write_file(
             },
         ]
     )
+    _install_role_owned_debug_runtime(monkeypatch, runtime, debug_runtime)
     ctx, _execution = _make_run_context(
         db_session,
         tmp_path,
@@ -2746,7 +2796,7 @@ def test_phase7f_ops_fix_stale_replace_correction_accepts_write_file(
 
 
 def test_phase7f_ops_fix_stale_replace_failed_correction_is_rejected(
-    db_session, tmp_path
+    db_session, tmp_path, monkeypatch
 ):
     runtime = _FakeRuntime(
         [
@@ -2756,6 +2806,10 @@ def test_phase7f_ops_fix_stale_replace_failed_correction_is_rejected(
                 "error": "AssertionError: value missing",
                 "returncode": 1,
             },
+        ]
+    )
+    debug_runtime = _FakeDebugRepairRuntime(
+        [
             {
                 "output": json.dumps(
                     [
@@ -2794,6 +2848,7 @@ def test_phase7f_ops_fix_stale_replace_failed_correction_is_rejected(
             },
         ]
     )
+    _install_role_owned_debug_runtime(monkeypatch, runtime, debug_runtime)
     ctx, _execution = _make_run_context(
         db_session,
         tmp_path,

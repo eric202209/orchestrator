@@ -20,6 +20,11 @@ from app.runtime_naming import (
 from app.services.orchestration.diagnostics.debug_feedback import (
     debug_repair_source_path,
 )
+from app.services.orchestration.validation.path_authority import (
+    PathAuthorityError,
+    declare,
+    observe,
+)
 from app.services.observability.planning_provider_evidence import (
     PlanningRepairResponseEvidence,
     debug_repair_response_evidence_target,
@@ -349,6 +354,94 @@ def _build_bounded_debug_repair_stale_replace_correction_prompt(
         "Failed replace_in_file targets with exact current file excerpts:\n"
         f"{json.dumps(stale_issues, indent=2, sort_keys=True)}\n"
     )
+
+
+def bounded_debug_repair_correction_runtime_refusal(runtime: Any) -> Optional[str]:
+    """Refuse a stale-replace correction runtime that could act on the workspace.
+
+    P42-V17-N: correction generation is observational.  It may only run on the
+    role-owned DEBUG_REPAIR runtime, and only when that backend declares no
+    tool execution.  An absent runtime or undeclared capability fails closed;
+    there is no fallback to the Execution runtime.
+    """
+
+    if runtime is None:
+        return "correction_runtime_unavailable"
+    capabilities = getattr(
+        getattr(runtime, "backend_descriptor", None), "capabilities", None
+    )
+    if capabilities is None:
+        return "correction_runtime_capability_unknown"
+    if getattr(capabilities, "supports_tool_execution", True) is not False:
+        return "correction_runtime_tool_capable"
+    return None
+
+
+def bounded_debug_repair_correction_guard_paths(
+    debug_data: Any, stale_issues: list[dict[str, Any]]
+) -> list[str]:
+    """Declared workspace paths whose state the correction must not change."""
+
+    raw_paths = [issue.get("path") for issue in stale_issues or []]
+    ops = (debug_data or {}).get("ops") if isinstance(debug_data, dict) else None
+    raw_paths.extend(
+        op.get("path")
+        for op in (ops if isinstance(ops, list) else [])
+        if isinstance(op, dict)
+    )
+    paths: list[str] = []
+    for raw_path in raw_paths:
+        relative = _safe_relative_op_path(raw_path)
+        if not relative:
+            continue
+        try:
+            canonical = declare(relative).value
+        except PathAuthorityError:
+            # Not a declarable workspace path: nothing in the workspace is
+            # identified by it, and the stale check / Path Authority reject it.
+            continue
+        if canonical not in paths:
+            paths.append(canonical)
+    return paths
+
+
+def bounded_debug_repair_target_identities(
+    project_dir: Path, paths: list[str]
+) -> dict[str, Any]:
+    """Observe each guard path without following symlinks.
+
+    Reuses Path Authority observation (segment ``lstat``, ``O_NOFOLLOW`` reads,
+    replaced-mid-read detection).  An observation failure is recorded as an
+    ``unobservable`` identity so the caller fails closed.
+    """
+
+    identities: dict[str, Any] = {}
+    for relative in paths:
+        try:
+            identities[relative] = observe(Path(project_dir), declare(relative))
+        except PathAuthorityError as exc:
+            identities[relative] = ("unobservable", getattr(exc, "code", "error"))
+    return identities
+
+
+def bounded_debug_repair_target_guard_failures(
+    before: dict[str, Any], after: Optional[dict[str, Any]] = None
+) -> list[str]:
+    """Guard paths that are unobservable, or whose identity changed."""
+
+    failures = [
+        path
+        for path, identity in before.items()
+        if isinstance(identity, tuple)
+        or (after is not None and after.get(path) != identity)
+    ]
+    if after is not None:
+        failures.extend(
+            path
+            for path, identity in after.items()
+            if isinstance(identity, tuple) and path not in failures
+        )
+    return failures
 
 
 def _mark_bounded_debug_repair_timeout_if_applicable(

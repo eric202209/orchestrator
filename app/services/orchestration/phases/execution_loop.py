@@ -175,6 +175,10 @@ from app.services.orchestration.phases.execution_debug_repair import (
     _bounded_debug_repair_source_edit_context,
     _bounded_debug_repair_stale_replace_issues,
     _build_bounded_debug_repair_stale_replace_correction_prompt,
+    bounded_debug_repair_correction_guard_paths,
+    bounded_debug_repair_correction_runtime_refusal,
+    bounded_debug_repair_target_guard_failures,
+    bounded_debug_repair_target_identities,
     _command_fix_materially_targets_source_or_tests,
     bounded_debug_repair_command_authority_rejection,
     _debug_prompt_mode_architecture,
@@ -3270,31 +3274,81 @@ def execute_step_loop(
                             ],
                         },
                     )
-                    correction_kwargs = dict(debug_runtime_kwargs)
-                    if correction_kwargs.get("diagnostic_metadata"):
-                        correction_kwargs["diagnostic_metadata"] = {
-                            **correction_kwargs["diagnostic_metadata"],
-                            "bounded_execution_debug_repair_ops_fix_correction": True,
-                            "stale_replace_targets": [
-                                issue.get("path") for issue in stale_replace_issues[:10]
-                            ],
-                        }
-                    correction_result = _run_coroutine(
-                        runtime_service.execute_task(
-                            correction_prompt,
-                            timeout_seconds=DEBUG_TIMEOUT_SECONDS,
-                            **correction_kwargs,
+                    # P42-V17-N: correction generation is observational. It runs
+                    # only on the role-owned, tool-less DEBUG_REPAIR runtime (no
+                    # Execution-runtime fallback), and the targets it describes
+                    # must be unchanged when its answer returns.
+                    correction_project_dir = Path(orchestration_state.project_dir)
+                    correction_guard_before = bounded_debug_repair_target_identities(
+                        correction_project_dir,
+                        bounded_debug_repair_correction_guard_paths(
+                            debug_data, stale_replace_issues
+                        ),
+                    )
+                    try:
+                        correction_runtime = _ensure_role_owned_debug_repair_runtime()
+                    except Exception:
+                        correction_runtime = None
+                    correction_refusal = (
+                        bounded_debug_repair_correction_runtime_refusal(
+                            correction_runtime
                         )
                     )
-                    correction_output = extract_structured_text(
-                        correction_result.get("output", "{}")
-                    )
+                    if (
+                        correction_refusal is None
+                        and bounded_debug_repair_target_guard_failures(
+                            correction_guard_before
+                        )
+                    ):
+                        correction_refusal = "correction_target_unobservable"
+                    correction_guard_failures: list[str] = []
+                    correction_output = ""
                     correction_success, correction_parsed, correction_strategy = (
-                        error_handler.attempt_json_parsing(
-                            correction_output,
-                            context=BOUNDED_DEBUG_REPAIR_STALE_REPLACE_CORRECTION_CONTEXT,
-                        )
+                        False,
+                        None,
+                        None,
                     )
+                    if correction_refusal is None:
+                        base_diagnostic_metadata = debug_runtime_kwargs.get(
+                            "diagnostic_metadata"
+                        )
+                        if base_diagnostic_metadata:
+                            debug_runtime_kwargs["diagnostic_metadata"] = {
+                                **base_diagnostic_metadata,
+                                "bounded_execution_debug_repair_ops_fix_correction": True,
+                                "stale_replace_targets": [
+                                    issue.get("path")
+                                    for issue in stale_replace_issues[:10]
+                                ],
+                            }
+                        try:
+                            correction_result = _invoke_debug_repair(correction_prompt)
+                        finally:
+                            if base_diagnostic_metadata:
+                                debug_runtime_kwargs["diagnostic_metadata"] = (
+                                    base_diagnostic_metadata
+                                )
+                        correction_guard_failures = (
+                            bounded_debug_repair_target_guard_failures(
+                                correction_guard_before,
+                                bounded_debug_repair_target_identities(
+                                    correction_project_dir,
+                                    list(correction_guard_before),
+                                ),
+                            )
+                        )
+                        correction_output = extract_structured_text(
+                            correction_result.get("output", "{}")
+                        )
+                        if not correction_guard_failures:
+                            (
+                                correction_success,
+                                correction_parsed,
+                                correction_strategy,
+                            ) = error_handler.attempt_json_parsing(
+                                correction_output,
+                                context=BOUNDED_DEBUG_REPAIR_STALE_REPLACE_CORRECTION_CONTEXT,
+                            )
                     correction_normalized = (
                         normalize_bounded_debug_repair_payload_detailed(
                             correction_parsed,
@@ -3319,7 +3373,11 @@ def execute_step_loop(
                         else []
                     )
                     correction_rejection_reason = None
-                    if not correction_success:
+                    if correction_refusal:
+                        correction_rejection_reason = correction_refusal
+                    elif correction_guard_failures:
+                        correction_rejection_reason = "correction_target_mutated"
+                    elif not correction_success:
                         correction_rejection_reason = "json_parse_failed"
                     elif corrected_debug_data is None:
                         correction_rejection_reason = (
@@ -3398,6 +3456,9 @@ def execute_step_loop(
                                         for issue in stale_replace_issues[:10]
                                     ],
                                     "correction_strategy": correction_strategy,
+                                    "correction_target_guard_failures": (
+                                        correction_guard_failures[:10]
+                                    ),
                                 },
                             )
                         except Exception:
