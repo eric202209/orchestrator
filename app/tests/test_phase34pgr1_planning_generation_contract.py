@@ -203,12 +203,61 @@ def test_canonical_planning_calls_pass_explicit_invocation_options():
     assert len(planner_calls) == 2
     assert all(_declares_generation_contract(call) for call in planner_calls)
 
-    # Discovery keeps its own wire contract and must not be given Planning's.
-    discovery_calls = _planning_lock_calls(
+    # P42-V17-G: Discovery now reuses Planning's generation bounds (merged
+    # with its own C4/C5 schema options) rather than running unbounded.
+    discovery_path = (
         REPO_ROOT / "app/services/orchestration/planning/read_only_discovery.py"
     )
+    discovery_calls = _planning_lock_calls(discovery_path)
     assert len(discovery_calls) == 1
-    assert not _declares_generation_contract(discovery_calls[0])
+    assert "planning_generation_invocation_options" in discovery_path.read_text()
+
+
+def test_discovery_receives_bounded_contract_for_chat_completions(
+    tmp_path, monkeypatch
+):
+    """P42-V17-G: Discovery carries the canonical Planning generation bounds."""
+
+    from types import SimpleNamespace
+
+    from app.services.orchestration.planning.read_only_discovery import (
+        run_discovery_stage,
+    )
+
+    monkeypatch.setattr(settings, "LOW_RESOURCE_SINGLE_MODEL", False)
+    captured: dict[str, object] = {}
+
+    class _Planner:
+        @staticmethod
+        async def _execute_task_with_planning_lock(*args, **kwargs):
+            captured.update(kwargs)
+            return {"status": "completed", "output": '{"action":"stop"}'}
+
+    ctx = SimpleNamespace(
+        read_only_discovery_completed=False,
+        runtime_service=_FakeRuntimeService("openai_chat_completions"),
+        prompt="Inspect the existing implementation.",
+        orchestration_state=SimpleNamespace(
+            project_context="fixture", project_dir=tmp_path
+        ),
+        emit_live=lambda *args, **kwargs: None,
+        session_id=1,
+        task_id=2,
+        task_execution_id=3,
+    )
+    run_discovery_stage(
+        ctx=ctx,
+        planning_timeout_seconds=120,
+        extract_structured_text=lambda value: str(value),
+        planner_service=_Planner,
+        emit_phase_event=lambda *args, **kwargs: None,
+    )
+
+    options = captured["invocation_options"]
+    assert options.reasoning_enabled is False
+    assert options.max_output_tokens == PLANNING_GENERATION_MAX_OUTPUT_TOKENS
+    assert options.response_schema is None
+    assert options.extra_provider_options is None
 
 
 def test_production_planning_invocation_reaches_provider_bounded(

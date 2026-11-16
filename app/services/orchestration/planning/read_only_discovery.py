@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 import re
 import shutil
@@ -507,14 +507,32 @@ def run_discovery_stage(
         },
     )
     discovery_runtime_options: dict[str, Any] = {}
+    discovery_invocation_options: RuntimeInvocationOptions | None = None
     # C4's JSON constraint is specific to the active L1 single-model runtime.
     # Legacy multi-model deployments retain their exact discovery wire
     # contract.
     if bool(getattr(settings, "LOW_RESOURCE_SINGLE_MODEL", False)):
-        discovery_runtime_options["invocation_options"] = RuntimeInvocationOptions(
+        discovery_invocation_options = RuntimeInvocationOptions(
             extra_provider_options={"response_format": {"type": "json_object"}},
             response_schema=DISCOVERY_ACTION_SCHEMA,
         )
+    # P42-V17-G: Discovery shares the Planning role's bounded generation
+    # contract (PHASE34-PGR1) on backends that declare one. Only the
+    # generation bounds are reused; the Planning response schema and Planning
+    # evidence target stay with the Plan invocation.
+    from app.services.orchestration.planning.planner import PlannerService
+
+    generation_contract = PlannerService.planning_generation_invocation_options(
+        ctx.runtime_service
+    )
+    if generation_contract is not None:
+        discovery_invocation_options = replace(
+            discovery_invocation_options or RuntimeInvocationOptions(),
+            reasoning_enabled=generation_contract.reasoning_enabled,
+            max_output_tokens=generation_contract.max_output_tokens,
+        )
+    if discovery_invocation_options is not None:
+        discovery_runtime_options["invocation_options"] = discovery_invocation_options
     diagnostic_metadata = {
         "session_id": ctx.session_id,
         "task_id": ctx.task_id,
