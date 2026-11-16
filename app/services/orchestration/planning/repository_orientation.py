@@ -255,6 +255,39 @@ def _confirmed_not_git_work_tree(project_dir: Path) -> bool:
     return completed.returncode != 0
 
 
+def _ignored_by_enclosing_git_checkout(project_dir: Path) -> bool:
+    """True only when an enclosing checkout positively disowns ``project_dir``.
+
+    P42-V17-O: a non-Git runtime workspace copied under ``runtime/tasks/`` sits
+    inside the Orchestrator checkout, which ignores ``/runtime/``.  Git commands
+    there resolve to the Orchestrator repository, which is not the project's
+    repository.  A workspace with its own ``.git`` entry (a nested repository or
+    a Git-backed runtime worktree) is never disowned here, and an ordinary
+    subdirectory of a Git project is not ignored by that project, so both keep
+    Git-tracked orientation.  Any Git error keeps the existing behavior.
+    """
+
+    try:
+        os.lstat(project_dir / ".git")
+        return False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    try:
+        completed = subprocess.run(
+            ["git", "check-ignore", "-q", "--", "."],
+            cwd=str(project_dir),
+            capture_output=True,
+            shell=False,
+            timeout=ORIENTATION_GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return completed.returncode == 0
+
+
 def workspace_product_paths(project_dir: Path) -> tuple[str, ...] | None:
     """Bounded, deterministic workspace-relative listing for non-Git projects.
 
@@ -349,13 +382,22 @@ def derive_repository_orientation(
     not to be a Git work tree.  Listed paths that match no task literal still
     follow the lexical matches inside the same budget, and import neighbors
     are not derived for this scope.  Git-tracked orientation is unchanged.
+    P42-V17-O: the same fallback applies when an enclosing checkout tracks
+    nothing under the project and ignores it (see
+    ``_ignored_by_enclosing_git_checkout``).
     """
 
     scope = ORIENTATION_SCOPE_TRACKED
     tracked = tracked_product_paths(Path(project_dir))
-    if tracked is None:
-        if not non_git_workspace_fallback or not _confirmed_not_git_work_tree(
-            Path(project_dir)
+    disowned = (
+        non_git_workspace_fallback
+        and tracked == ()
+        and _ignored_by_enclosing_git_checkout(Path(project_dir))
+    )
+    if tracked is None or disowned:
+        if not disowned and (
+            not non_git_workspace_fallback
+            or not _confirmed_not_git_work_tree(Path(project_dir))
         ):
             return _unavailable(ORIENTATION_UNAVAILABLE_NOT_GIT)
         tracked = workspace_product_paths(Path(project_dir))
