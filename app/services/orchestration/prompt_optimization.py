@@ -53,10 +53,15 @@ def optimize_prompt(
     max_tokens: int = 30000,
     *,
     hard_char_limit: int | None = None,
+    preserve_whitespace: bool = False,
 ) -> str:
-    """Optimize prompt by removing unnecessary whitespace and shortening."""
+    """Optimize prompt by removing unnecessary whitespace and shortening.
+
+    ``preserve_whitespace`` keeps the prompt's bytes (only the length bound
+    applies) for prompts whose source excerpts must stay copyable verbatim.
+    """
     # Remove excessive whitespace
-    optimized = " ".join(prompt.split())
+    optimized = prompt if preserve_whitespace else " ".join(prompt.split())
 
     target_chars = max_tokens * 3
     if hard_char_limit is not None:

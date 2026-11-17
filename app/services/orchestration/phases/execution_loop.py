@@ -2810,7 +2810,11 @@ def execute_step_loop(
                 if primary_error is not None:
                     raise primary_error
                 return result
-            optimized_prompt = optimize_prompt(prompt_text, max_tokens=25000)
+            # P42-V18-B: replace_in_file.old must be copied exactly from the
+            # source excerpts in this prompt, so newlines and indentation stay.
+            optimized_prompt = optimize_prompt(
+                prompt_text, max_tokens=25000, preserve_whitespace=True
+            )
             evidence_options = debug_repair_evidence_options(
                 debug_repair_runtime,
                 task_execution_id=ctx.task_execution_id,
