@@ -386,6 +386,22 @@ _HINT_MINIMUM_LENGTH = 3
 _HINT_PATH_ASSOCIATION_WINDOW = 200
 _MAXIMUM_TARGET_HINTS = 12
 
+_INDEPENDENT_ACCEPTANCE_HEADING = re.compile(
+    r"^\s*independent acceptance contract\s*\(required\)\s*:(.*)$",
+    re.IGNORECASE,
+)
+_SECTION_HEADING = re.compile(r"^[A-Za-z][^`]*:\s*$")
+_PYTEST_WORD = re.compile(r"(?<![\w.-])pytest(?![\w./-])")
+_TARGET_MODIFICATION_WORD = re.compile(
+    r"\b(?:add|change|create|delete|edit|fix|implement|modify|refactor|remove|rewrite|update|write)\b",
+    re.IGNORECASE,
+)
+_NEGATED_TARGET_MODIFICATION = re.compile(
+    r"\b(?:do\s+not|don't|must\s+not|should\s+not|never|without)\s+"
+    r"(?:\w+\s+){0,2}(?:add|change|create|delete|edit|fix|implement|modify|refactor|remove|rewrite|update|write)\b",
+    re.IGNORECASE,
+)
+
 
 def _hint_is_usable(text: str) -> bool:
     candidate = text.strip()
@@ -461,6 +477,75 @@ def _associated_hint_path(
         if best is None or distance < best[0]:
             best = (distance, path)
     return best[1] if best else None
+
+
+def _independent_acceptance_file_paths(task_description: str) -> tuple[str, ...]:
+    """Return file paths used by the required acceptance command section."""
+
+    paths: list[str] = []
+    current: list[str] | None = None
+    for line in str(task_description or "").splitlines():
+        heading = _INDEPENDENT_ACCEPTANCE_HEADING.match(line)
+        if heading:
+            if current is not None:
+                current = None
+            current = [heading.group(1)]
+            continue
+        if current is not None and _SECTION_HEADING.match(line):
+            current = None
+            continue
+        if current is not None:
+            current.append(line)
+
+    for line in current or ():
+        for command in _HINT_BACKTICK_RE.findall(line):
+            if not _PYTEST_WORD.search(command):
+                continue
+            paths.extend(match.group(1) for match in _HINT_PATH_RE.finditer(command))
+    return tuple(_ordered_unique_paths(paths))
+
+
+def _explicitly_requested_for_modification(
+    task_description: str, relative_path: str
+) -> bool:
+    """Keep a path expected when the task explicitly asks to modify it."""
+
+    text = str(task_description or "")
+    start = 0
+    while True:
+        index = text.find(relative_path, start)
+        if index < 0:
+            return False
+        clause_start = max(text.rfind("\n", 0, index), text.rfind(";", 0, index)) + 1
+        before_path = text[clause_start:index]
+        if _TARGET_MODIFICATION_WORD.search(before_path) and not (
+            _NEGATED_TARGET_MODIFICATION.search(before_path[-120:])
+        ):
+            return True
+        start = index + len(relative_path)
+
+
+def _acceptance_context_supporting_paths(
+    root: Path, task_description: str
+) -> tuple[str, ...]:
+    """Return acceptance files and their bounded implementation imports."""
+
+    acceptance_paths = _independent_acceptance_file_paths(task_description)
+    if not acceptance_paths:
+        return ()
+    try:
+        from app.services.orchestration.planning.direct_import_grounding import (
+            direct_first_party_imports,
+        )
+
+        expansion = direct_first_party_imports(
+            root,
+            acceptance_paths,
+            include_test_anchors=True,
+        )
+        return tuple(_ordered_unique_paths([*expansion.resolved, *acceptance_paths]))
+    except (OSError, ValueError):
+        return acceptance_paths
 
 
 def extract_source_target_hints(
@@ -1109,10 +1194,17 @@ def planner_expected_source_paths(
 ) -> tuple[str, ...]:
     """Select explicit task/contract paths without walking the repository."""
 
+    acceptance_paths = set(_independent_acceptance_file_paths(task_description))
+    task_paths = extract_required_file_paths(task_description)
     return tuple(
         _ordered_unique_paths(
             [
-                *extract_required_file_paths(task_description),
+                *(
+                    path
+                    for path in task_paths
+                    if path not in acceptance_paths
+                    or _explicitly_requested_for_modification(task_description, path)
+                ),
                 *planner_contract_source_paths(planner_contract),
                 *planner_contract_test_paths(planner_contract),
                 *additional_paths,
@@ -1179,6 +1271,7 @@ def materialize_planner_source_context(
     unsafe_expected = _unsafe_requested_paths(requested_expected_paths)
     expected = _ordered_unique_paths(requested_expected_paths)
     expected_set = set(expected)
+    task_text = str(task_description or "")
     creation_authorized_set = set(
         _ordered_unique_paths(creation_authorized_paths or ())
     )
@@ -1194,9 +1287,16 @@ def materialize_planner_source_context(
             )
         except Exception:
             selected_supporting = []
+    selected_supporting = list(
+        _ordered_unique_paths(
+            [
+                *_acceptance_context_supporting_paths(root, task_text),
+                *selected_supporting,
+            ]
+        )
+    )
     supporting_set = set(_ordered_unique_paths(selected_supporting))
     candidates = _ordered_unique_paths([*expected, *selected_supporting])
-    task_text = str(task_description or "")
     target_hints = extract_source_target_hints(
         task_text,
         planner_contract=planner_contract,

@@ -167,14 +167,24 @@ def direct_first_party_imports(
     anchor_paths: Iterable[str],
     *,
     maximum_files: int = MAX_DIRECT_IMPORT_FILES,
+    include_test_anchors: bool = False,
 ) -> DirectImportExpansion:
-    """Resolve the direct first-party imports of product Python anchor files."""
+    """Resolve direct first-party imports of bounded Python anchor files.
+
+    Test files remain excluded by default because ordinary tests are not
+    implementation anchors.  Required independent acceptance files are an
+    explicit verification-context exception: callers may opt them in so their
+    imported implementation sources remain available without making the test
+    file an editable Planning target.
+    """
 
     root = Path(project_dir).resolve()
     anchors = [
         path
         for path in dict.fromkeys(str(item or "") for item in anchor_paths)
-        if path.endswith(".py") and is_import_fact_source(path)
+        if path.endswith(".py")
+        and (include_test_anchors or not is_test_path(path))
+        and (include_test_anchors or is_import_fact_source(path))
     ]
     if not anchors:
         return DirectImportExpansion()
@@ -184,7 +194,9 @@ def direct_first_party_imports(
     unresolved: list[str] = []
 
     def add(path: str) -> None:
-        if path in anchor_set or path in resolved or is_test_path(path):
+        if path in anchor_set or path in resolved:
+            return
+        if is_test_path(path) and not include_test_anchors:
             return
         resolved.append(path)
 
