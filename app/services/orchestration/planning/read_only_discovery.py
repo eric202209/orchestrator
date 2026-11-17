@@ -25,6 +25,7 @@ from app.services.orchestration.planning.source_materialization import (
     SOURCE_STATUS_NEW,
     TARGET_HINT_ABSENT,
     PlannerSourceMaterialization,
+    acceptance_implementation_imports,
     replacement_target_hints,
 )
 from app.services.orchestration.planning.repository_orientation import (
@@ -129,6 +130,26 @@ class DiscoveryAdmission:
     reason: str
 
 
+def _paths_completely_materialized(
+    paths: tuple[str, ...], materialization: PlannerSourceMaterialization
+) -> bool:
+    records = {
+        getattr(item, "relative_path", None): item for item in materialization.files
+    }
+    for path in paths:
+        item = records.get(path)
+        if (
+            item is None
+            or getattr(item, "status", None) != SOURCE_STATUS_EXISTING
+            or getattr(item, "content", None) is None
+            or bool(getattr(item, "truncated", False))
+            or not getattr(item, "version_identity", None)
+            or not getattr(item, "content_hash", None)
+        ):
+            return False
+    return True
+
+
 def assess_discovery_admission(
     *,
     prompt: str,
@@ -136,12 +157,18 @@ def assess_discovery_admission(
     materialization: PlannerSourceMaterialization,
     intent_mode: str = TaskIntentMode.DEFAULT.value,
     direct_imports: DirectImportExpansion | None = None,
+    acceptance_imports: DirectImportExpansion | None = None,
 ) -> DiscoveryAdmission:
     """Decide whether current bounded source facts justify one discovery call.
 
     ``direct_imports`` (Phase 40C-2) lists the direct first-party imports of the
     expected source.  Grounding is not sufficient while one of them is
     unresolved, beyond the bound, or not completely materialized.
+
+    ``acceptance_imports`` (P42-V17-Z) lists the existing implementation the
+    required acceptance file exercises.  Authorized new paths alone do not
+    ground a task while that implementation is beyond the bound or not
+    completely materialized.
     """
 
     if normalize_task_intent(intent_mode) == TaskIntentMode.CREATE_ONLY.value:
@@ -165,6 +192,16 @@ def assess_discovery_admission(
         and bool(getattr(item, "creation_authorized", False))
         for item in expected
     ):
+        if acceptance_imports is not None and (
+            acceptance_imports.exceeded
+            or not _paths_completely_materialized(
+                acceptance_imports.resolved, materialization
+            )
+        ):
+            return DiscoveryAdmission(
+                DISCOVERY_ADMISSION_REQUIRED,
+                "acceptance_implementation_not_grounded",
+            )
         return DiscoveryAdmission(
             DISCOVERY_ADMISSION_SKIPPED, "authorized_new_paths_are_grounded"
         )
@@ -196,23 +233,11 @@ def assess_discovery_admission(
             return DiscoveryAdmission(
                 DISCOVERY_ADMISSION_REQUIRED, "direct_first_party_import_unresolved"
             )
-        records = {
-            getattr(item, "relative_path", None): item for item in materialization.files
-        }
-        for path in direct_imports.resolved:
-            item = records.get(path)
-            if (
-                item is None
-                or getattr(item, "status", None) != SOURCE_STATUS_EXISTING
-                or getattr(item, "content", None) is None
-                or bool(getattr(item, "truncated", False))
-                or not getattr(item, "version_identity", None)
-                or not getattr(item, "content_hash", None)
-            ):
-                return DiscoveryAdmission(
-                    DISCOVERY_ADMISSION_REQUIRED,
-                    "direct_first_party_import_not_grounded",
-                )
+        if not _paths_completely_materialized(direct_imports.resolved, materialization):
+            return DiscoveryAdmission(
+                DISCOVERY_ADMISSION_REQUIRED,
+                "direct_first_party_import_not_grounded",
+            )
 
     hints = replacement_target_hints(prompt, planner_contract=planner_contract)
     if hints:
@@ -322,6 +347,9 @@ def prepare_discovery_context(
         materialization=materialization,
         intent_mode=intent_mode,
         direct_imports=direct_imports,
+        acceptance_imports=acceptance_implementation_imports(
+            Path(ctx.orchestration_state.project_dir), ctx.prompt
+        ),
     )
     emit_discovery_admission(
         ctx=ctx, admission=admission, emit_phase_event=emit_phase_event

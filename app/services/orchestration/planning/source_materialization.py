@@ -548,6 +548,50 @@ def _acceptance_context_supporting_paths(
         return acceptance_paths
 
 
+def acceptance_implementation_imports(root: Path, task_description: str) -> Any:
+    """Return the existing implementation the required acceptance exercises.
+
+    These are the acceptance files' direct first-party non-test imports, plus
+    one further hop only through package ``__init__.py`` facades, whose
+    re-exports name the implementation modules.  The bound is the existing
+    direct-import limit; nothing is materialized and no authority is granted.
+    Unresolved names are dropped, because they may be files the task creates.
+    """
+
+    from app.services.orchestration.planning.direct_import_grounding import (
+        MAX_DIRECT_IMPORT_FILES,
+        DirectImportExpansion,
+        direct_first_party_imports,
+    )
+    from app.services.orchestration.planning.orientation_import_facts import (
+        is_test_path,
+    )
+
+    acceptance_paths = _independent_acceptance_file_paths(task_description)
+    if not acceptance_paths:
+        return DirectImportExpansion()
+    try:
+        first = direct_first_party_imports(
+            root, acceptance_paths, include_test_anchors=True
+        )
+        implementation = [path for path in first.resolved if not is_test_path(path)]
+        facades = [path for path in implementation if path.endswith("/__init__.py")]
+        second = (
+            direct_first_party_imports(root, facades)
+            if facades
+            else DirectImportExpansion()
+        )
+    except (OSError, ValueError):
+        return DirectImportExpansion(exceeded=True)
+    resolved = _ordered_unique_paths([*implementation, *second.resolved])
+    return DirectImportExpansion(
+        resolved=tuple(resolved[:MAX_DIRECT_IMPORT_FILES]),
+        exceeded=(
+            first.exceeded or second.exceeded or len(resolved) > MAX_DIRECT_IMPORT_FILES
+        ),
+    )
+
+
 def extract_source_target_hints(
     task_description: str,
     *,
