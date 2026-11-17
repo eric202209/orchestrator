@@ -7,6 +7,7 @@ responsible for those control decisions.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -602,11 +603,13 @@ def build_bounded_debug_repair_changed_file_context(
 
     lines = [
         "## CURRENT CONTENT OF IMPLICATED SOURCE FILES",
-        "Only files labelled [COMPLETE] are full current source truth. A [TRUNCATED] file shows only a leading excerpt: never construct replace_in_file old text across its truncation boundary, and never write_file it. Existing function signatures shown here are authoritative. Do not change parameter names, types, order, or count unless the task explicitly requests an API change. If a function body raises NotImplementedError, implement the body while keeping the exact signature. Do not redesign the API.",
+        "Only files labelled [COMPLETE] are full current source truth. A [TRUNCATED] file shows only an excerpt: never construct replace_in_file old text across a truncation boundary, and never write_file it. Existing function signatures shown here are authoritative. Do not change parameter names, types, order, or count unless the task explicitly requests an API change. If a function body raises NotImplementedError, implement the body while keeping the exact signature. Do not redesign the API.",
     ]
     included_paths: list[str] = []
     complete_paths: list[str] = []
     truncated_paths: list[str] = []
+    line_references = _traceback_line_references(envelope, project_dir)
+    windows: dict[str, dict[str, Any]] = {}
     for relative_path in ordered_paths:
         if len(included_paths) >= _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_FILES:
             break
@@ -651,6 +654,45 @@ def build_bounded_debug_repair_changed_file_context(
         )
         if content_limit < 4:
             break
+        # P42-V18-D: when verification output names a line of this file, show
+        # the exact current bytes around it instead of the leading prefix.
+        line_count = content.count("\n") + 1
+        window_label_reserve = len(
+            _truncated_window_label(len(content), len(content), line_count, line_count)
+        )
+        window = _traceback_local_source_window(
+            content,
+            line_references.get(relative_path),
+            min(
+                content_limit - 3,
+                remaining
+                - len(section_header)
+                - window_label_reserve
+                - 2 * boundary_reserve
+                - 5,
+            ),
+        )
+        if window is not None:
+            hidden_before, visible, hidden_after, first_line, last_line = window
+            lines.append(section_header)
+            lines.append(
+                _truncated_window_label(
+                    len(visible), len(content), first_line, last_line
+                )
+            )
+            if hidden_before:
+                lines.append(_truncation_boundary_line(hidden_before))
+            lines.append(visible)
+            if hidden_after:
+                lines.append(_truncation_boundary_line(hidden_after))
+            windows[relative_path] = {
+                "selection": "traceback_local",
+                "start_line": first_line,
+                "end_line": last_line,
+            }
+            included_paths.append(relative_path)
+            truncated_paths.append(relative_path)
+            continue
         # Same visible prefix as ``_excerpt``; the bare "..." suffix is replaced
         # by an explicit boundary line.
         visible = str(content).strip()[: content_limit - 3].rstrip()
@@ -684,9 +726,106 @@ def build_bounded_debug_repair_changed_file_context(
                 else list(included_paths)
             ),
             "bounded_execution_debug_repair_changed_file_context_chars": len(rendered),
+            "bounded_execution_debug_repair_changed_file_context_windows": windows,
         }
     )
     return rendered, metadata
+
+
+def _traceback_line_references(
+    envelope: DebugFeedbackEnvelope, project_dir: Path
+) -> dict[str, int]:
+    """Map each product source path to the last line the failure output names.
+
+    pytest and CPython both list the innermost frame last.  Paths go through
+    the same normalization as context selection, so tests and paths outside
+    the workspace never yield a reference.
+    """
+
+    text = "\n".join(
+        (
+            str(envelope.stdout_excerpt or ""),
+            str(envelope.stderr_excerpt or ""),
+            str(envelope.pytest_excerpt or ""),
+        )
+    )
+    references: dict[str, int] = {}
+    for match in re.finditer(
+        r"((?:[A-Za-z]:)?[^\s:'\"]+\.py)(?::|\", line )(\d+)\b", text
+    ):
+        path = _normalize_bounded_debug_repair_source_path(match.group(1), project_dir)
+        if path:
+            references[path] = int(match.group(2))
+    return references
+
+
+def _traceback_local_source_window(
+    content: str, line: Optional[int], budget: int
+) -> Optional[tuple[int, str, int, int, int]]:
+    """Exact current bytes around ``line``, line-aligned, within ``budget``.
+
+    The region keeps the largest enclosing definition that fits whole, else
+    the referenced line, and is chosen by the Planning source-region selector.
+    Returns ``(hidden_before, visible, hidden_after, first_line, last_line)``,
+    or ``None`` when the reference is absent or not a line of ``content``.
+    """
+
+    from app.services.orchestration.planning.source_materialization import (
+        _select_source_region,
+    )
+
+    # Newline-delimited, like tracebacks and the region selector; splitlines()
+    # would also split on form feeds and shift every later line.
+    lines = content.split("\n")
+    if not line or not 1 <= line <= len(lines) or budget < 4:
+        return None
+    offsets = [0]
+    for text in lines:
+        offsets.append(offsets[-1] + len(text.encode("utf-8")) + 1)
+    offsets[-1] = len(content.encode("utf-8"))
+    first, last = line, line
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        tree = None
+    for node in ast.walk(tree) if tree is not None else ():
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        start = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+        end = node.end_lineno or node.lineno
+        if (
+            start <= line <= end
+            and end - start > last - first
+            and offsets[end] - offsets[start - 1] <= budget
+        ):
+            first, last = start, end
+    region = _select_source_region(
+        content,
+        budget_bytes=budget,
+        match_span=(offsets[first - 1], offsets[last]),
+    )
+    if region is None:
+        return None
+    encoded = content.encode("utf-8")
+    visible = encoded[region.start_byte : region.end_byte].decode("utf-8")
+    if visible.endswith("\n"):
+        visible = visible[:-1]
+    return (
+        len(encoded[: region.start_byte].decode("utf-8")),
+        visible,
+        len(encoded[region.end_byte :].decode("utf-8")),
+        region.start_line,
+        region.end_line,
+    )
+
+
+def _truncated_window_label(
+    shown_chars: int, total_chars: int, first_line: int, last_line: int
+) -> str:
+    return (
+        f"[TRUNCATED: {shown_chars} of {total_chars} characters shown, lines "
+        f"{first_line}-{last_line} only; not complete source truth]"
+    )
 
 
 def _truncated_source_label(shown_chars: int, total_chars: int) -> str:
