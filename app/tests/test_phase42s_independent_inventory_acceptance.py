@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import shutil
 import sys
 from pathlib import Path
 
@@ -153,6 +154,7 @@ def _write_inventory_project(root: Path, *, corrected: bool) -> Path:
     (root / "tests/test_inventory_acceptance.py").write_text(
         INDEPENDENT_TEST_SOURCE, encoding="utf-8"
     )
+    shutil.copytree(root, root.parent / f"{root.name}-acceptance-baseline")
     return root
 
 
@@ -269,9 +271,12 @@ def _candidate_check(
     acceptance_task_prompt: str | None = None,
     acceptance_authority_status: str | None = None,
 ):
+    snapshot_root = root.parent / f"{root.name}-acceptance-baseline"
     return validate_candidate_delta(
         project_dir=root,
         change_set={
+            "target_path": str(root),
+            "snapshot_path": str(snapshot_root),
             "modified_files": ["inventory/service.py"],
             "added_files": [],
             "deleted_files": [],
@@ -327,6 +332,103 @@ def test_correct_candidate_passes_independent_contract_runner(tmp_path):
     assert run.findings == ()
     assert run.task_acceptance["required"] is True
     assert run.task_acceptance["results"][0]["outcome"] == "passed"
+    assert run.task_acceptance["integrity"]["status"] == "verified"
+
+
+def test_weakened_required_acceptance_replacement_is_not_authoritative(tmp_path):
+    root = _write_inventory_project(tmp_path / "correct", corrected=True)
+    (root / "tests/test_inventory_acceptance.py").write_text(
+        "def test_placeholder():\n    assert bool('placeholder')\n",
+        encoding="utf-8",
+    )
+
+    run = _candidate_check(root, prompt=INDEPENDENT_PROMPT)
+
+    assert "independent_acceptance_integrity_failed" in [
+        finding.rule_id for finding in run.findings
+    ]
+    assert run.task_acceptance["status"] == "blocked_integrity"
+    assert run.task_acceptance["results"] == []
+    assert run.task_acceptance["integrity"]["failures"] == [
+        {
+            "code": "acceptance_file_identity_mismatch",
+            "path": "tests/test_inventory_acceptance.py",
+        }
+    ]
+
+
+def test_required_acceptance_assertion_removal_is_not_authoritative(tmp_path):
+    root = _write_inventory_project(tmp_path / "correct", corrected=True)
+    (root / "tests/test_inventory_acceptance.py").write_text(
+        "def test_removed_assertion():\n    pass\n",
+        encoding="utf-8",
+    )
+
+    run = _candidate_check(root, prompt=INDEPENDENT_PROMPT)
+
+    assert "independent_acceptance_integrity_failed" in [
+        finding.rule_id for finding in run.findings
+    ]
+    assert run.task_acceptance["integrity"]["failures"] == [
+        {
+            "code": "acceptance_file_identity_mismatch",
+            "path": "tests/test_inventory_acceptance.py",
+        }
+    ]
+
+
+def test_required_acceptance_symlink_replacement_is_not_authoritative(tmp_path):
+    root = _write_inventory_project(tmp_path / "correct", corrected=True)
+    acceptance = root / "tests/test_inventory_acceptance.py"
+    acceptance.unlink()
+    (root / "tests/test_other.py").write_text(
+        INDEPENDENT_TEST_SOURCE,
+        encoding="utf-8",
+    )
+    acceptance.symlink_to("test_other.py")
+
+    run = _candidate_check(root, prompt=INDEPENDENT_PROMPT)
+
+    assert "independent_acceptance_integrity_failed" in [
+        finding.rule_id for finding in run.findings
+    ]
+    assert run.task_acceptance["integrity"]["failures"] == [
+        {
+            "code": "acceptance_path_symlink",
+            "path": "tests/test_inventory_acceptance.py",
+        }
+    ]
+
+
+def test_required_acceptance_command_redirect_is_refused(tmp_path):
+    root = _write_inventory_project(tmp_path / "correct", corrected=True)
+    redirected = INDEPENDENT_PROMPT.replace(
+        "python -m pytest tests/test_inventory_acceptance.py -q",
+        "python -m pytest tests/test_other.py -q > redirected.txt",
+    )
+
+    run = _candidate_check(root, prompt=redirected)
+
+    assert "task_acceptance_command_refused" in [
+        finding.rule_id for finding in run.findings
+    ]
+
+
+def test_required_acceptance_deletion_is_not_authoritative(tmp_path):
+    root = _write_inventory_project(tmp_path / "correct", corrected=True)
+    (root / "tests/test_inventory_acceptance.py").unlink()
+
+    run = _candidate_check(root, prompt=INDEPENDENT_PROMPT)
+
+    assert "independent_acceptance_integrity_failed" in [
+        finding.rule_id for finding in run.findings
+    ]
+    assert run.task_acceptance["integrity"]["failures"] == [
+        {
+            "code": "acceptance_file_not_regular",
+            "path": "tests/test_inventory_acceptance.py",
+        }
+    ]
 
 
 def test_retry_feedback_cannot_replace_persisted_independent_contract(tmp_path):
@@ -384,6 +486,7 @@ def test_independent_result_has_distinct_attempt_bound_evidence(tmp_path):
         33,
     )
     assert projection["results"][0]["outcome"] == "failed"
+    assert projection["integrity"]["status"] == "verified"
 
 
 def test_required_marker_is_forced_before_review_publication_even_flag_off(

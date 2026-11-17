@@ -1418,6 +1418,37 @@ def _task_acceptance_evidence(
     if acceptance.get("required"):
         projection["required"] = True
         projection["contract_kind"] = "independent"
+        integrity = acceptance.get("integrity")
+        if isinstance(integrity, dict):
+            projection["integrity"] = {
+                "status": _bounded_evidence_text(integrity.get("status")),
+                "paths": [
+                    {
+                        "path": _bounded_evidence_text(item.get("path")),
+                        "baseline_sha256": _bounded_evidence_text(
+                            item.get("baseline_sha256")
+                        ),
+                        "candidate_sha256": _bounded_evidence_text(
+                            item.get("candidate_sha256")
+                        ),
+                    }
+                    for item in (integrity.get("paths") or [])[
+                        :_ACCEPTANCE_EVIDENCE_ITEM_LIMIT
+                    ]
+                    if isinstance(item, dict)
+                ],
+                "failures": [
+                    {
+                        key: _bounded_evidence_text(item.get(key))
+                        for key in ("code", "path", "command")
+                        if key in item
+                    }
+                    for item in (integrity.get("failures") or [])[
+                        :_ACCEPTANCE_EVIDENCE_ITEM_LIMIT
+                    ]
+                    if isinstance(item, dict)
+                ],
+            }
     return projection
 
 

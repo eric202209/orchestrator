@@ -22,7 +22,13 @@ from app.services.orchestration.execution.python_resolution import (
 )
 from app.services.orchestration.types import CandidateFinding
 
-from .path_authority import PathDeclarationError, declare
+from .path_authority import (
+    EntryType,
+    PathAuthorityError,
+    PathDeclarationError,
+    declare,
+    observe,
+)
 from .workspace_guard import TaskWorkspaceViolationError, normalize_path_reference
 
 
@@ -747,12 +753,125 @@ def _task_acceptance_finding(
     )
 
 
+def _independent_acceptance_file_paths(
+    extraction: TaskAcceptanceExtraction,
+) -> tuple[tuple[str, ...], tuple[dict[str, str], ...]]:
+    """Return the exact file paths required acceptance commands name.
+
+    A required contract must identify files, not only a pytest directory or a
+    broad discovery command.  Without a file identity there is no bounded
+    pre-execution object to protect from candidate mutation.
+    """
+
+    paths: list[str] = []
+    failures: list[dict[str, str]] = []
+    for command in extraction.admitted:
+        command_paths = [
+            argument.partition("::")[0]
+            for argument in command.pytest_args
+            if not argument.startswith("-")
+        ]
+        if not command_paths:
+            failures.append(
+                {
+                    "code": "acceptance_file_path_missing",
+                    "command": command.text,
+                }
+            )
+            continue
+        for path in command_paths:
+            if path not in paths:
+                paths.append(path)
+    return tuple(paths), tuple(failures)
+
+
+def _verify_independent_acceptance_files(
+    *,
+    project_dir: Path,
+    change_set: Mapping[str, Any] | None,
+    extraction: TaskAcceptanceExtraction,
+) -> dict[str, Any]:
+    """Bind required acceptance files to the pre-execution snapshot.
+
+    The snapshot is the existing attempt-bound source identity.  Path
+    Authority observation supplies the regular-file and symlink checks; the
+    content hashes ensure a replacement with a passing file cannot silently
+    become the authoritative acceptance test.
+    """
+
+    paths, path_failures = _independent_acceptance_file_paths(extraction)
+    if path_failures:
+        return {"status": "failed", "paths": [], "failures": list(path_failures)}
+
+    snapshot_path = (change_set or {}).get("snapshot_path")
+    if not isinstance(snapshot_path, str) or not snapshot_path.strip():
+        return {
+            "status": "failed",
+            "paths": [],
+            "failures": [{"code": "acceptance_baseline_missing"}],
+        }
+
+    candidate_root = Path(project_dir).resolve()
+    snapshot_root = Path(snapshot_path).expanduser().resolve()
+    verified_paths: list[dict[str, str]] = []
+    failures: list[dict[str, str]] = []
+    for relative_path in paths:
+        try:
+            declared = declare(relative_path)
+            baseline = observe(snapshot_root, declared)
+            candidate = observe(candidate_root, declared)
+        except (PathAuthorityError, PathDeclarationError) as exc:
+            failures.append(
+                {
+                    "code": getattr(exc, "code", "acceptance_path_invalid"),
+                    "path": relative_path,
+                }
+            )
+            continue
+
+        if baseline.symlink_segment or candidate.symlink_segment:
+            failures.append({"code": "acceptance_path_symlink", "path": relative_path})
+            continue
+        if (
+            baseline.entry_type is not EntryType.REGULAR_FILE
+            or candidate.entry_type is not EntryType.REGULAR_FILE
+        ):
+            failures.append(
+                {"code": "acceptance_file_not_regular", "path": relative_path}
+            )
+            continue
+        if not baseline.content_sha256 or not candidate.content_sha256:
+            failures.append(
+                {"code": "acceptance_file_identity_unavailable", "path": relative_path}
+            )
+            continue
+        if baseline.content_sha256 != candidate.content_sha256:
+            failures.append(
+                {"code": "acceptance_file_identity_mismatch", "path": relative_path}
+            )
+            continue
+        verified_paths.append(
+            {
+                "path": relative_path,
+                "baseline_sha256": baseline.content_sha256,
+                "candidate_sha256": candidate.content_sha256,
+            }
+        )
+
+    return {
+        "status": "verified" if not failures else "failed",
+        "paths": verified_paths,
+        "failures": failures,
+    }
+
+
 def _run_task_acceptance(
     *,
     project_dir: Path,
     task_prompt: str,
     acceptance_task_prompt: str | None = None,
     acceptance_authority_status: str | None = None,
+    candidate_change_set: Mapping[str, Any] | None = None,
     focused_command: str,
     focused_returncode: int | None,
     timeout_seconds: int,
@@ -848,11 +967,46 @@ def _run_task_acceptance(
     extraction = (
         independent_acceptance_pytest_commands(
             source_prompt,
-            project_dir=project_dir,
+            # Keep the operator-declared path lexical.  Resolving it through
+            # the live candidate before Path Authority observes it would turn
+            # a symlink replacement into a different apparent test path.
+            project_dir=None,
         )
         if independent_required
         else task_acceptance_pytest_commands(source_prompt, project_dir=project_dir)
     )
+    acceptance_integrity = None
+    if extraction.required:
+        acceptance_integrity = _verify_independent_acceptance_files(
+            project_dir=project_dir,
+            change_set=candidate_change_set,
+            extraction=extraction,
+        )
+        if acceptance_integrity["status"] != "verified":
+            findings.append(
+                _task_acceptance_finding(
+                    rule_id="independent_acceptance_integrity_failed",
+                    category="task_contract",
+                    message=(
+                        "Required independent acceptance file identity is not "
+                        "bound to the pre-execution candidate"
+                    ),
+                    evidence={"integrity": acceptance_integrity},
+                )
+            )
+            return {
+                "status": "blocked_integrity",
+                "section_found": extraction.section_found,
+                "extracted": list(extraction.extracted),
+                "admitted": [command.text for command in extraction.admitted],
+                "refused": [dict(refusal) for refusal in extraction.refused],
+                "ignored": [dict(item) for item in extraction.ignored],
+                "required": True,
+                "contract_kind": "independent",
+                "integrity": acceptance_integrity,
+                "results": [],
+                "declared_forms": list(declared_acceptance_forms(task_prompt)),
+            }
     for refusal in extraction.refused:
         findings.append(
             _task_acceptance_finding(
@@ -1044,6 +1198,7 @@ def _run_task_acceptance(
     if extraction.required:
         result["required"] = True
         result["contract_kind"] = "independent"
+        result["integrity"] = acceptance_integrity
     if acceptance_authority_status is not None:
         result["authority_status"] = acceptance_authority_status
     return result
@@ -1155,6 +1310,7 @@ def validate_candidate_delta(
             task_prompt=task_prompt,
             acceptance_task_prompt=acceptance_task_prompt,
             acceptance_authority_status=acceptance_authority_status,
+            candidate_change_set=change_set,
             # A never-started focused run is not reusable acceptance evidence.
             focused_command=selection.command if start_error is None else "",
             focused_returncode=focused_returncode,
