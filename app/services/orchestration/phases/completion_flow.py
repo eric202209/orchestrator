@@ -200,18 +200,29 @@ def _resolve_template_review_policy(task: Any) -> Optional[dict]:
     template_id = getattr(task, "template_id", None)
     if not template_id:
         return None
+
+    def _unresolved_template_policy() -> dict:
+        """Keep a persisted review requirement from falling back to auto-publish."""
+
+        return {
+            "auto_promote_if": [],
+            "hold_if": ["always"],
+            "allowed_ops": [],
+            "auto_promote_eligible": False,
+        }
+
     try:
         from app.services.orchestration.workflow_templates import get_template
 
         tmpl = get_template(template_id)
         if not tmpl:
-            return None
+            return _unresolved_template_policy()
         policy = dict(tmpl.review_policy)
         policy["auto_promote_eligible"] = tmpl.auto_promote_eligible
         policy["allowed_ops"] = tmpl.allowed_ops
         return policy
     except Exception:
-        return None
+        return _unresolved_template_policy()
 
 
 def _extract_completion_repair_json_text(value: Any) -> str:

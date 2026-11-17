@@ -463,6 +463,26 @@ def test_resolve_template_carries_auto_promote_eligible():
     assert "allowed_ops" in policy
 
 
+def test_unresolvable_persisted_review_template_fails_closed(monkeypatch):
+    from app.services.orchestration.phases.completion_flow import (
+        _resolve_template_review_policy,
+    )
+
+    class FakeTask:
+        template_id = "dependency-config-change"
+
+    monkeypatch.setattr(
+        "app.services.orchestration.workflow_templates.get_template",
+        lambda _template_id: None,
+    )
+
+    policy = _resolve_template_review_policy(FakeTask())
+
+    assert policy is not None
+    assert policy["auto_promote_eligible"] is False
+    assert policy["hold_if"] == ["always"]
+
+
 # ---------------------------------------------------------------------------
 # Unknown condition names fail-closed
 # ---------------------------------------------------------------------------

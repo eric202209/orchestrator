@@ -165,11 +165,25 @@ def test_s6_r8_evaluator_exception_is_error_not_pass(_no_event_journal):
     assert result["verdict"] == "ERROR"
 
 
-def _seed_auto_publish(db_session, tmp_path, monkeypatch, runtime, verdict):
+def _seed_auto_publish(
+    db_session,
+    tmp_path,
+    monkeypatch,
+    runtime,
+    verdict,
+    *,
+    template_id=None,
+    existing_mutable_paths=(),
+):
     ctx, execution, project_root, workspace_dir = _seed_legacy_finalize_ctx(
-        db_session, tmp_path
+        db_session,
+        tmp_path,
+        existing_mutable_paths=existing_mutable_paths,
     )
     ctx.runtime_service = runtime
+    if template_id is not None:
+        ctx.task.template_id = template_id
+        db_session.flush()
     (workspace_dir / "README.md").write_text("before\n", encoding="utf-8")
     ctx.task_service.create_workspace_snapshot(
         ctx.project,
@@ -274,6 +288,34 @@ def test_r1_r5_explicit_evaluator_pass_preserves_auto_publication(
     assert runtime.evaluator_calls == 1
     assert result["status"] == "completed"
     assert (project_root / "README.md").read_text(encoding="utf-8") == "after\n"
+
+
+def test_p42_v17r_persisted_review_template_holds_before_publication(
+    db_session, tmp_path, monkeypatch
+):
+    from app.models import TaskExecutionChangeSet
+
+    runtime = _Runtime({"output": SUBSTANTIVE_PASS})
+    result, ctx, project_root = _seed_auto_publish(
+        db_session,
+        tmp_path,
+        monkeypatch,
+        runtime,
+        _accepted(),
+        template_id="dependency-config-change",
+    )
+
+    record = (
+        db_session.query(TaskExecutionChangeSet)
+        .filter(TaskExecutionChangeSet.task_execution_id == ctx.task_execution_id)
+        .one()
+    )
+    assert result["status"] == "completed"
+    assert not (project_root / "README.md").exists()
+    assert record.disposition == "captured"
+    assert record.review_decision["held_for_review"] is True
+    assert record.review_decision["reason"] == "template_auto_promote_not_eligible"
+    assert record.review_decision["publication_eligible"] is False
 
 
 def test_s8_r9_smoke_only_warning_with_explicit_pass_still_publishes(

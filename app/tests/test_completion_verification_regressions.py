@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import shlex
@@ -1260,10 +1261,16 @@ def _seed_finalize_ctx(db_session, tmp_path):
     return ctx, execution
 
 
-def _seed_legacy_finalize_ctx(db_session, tmp_path, *, task_subfolder="task-work"):
+def _seed_legacy_finalize_ctx(
+    db_session, tmp_path, *, task_subfolder="task-work", existing_mutable_paths=()
+):
     project_root = tmp_path / "legacy-project"
     workspace_dir = project_root / task_subfolder
     workspace_dir.mkdir(parents=True)
+    for relative_path in existing_mutable_paths:
+        existing_path = workspace_dir / relative_path
+        existing_path.parent.mkdir(parents=True, exist_ok=True)
+        existing_path.write_text("before\n", encoding="utf-8")
     project = Project(name="Legacy Finalize", workspace_path=str(project_root))
     db_session.add(project)
     db_session.flush()
@@ -1335,6 +1342,7 @@ def _seed_legacy_finalize_ctx(db_session, tmp_path, *, task_subfolder="task-work
         {"op": "write_file", "path": path} for path in publication_paths
     ]
     task.steps = json.dumps(state.plan)
+    existing_mutable_paths = set(existing_mutable_paths)
     authority = AcceptedPathAuthority.create(
         accepted_plan_identity=accepted_plan_identity(state.plan),
         workspace_identity=str(workspace_dir.resolve()),
@@ -1342,8 +1350,17 @@ def _seed_legacy_finalize_ctx(db_session, tmp_path, *, task_subfolder="task-work
         grants=[
             PathGrant(
                 path=declare(path),
-                grant_class=GrantClass.CREATION_AUTHORIZED,
+                grant_class=(
+                    GrantClass.EXISTING_MUTABLE
+                    if path in existing_mutable_paths
+                    else GrantClass.CREATION_AUTHORIZED
+                ),
                 provenance=GrantProvenance.ACCEPTED_PLAN,
+                baseline_content_hash=(
+                    hashlib.sha256((workspace_dir / path).read_bytes()).hexdigest()
+                    if path in existing_mutable_paths
+                    else None
+                ),
             )
             for path in publication_paths
         ],

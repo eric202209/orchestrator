@@ -1293,13 +1293,12 @@ class CompletionCoordinator:
                     "reason": "verification_insufficient_for_auto_promotion",
                 },
             )
-        if evaluator_pending:
-            _persist_review_projection(
-                {
-                    **review_decision,
-                    "evaluator_pending": False,
-                }
-            )
+        _persist_review_projection(
+            {
+                **review_decision,
+                "evaluator_pending": False,
+            }
+        )
         if task_change_set and project and ctx.runtime_workspace_used:
             task_service.retain_workspace_snapshot(
                 project,
