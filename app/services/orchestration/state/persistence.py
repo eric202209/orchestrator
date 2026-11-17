@@ -1394,7 +1394,7 @@ def _task_acceptance_evidence(
         if isinstance(output, dict):
             item["output"] = {key: output.get(key) for key in _ACCEPTANCE_OUTPUT_KEYS}
         projected.append(item)
-    return {
+    projection = {
         "schema": TASK_ACCEPTANCE_EVIDENCE_SCHEMA,
         "session_id": session_id,
         "task_id": task_id,
@@ -1415,6 +1415,10 @@ def _task_acceptance_evidence(
             for r in refused[:_ACCEPTANCE_EVIDENCE_ITEM_LIMIT]
         ],
     }
+    if acceptance.get("required"):
+        projection["required"] = True
+        projection["contract_kind"] = "independent"
+    return projection
 
 
 def record_validation_verdict(

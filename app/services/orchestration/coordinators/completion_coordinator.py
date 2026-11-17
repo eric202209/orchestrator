@@ -68,6 +68,7 @@ from app.services.orchestration.validation.accepted_path_authority import (
 )
 from app.services.orchestration.validation.candidate_checks import (
     candidate_delta_identity,
+    task_prompt_requires_independent_acceptance,
 )
 from app.services.orchestration.validation.path_authority import PathAuthorityError
 from app.services.orchestration.validation.validator import ValidatorService
@@ -445,6 +446,12 @@ class CompletionCoordinator:
         prompt = ctx.prompt
         acceptance_task_prompt = getattr(ctx, "acceptance_task_prompt", None)
         acceptance_authority_status = getattr(ctx, "acceptance_authority_status", None)
+        acceptance_contract_prompt = (
+            acceptance_task_prompt if acceptance_task_prompt is not None else prompt
+        )
+        independent_acceptance_required = task_prompt_requires_independent_acceptance(
+            acceptance_contract_prompt
+        )
         execution_profile = ctx.execution_profile
         validation_profile = ctx.validation_profile
         runs_in_canonical_baseline = ctx.runs_in_canonical_baseline
@@ -591,7 +598,10 @@ class CompletionCoordinator:
                 "run_candidate_checks": True,
                 "include_static_checks": True,
             }
-            if settings.TASK_ACCEPTANCE_VERIFICATION_ENABLED:
+            if (
+                settings.TASK_ACCEPTANCE_VERIFICATION_ENABLED
+                or independent_acceptance_required
+            ):
                 evidence["run_task_acceptance_checks"] = True
             if _gating_change_set_cache[0]:
                 evidence["change_set"] = _gating_change_set_cache[0]
@@ -1030,7 +1040,10 @@ class CompletionCoordinator:
                         "include_static_checks": True,
                         **(
                             {"run_task_acceptance_checks": True}
-                            if settings.TASK_ACCEPTANCE_VERIFICATION_ENABLED
+                            if (
+                                settings.TASK_ACCEPTANCE_VERIFICATION_ENABLED
+                                or independent_acceptance_required
+                            )
                             else {}
                         ),
                     },

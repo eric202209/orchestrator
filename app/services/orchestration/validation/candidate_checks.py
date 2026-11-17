@@ -74,16 +74,21 @@ class TaskAcceptanceCommand:
 
 @dataclass(frozen=True)
 class TaskAcceptanceExtraction:
-    """Pytest commands stated in a task's explicit ``Acceptance criteria:``."""
+    """Pytest commands stated in one task-owned acceptance section."""
 
     section_found: bool
     extracted: tuple[str, ...]
     admitted: tuple[TaskAcceptanceCommand, ...]
     refused: tuple[dict[str, str], ...]
     ignored: tuple[dict[str, str], ...]
+    required: bool = False
 
 
 _ACCEPTANCE_HEADING = re.compile(r"^\s*acceptance criteria:(.*)$", re.IGNORECASE)
+_INDEPENDENT_ACCEPTANCE_HEADING = re.compile(
+    r"^\s*independent acceptance contract\s*\(required\)\s*:(.*)$",
+    re.IGNORECASE,
+)
 # A later unindented, non-list "Heading:" line closes the acceptance section.
 _SECTION_HEADING = re.compile(r"^[A-Za-z][^`]*:\s*$")
 _CODE_SPAN = re.compile(r"`([^`\n]+)`")
@@ -183,11 +188,11 @@ _PYTEST_FLAGS = frozenset(
 )
 
 
-def _acceptance_sections(task_prompt: str) -> list[str]:
+def _sections_for_heading(task_prompt: str, heading_pattern: re.Pattern) -> list[str]:
     sections: list[str] = []
     current: list[str] | None = None
     for line in str(task_prompt or "").splitlines():
-        heading = _ACCEPTANCE_HEADING.match(line)
+        heading = heading_pattern.match(line)
         if heading:
             if current is not None:
                 sections.append("\n".join(current))
@@ -201,6 +206,20 @@ def _acceptance_sections(task_prompt: str) -> list[str]:
     if current is not None:
         sections.append("\n".join(current))
     return sections
+
+
+def _acceptance_sections(task_prompt: str) -> list[str]:
+    return _sections_for_heading(task_prompt, _ACCEPTANCE_HEADING)
+
+
+def _independent_acceptance_sections(task_prompt: str) -> list[str]:
+    return _sections_for_heading(task_prompt, _INDEPENDENT_ACCEPTANCE_HEADING)
+
+
+def task_prompt_requires_independent_acceptance(task_prompt: str) -> bool:
+    """Return whether the persisted task explicitly requires its contract."""
+
+    return bool(_independent_acceptance_sections(task_prompt))
 
 
 def _declared_acceptance_heading(line: str) -> tuple[str, str] | None:
@@ -303,18 +322,12 @@ def _admit_pytest_command(
     return TaskAcceptanceCommand(text=text, pytest_args=tuple(admitted_args)), ""
 
 
-def task_acceptance_pytest_commands(
-    task_prompt: str, *, project_dir: Path | None = None
+def _extract_pytest_commands(
+    sections: list[str],
+    *,
+    project_dir: Path | None,
+    required: bool,
 ) -> TaskAcceptanceExtraction:
-    """Extract pytest commands quoted in the task's explicit acceptance section.
-
-    Only backtick-quoted spans inside an ``Acceptance criteria:`` section are
-    considered, and only spans naming ``pytest`` are command candidates.
-    Nothing is executed here; with ``project_dir`` path arguments must also
-    resolve (symlinks included) inside the workspace.
-    """
-
-    sections = _acceptance_sections(task_prompt)
     extracted: list[str] = []
     admitted: list[TaskAcceptanceCommand] = []
     refused: list[dict[str, str]] = []
@@ -339,6 +352,37 @@ def task_acceptance_pytest_commands(
         admitted=tuple(admitted),
         refused=tuple(refused),
         ignored=tuple(ignored),
+        required=required,
+    )
+
+
+def task_acceptance_pytest_commands(
+    task_prompt: str, *, project_dir: Path | None = None
+) -> TaskAcceptanceExtraction:
+    """Extract pytest commands quoted in the task's ordinary acceptance section.
+
+    Only backtick-quoted spans inside an ``Acceptance criteria:`` section are
+    considered, and only spans naming ``pytest`` are command candidates.
+    Nothing is executed here; with ``project_dir`` path arguments must also
+    resolve (symlinks included) inside the workspace.
+    """
+
+    return _extract_pytest_commands(
+        _acceptance_sections(task_prompt),
+        project_dir=project_dir,
+        required=False,
+    )
+
+
+def independent_acceptance_pytest_commands(
+    task_prompt: str, *, project_dir: Path | None = None
+) -> TaskAcceptanceExtraction:
+    """Extract the operator-required independent acceptance command(s)."""
+
+    return _extract_pytest_commands(
+        _independent_acceptance_sections(task_prompt),
+        project_dir=project_dir,
+        required=True,
     )
 
 
@@ -797,9 +841,17 @@ def _run_task_acceptance(
             "declared_forms": [],
         }
 
-    extraction = task_acceptance_pytest_commands(
-        task_prompt if acceptance_task_prompt is None else acceptance_task_prompt,
-        project_dir=project_dir,
+    source_prompt = (
+        task_prompt if acceptance_task_prompt is None else acceptance_task_prompt
+    )
+    independent_required = task_prompt_requires_independent_acceptance(source_prompt)
+    extraction = (
+        independent_acceptance_pytest_commands(
+            source_prompt,
+            project_dir=project_dir,
+        )
+        if independent_required
+        else task_acceptance_pytest_commands(source_prompt, project_dir=project_dir)
     )
     for refusal in extraction.refused:
         findings.append(
@@ -814,26 +866,50 @@ def _run_task_acceptance(
             )
         )
     if extraction.section_found and not (extraction.admitted or extraction.refused):
-        # Policy B: declared acceptance that names no verifiable pytest command
-        # is visible but not blocking.  A missing section stays silent.
-        findings.append(
-            _task_acceptance_finding(
-                rule_id="task_acceptance_no_verifiable_commands",
-                category="task_contract",
-                severity="warning",
-                message=(
-                    "Task acceptance criteria name no verifiable pytest command; "
-                    "acceptance was not verified"
-                ),
-                evidence={
-                    "section_found": True,
-                    "extracted_count": len(extraction.extracted),
-                    "admitted_count": 0,
-                    "refused_count": 0,
-                    "ignored_count": len(extraction.ignored),
-                },
+        # Ordinary acceptance remains warning-only for compatibility. An
+        # explicitly required independent contract fails closed when it has no
+        # runnable command to produce authoritative evidence.
+        if extraction.required:
+            findings.append(
+                _task_acceptance_finding(
+                    rule_id="independent_acceptance_command_missing",
+                    category="task_contract",
+                    message=(
+                        "Required independent acceptance contract names no "
+                        "verifiable pytest command"
+                    ),
+                    evidence={
+                        "section_found": True,
+                        "required": True,
+                        "extracted_count": len(extraction.extracted),
+                        "admitted_count": 0,
+                        "refused_count": 0,
+                        "ignored_count": len(extraction.ignored),
+                    },
+                )
             )
-        )
+        else:
+            # Policy B: declared acceptance that names no verifiable pytest
+            # command is visible but not blocking. A missing section stays
+            # silent.
+            findings.append(
+                _task_acceptance_finding(
+                    rule_id="task_acceptance_no_verifiable_commands",
+                    category="task_contract",
+                    severity="warning",
+                    message=(
+                        "Task acceptance criteria name no verifiable pytest command; "
+                        "acceptance was not verified"
+                    ),
+                    evidence={
+                        "section_found": True,
+                        "extracted_count": len(extraction.extracted),
+                        "admitted_count": 0,
+                        "refused_count": 0,
+                        "ignored_count": len(extraction.ignored),
+                    },
+                )
+            )
     results: list[dict[str, Any]] = []
     python = None
     if extraction.admitted:
@@ -965,6 +1041,9 @@ def _run_task_acceptance(
         "results": results,
         "declared_forms": list(declared_acceptance_forms(task_prompt)),
     }
+    if extraction.required:
+        result["required"] = True
+        result["contract_kind"] = "independent"
     if acceptance_authority_status is not None:
         result["authority_status"] = acceptance_authority_status
     return result
