@@ -653,6 +653,11 @@ def _has_explicit_new_test_writing_intent(task_prompt: str) -> bool:
         r"(?:pytest|unit\s+tests?|tests?|test\s+files?|test\s+coverage)\b",
         r"\b(?:with|include|add|write|create|update|provide)\s+"
         r"(?:new\s+)?(?:regression\s+)?(?:tests?|coverage)\b",
+        # "add a regression test", "add focused regression tests": one article
+        # and at most one free modifier, only before the unambiguous nouns.
+        r"\b(?:add|write|create|provide)\s+"
+        r"(?:(?:a|an|some|more|new|additional)\s+)?(?:[a-z-]+\s+)?"
+        r"(?:regression|unit)\s+tests?\b",
         # "tests for the feature", "tests that verify", etc.
         r"\btests?\s+(?:for|that|cover|exercise|import)\b",
     ]

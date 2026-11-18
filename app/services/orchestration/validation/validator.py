@@ -80,6 +80,8 @@ from app.services.orchestration.planning.behavioral_repair_contract import (
 )
 from app.services.orchestration.planning.task_bootstrap_contract import (
     BootstrapTaskType,
+    _has_explicit_new_test_writing_intent,
+    _is_test_path,
     build_task1_bootstrap_contract,
     validate_task1_bootstrap_contract,
 )
@@ -2736,6 +2738,41 @@ class ValidatorService:
                     f"{behavioral_repair_contract.test_only_mutation_paths[:5]}; "
                     "grounded_implementation_paths: "
                     f"{behavioral_repair_contract.grounded_implementation_paths[:5]})"
+                )
+
+        # P43-PRODUCT-01: a Task that explicitly asks for new or regression
+        # tests needs a planned test mutation, as the Planning prompt already
+        # states.  The Task 1 bootstrap contract and registered planner
+        # contracts own this decision when they apply.
+        requested_test_text = (
+            " ".join(str(value or "") for value in (title, description))
+            if description is not None
+            else str(task_prompt or "")
+        )
+        if (
+            profile != "verification"
+            and stage_allows_materialization
+            and task1_bootstrap_contract is None
+            and planner_contract is None
+            and _has_explicit_new_test_writing_intent(requested_test_text)
+        ):
+            test_mutation_paths = sorted(
+                path for path in materialized_targets if _is_test_path(path)
+            )
+            details["requested_test_deliverable"] = {
+                "requested": True,
+                "test_mutation_paths": test_mutation_paths[:20],
+                "code": (
+                    None
+                    if test_mutation_paths
+                    else "requested_test_deliverable_missing"
+                ),
+            }
+            if not test_mutation_paths:
+                repairable.append(
+                    "Task explicitly requested regression or new tests, but no "
+                    "plan operation adds or edits a test file (use append_file, "
+                    "replace_in_file, or authorized write_file on a test path)"
                 )
 
         negative_existing_checks = cls._plan_negative_existing_file_checks(

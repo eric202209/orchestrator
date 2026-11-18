@@ -98,7 +98,18 @@ def test_case_b_shaped_semantic_source_passes_but_unmaterialized_test_append_fai
         project_dir=project_dir,
         source_materialization=source_materialization,
     )
-    assert semantic_only.accepted, semantic_only.reasons
+    # P43-PRODUCT-01: TASK asks for regression coverage, so the source-only
+    # Plan is repairable for the missing test deliverable; the semantic source
+    # operation itself still raises no source-materialization finding.
+    assert semantic_only.repairable, semantic_only.reasons
+    assert all(
+        reason.startswith("Task explicitly requested regression or new tests")
+        for reason in semantic_only.reasons
+    ), semantic_only.reasons
+    assert (
+        semantic_only.details["requested_test_deliverable"]["code"]
+        == "requested_test_deliverable_missing"
+    )
 
     issues = _issues(
         project_dir, _plan([source_operation, test_append]), source_materialization
