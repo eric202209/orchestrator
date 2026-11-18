@@ -1620,6 +1620,7 @@ def _build_specialized_prompt_protected(
             ):
                 full_contract_candidate = build_compact_planning_repair_prompt(
                     malformed_output,
+                    task_description=task_description,
                     rejection_reasons=rejection_reasons,
                     prompt_profile="default",
                     apply_prompt_profile=None,
@@ -2420,11 +2421,13 @@ def build_compact_planning_repair_prompt(
         nested_workspace_guidance,
     )
     task_objective = _compact_task_objective(task_description)
-    preserve_task_objective = _is_stale_replace_repair(
-        malformed_output, rejection_reasons
-    ) or any(
-        "python_write_file_drops_referenced_definitions" in str(reason).lower()
-        for reason in (rejection_reasons or ())
+    preserve_task_objective = (
+        _is_test_deliverable_rejection(rejection_reasons)
+        or _is_stale_replace_repair(malformed_output, rejection_reasons)
+        or any(
+            "python_write_file_drops_referenced_definitions" in str(reason).lower()
+            for reason in (rejection_reasons or ())
+        )
     )
     task_objective_line = (
         f"Task objective (preserve): {task_objective}\n"
@@ -3615,6 +3618,7 @@ def _build_over_budget_compact_repair_prompt(
         )
     return build_compact_planning_repair_prompt(
         malformed_output,
+        task_description=task_description,
         rejection_reasons=rejection_reasons,
         prompt_profile=prompt_profile,
         apply_prompt_profile=apply_prompt_profile,

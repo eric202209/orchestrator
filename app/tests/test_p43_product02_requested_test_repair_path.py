@@ -335,8 +335,12 @@ def test_initial_plan_with_tests_needs_no_repair(tmp_path, monkeypatch):
 
 
 def test_repair_prompt_keeps_objective_only_for_the_requested_test_finding(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
+    # CI may not provide the deployment-only repair context setting.  That
+    # selects the bounded compact fallback, which must preserve the same
+    # requested-test objective contract as the full prompt.
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", None)
     root = _workspace(tmp_path)
     plan = json.dumps(_source_only_plan())
 
