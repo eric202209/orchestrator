@@ -38,6 +38,7 @@ _DETERMINISTIC_PLANNING_CONTRACT_MARKERS = (
     "planning_semantic_target_inventory_invalid",
     "planning_repair_missing_source_materialization",
     "planning_validation_failed_after_repair",
+    "repair_candidate_rejected_by_bootstrap_contract",
     "post_plan_grounding_rejected_after_repair",
     "repair_output_contract_violation",
     "op_contract_violation",

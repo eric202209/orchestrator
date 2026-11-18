@@ -31,6 +31,7 @@ from app.services.orchestration.planning.source_api_contract import (
 from app.services.orchestration.planning.source_materialization import (
     SOURCE_STATUS_EXISTING,
     SOURCE_MATERIALIZATION_REPAIR_MARKERS,
+    _independent_acceptance_file_paths,
     describe_provider_visible_source,
     materialize_planner_source_context,
     materialized_source_file,
@@ -73,6 +74,22 @@ PLANNING_REPAIR_MAX_SOURCE_CONTEXT_CHARS = 1400
 PLANNING_REPAIR_MAX_SOURCE_API_CONTRACT_CHARS = 1600
 PLANNING_REPAIR_COMPACT_SOURCE_API_CONTRACT_CHARS = 1200
 PLANNING_REPAIR_MINIMAL_SOURCE_API_CONTRACT_CHARS = 760
+# Lower-cased stem of the Validator requested-test-deliverable finding.
+REQUESTED_TEST_DELIVERABLE_REASON = "task explicitly requested regression or new tests"
+# P43-PRODUCT-03: lower-cased rejection markers that only a test mutation can
+# answer -- the requested-test finding and the Task 1 bootstrap test codes.
+_TEST_DELIVERABLE_REJECTION_MARKERS = (
+    REQUESTED_TEST_DELIVERABLE_REASON,
+    "task1_bootstrap_missing_expected_test_files",
+    "task1_bootstrap_expected_test_not_generated",
+    "bootstrap prompt asks for tests but no test files",
+)
+_TEST_REQUIREMENT_RE = re.compile(
+    r"\b(?:new|regression|unit)\s+tests?\b"
+    r"|\b(?:add|write|create|provide|include)\b[^.;]{0,40}\btests?\b",
+    re.I,
+)
+_NEGATED_REQUIREMENT_RE = re.compile(r"^(?:do not|don't|never)\b", re.I)
 # The handle line both provider-safe source renderers emit for one
 # Orchestrator-issued semantic target.
 _ISSUED_TARGET_ID_LINE_RE = re.compile(
@@ -876,10 +893,25 @@ def build_planning_repair_prompt_with_metadata(
         nested_workspace_guidance,
     )
     task_objective = _compact_task_objective(task_description)
-    preserve_task_objective = any(
+    # P43-PRODUCT-02/03: a missing requested test (general or Task 1
+    # bootstrap) asks the repair to test behaviour that only the Task states,
+    # so it keeps the objective and names the admissible test target.
+    test_deliverable_rejected = _is_test_deliverable_rejection(rejection_reasons)
+    preserve_task_objective = test_deliverable_rejected or any(
         "python_write_file_drops_referenced_definitions" in str(reason).lower()
         for reason in (rejection_reasons or ())
     )
+    if test_deliverable_rejected:
+        validation_guidance_block = _join_optional_blocks(
+            _build_requested_test_target_guidance(
+                task_description=task_description,
+                project_dir=project_dir,
+                source_materialization=(
+                    planner_source_materialization if materialization_block else None
+                ),
+            ),
+            validation_guidance_block,
+        )
     task_objective_line = (
         f"Task objective (preserve): {task_objective}\n"
         if task_objective and preserve_task_objective
@@ -2617,6 +2649,111 @@ Required repair:
 - Return only valid JSON step objects with description, commands, verification, expected_files, and optional step_number, rollback, and ops.
 - Relative paths only; no heredocs, background processes, dev servers, absolute paths, prose, or markdown.
 """
+
+
+def _is_test_deliverable_rejection(rejection_reasons: Optional[list[str]]) -> bool:
+    return any(
+        marker in str(reason).lower()
+        for reason in (rejection_reasons or ())
+        for marker in _TEST_DELIVERABLE_REJECTION_MARKERS
+    )
+
+
+def _task_test_requirement_lines(task_description: str, limit: int = 3) -> list[str]:
+    """Task sentences that request new tests, verbatim and bounded."""
+
+    lines: list[str] = []
+    for raw_line in str(task_description or "").splitlines():
+        for sentence in re.split(r"(?<=[.!?])\s+", raw_line.strip()):
+            text = sentence.strip().lstrip("-* ").strip()
+            if not text or _NEGATED_REQUIREMENT_RE.search(text):
+                continue
+            if _TEST_REQUIREMENT_RE.search(text):
+                lines.append(text[:240])
+    return list(dict.fromkeys(lines))[:limit]
+
+
+def _new_test_path_pattern(test_files: list[str]) -> str:
+    """The new-test path convention the existing tests already establish."""
+
+    for relative in test_files:
+        path = Path(relative)
+        directory = "" if path.parent == Path(".") else f"{path.parent.as_posix()}/"
+        name = path.name
+        if name.startswith("test_"):
+            return f"{directory}test_<topic>{path.suffix}"
+        if "_test." in name:
+            return f"{directory}<topic>_test{name.split('_test', 1)[1]}"
+        if ".test." in name:
+            return f"{directory}<topic>.test{name.split('.test', 1)[1]}"
+    return ""
+
+
+def _build_requested_test_target_guidance(
+    *,
+    task_description: str,
+    project_dir: Path,
+    source_materialization: Any,
+) -> str:
+    """Name the missing test deliverable and its admissible operations.
+
+    The Validator admits a new-file ``write_file`` only when the path does not
+    exist and is listed in that step's ``expected_files``; an existing test is
+    editable only when its full source was materialized. Without these facts
+    the repair model saw every record as ``creation_authorized: false`` next to
+    "Never invent paths" (P43-PRODUCT-02 Evaluations A and B).
+    """
+
+    try:
+        test_files = list(build_project_index(project_dir).test_files)
+    except Exception:
+        test_files = []
+    protected = set(_independent_acceptance_file_paths(task_description))
+    lines = [
+        "## REQUESTED TEST DELIVERABLE",
+        "The Task requires new tests and the rejected plan has no test mutation. "
+        "Keep the source fix and add a test step.",
+    ]
+    requirement_lines = _task_test_requirement_lines(task_description)
+    if requirement_lines:
+        lines.append("Task test requirement:")
+        lines.extend(f"- {line}" for line in requirement_lines)
+    rendered: list[str] = []
+    for relative in test_files[:8]:
+        record = (
+            materialized_source_file(source_materialization, relative)
+            if source_materialization is not None
+            else None
+        )
+        if relative in protected:
+            state = "protected acceptance; do not modify"
+        elif (
+            record is not None
+            and record.status == SOURCE_STATUS_EXISTING
+            and not record.truncated
+        ):
+            state = "existing; editable with append_file or replace_in_file"
+        else:
+            state = "existing; not editable in this repair: source not materialized"
+        rendered.append(f"- {relative} ({state})")
+    if len(test_files) > 8:
+        rendered.append(f"- ... {len(test_files) - 8} more")
+    lines.append("Existing test files:" if rendered else "Existing test files: none")
+    lines.extend(rendered)
+    pattern = _new_test_path_pattern(test_files)
+    location = (
+        f"a new path following the existing convention, such as {pattern}"
+        if pattern
+        else "a new test path consistent with the project structure"
+    )
+    lines.append(
+        f"New test file (authorized): use write_file with complete tests at "
+        f"{location}. The path must not already exist and must be listed in "
+        "that step's expected_files. Such a path is not an invented path. "
+        "The tests must exercise the behaviour the Task objective describes; "
+        "verify with python3 -m pytest <new test path> -q."
+    )
+    return "\n".join(lines)
 
 
 def _compact_task_objective(task_description: str, maximum_chars: int = 420) -> str:
