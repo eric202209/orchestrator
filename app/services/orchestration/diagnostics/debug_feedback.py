@@ -475,6 +475,22 @@ def build_bounded_debug_repair_prompt_with_metadata(
             '  {"repair_type":"ops_fix","ops":[{"op":"write_file","path":"src/...","content":"complete file content"}],"verification_command":"python3 -m pytest -q"}\n'
         )
     if source_contract:
+        if zero_test_collect_only:
+            source_rule_11 = (
+                "11. Zero tests were collected. The command must create a non-empty "
+                "test_*.py file containing a def test_* function and at least one "
+                "assertion or target-package import; include that path in "
+                "expected_files. An empty file or touch command is invalid. If "
+                "workspace evidence names a missing Python module target, prefer "
+                "creating that module file instead of editing only a package "
+                "__init__.py.\n"
+            )
+        else:
+            source_rule_11 = (
+                "11. If workspace evidence names a missing Python module target, "
+                "prefer creating that module file instead of editing only a package "
+                "__init__.py.\n"
+            )
         rules_section = (
             "Rules:\n"
             "1. Output exactly one JSON array containing one source repair object.\n"
@@ -487,7 +503,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
             f"8. Commands execute from the workspace root ({workspace}). Do not cd into the workspace root or any path containing vault/projects; you are already there.\n"
             "9. Do not bypass validators, workspace boundaries, or verification.\n"
             "10. Do not request additional retries or describe policy.\n"
-            "11. If workspace evidence names a missing Python module target, prefer creating that module file instead of editing only a package __init__.py.\n"
+            f"{source_rule_11}"
             "12. If a function whose definition appears in the source excerpts above raises NotImplementedError, implement its body only. Do not change its parameter list, annotations, return annotation, or call convention.\n"
         )
     else:

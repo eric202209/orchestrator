@@ -2,10 +2,14 @@
 
 from pathlib import Path
 from copy import deepcopy
+import ast
 import json
 import hashlib
+import os
+import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
 from app.services.orchestration.diagnostics.debug_feedback import (
@@ -290,6 +294,163 @@ def test_existing_and_unknown_test_paths_remain_rejected(tmp_path):
     assert executor_result["failure_category"] == "validation_failure"
 
 
+def _portable_test_functions(source: str) -> set[str]:
+    return {
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test")
+    }
+
+
+def _portable_copy_tree(source: Path, destination: Path) -> None:
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns(".agent", "__pycache__", ".pytest_cache"),
+    )
+
+
+def _portable_run_pytest(cwd: Path, targets: list[str]) -> dict:
+    report = cwd / ".portable-oracle-junit.xml"
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            f"--junitxml={report}",
+            *targets,
+        ],
+        cwd=cwd,
+        env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    cases = {}
+    if report.exists():
+        for case in ET.parse(report).iter("testcase"):
+            outcome = "passed"
+            for child in case:
+                if child.tag in ("failure", "error"):
+                    outcome = "failed"
+                elif child.tag == "skipped":
+                    outcome = "skipped"
+            cases[case.get("name", "")] = outcome
+        report.unlink()
+    return {"exit": process.returncode, "cases": cases}
+
+
+def _run_portable_completion_oracle(
+    baseline: Path,
+    change_set: Path,
+    acceptance: str,
+    existing: list[str],
+    tmp_path: Path,
+) -> dict:
+    """Keep the independent completion control usable when ignored evidence is absent."""
+
+    manifest = json.loads((change_set / "manifest.json").read_text())
+    copied = list(manifest.get("copied_files") or [])
+    deleted = list(manifest.get("deleted_files") or [])
+    candidate = tmp_path / "portable-oracle-candidate"
+    _portable_copy_tree(baseline, candidate)
+    for relative in copied:
+        target = candidate / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(change_set / "files" / relative, target)
+    for relative in deleted:
+        (candidate / relative).unlink(missing_ok=True)
+
+    acceptance_protected = (
+        acceptance not in copied
+        and hashlib.sha256((candidate / acceptance).read_bytes()).digest()
+        == hashlib.sha256((baseline / acceptance).read_bytes()).digest()
+    )
+
+    functional = _portable_run_pytest(candidate, [acceptance])
+    functional_summary = {
+        "passed": sum(value == "passed" for value in functional["cases"].values()),
+        "total": len(functional["cases"]),
+        "exit": functional["exit"],
+    }
+    functional_pass = functional["exit"] == 0 and bool(functional["cases"])
+
+    preserved = tmp_path / "portable-oracle-preserved"
+    _portable_copy_tree(candidate, preserved)
+    for relative in existing:
+        shutil.copy2(baseline / relative, preserved / relative)
+    preservation = _portable_run_pytest(preserved, existing)
+    weakened = []
+    for relative in existing:
+        if relative in copied:
+            before = _portable_test_functions((baseline / relative).read_text())
+            after = _portable_test_functions((candidate / relative).read_text())
+            if not before <= after:
+                weakened.append(relative)
+    preservation_pass = preservation["exit"] == 0 and not weakened
+
+    delivered = {}
+    for relative in copied:
+        name = relative.rsplit("/", 1)[-1]
+        if relative == acceptance or not (
+            name.endswith(".py")
+            and (name.startswith("test_") or name.endswith("_test.py"))
+        ):
+            continue
+        after = _portable_test_functions((candidate / relative).read_text())
+        before = (
+            _portable_test_functions((baseline / relative).read_text())
+            if (baseline / relative).exists()
+            else set()
+        )
+        new = sorted(after - before)
+        if new:
+            delivered[relative] = new
+    new_names = {name for names in delivered.values() for name in names}
+
+    if not delivered:
+        deliverable = "MISSING"
+    else:
+        on_candidate = _portable_run_pytest(candidate, sorted(delivered))
+        candidate_new = {
+            name: on_candidate["cases"].get(name, "absent") for name in new_names
+        }
+        regress = tmp_path / "portable-oracle-regress"
+        _portable_copy_tree(baseline, regress)
+        for relative in delivered:
+            target = regress / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(candidate / relative, target)
+        on_baseline = _portable_run_pytest(regress, sorted(delivered))
+        baseline_new = {
+            name: on_baseline["cases"].get(name, "absent") for name in new_names
+        }
+        if any(value != "passed" for value in candidate_new.values()):
+            deliverable = "FAILING_ON_CANDIDATE"
+        elif not any(value != "passed" for value in baseline_new.values()):
+            deliverable = "INEFFECTIVE"
+        else:
+            deliverable = "COMPLETE"
+
+    return {
+        "acceptance_protected": acceptance_protected,
+        "functional": functional_summary,
+        "preservation_pass": preservation_pass,
+        "deliverable": deliverable,
+        "complete_delivery": bool(
+            acceptance_protected
+            and functional_pass
+            and preservation_pass
+            and deliverable == "COMPLETE"
+        ),
+    }
+
+
 def test_pagekit_reference_candidate_passes_external_completion_oracle(tmp_path):
     baseline = _pagekit_workspace(tmp_path / "baseline")
     change_set = tmp_path / "changeset"
@@ -332,26 +493,13 @@ def test_pagekit_reference_candidate_passes_external_completion_oracle(tmp_path)
         ),
         encoding="utf-8",
     )
-    oracle = (
-        Path(__file__).resolve().parents[2]
-        / "docs/roadmap/reports/evidence/p43-product-02/oracle.py"
+    verdict = _run_portable_completion_oracle(
+        baseline,
+        change_set,
+        "tests/test_pagekit_acceptance.py",
+        ["tests/test_paging.py"],
+        tmp_path,
     )
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-I",
-            str(oracle),
-            str(baseline),
-            str(change_set),
-            "tests/test_pagekit_acceptance.py",
-            "tests/test_paging.py",
-        ],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    verdict = json.loads(completed.stdout)
     assert verdict["acceptance_protected"] is True
     assert verdict["functional"] == {"exit": 0, "passed": 1, "total": 1}
     assert verdict["preservation_pass"] is True
