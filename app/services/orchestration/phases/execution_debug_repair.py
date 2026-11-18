@@ -21,10 +21,21 @@ from app.services.orchestration.diagnostics.debug_feedback import (
     debug_repair_source_path,
 )
 from app.services.orchestration.validation.path_authority import (
+    GrantClass,
+    GrantProvenance,
     PathAuthorityError,
+    TrustClass,
+    classify_trust,
     declare,
     observe,
 )
+from app.services.orchestration.validation.accepted_path_authority import (
+    accepted_plan_identity,
+)
+from app.services.orchestration.planning.source_materialization import (
+    _independent_acceptance_file_paths,
+)
+from app.services.orchestration.planning.orientation_import_facts import is_test_path
 from app.services.observability.planning_provider_evidence import (
     PlanningRepairResponseEvidence,
     debug_repair_response_evidence_target,
@@ -277,6 +288,182 @@ def _safe_relative_op_path(path_value: Any) -> Optional[str]:
     if path.is_absolute() or ".." in path.parts:
         return None
     return relative
+
+
+def derive_bounded_debug_repair_generated_test_paths(
+    *,
+    accepted_path_authority: Any,
+    accepted_plan: Any,
+    orchestration_state: Any,
+    current_step_result: Any,
+    task_execution_id: Any,
+    task_execution_status: Any,
+    project_dir: Path,
+    task: Any = None,
+) -> tuple[str, ...]:
+    """Derive exact generated-test paths eligible for this Debug Repair.
+
+    This is an execution-provenance projection, not a new grant source.  Every
+    returned path must have the existing APA ``creation_authorized`` grant, an
+    accepted-plan creation operation, a current-TaskExecution StepResult with
+    ``created_files`` provenance, and a live regular-file observation in the
+    APA workspace.  Missing or legacy provenance fails closed.
+    """
+
+    def _status(value: Any) -> str:
+        value = getattr(value, "value", value)
+        return str(value or "").strip().lower()
+
+    if accepted_path_authority is None or task_execution_id is None:
+        return ()
+    if _status(task_execution_status) != "running":
+        return ()
+    if _status(getattr(orchestration_state, "status", None)) in {
+        "done",
+        "aborted",
+    }:
+        return ()
+    if (
+        _status(getattr(task, "workspace_status", None))
+        in {
+            "promoted",
+            "published",
+        }
+        or getattr(task, "promoted_at", None) is not None
+    ):
+        return ()
+
+    try:
+        workspace_identity = str(Path(project_dir).resolve())
+        if accepted_path_authority.workspace_identity != workspace_identity:
+            return ()
+        plan_identity = accepted_plan_identity(accepted_plan)
+        if accepted_path_authority.accepted_plan_identity != plan_identity:
+            return ()
+    except Exception:
+        return ()
+
+    try:
+        protected_acceptance = {
+            str(path).strip().replace("\\", "/").lstrip("./")
+            for path in _independent_acceptance_file_paths(
+                str(getattr(orchestration_state, "task_description", "") or "")
+            )
+            if str(path).strip()
+        }
+    except Exception:
+        return ()
+
+    plan_creation_paths_by_step: dict[int, set[str]] = {}
+    for index, step in enumerate(accepted_plan or [], start=1):
+        if not isinstance(step, dict):
+            continue
+        try:
+            step_number = int(step.get("step_number", index))
+        except (TypeError, ValueError):
+            step_number = index
+        paths: set[str] = set()
+        for operation in step.get("ops") or []:
+            if not isinstance(operation, dict):
+                continue
+            if str(operation.get("op") or "").strip() not in {
+                "write_file",
+                "append_file",
+            }:
+                continue
+            relative = _safe_relative_op_path(operation.get("path"))
+            if relative:
+                paths.add(relative)
+        if paths:
+            plan_creation_paths_by_step[step_number] = paths
+
+    if not plan_creation_paths_by_step:
+        return ()
+
+    execution_results = list(
+        getattr(orchestration_state, "execution_results", []) or []
+    )
+    if current_step_result is not None:
+        execution_results.append(current_step_result)
+
+    paths: list[str] = []
+    seen: set[str] = set()
+    for result in execution_results:
+        result_execution_id = getattr(result, "task_execution_id", None)
+        if result_execution_id is None and isinstance(result, dict):
+            result_execution_id = result.get("task_execution_id")
+        if str(result_execution_id) != str(task_execution_id):
+            continue
+
+        result_workspace = getattr(result, "workspace_identity", None)
+        if result_workspace is None and isinstance(result, dict):
+            result_workspace = result.get("workspace_identity")
+        if str(result_workspace or "") != workspace_identity:
+            continue
+        result_plan_identity = getattr(result, "accepted_plan_identity", None)
+        if result_plan_identity is None and isinstance(result, dict):
+            result_plan_identity = result.get("accepted_plan_identity")
+        if str(result_plan_identity or "") != plan_identity:
+            continue
+
+        step_number = getattr(result, "step_number", None)
+        if step_number is None and isinstance(result, dict):
+            step_number = result.get("step_number")
+        try:
+            creation_paths = plan_creation_paths_by_step[int(step_number)]
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        created_files = getattr(result, "created_files", None)
+        if created_files is None and isinstance(result, dict):
+            created_files = result.get("created_files")
+        changed_files = getattr(result, "files_changed", None)
+        if changed_files is None and isinstance(result, dict):
+            changed_files = result.get("files_changed")
+        changed = {
+            str(path).strip().replace("\\", "/").lstrip("./")
+            for path in (changed_files or [])
+            if str(path).strip()
+        }
+
+        for raw_path in created_files or []:
+            relative = _safe_relative_op_path(raw_path)
+            if (
+                not relative
+                or relative not in creation_paths
+                or relative not in changed
+                or relative in protected_acceptance
+                or relative in seen
+            ):
+                continue
+            try:
+                declared = declare(relative)
+                if classify_trust(declared) is not TrustClass.PRODUCT:
+                    continue
+                if not is_test_path(declared.value):
+                    continue
+                grant = accepted_path_authority.grant_for(declared)
+                if (
+                    grant is None
+                    or grant.grant_class is not GrantClass.CREATION_AUTHORIZED
+                    or grant.provenance
+                    not in {
+                        GrantProvenance.ACCEPTED_PLAN,
+                        GrantProvenance.TASK_EXPLICIT_SCOPE,
+                    }
+                ):
+                    continue
+                observation = observe(Path(project_dir), declared)
+            except (PathAuthorityError, OSError):
+                continue
+            if (
+                observation.exists
+                and observation.entry_type.value == "regular_file"
+                and not observation.symlink_segment
+            ):
+                seen.add(relative)
+                paths.append(relative)
+    return tuple(paths)
 
 
 def _bounded_debug_repair_stale_replace_issues(

@@ -82,6 +82,12 @@ class StepResult:
     error_message: str = ""
     attempt: int = 1
     verification_evidence_ref: Optional[str] = None
+    # Execution provenance for bounded repair decisions. Older checkpoints
+    # leave these unset and therefore cannot authorize generated-test repair.
+    created_files: List[str] = field(default_factory=list)
+    task_execution_id: Optional[int] = None
+    workspace_identity: Optional[str] = None
+    accepted_plan_identity: Optional[str] = None
 
 
 @dataclass

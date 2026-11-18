@@ -31,6 +31,8 @@ from app.services.orchestration.planning.orientation_import_facts import (
     is_test_path,
 )
 from app.services.orchestration.validation.path_authority import (
+    GrantClass,
+    GrantProvenance,
     PathAuthorityError,
     TrustClass,
     classify_trust,
@@ -360,6 +362,7 @@ def build_bounded_debug_repair_prompt(
     *,
     source_edit_context: bool = False,
     candidate_repair: Optional[Any] = None,
+    authorized_generated_test_paths: Optional[Iterable[str]] = None,
 ) -> str:
     """Render the bounded Phase 7F debug repair prompt body."""
 
@@ -368,6 +371,7 @@ def build_bounded_debug_repair_prompt(
         evidence_capsule,
         source_edit_context=source_edit_context,
         candidate_repair=candidate_repair,
+        authorized_generated_test_paths=authorized_generated_test_paths,
     ).prompt
 
 
@@ -378,6 +382,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
     source_edit_context: bool = False,
     candidate_repair: Optional[Any] = None,
     prior_source_paths: Optional[Iterable[str]] = None,
+    authorized_generated_test_paths: Optional[Iterable[str]] = None,
 ) -> DebugRepairPromptBuildResult:
     """Render the bounded debug repair prompt with source/API metadata."""
 
@@ -404,7 +409,11 @@ def build_bounded_debug_repair_prompt_with_metadata(
         if rendered:
             evidence_section = f"\n{rendered}\n"
     source_excerpt_section = build_source_step_validation_excerpt_section(envelope)
-    source_contract = build_debug_source_contract(envelope, evidence_capsule)
+    source_contract = build_debug_source_contract(
+        envelope,
+        evidence_capsule,
+        prior_source_paths=prior_source_paths,
+    )
     source_api_contract, source_api_metadata = (
         build_debug_source_api_contract_context_block(
             envelope,
@@ -416,6 +425,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
         build_bounded_debug_repair_changed_file_context(
             envelope,
             prior_source_paths=prior_source_paths,
+            allowed_generated_test_paths=authorized_generated_test_paths,
         )
     )
     source_contract_section = f"\n{source_contract}\n" if source_contract else ""
@@ -425,6 +435,26 @@ def build_bounded_debug_repair_prompt_with_metadata(
     changed_file_context_section = (
         f"\n{changed_file_context}\n" if changed_file_context else ""
     )
+    generated_test_paths = _normalized_generated_test_paths(
+        authorized_generated_test_paths
+    )
+    if generated_test_paths and source_contract:
+        source_contract = source_contract.replace(
+            "- Do not edit tests or verifier commands.",
+            "- Existing baseline tests and protected acceptance files are immutable; only the exact authorized generated-test paths below may be repaired.",
+        )
+        source_contract_section = f"\n{source_contract}\n"
+    generated_test_contract_section = ""
+    if generated_test_paths:
+        generated_test_contract_section = (
+            "\nAuthorized generated-test repair contract:\n"
+            "- The following exact test path(s) were created by this Task Execution "
+            "under the accepted Plan and are conditionally repairable before publication:\n"
+            + "".join(f"  - {path}\n" for path in generated_test_paths)
+            + "- Modify only those exact paths, using replace_in_file with current visible text.\n"
+            "- Existing baseline tests, protected acceptance files, and every other test path remain immutable.\n"
+            "- This contract grants no authority to create, delete, or modify any other file.\n"
+        )
     source_ops_contract_section = ""
     if source_contract:
         source_ops_contract_section = (
@@ -507,6 +537,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
         f"{source_ops_contract_section}"
         f"{source_api_contract_section}"
         f"{changed_file_context_section}"
+        f"{generated_test_contract_section}"
         f"{rules_section}"
     )
     return DebugRepairPromptBuildResult(
@@ -553,6 +584,7 @@ def build_bounded_debug_repair_changed_file_context(
     *,
     prior_source_paths: Optional[Iterable[str]] = None,
     allowed_source_paths: Optional[Iterable[str]] = None,
+    allowed_generated_test_paths: Optional[Iterable[str]] = None,
 ) -> tuple[str, dict[str, Any]]:
     """Render bounded current source content for a Phase 7F repair prompt.
 
@@ -565,6 +597,9 @@ def build_bounded_debug_repair_changed_file_context(
         "bounded_execution_debug_repair_changed_file_context_present": False,
         "bounded_execution_debug_repair_changed_file_context_paths": [],
         "bounded_execution_debug_repair_changed_file_context_chars": 0,
+        "bounded_execution_debug_repair_changed_file_context_generated_test_paths": [],
+        "bounded_execution_debug_repair_changed_file_context_complete_generated_test_paths": [],
+        "bounded_execution_debug_repair_changed_file_context_truncated_generated_test_paths": [],
     }
     project_dir = Path(envelope.workspace_path or ".")
     if not project_dir.is_dir():
@@ -583,7 +618,19 @@ def build_bounded_debug_repair_changed_file_context(
             )
         }
     )
+    allowed_generated = tuple(
+        dict.fromkeys(
+            normalized
+            for raw_path in allowed_generated_test_paths or ()
+            if (
+                normalized := _normalize_bounded_debug_repair_generated_test_path(
+                    raw_path, project_dir
+                )
+            )
+        )
+    )
     ordered_paths: list[str] = []
+    generated_paths: set[str] = set()
     seen: set[str] = set()
 
     def add_path(raw_path: Any) -> None:
@@ -600,11 +647,35 @@ def build_bounded_debug_repair_changed_file_context(
         add_path(path)
     for path in _traceback_python_paths(envelope):
         add_path(path)
+    for path in allowed_generated:
+        if path not in seen:
+            seen.add(path)
+            ordered_paths.append(path)
+            generated_paths.add(path)
 
-    lines = [
-        "## CURRENT CONTENT OF IMPLICATED SOURCE FILES",
-        "Only files labelled [COMPLETE] are full current source truth. A [TRUNCATED] file shows only an excerpt: never construct replace_in_file old text across a truncation boundary, and never write_file it. Existing function signatures shown here are authoritative. Do not change parameter names, types, order, or count unless the task explicitly requests an API change. If a function body raises NotImplementedError, implement the body while keeping the exact signature. Do not redesign the API.",
-    ]
+    lines: list[str] = []
+    current_kind: Optional[str] = None
+
+    def add_section(kind: str) -> None:
+        nonlocal current_kind
+        if kind == current_kind:
+            return
+        current_kind = kind
+        if kind == "generated_test":
+            lines.extend(
+                [
+                    "## CURRENT CONTENT OF AUTHORIZED GENERATED TEST FILES",
+                    "Only the exact generated-test paths listed in the authorized contract may be repaired. Files labelled [COMPLETE] are full current test truth; [TRUNCATED] content is not sufficient for a whole-file rewrite.",
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "## CURRENT CONTENT OF IMPLICATED SOURCE FILES",
+                    "Only files labelled [COMPLETE] are full current source truth. A [TRUNCATED] file shows only an excerpt: never construct replace_in_file old text across a truncation boundary, and never write_file it. Existing function signatures shown here are authoritative. Do not change parameter names, types, order, or count unless the task explicitly requests an API change. If a function body raises NotImplementedError, implement the body while keeping the exact signature. Do not redesign the API.",
+                ]
+            )
+
     included_paths: list[str] = []
     complete_paths: list[str] = []
     truncated_paths: list[str] = []
@@ -614,6 +685,7 @@ def build_bounded_debug_repair_changed_file_context(
         if len(included_paths) >= _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_FILES:
             break
         path = project_dir / relative_path
+        add_section("generated_test" if relative_path in generated_paths else "source")
         try:
             resolved = path.resolve()
             resolved.relative_to(project_dir.resolve())
@@ -718,12 +790,27 @@ def build_bounded_debug_repair_changed_file_context(
             "bounded_execution_debug_repair_changed_file_context_present": True,
             "bounded_execution_debug_repair_changed_file_context_paths": included_paths,
             "bounded_execution_debug_repair_changed_file_context_complete_paths": (
-                complete_paths if len(rendered) == len("\n".join(lines)) else []
+                [path for path in complete_paths if path not in generated_paths]
+                if len(rendered) == len("\n".join(lines))
+                else []
             ),
             "bounded_execution_debug_repair_changed_file_context_truncated_paths": (
                 truncated_paths
                 if len(rendered) == len("\n".join(lines))
                 else list(included_paths)
+            ),
+            "bounded_execution_debug_repair_changed_file_context_generated_test_paths": [
+                path for path in included_paths if path in generated_paths
+            ],
+            "bounded_execution_debug_repair_changed_file_context_complete_generated_test_paths": (
+                [path for path in complete_paths if path in generated_paths]
+                if len(rendered) == len("\n".join(lines))
+                else []
+            ),
+            "bounded_execution_debug_repair_changed_file_context_truncated_generated_test_paths": (
+                [path for path in truncated_paths if path in generated_paths]
+                if len(rendered) == len("\n".join(lines))
+                else [path for path in included_paths if path in generated_paths]
             ),
             "bounded_execution_debug_repair_changed_file_context_chars": len(rendered),
             "bounded_execution_debug_repair_changed_file_context_windows": windows,
@@ -860,6 +947,49 @@ def _normalize_bounded_debug_repair_source_path(
     except (OSError, ValueError):
         return ""
     return debug_repair_source_path(relative, project_dir)
+
+
+def _normalize_bounded_debug_repair_generated_test_path(
+    raw_path: Any, project_dir: Path
+) -> str:
+    """Normalize one already-authorized generated-test path for prompt context."""
+
+    try:
+        canonical = declare(raw_path)
+        if classify_trust(canonical) is not TrustClass.PRODUCT:
+            return ""
+        if not is_test_path(canonical.value):
+            return ""
+        observation = observe(Path(project_dir), canonical)
+    except (PathAuthorityError, OSError):
+        return ""
+    if (
+        not observation.exists
+        or observation.entry_type.value != "regular_file"
+        or observation.symlink_segment
+    ):
+        return ""
+    return canonical.value
+
+
+def _normalized_generated_test_paths(
+    paths: Optional[Iterable[str]],
+) -> tuple[str, ...]:
+    """Canonicalize the trusted path projection without deriving authority."""
+
+    normalized: list[str] = []
+    for raw_path in paths or ():
+        try:
+            canonical = declare(raw_path)
+        except PathAuthorityError:
+            continue
+        if (
+            classify_trust(canonical) is TrustClass.PRODUCT
+            and is_test_path(canonical.value)
+            and canonical.value not in normalized
+        ):
+            normalized.append(canonical.value)
+    return tuple(normalized)
 
 
 def debug_repair_source_path(raw_path: Any, project_dir: Optional[Path] = None) -> str:
@@ -1171,6 +1301,7 @@ def build_debug_source_contract(
     evidence_capsule: Optional[Any] = None,
     *,
     max_chars: int = _DEBUG_SOURCE_CONTRACT_MAX_CHARS,
+    prior_source_paths: Optional[Iterable[str]] = None,
 ) -> str:
     """Render a compact source-focused repair contract for Python debug repair."""
 
@@ -1200,11 +1331,27 @@ def build_debug_source_contract(
         except (OSError, SyntaxError, ValueError):
             contract = None
 
-    if contract is not None:
+    prior_targets: list[str] = []
+    for path in prior_source_paths or ():
+        normalized = debug_repair_source_path(path, project_dir)
+        if normalized:
+            _append_unique(prior_targets, normalized, limit=3)
+
+    if prior_targets:
+        # The accepted plan's prior source mutations are the strongest target
+        # evidence for a verification failure. Package-root imports can make
+        # ``extract_python_test_contract`` report ``__init__.py`` even when
+        # the implementation under test is a sibling module. Do not let that
+        # inferred re-export target override the actual repaired source.
+        for path in prior_targets:
+            _append_unique(targets, path, limit=3)
+    elif contract is not None:
         for path, _reason in list(contract.source_targets) + list(
             contract.missing_source_targets
         ):
             _append_unique(targets, path, limit=3)
+
+    if contract is not None:
         for line in _debug_expected_behavior_lines(contract):
             _append_unique(behavior, line, limit=3)
 
@@ -1437,12 +1584,14 @@ def normalize_bounded_debug_repair_payload(
     *,
     envelope: Optional[DebugFeedbackEnvelope] = None,
     source_edit_context: bool = False,
+    authorized_generated_test_paths: Optional[Iterable[str]] = None,
 ) -> Optional[dict[str, Any]]:
     """Convert a Phase 7F repair array into the legacy debug action shape."""
     return normalize_bounded_debug_repair_payload_detailed(
         parsed_data,
         envelope=envelope,
         source_edit_context=source_edit_context,
+        authorized_generated_test_paths=authorized_generated_test_paths,
     ).payload
 
 
@@ -1451,6 +1600,7 @@ def parse_bounded_debug_repair_output_strict(
     *,
     envelope: Optional[DebugFeedbackEnvelope] = None,
     source_edit_context: bool = False,
+    authorized_generated_test_paths: Optional[Iterable[str]] = None,
 ) -> DebugRepairNormalizationResult:
     """Parse exactly one canonical bounded repair JSON array, once."""
 
@@ -1500,6 +1650,7 @@ def parse_bounded_debug_repair_output_strict(
         parsed_data,
         envelope=envelope,
         source_edit_context=source_edit_context,
+        authorized_generated_test_paths=authorized_generated_test_paths,
     )
 
 
@@ -1508,6 +1659,7 @@ def normalize_bounded_debug_repair_payload_detailed(
     *,
     envelope: Optional[DebugFeedbackEnvelope] = None,
     source_edit_context: bool = False,
+    authorized_generated_test_paths: Optional[Iterable[str]] = None,
 ) -> DebugRepairNormalizationResult:
     """Convert Phase 7F repair output while preserving invalid-branch details."""
 
@@ -1528,11 +1680,18 @@ def normalize_bounded_debug_repair_payload_detailed(
     raw_ops_present = isinstance(item.get("ops"), list)
     if explicit_ops_fix and raw_ops_present and not ops:
         return _debug_repair_normalization_rejected(parsed_data, "invalid_ops_fix_ops")
-    if (source_edit_context or explicit_ops_fix) and _ops_have_unauthorized_path(ops):
+    if (source_edit_context or explicit_ops_fix) and _ops_have_unauthorized_path(
+        ops, authorized_generated_test_paths=authorized_generated_test_paths
+    ):
         return _debug_repair_normalization_rejected(
             parsed_data, "unauthorized_source_path"
         )
-    if (source_edit_context or explicit_ops_fix) and _ops_touch_source_files(ops):
+    if (source_edit_context or explicit_ops_fix) and (
+        _ops_touch_source_files(ops)
+        or _ops_touch_authorized_generated_tests(
+            ops, authorized_generated_test_paths=authorized_generated_test_paths
+        )
+    ):
         if not verification:
             return _debug_repair_normalization_rejected(
                 parsed_data, "missing_verification_command"
@@ -1732,7 +1891,11 @@ def _ops_touch_source_files(ops: Any) -> bool:
     return False
 
 
-def _ops_have_unauthorized_path(ops: Any) -> bool:
+def _ops_have_unauthorized_path(
+    ops: Any,
+    *,
+    authorized_generated_test_paths: Optional[Iterable[str]] = None,
+) -> bool:
     """True when a durable repair op targets a path no repair may write.
 
     Traversal, absolute or protected-root paths, orchestration-internal or
@@ -1740,6 +1903,7 @@ def _ops_have_unauthorized_path(ops: Any) -> bool:
     """
 
     durable_ops = {"replace_in_file", "write_file", "append_file"}
+    generated = set(_normalized_generated_test_paths(authorized_generated_test_paths))
     for op in ops or []:
         if not isinstance(op, dict):
             continue
@@ -1754,7 +1918,33 @@ def _ops_have_unauthorized_path(ops: Any) -> bool:
             return True
         if classify_trust(canonical) is not TrustClass.PRODUCT:
             return True
-        if is_test_path(canonical.value):
+        if is_test_path(canonical.value) and canonical.value not in generated:
+            return True
+    return False
+
+
+def _ops_touch_authorized_generated_tests(
+    ops: Any,
+    *,
+    authorized_generated_test_paths: Optional[Iterable[str]] = None,
+) -> bool:
+    generated = set(_normalized_generated_test_paths(authorized_generated_test_paths))
+    if not generated:
+        return False
+    for op in ops or []:
+        if not isinstance(op, dict):
+            continue
+        if str(op.get("op") or "").strip() not in {
+            "replace_in_file",
+            "write_file",
+            "append_file",
+        }:
+            continue
+        try:
+            canonical = declare(op.get("path"))
+        except PathAuthorityError:
+            continue
+        if canonical.value in generated:
             return True
     return False
 
@@ -1765,6 +1955,7 @@ def bounded_debug_repair_ops_authority_rejection(
     authority: Any,
     project_dir: Path,
     complete_source_paths: Iterable[str] = (),
+    generated_test_paths: Iterable[str] = (),
 ) -> Optional[str]:
     """Reject an accepted ``ops_fix`` that its execution could not justify.
 
@@ -1775,6 +1966,7 @@ def bounded_debug_repair_ops_authority_rejection(
     """
 
     complete = set(complete_source_paths or ())
+    generated = set(_normalized_generated_test_paths(generated_test_paths))
     for op in ops or []:
         if not isinstance(op, dict):
             continue
@@ -1782,16 +1974,49 @@ def bounded_debug_repair_ops_authority_rejection(
         if op_name not in {"replace_in_file", "write_file", "append_file"}:
             continue
         relative = debug_repair_source_path(op.get("path"), project_dir)
-        if not relative:
-            return "unauthorized_source_path"
-        if authority is not None and authority.grant_for(declare(relative)) is None:
+        if relative:
+            if authority is not None and authority.grant_for(declare(relative)) is None:
+                return "unauthorized_source_path"
+            if (
+                op_name == "write_file"
+                and (Path(project_dir) / relative).is_file()
+                and relative not in complete
+            ):
+                return "missing_source_provenance"
+            continue
+
+        try:
+            canonical = declare(op.get("path"))
+        except PathAuthorityError:
             return "unauthorized_source_path"
         if (
-            op_name == "write_file"
-            and (Path(project_dir) / relative).is_file()
-            and relative not in complete
+            canonical.value not in generated
+            or not is_test_path(canonical.value)
+            or op_name != "replace_in_file"
+            or authority is None
         ):
-            return "missing_source_provenance"
+            return "unauthorized_source_path"
+        grant = authority.grant_for(canonical)
+        if (
+            grant is None
+            or grant.grant_class is not GrantClass.CREATION_AUTHORIZED
+            or grant.provenance
+            not in {
+                GrantProvenance.ACCEPTED_PLAN,
+                GrantProvenance.TASK_EXPLICIT_SCOPE,
+            }
+        ):
+            return "unauthorized_source_path"
+        try:
+            observation = observe(project_dir, canonical)
+        except (PathAuthorityError, OSError):
+            return "unauthorized_source_path"
+        if (
+            not observation.exists
+            or observation.entry_type.value != "regular_file"
+            or observation.symlink_segment
+        ):
+            return "unauthorized_source_path"
     return None
 
 

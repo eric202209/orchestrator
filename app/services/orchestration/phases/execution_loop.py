@@ -138,6 +138,7 @@ from app.services.orchestration.types import (
 )
 from app.services.orchestration.validation.validator import ValidatorService
 from app.services.orchestration.validation.path_authority import (
+    GrantClass,
     PathAuthorityError,
     declare,
 )
@@ -189,6 +190,7 @@ from app.services.orchestration.phases.execution_debug_repair import (
     _is_weak_completion_verifier_failure,
     _mark_bounded_debug_repair_timeout_if_applicable,
     _safe_relative_op_path,
+    derive_bounded_debug_repair_generated_test_paths,
 )
 from app.services.orchestration.prompt_templates import OrchestrationStatus, StepResult
 from app.schemas.knowledge import KnowledgeContext
@@ -202,6 +204,41 @@ from app.services.orchestration.recovery.recovery_strategy_registry import (
 from app.services.workspace.control_state_paths import control_state_of
 
 _DEBUG_KNOWLEDGE_MIN_CONFIDENCE = 0.85
+
+
+def _creation_authorized_files_from_structured_ops(
+    ops: Any,
+    files_changed: Any,
+    accepted_path_authority: Any,
+) -> list[str]:
+    """Record only files actually created under an accepted creation grant."""
+
+    changed = {
+        str(path).strip().replace("\\", "/").lstrip("./")
+        for path in files_changed or []
+        if str(path).strip()
+    }
+    created: list[str] = []
+    for operation in ops or []:
+        if not isinstance(operation, dict):
+            continue
+        if str(operation.get("op") or "").strip() not in {
+            "write_file",
+            "append_file",
+        }:
+            continue
+        try:
+            declared = declare(operation.get("path"))
+        except PathAuthorityError:
+            continue
+        if (
+            declared.value in changed
+            and accepted_path_authority is not None
+            and (grant := accepted_path_authority.grant_for(declared)) is not None
+            and grant.grant_class is GrantClass.CREATION_AUTHORIZED
+        ):
+            created.append(declared.value)
+    return list(dict.fromkeys(created))
 
 
 def _persist_step_verification_evidence_records(
@@ -361,6 +398,8 @@ def _fail_unsupported_step_commands(
         output="",
         verification_output="",
         files_changed=[],
+        task_execution_id=task_execution_id,
+        workspace_identity=str(Path(orchestration_state.project_dir).resolve()),
         error_message=terminal_message,
         attempt=1,
     )
@@ -620,6 +659,9 @@ def execute_step_loop(
     # retries may temporarily rewrite a step to rerun a command, but Candidate
     # must receive this same accepted projection after the step succeeds.
     accepted_plan_snapshot = deepcopy(orchestration_state.plan)
+    execution_workspace_identity = str(Path(orchestration_state.project_dir).resolve())
+    execution_plan_identity = accepted_path_authority.accepted_plan_identity
+    debug_repair_generated_test_paths_by_step: dict[int, tuple[str, ...]] = {}
 
     # Synthesize a minimal artifact when resuming from an old checkpoint that
     # predates the reasoning_artifact field (stored None).
@@ -755,7 +797,8 @@ def execute_step_loop(
 
         orchestration_state.current_step_index = step_index
         task.current_step = step_index + 1
-        refresh_task_execution_lease(_get_task_execution(db, ctx.task_execution_id))
+        current_task_execution = _get_task_execution(db, ctx.task_execution_id)
+        refresh_task_execution_lease(current_task_execution)
         save_orchestration_checkpoint(
             db, session_id, task_id, prompt, orchestration_state
         )
@@ -926,10 +969,14 @@ def execute_step_loop(
             orchestration_state.project_dir, expected_files
         )
 
+        generated_test_paths_for_execution = (
+            debug_repair_generated_test_paths_by_step.get(step_index, ())
+        )
         ops_result = ExecutorService.execute_file_ops(
             Path(orchestration_state.project_dir),
             step_ops,
             accepted_path_authority=accepted_path_authority,
+            debug_repair_generated_test_paths=generated_test_paths_for_execution,
             authority_check=lambda: _reserve_mutation_authority(
                 db, session_id, task_id
             ),
@@ -996,6 +1043,11 @@ def execute_step_loop(
                         },
                     )
 
+        structured_created_files = _creation_authorized_files_from_structured_ops(
+            step_ops,
+            ops_result.get("files_changed", []),
+            accepted_path_authority,
+        )
         step_started_at = datetime.now(timezone.utc)
         if (
             not ops_result.get("success", False)
@@ -1013,6 +1065,10 @@ def execute_step_loop(
                 output=str(ops_result.get("output", ""))[:1000],
                 verification_output="",
                 files_changed=[],
+                created_files=structured_created_files,
+                task_execution_id=ctx.task_execution_id,
+                workspace_identity=execution_workspace_identity,
+                accepted_plan_identity=execution_plan_identity,
                 error_message=terminal_message,
                 attempt=1,
             )
@@ -1220,6 +1276,11 @@ def execute_step_loop(
             step_result,
             expected_files=expected_files,
             extract_structured_text=extract_structured_text,
+        )
+        step_result["created_files"] = list(
+            dict.fromkeys(
+                [*structured_created_files, *generated_test_paths_for_execution]
+            )
         )
         if ops_result.get("files_changed"):
             merged_files_changed = list(
@@ -1498,6 +1559,10 @@ def execute_step_loop(
                 output=step_output[:1000],
                 verification_output=assessment.verification_output,
                 files_changed=observed_files,
+                created_files=step_result.get("created_files", []),
+                task_execution_id=ctx.task_execution_id,
+                workspace_identity=execution_workspace_identity,
+                accepted_plan_identity=execution_plan_identity,
                 error_message=terminal_message,
                 attempt=current_attempt,
                 verification_evidence_ref=verification_evidence_ref,
@@ -1589,6 +1654,10 @@ def execute_step_loop(
             files_changed=step_result.get(
                 "files_changed", expected_files if step_ops else []
             ),
+            created_files=step_result.get("created_files", []),
+            task_execution_id=ctx.task_execution_id,
+            workspace_identity=execution_workspace_identity,
+            accepted_plan_identity=execution_plan_identity,
             error_message=step_result.get("error", ""),
             attempt=current_attempt,
             verification_evidence_ref=verification_evidence_ref,
@@ -2194,6 +2263,9 @@ def execute_step_loop(
                             "rerun_stdout", ""
                         ),
                         files_changed=_recovery_changed,
+                        task_execution_id=ctx.task_execution_id,
+                        workspace_identity=execution_workspace_identity,
+                        accepted_plan_identity=execution_plan_identity,
                         error_message="",
                         attempt=current_attempt,
                     )
@@ -2299,6 +2371,20 @@ def execute_step_loop(
             and debug_feedback_envelope.eligible_for_debug_repair
             and task_execution_id is not None
             and int(task_execution_id) not in debug_repair_used_ids
+        )
+        generated_test_paths = (
+            derive_bounded_debug_repair_generated_test_paths(
+                accepted_path_authority=accepted_path_authority,
+                accepted_plan=accepted_plan_snapshot,
+                orchestration_state=orchestration_state,
+                current_step_result=step_record,
+                task_execution_id=task_execution_id,
+                task_execution_status=getattr(current_task_execution, "status", None),
+                project_dir=Path(orchestration_state.project_dir),
+                task=task,
+            )
+            if bounded_debug_repair_allowed
+            else ()
         )
         debug_source_api_contract_metadata: dict[str, Any] = {
             "source_api_contract_available": False,
@@ -2456,6 +2542,7 @@ def execute_step_loop(
                         debug_feedback_envelope,
                         prior_source_paths=authorized_source_paths,
                         allowed_source_paths=authorized_source_paths,
+                        allowed_generated_test_paths=generated_test_paths,
                     )
                 )
                 context_paths = list(
@@ -2465,7 +2552,9 @@ def execute_step_loop(
                     or []
                 )
                 repair_target_paths = [
-                    path for path in context_paths if path in authorized_source_paths
+                    path
+                    for path in context_paths
+                    if path in authorized_source_paths or path in generated_test_paths
                 ]
                 complete_source_paths = [
                     path
@@ -2483,6 +2572,7 @@ def execute_step_loop(
                         source_context=source_context,
                         repair_target_paths=repair_target_paths,
                         complete_source_paths=complete_source_paths,
+                        authorized_generated_test_paths=generated_test_paths,
                     )
                     debug_source_api_contract_metadata.update(
                         {
@@ -2512,6 +2602,7 @@ def execute_step_loop(
                         orchestration_state,
                         step_index,
                     ),
+                    authorized_generated_test_paths=generated_test_paths,
                 )
                 debug_prompt = debug_prompt_result.prompt
                 debug_source_api_contract_metadata = dict(
@@ -2961,6 +3052,7 @@ def execute_step_loop(
                     repair_output,
                     envelope=debug_feedback_envelope,
                     source_edit_context=source_edit_context,
+                    authorized_generated_test_paths=generated_test_paths,
                 )
                 success = normalization_result.payload is not None
                 debug_data = normalization_result.payload
@@ -2981,6 +3073,7 @@ def execute_step_loop(
                             "bounded_execution_debug_repair_changed_file_context_complete_paths"
                         )
                         or (),
+                        generated_test_paths=generated_test_paths,
                     )
                     if ops_authority_rejection:
                         normalization_result = _debug_repair_normalization_rejected(
@@ -3218,6 +3311,10 @@ def execute_step_loop(
                         output=step_record.output,
                         verification_output=step_record.verification_output,
                         files_changed=step_record.files_changed,
+                        created_files=step_record.created_files,
+                        task_execution_id=ctx.task_execution_id,
+                        workspace_identity=execution_workspace_identity,
+                        accepted_plan_identity=execution_plan_identity,
                         error_message="",
                         attempt=current_attempt,
                     )
@@ -3358,6 +3455,7 @@ def execute_step_loop(
                             correction_parsed,
                             envelope=debug_feedback_envelope,
                             source_edit_context=True,
+                            authorized_generated_test_paths=generated_test_paths,
                         )
                         if correction_success
                         else None
@@ -3955,6 +4053,7 @@ def execute_step_loop(
                                         _e54_retry_parsed,
                                         envelope=debug_feedback_envelope,
                                         source_edit_context=_e54_retry_src_ctx,
+                                        authorized_generated_test_paths=generated_test_paths,
                                     )
                                     if _e54_retry_ok
                                     else None
@@ -4196,6 +4295,20 @@ def execute_step_loop(
                     ):
                         step["commands"] = [verification_fix]
                     step_updated = True
+                if fix_type == "ops_fix" and generated_test_paths:
+                    generated_paths_used = {
+                        _safe_relative_op_path(operation.get("path"))
+                        for operation in debug_data.get("ops") or []
+                        if isinstance(operation, dict)
+                    }
+                    if generated_paths_used.intersection(generated_test_paths):
+                        debug_repair_generated_test_paths_by_step[step_index] = (
+                            generated_test_paths
+                        )
+                    else:
+                        debug_repair_generated_test_paths_by_step.pop(step_index, None)
+                else:
+                    debug_repair_generated_test_paths_by_step.pop(step_index, None)
                 if step_updated:
                     orchestration_state.plan[step_index] = step
                     task.steps = json.dumps(orchestration_state.plan)

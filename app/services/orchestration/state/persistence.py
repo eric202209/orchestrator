@@ -1233,6 +1233,10 @@ def serialize_step_result(step_result: StepResult) -> Dict[str, Any]:
         "output": step_result.output,
         "verification_output": step_result.verification_output,
         "files_changed": step_result.files_changed,
+        "created_files": step_result.created_files,
+        "task_execution_id": step_result.task_execution_id,
+        "workspace_identity": step_result.workspace_identity,
+        "accepted_plan_identity": step_result.accepted_plan_identity,
         "error_message": step_result.error_message,
         "attempt": step_result.attempt,
     }
@@ -1245,6 +1249,10 @@ def restore_step_result(data: Dict[str, Any]) -> StepResult:
         output=data.get("output", ""),
         verification_output=data.get("verification_output", ""),
         files_changed=data.get("files_changed", []) or [],
+        created_files=data.get("created_files", []) or [],
+        task_execution_id=data.get("task_execution_id"),
+        workspace_identity=data.get("workspace_identity"),
+        accepted_plan_identity=data.get("accepted_plan_identity"),
         error_message=data.get("error_message", ""),
         attempt=data.get("attempt", 1),
     )

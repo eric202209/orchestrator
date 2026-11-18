@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -43,10 +43,12 @@ from app.services.orchestration.validation.accepted_path_authority import (
 from app.services.orchestration.validation.path_authority import (
     EntryType,
     GrantClass,
+    GrantProvenance,
     PathAuthorityError,
     declare,
     observe,
 )
+from app.services.orchestration.planning.orientation_import_facts import is_test_path
 
 
 @dataclass(frozen=True)
@@ -475,6 +477,7 @@ class ExecutorService:
         project_dir: Path,
         operation: Dict[str, Any],
         accepted_path_authority: AcceptedPathAuthority,
+        debug_repair_generated_test_paths: Iterable[str] = (),
     ) -> str:
         """Authorize one structured mutation immediately before resolution."""
 
@@ -502,6 +505,24 @@ class ExecutorService:
                     f"mkdir target is not a directory: {declared.value}",
                 )
             return declared.value
+
+        if (
+            op_name == "replace_in_file"
+            and declared.value in set(debug_repair_generated_test_paths or ())
+            and is_test_path(declared.value)
+        ):
+            grant = accepted_path_authority.grant_for(declared)
+            if (
+                grant is not None
+                and grant.grant_class is GrantClass.CREATION_AUTHORIZED
+                and grant.provenance
+                in {
+                    GrantProvenance.ACCEPTED_PLAN,
+                    GrantProvenance.TASK_EXPLICIT_SCOPE,
+                }
+                and observation.entry_type is EntryType.REGULAR_FILE
+            ):
+                return declared.value
 
         if op_name == "delete_file":
             required_class = GrantClass.DELETION_AUTHORIZED
@@ -557,6 +578,7 @@ class ExecutorService:
         *,
         accepted_path_authority: AcceptedPathAuthority | None = None,
         authority_check: Callable[[], Optional[str]] | None = None,
+        debug_repair_generated_test_paths: Iterable[str] = (),
     ) -> Dict[str, Any]:
         """Execute structured file operations without shell quoting.
 
@@ -581,6 +603,11 @@ class ExecutorService:
         output_lines: List[str] = []
         semantic_artifacts: List[Dict[str, Any]] = []
         normalized_project_dir = project_dir.resolve()
+        generated_test_paths = {
+            str(path).strip().replace("\\", "/").lstrip("./")
+            for path in debug_repair_generated_test_paths or ()
+            if str(path).strip()
+        }
 
         for index, operation in enumerate(ops, start=1):
             if not isinstance(operation, dict):
@@ -622,6 +649,7 @@ class ExecutorService:
                     normalized_project_dir,
                     operation,
                     accepted_path_authority,
+                    generated_test_paths,
                 )
                 target = ExecutorService._resolve_op_path(
                     normalized_project_dir,
@@ -636,6 +664,7 @@ class ExecutorService:
                     normalized_project_dir,
                     operation,
                     accepted_path_authority,
+                    generated_test_paths,
                 )
             except PathAuthorityError as exc:
                 failure = {
@@ -726,6 +755,7 @@ class ExecutorService:
                     normalized_project_dir,
                     operation,
                     accepted_path_authority,
+                    generated_test_paths,
                 )
                 target.unlink()
                 files_changed.append(relative)
@@ -748,6 +778,7 @@ class ExecutorService:
                         normalized_project_dir,
                         operation,
                         accepted_path_authority,
+                        generated_test_paths,
                     )
                     target.write_text(content, encoding="utf-8")
                     ensure_shared_permissions(target)
@@ -769,6 +800,7 @@ class ExecutorService:
                         normalized_project_dir,
                         operation,
                         accepted_path_authority,
+                        generated_test_paths,
                     )
                     with target.open("a", encoding="utf-8") as handle:
                         handle.write(content)
@@ -854,6 +886,7 @@ class ExecutorService:
                         normalized_project_dir,
                         operation,
                         accepted_path_authority,
+                        generated_test_paths,
                     )
                     if (
                         current_source_version_identity(target)
@@ -892,6 +925,7 @@ class ExecutorService:
                         normalized_project_dir,
                         operation,
                         accepted_path_authority,
+                        generated_test_paths,
                     )
                     if (
                         current_source_version_identity(target)
@@ -1010,6 +1044,7 @@ class ExecutorService:
                         normalized_project_dir,
                         operation,
                         accepted_path_authority,
+                        generated_test_paths,
                     )
                     target.write_text(
                         re.sub(old, lambda _match: new, original, count=1),
@@ -1031,6 +1066,7 @@ class ExecutorService:
                     normalized_project_dir,
                     operation,
                     accepted_path_authority,
+                    generated_test_paths,
                 )
                 patch_result = try_deterministic_patch(
                     target, old, new, normalized_project_dir
@@ -1066,6 +1102,7 @@ class ExecutorService:
                 normalized_project_dir,
                 operation,
                 accepted_path_authority,
+                generated_test_paths,
             )
             target.write_text(original.replace(old, new, 1), encoding="utf-8")
             ensure_shared_permissions(target)

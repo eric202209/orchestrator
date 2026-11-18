@@ -6,7 +6,7 @@ import difflib
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from app.services.orchestration.diagnostics.debug_feedback import (
     DebugFeedbackEnvelope,
@@ -190,12 +190,18 @@ def build_bounded_diff_repair_prompt(
     source_context: str = "",
     repair_target_paths: Optional[List[str]] = None,
     complete_source_paths: Optional[List[str]] = None,
+    authorized_generated_test_paths: Optional[Iterable[str]] = None,
 ) -> str:
     targets = [
         str(path).strip() for path in repair_target_paths or [] if str(path).strip()
     ]
     complete = [
         str(path).strip() for path in complete_source_paths or [] if str(path).strip()
+    ]
+    generated_tests = [
+        str(path).strip()
+        for path in authorized_generated_test_paths or ()
+        if str(path).strip()
     ]
     workspace = render_workspace_path_for_prompt(Path(capsule.workspace_path or "."))
     evidence_section = ""
@@ -226,6 +232,15 @@ def build_bounded_diff_repair_prompt(
         if source_context
         else "\nCurrent source context: (none supplied)\n"
     )
+    generated_test_section = ""
+    generated_test_rule = "6. Do not modify tests or rewrite unrelated files.\n"
+    if generated_tests:
+        generated_test_section = (
+            "\nAuthorized generated-test paths (conditionally repairable before publication):\n"
+            + "".join(f"- {path}\n" for path in generated_tests)
+            + "Only these exact paths may receive replace_in_file operations, using current visible text. Existing baseline tests, protected acceptance files, and all other test paths remain immutable.\n"
+        )
+        generated_test_rule = "6. Do not modify existing baseline tests, protected acceptance files, or any test path not listed in the authorized generated-test paths section.\n"
     return (
         "Return a bare JSON array of exactly one structured source repair object. "
         "Do not return prose, markdown, comments, explanations, or fenced code.\n\n"
@@ -242,6 +257,7 @@ def build_bounded_diff_repair_prompt(
         f"{target_section}\n"
         f"Complete current source files shown: {complete_section}\n"
         f"{source_context_section}"
+        f"{generated_test_section}"
         "Rules:\n"
         "1. The parser accepts one object with repair_type or fix_type set to ops_fix, "
         "an ops array, and verification_command.\n"
@@ -251,7 +267,7 @@ def build_bounded_diff_repair_prompt(
         "context provide evidence; neither grants write authority.\n"
         "4. For replace_in_file, copy old exactly from the visible current source context.\n"
         "5. Use write_file only for paths listed as complete current source files above.\n"
-        "6. Do not modify tests or rewrite unrelated files.\n"
+        f"{generated_test_rule}"
         "7. verification_command must be a runnable verification shell string, not a "
         "mutation command.\n"
         "8. Use relative paths only; no absolute paths, `..`, or `~`.\n"
