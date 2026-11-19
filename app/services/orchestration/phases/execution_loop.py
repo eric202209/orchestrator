@@ -2781,6 +2781,11 @@ def execute_step_loop(
             }
 
             _ensure_role_owned_debug_repair_runtime()
+        elif is_diff_scoped_debug_repair_mode(debug_prompt_mode):
+            # P43-PRODUCT-07-T1: diff-scoped repair is parsed by the same strict
+            # bounded parser, so it uses the same role-owned, tool-less lane and
+            # bounded invocation options instead of the Execution agent first.
+            _ensure_role_owned_debug_repair_runtime()
 
         def _invoke_debug_repair(prompt_text: str) -> dict[str, Any]:
             result = None
