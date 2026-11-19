@@ -413,6 +413,7 @@ def build_bounded_debug_repair_prompt_with_metadata(
         envelope,
         evidence_capsule,
         prior_source_paths=prior_source_paths,
+        authorized_generated_test_paths=authorized_generated_test_paths,
     )
     source_api_contract, source_api_metadata = (
         build_debug_source_api_contract_context_block(
@@ -438,12 +439,6 @@ def build_bounded_debug_repair_prompt_with_metadata(
     generated_test_paths = _normalized_generated_test_paths(
         authorized_generated_test_paths
     )
-    if generated_test_paths and source_contract:
-        source_contract = source_contract.replace(
-            "- Do not edit tests or verifier commands.",
-            "- Existing baseline tests and protected acceptance files are immutable; only the exact authorized generated-test paths below may be repaired.",
-        )
-        source_contract_section = f"\n{source_contract}\n"
     generated_test_contract_section = ""
     if generated_test_paths:
         generated_test_contract_section = (
@@ -1318,8 +1313,14 @@ def build_debug_source_contract(
     *,
     max_chars: int = _DEBUG_SOURCE_CONTRACT_MAX_CHARS,
     prior_source_paths: Optional[Iterable[str]] = None,
+    authorized_generated_test_paths: Optional[Iterable[str]] = None,
 ) -> str:
-    """Render a compact source-focused repair contract for Python debug repair."""
+    """Render a compact source-focused repair contract for Python debug repair.
+
+    ``authorized_generated_test_paths`` is the trusted PRODUCT-06 projection.
+    It changes only wording and expected-behavior provenance; it grants no
+    authority.
+    """
 
     if envelope.failure_class not in {
         "pytest_failure",
@@ -1338,14 +1339,28 @@ def build_debug_source_contract(
     behavior: list[str] = []
     argparse_wiring: list[str] = []
 
+    generated_test_paths = _normalized_generated_test_paths(
+        authorized_generated_test_paths
+    )
     contract = None
+    behavior_contract = None
     if project_dir.exists():
         try:
             from app.services.project.source_imports import extract_python_test_contract
 
             contract = extract_python_test_contract(project_dir)
+            # Assertions of a repairable generated test may themselves be the
+            # defect, so they are not promoted to expected behavior.
+            behavior_contract = (
+                extract_python_test_contract(
+                    project_dir, exclude_test_paths=generated_test_paths
+                )
+                if generated_test_paths
+                else contract
+            )
         except (OSError, SyntaxError, ValueError):
             contract = None
+            behavior_contract = None
 
     prior_targets: list[str] = []
     for path in prior_source_paths or ():
@@ -1367,8 +1382,8 @@ def build_debug_source_contract(
         ):
             _append_unique(targets, path, limit=3)
 
-    if contract is not None:
-        for line in _debug_expected_behavior_lines(contract):
+    if behavior_contract is not None:
+        for line in _debug_expected_behavior_lines(behavior_contract):
             _append_unique(behavior, line, limit=3)
 
     if envelope.failure_class == "source_step_validation":
@@ -1428,7 +1443,7 @@ def build_debug_source_contract(
             line for line in behavior if line not in priority_behavior
         ]
 
-    for line in _debug_expected_behavior_lines(contract, context):
+    for line in _debug_expected_behavior_lines(behavior_contract, context):
         _append_unique(behavior, line, limit=3)
 
     if imported_symbol == "normalize_greeting" or "normalize_greeting" in context:
@@ -1447,17 +1462,29 @@ def build_debug_source_contract(
     if not targets and not behavior:
         return ""
 
-    lines = [
-        "Debug source contract:",
-        "- Existing tests are the failing contract.",
-        "- Do not edit tests or verifier commands.",
-        "- Repair source code under the required target.",
-    ]
+    if generated_test_paths:
+        lines = [
+            "Debug source contract:",
+            "- Existing baseline tests and protected acceptance files are immutable; only the exact authorized generated-test paths below may be repaired.",
+            "- A failing authorized generated test is an observation and may itself be incorrect; check it against the source signature and trusted tests.",
+            "- Repair source code under the required target, or the authorized generated test when its expectation is wrong.",
+        ]
+    else:
+        lines = [
+            "Debug source contract:",
+            "- Existing tests are the failing contract.",
+            "- Do not edit tests or verifier commands.",
+            "- Repair source code under the required target.",
+        ]
     if targets:
         lines.append("- Required source target path:")
         lines.extend(f"  - {target}" for target in targets[:3])
     if behavior:
-        lines.append("- Expected behavior:")
+        lines.append(
+            "- Expected behavior (from existing or protected tests):"
+            if generated_test_paths
+            else "- Expected behavior:"
+        )
         lines.extend(f"  - {item}" for item in behavior[:4])
     if argparse_wiring:
         lines.append("- Required argparse wiring:")

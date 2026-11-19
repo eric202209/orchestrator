@@ -6,7 +6,7 @@ import ast
 from dataclasses import dataclass
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 _PYTHON_IMPORT_LINE_RE = re.compile(
     r"^\s*(?:from\s+(?P<from>[A-Za-z_][A-Za-z0-9_.]*)\s+import\b|"
@@ -348,11 +348,22 @@ def _render_assertion(node: ast.AST, source: str) -> Optional[str]:
     return None
 
 
-def extract_python_test_contract(project_dir: Path) -> Optional[PythonTestContract]:
-    """Extract a compact, deterministic source/test contract for Python projects."""
+def extract_python_test_contract(
+    project_dir: Path, *, exclude_test_paths: Iterable[str] = ()
+) -> Optional[PythonTestContract]:
+    """Extract a compact, deterministic source/test contract for Python projects.
+
+    ``exclude_test_paths`` are workspace-relative test files left out of the
+    contract (for example, generated tests whose assertions are not trusted).
+    """
 
     root = project_dir.resolve()
-    test_files = _iter_python_test_files(project_dir)
+    excluded = {str(path) for path in exclude_test_paths}
+    test_files = [
+        path
+        for path in _iter_python_test_files(project_dir)
+        if _relative_to_root(path, root) not in excluded
+    ]
     if not test_files:
         return None
     package_roots = _project_package_roots(project_dir)

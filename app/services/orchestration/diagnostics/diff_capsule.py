@@ -191,6 +191,7 @@ def build_bounded_diff_repair_prompt(
     repair_target_paths: Optional[List[str]] = None,
     complete_source_paths: Optional[List[str]] = None,
     authorized_generated_test_paths: Optional[Iterable[str]] = None,
+    prior_source_paths: Optional[Iterable[str]] = None,
 ) -> str:
     targets = [
         str(path).strip() for path in repair_target_paths or [] if str(path).strip()
@@ -214,7 +215,14 @@ def build_bounded_diff_repair_prompt(
         if rendered:
             evidence_section = f"\n{rendered}\n"
     source_contract = (
-        build_debug_source_contract(envelope, evidence_capsule) if envelope else ""
+        build_debug_source_contract(
+            envelope,
+            evidence_capsule,
+            prior_source_paths=prior_source_paths,
+            authorized_generated_test_paths=generated_tests,
+        )
+        if envelope
+        else ""
     )
     source_contract_section = f"\n{source_contract}\n" if source_contract else ""
     target_section = (

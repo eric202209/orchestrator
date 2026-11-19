@@ -2573,6 +2573,7 @@ def execute_step_loop(
                         repair_target_paths=repair_target_paths,
                         complete_source_paths=complete_source_paths,
                         authorized_generated_test_paths=generated_test_paths,
+                        prior_source_paths=prior_source_paths,
                     )
                     debug_source_api_contract_metadata.update(
                         {
