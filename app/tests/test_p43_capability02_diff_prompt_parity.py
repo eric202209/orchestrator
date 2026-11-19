@@ -133,7 +133,15 @@ def _contract_section(prompt: str) -> str:
 def test_reconstruction_matches_retained_r2_manifest(tmp_path):
     _prompt, data, evidence, capsule, metadata, _envelope_ = _r2_prompt(tmp_path)
     metrics = data["retained_metrics"]
-    assert evidence.total_chars == metrics["evidence_chars_total"]
+    # The evidence capsule shells out to find/grep, whose file order follows
+    # filesystem directory order; with per-command truncation its char total
+    # varies by host (445 in R2, 444 on CI). Pin only order-independent facts.
+    assert sorted(evidence.files_inspected) == [
+        "./tests/test_pagekit_acceptance.py",
+        "./tests/test_pagination_regression.py",
+        "./tests/test_paging.py",
+    ]
+    assert evidence.matched_line_count == 3
     assert capsule.diff_line_count == metrics["diff_capsule_line_count"]
     assert (
         metadata["bounded_execution_debug_repair_changed_file_context_chars"]
