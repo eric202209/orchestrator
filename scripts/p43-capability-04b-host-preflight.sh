@@ -404,7 +404,7 @@ arm_timer() {
     --timer-property=AccuracySec=1s --timer-property=RemainAfterElapse=no \
     --property=RuntimeMaxSec=300s --property=TimeoutStopSec=5s --property=KillMode=control-group \
     --setenv="P43_WATCHDOG_UNIT=$unit.service" \
-    "$work/rollback-exec.sh" rollback --watchdog "$id" --watchdog-unit "$unit.service" >/dev/null
+    /bin/bash "$work/rollback-exec.sh" rollback --watchdog "$id" --watchdog-unit "$unit.service" >/dev/null
   systemctl is-active --quiet "$unit.timer" || die 'rollback watchdog timer did not become active'
   local next
   next="$(systemctl show "$unit.timer" -p NextElapseUSecMonotonic --value)"
