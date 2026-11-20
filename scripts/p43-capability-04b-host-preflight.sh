@@ -458,7 +458,7 @@ restore_checks() {
 }
 
 rearm_watchdog() {
-  local id="$1" work unit
+  local id="$1" work="$2" unit
   unit="$(head -n 1 "$work/watchdog-units" 2>/dev/null || true)"
   if [[ -z "$unit" ]] || ! systemctl is-active --quiet "$unit.timer"; then
     log "WATCHDOG_UNAVAILABLE for run $id; operator intervention required immediately"
@@ -591,14 +591,39 @@ rollback_impl() {
   return 0
 }
 
-bounded_rollback() {
-  local id="$1" mode="$2"
-  if ! P43_INTERNAL_ROLLBACK=1 timeout --signal=TERM --kill-after=5s 295s \
-      "$SCRIPT_PATH" _rollback-child "$id" "$mode"; then
-    set_state STATE RESTORE_FAILED "$(state_file_for "$id")" 2>/dev/null || true
-    log "RESTORE_FAILED: bounded $mode rollback attempt did not complete; watchdog remains armed"
-    return 1
+# Every rollback state transition happens under operation.lock. Holding it here
+# means no attempt is in flight, so ROLLING_BACK can only be an interrupted
+# attempt. Any other state (RESTORED, RESTORE_FAILED, pre-rollback) is kept.
+record_incomplete_rollback() {
+  local id="$1" mode="$2" rc="$3" lock_file current
+  lock_file="$(workdir_for "$id")/operation.lock"
+  if [[ ! -f "$lock_file" ]] || ! { exec 5>>"$lock_file"; } 2>/dev/null; then
+    log "bounded $mode rollback rc=$rc; operation lock unavailable, state not changed"
+    return 0
   fi
+  if ! flock -w 5 5; then
+    exec 5>&-
+    log "bounded $mode rollback rc=$rc; another rollback holds the operation lock and owns the state outcome"
+    return 0
+  fi
+  if transition_state ROLLING_BACK RESTORE_FAILED "$(state_file_for "$id")"; then
+    log "RESTORE_FAILED: bounded $mode rollback rc=$rc left an interrupted attempt; watchdog remains armed"
+  else
+    current="$(get_state "$id" STATE 2>/dev/null || true)"
+    log "bounded $mode rollback rc=$rc; state '$current' kept without overwrite"
+  fi
+  flock -u 5
+  exec 5>&-
+}
+
+bounded_rollback() {
+  local id="$1" mode="$2" rc=0
+  P43_INTERNAL_ROLLBACK=1 timeout --signal=TERM --kill-after=5s 295s \
+    "$SCRIPT_PATH" _rollback-child "$id" "$mode" || rc=$?
+  if (( rc == 0 )); then return 0; fi
+  if (( rc == 124 || rc == 137 )); then log "bounded $mode rollback attempt timed out (rc=$rc)"; fi
+  record_incomplete_rollback "$id" "$mode" "$rc"
+  return 1
 }
 
 check_live_guards() {
