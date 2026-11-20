@@ -9,11 +9,14 @@ Covers:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from textwrap import dedent
 
 import pytest
 from sqlalchemy import text
+from starlette.requests import Request
 
+from app.api.v1.endpoints.mobile import get_mobile_connection_info
 from app.config import settings
 from app.models import LogEntry, Project, Task, TaskStatus
 from app.models import Session as SessionModel
@@ -91,6 +94,44 @@ def soft_delete_project(db, project: Project) -> None:
 def _enable_mobile_key(monkeypatch):
     """Monkeypatch the mobile gateway key so the endpoint authenticates."""
     monkeypatch.setattr(settings, "MOBILE_GATEWAY_API_KEY", MOBILE_KEY)
+
+
+def test_connection_info_advertises_operator_workflow_endpoints(
+    db_session, monkeypatch
+):
+    _enable_mobile_key(monkeypatch)
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/v1/mobile-admin/connection-info",
+            "headers": [],
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("testserver", 80),
+            "root_path": "",
+        }
+    )
+
+    body = get_mobile_connection_info(
+        request,
+        SimpleNamespace(email="operator@example.com"),
+        db_session,
+    )
+    endpoints = set(body["available_endpoints"])
+    base_url = body["mobile_base_url"]
+
+    for suffix in (
+        "/projects/{project_id}/tree",
+        "/providers/status",
+        "/sessions/{session_id}/events",
+        "/sessions/{session_id}/failure-summary",
+        "/sessions/{session_id}/operator-feedback",
+        "/sessions/{session_id}/replan",
+        "/tasks/{task_id}/change-set",
+        "/sessions/{session_id}/interventions",
+    ):
+        assert f"{base_url}{suffix}" in endpoints
 
 
 def test_dashboard_zero_counts(api_client, db_session, monkeypatch):

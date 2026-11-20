@@ -838,6 +838,97 @@ def test_maybe_queue_next_automatic_task_completes_session_when_no_work_remains(
     assert session.is_active is False
 
 
+def test_maybe_queue_next_automatic_task_does_not_complete_after_review_pause(
+    db_session,
+):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session,
+        project,
+        status="running",
+        is_active=True,
+        execution_mode="automatic",
+    )
+    failed_task = Task(
+        project_id=project.id,
+        title="Needs operator review",
+        status=TaskStatus.FAILED,
+        plan_position=1,
+        error_message="completion validation failed: generated tests are incorrect",
+    )
+    db_session.add(failed_task)
+    db_session.flush()
+    db_session.add(
+        SessionTask(
+            session_id=session.id,
+            task_id=failed_task.id,
+            status=TaskStatus.FAILED,
+        )
+    )
+    db_session.commit()
+
+    result = session_runtime_service.maybe_queue_next_automatic_task(
+        db_session,
+        session,
+    )
+
+    db_session.refresh(session)
+    assert result is None
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert "operator review" in (session.last_alert_message or "").lower()
+
+
+def test_maybe_queue_next_automatic_task_does_not_complete_after_budget_pause(
+    db_session,
+):
+    project = _make_project(db_session)
+    session = _make_session(
+        db_session,
+        project,
+        status="running",
+        is_active=True,
+        execution_mode="automatic",
+    )
+    failed_task = Task(
+        project_id=project.id,
+        title="Recovery budget exhausted",
+        status=TaskStatus.FAILED,
+        plan_position=1,
+        error_message="provider returned an execution failure",
+    )
+    db_session.add(failed_task)
+    db_session.flush()
+    db_session.add_all(
+        [
+            SessionTask(
+                session_id=session.id,
+                task_id=failed_task.id,
+                status=TaskStatus.FAILED,
+            ),
+            LogEntry(
+                session_id=session.id,
+                task_id=failed_task.id,
+                level="INFO",
+                message="automatic recovery attempt",
+                log_metadata=json.dumps({"event_type": "automatic_recovery_attempt"}),
+            ),
+        ]
+    )
+    db_session.commit()
+
+    result = session_runtime_service.maybe_queue_next_automatic_task(
+        db_session,
+        session,
+    )
+
+    db_session.refresh(session)
+    assert result is None
+    assert session.status == "paused"
+    assert session.is_active is False
+    assert "retried" in (session.last_alert_message or "").lower()
+
+
 def test_start_already_paused_session_returns_409(db_session):
     project = _make_project(db_session)
     session = _make_session(db_session, project, status="paused", is_active=True)

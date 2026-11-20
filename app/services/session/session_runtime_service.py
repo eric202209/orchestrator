@@ -1326,6 +1326,12 @@ def maybe_queue_next_automatic_task(
     )
     if not next_task:
         recovered_task = reopen_failed_ordered_task_if_needed(db, session)
+        # The recovery helper deliberately pauses the session when the failed
+        # task needs operator review or its automatic retry budget is spent.
+        # Do not fall through to the no-work completion branch in either case:
+        # a failed task is not proof that the project completed successfully.
+        if session.status != "running" or not session.is_active:
+            return None
         if recovered_task:
             next_task = task_service.get_next_pending_task(
                 session.project_id, allow_failed_prior_tasks=True
