@@ -396,7 +396,7 @@ confirm_run() {
 }
 
 arm_timer() {
-  local id="$1" work="$2" delay="$3" suffix="$4" url="$5" host="$6" vpid="$7" unit
+  local id="$1" work="$2" delay="$3" suffix="$4" url="$5" host="$6" vpid="$7" unit next timers target accuracy
   unit="p43-cap-04b-${id//[^a-zA-Z0-9]/-}-${suffix}"
   printf '%s\n' "$unit" >>"$work/watchdog-units"
   chmod 0600 "$work/watchdog-units"
@@ -406,10 +406,41 @@ arm_timer() {
     --setenv="P43_WATCHDOG_UNIT=$unit.service" \
     /bin/bash "$work/rollback-exec.sh" rollback --watchdog "$id" --watchdog-unit "$unit.service" >/dev/null
   systemctl is-active --quiet "$unit.timer" || die 'rollback watchdog timer did not become active'
-  local next
   next="$(systemctl show "$unit.timer" -p NextElapseUSecMonotonic --value)"
-  [[ -n "$next" && "$next" != 0 ]] || die 'rollback watchdog deadline cannot be verified'
-  [[ "$(systemctl show "$unit.timer" -p OnActiveUSec --value)" == 10min ]] || die 'initial watchdog deadline is not the required 10-minute bound'
+  timers="$(systemctl show "$unit.timer" -p TimersMonotonic --value)"
+  target="$(systemctl show "$unit.timer" -p Unit --value)"
+  accuracy="$(systemctl show "$unit.timer" -p AccuracyUSec --value)"
+  [[ "$target" == "$unit.service" ]] || die 'rollback watchdog timer targets an unexpected service'
+  [[ "$accuracy" == 1s ]] || die 'rollback watchdog timer accuracy cannot be verified'
+  python3 - "$timers" "$next" <<'PY' || die 'initial watchdog deadline is not the required 10-minute bound'
+import re
+import sys
+import time
+
+timers, next_elapse = sys.argv[1:3]
+match = re.search(r"OnActiveUSec=([^;}]+).*?next_elapse=([^;}]+)", timers)
+if not match or match.group(1).strip() != "10min":
+    raise SystemExit(1)
+
+def seconds(value):
+    parts = re.findall(r"(\d+(?:\.\d+)?)(d|h|min|s|ms|us)", value.strip())
+    if not parts or "".join(number + unit for number, unit in parts) != value.strip():
+        raise ValueError("invalid systemd time span")
+    scale = {"d": 86400, "h": 3600, "min": 60, "s": 1, "ms": .001, "us": .000001}
+    return sum(float(number) * scale[unit] for number, unit in parts)
+
+try:
+    scheduled = seconds(match.group(2))
+    reported = seconds(next_elapse)
+except (OSError, ValueError, IndexError):
+    raise SystemExit(1)
+now = time.clock_gettime(time.CLOCK_MONOTONIC)
+if scheduled <= 0 or reported <= 0 or abs(scheduled - reported) > .01:
+    raise SystemExit(1)
+remaining = scheduled - now
+if remaining <= 0 or remaining > 600:
+    raise SystemExit(1)
+PY
   [[ "$(systemctl show "$unit.timer" -p OnUnitInactiveUSec --value)" == 1min ]] || die 'watchdog retry interval is not one minute'
   note "Watchdog armed: $unit.timer ($delay)"
 }
