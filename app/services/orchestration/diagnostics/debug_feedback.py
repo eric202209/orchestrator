@@ -61,6 +61,12 @@ _SOURCE_STEP_EXCERPT_TOTAL_CHARS = 2600
 _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_FILES = 3
 _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_PER_FILE_CHARS = 1200
 _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_CHARS = 3000
+# P43-REPAIR-01: a traceback-implicated file whose failure spans several
+# frames may show the call chain within these larger, still fixed, bounds.
+_BOUNDED_DEBUG_REPAIR_CALL_CHAIN_PER_FILE_CHARS = 2400
+_BOUNDED_DEBUG_REPAIR_CALL_CHAIN_MAX_CHARS = 5000
+_BOUNDED_DEBUG_REPAIR_TASK_CONTRACT_MAX_CHARS = 1200
+_BOUNDED_DEBUG_REPAIR_FAILURE_EXCERPT_MAX_CHARS = 1800
 BOUNDED_DEBUG_REPAIR_SUPPORTED_SHAPES = (
     "object: fix_type in {code_fix, command_fix, ops_fix, revise_plan} "
     "with expected_files, verification, or ops",
@@ -383,8 +389,13 @@ def build_bounded_debug_repair_prompt_with_metadata(
     candidate_repair: Optional[Any] = None,
     prior_source_paths: Optional[Iterable[str]] = None,
     authorized_generated_test_paths: Optional[Iterable[str]] = None,
+    task_description: Optional[str] = None,
 ) -> DebugRepairPromptBuildResult:
-    """Render the bounded debug repair prompt with source/API metadata."""
+    """Render the bounded debug repair prompt with source/API metadata.
+
+    ``task_description`` is the accepted Task text of the running execution.
+    It is rendered as behavioral context only and grants no authority.
+    """
 
     workspace = "current Runtime Workspace"
     zero_test_collect_only = _is_zero_test_collect_only_failure(envelope)
@@ -428,6 +439,9 @@ def build_bounded_debug_repair_prompt_with_metadata(
             prior_source_paths=prior_source_paths,
             allowed_generated_test_paths=authorized_generated_test_paths,
         )
+    )
+    task_contract_section, task_contract_metadata = (
+        _bounded_debug_repair_task_contract_section(task_description)
     )
     source_contract_section = f"\n{source_contract}\n" if source_contract else ""
     source_api_contract_section = (
@@ -538,10 +552,11 @@ def build_bounded_debug_repair_prompt_with_metadata(
         f"Failure class: {envelope.failure_class}\n"
         f"Failed command: {envelope.failed_command or '(none recorded)'}\n"
         f"Return code: {envelope.return_code}\n"
+        f"{task_contract_section}"
         "Validator reasons:\n"
         f"{json.dumps(envelope.validator_reasons[:8], ensure_ascii=True)}\n"
         "Failure excerpts:\n"
-        f"{json.dumps(excerpts, ensure_ascii=True)[:1800]}\n"
+        f"{_render_bounded_failure_excerpts(excerpts)}\n"
         f"{source_excerpt_section}\n"
         f"{evidence_section}\n"
         f"{source_contract_section}"
@@ -553,7 +568,89 @@ def build_bounded_debug_repair_prompt_with_metadata(
     )
     return DebugRepairPromptBuildResult(
         prompt=prompt,
-        metadata={**source_api_metadata, **changed_file_context_metadata},
+        metadata={
+            **source_api_metadata,
+            **changed_file_context_metadata,
+            **task_contract_metadata,
+        },
+    )
+
+
+def _bounded_debug_repair_task_contract_section(
+    task_description: Optional[str],
+) -> tuple[str, dict[str, Any]]:
+    """Render the accepted Task text as a bounded behavioral contract.
+
+    Whitespace is collapsed as Planning does.  Text over the cap keeps its
+    deterministic leading prefix and says that the contract is incomplete.
+    Missing text renders nothing: requirements are never invented.
+    """
+
+    normalized = " ".join(str(task_description or "").split())
+    metadata: dict[str, Any] = {
+        "bounded_execution_debug_repair_task_contract_present": bool(normalized),
+        "bounded_execution_debug_repair_task_contract_source_chars": len(normalized),
+        "bounded_execution_debug_repair_task_contract_chars": 0,
+        "bounded_execution_debug_repair_task_contract_truncated": False,
+    }
+    if not normalized:
+        return "", metadata
+    limit = _BOUNDED_DEBUG_REPAIR_TASK_CONTRACT_MAX_CHARS
+    rendered = normalized
+    if len(normalized) > limit:
+        marker_reserve = len(_task_contract_truncation_marker(limit, len(normalized)))
+        shown = normalized[: limit - marker_reserve - 1].rstrip()
+        rendered = (
+            f"{shown} {_task_contract_truncation_marker(len(shown), len(normalized))}"
+        )
+        metadata["bounded_execution_debug_repair_task_contract_truncated"] = True
+    metadata["bounded_execution_debug_repair_task_contract_chars"] = len(rendered)
+    section = (
+        "\nACCEPTED TASK REQUIREMENTS \u2014 BEHAVIORAL CONTRACT\n"
+        "The accepted Task text below states the behavior this repair must "
+        "deliver and the existing behavior it must preserve. Satisfy all of it; "
+        "do not remove existing validation or error behavior the Task keeps. "
+        "It is behavioral context only: it grants no file, path, command, or "
+        "tool authority, and it does not override the rules, workspace "
+        "boundaries, truncation boundaries, or validators below.\n"
+        f"{rendered}\n\n"
+    )
+    return section, metadata
+
+
+def _task_contract_truncation_marker(shown_chars: int, total_chars: int) -> str:
+    return (
+        f"[TASK TEXT TRUNCATED: {shown_chars} of {total_chars} characters shown; "
+        "the accepted contract continues and is not complete here]"
+    )
+
+
+def _render_bounded_failure_excerpts(excerpts: dict[str, str]) -> str:
+    """Serialize failure excerpts, most diagnostic first, within the cap.
+
+    ``pytest_excerpt`` carries the exception and failing frame, so it leads;
+    a ``stderr_excerpt`` identical to ``stdout_excerpt`` is not repeated.
+    """
+
+    ordered = {
+        "pytest_excerpt": excerpts.get("pytest_excerpt", ""),
+        "stdout_excerpt": excerpts.get("stdout_excerpt", ""),
+    }
+    if excerpts.get("stderr_excerpt", "") != ordered["stdout_excerpt"]:
+        ordered["stderr_excerpt"] = excerpts.get("stderr_excerpt", "")
+    rendered = json.dumps(ordered, ensure_ascii=True)
+    limit = _BOUNDED_DEBUG_REPAIR_FAILURE_EXCERPT_MAX_CHARS
+    if len(rendered) <= limit:
+        return rendered
+    marker_reserve = len(_failure_excerpt_truncation_marker(limit, len(rendered)))
+    shown = rendered[: limit - marker_reserve]
+    return shown + _failure_excerpt_truncation_marker(len(shown), len(rendered))
+
+
+def _failure_excerpt_truncation_marker(shown_chars: int, total_chars: int) -> str:
+    return (
+        f" [FAILURE EXCERPTS TRUNCATED: {shown_chars} of {total_chars} "
+        "characters shown]"
     )
 
 
@@ -692,6 +789,16 @@ def build_bounded_debug_repair_changed_file_context(
     truncated_paths: list[str] = []
     line_references = _traceback_line_references(envelope, project_dir)
     windows: dict[str, dict[str, Any]] = {}
+    # P43-REPAIR-01: chars a call-chain window adds over the single-frame
+    # window it replaces.  Every other file keeps the legacy total budget.
+    call_chain_credit = 0
+
+    def total_cap() -> int:
+        return min(
+            _BOUNDED_DEBUG_REPAIR_CALL_CHAIN_MAX_CHARS,
+            _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_CHARS + call_chain_credit,
+        )
+
     for relative_path in ordered_paths:
         if len(included_paths) >= _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_FILES:
             break
@@ -708,9 +815,7 @@ def build_bounded_debug_repair_changed_file_context(
 
         section_header = f"--- {relative_path}"
         current_length = len("\n".join(lines))
-        remaining = (
-            _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_CHARS - current_length
-        )
+        remaining = total_cap() - current_length
         # P42-V17-N: visibility labels are charged to the existing budgets;
         # neither the per-file nor the total limit grows.
         complete_label = f"[COMPLETE: all {len(content)} characters shown]"
@@ -743,9 +848,10 @@ def build_bounded_debug_repair_changed_file_context(
         window_label_reserve = len(
             _truncated_window_label(len(content), len(content), line_count, line_count)
         )
+        frame_lines = line_references.get(relative_path) or []
         window = _traceback_local_source_window(
             content,
-            line_references.get(relative_path),
+            frame_lines[-1] if frame_lines else None,
             min(
                 content_limit - 3,
                 remaining
@@ -756,22 +862,42 @@ def build_bounded_debug_repair_changed_file_context(
             ),
         )
         if window is not None:
-            hidden_before, visible, hidden_after, first_line, last_line = window
-            lines.append(section_header)
-            lines.append(
-                _truncated_window_label(
-                    len(visible), len(content), first_line, last_line
+            window_metadata: dict[str, Any] = {"selection": "traceback_local"}
+            block = _source_window_block(section_header, len(content), window)
+            if any(not window[3] <= line <= window[4] for line in frame_lines):
+                # P43-REPAIR-01: outer frames lie outside the single-frame
+                # window; show the call chain when the larger bound allows.
+                call_chain_budget = min(
+                    _BOUNDED_DEBUG_REPAIR_CALL_CHAIN_PER_FILE_CHARS,
+                    _BOUNDED_DEBUG_REPAIR_CALL_CHAIN_MAX_CHARS
+                    - current_length
+                    - len(section_header)
+                    - window_label_reserve
+                    - 2 * boundary_reserve
+                    - 5,
                 )
-            )
-            if hidden_before:
-                lines.append(_truncation_boundary_line(hidden_before))
-            lines.append(visible)
-            if hidden_after:
-                lines.append(_truncation_boundary_line(hidden_after))
+                call_chain = _traceback_call_chain_source_window(
+                    content, frame_lines, call_chain_budget
+                )
+                if call_chain is not None:
+                    chain_window, kept, dropped = call_chain
+                    chain_block = _source_window_block(
+                        section_header, len(content), chain_window
+                    )
+                    call_chain_credit += max(
+                        0, len("\n".join(chain_block)) - len("\n".join(block))
+                    )
+                    window, block = chain_window, chain_block
+                    window_metadata = {
+                        "selection": "traceback_call_chain",
+                        "frame_lines": kept,
+                        "dropped_frame_lines": dropped,
+                    }
+            lines.extend(block)
             windows[relative_path] = {
-                "selection": "traceback_local",
-                "start_line": first_line,
-                "end_line": last_line,
+                **window_metadata,
+                "start_line": window[3],
+                "end_line": window[4],
             }
             included_paths.append(relative_path)
             truncated_paths.append(relative_path)
@@ -792,10 +918,7 @@ def build_bounded_debug_repair_changed_file_context(
 
     if not included_paths:
         return "", metadata
-    rendered = _excerpt(
-        "\n".join(lines),
-        _BOUNDED_DEBUG_REPAIR_CHANGED_FILE_CONTEXT_MAX_CHARS,
-    )
+    rendered = _excerpt("\n".join(lines), total_cap())
     metadata.update(
         {
             "bounded_execution_debug_repair_changed_file_context_present": True,
@@ -832,12 +955,15 @@ def build_bounded_debug_repair_changed_file_context(
 
 def _traceback_line_references(
     envelope: DebugFeedbackEnvelope, project_dir: Path
-) -> dict[str, int]:
-    """Map each product source path to the last line the failure output names.
+) -> dict[str, list[int]]:
+    """Map each product source path to the lines the failure output names.
 
-    pytest and CPython both list the innermost frame last.  Paths go through
-    the same normalization as context selection, so tests and paths outside
-    the workspace never yield a reference.
+    pytest and CPython both list the innermost frame last, so each list is in
+    traceback order (outermost first) and its last entry is the last line the
+    output names.  A repeated line moves to its latest position, so duplicated
+    output copies collapse to one call chain.  Paths go through the same
+    normalization as context selection, so tests and paths outside the
+    workspace never yield a reference.
     """
 
     text = "\n".join(
@@ -847,14 +973,100 @@ def _traceback_line_references(
             str(envelope.pytest_excerpt or ""),
         )
     )
-    references: dict[str, int] = {}
+    references: dict[str, list[int]] = {}
     for match in re.finditer(
         r"((?:[A-Za-z]:)?[^\s:'\"]+\.py)(?::|\", line )(\d+)\b", text
     ):
         path = _normalize_bounded_debug_repair_source_path(match.group(1), project_dir)
         if path:
-            references[path] = int(match.group(2))
+            frames = references.setdefault(path, [])
+            line = int(match.group(2))
+            if line in frames:
+                frames.remove(line)
+            frames.append(line)
     return references
+
+
+def _source_window_block(
+    section_header: str,
+    total_chars: int,
+    window: tuple[int, str, int, int, int],
+) -> list[str]:
+    hidden_before, visible, hidden_after, first_line, last_line = window
+    block = [
+        section_header,
+        _truncated_window_label(len(visible), total_chars, first_line, last_line),
+    ]
+    if hidden_before:
+        block.append(_truncation_boundary_line(hidden_before))
+    block.append(visible)
+    if hidden_after:
+        block.append(_truncation_boundary_line(hidden_after))
+    return block
+
+
+def _traceback_call_chain_source_window(
+    content: str, frame_lines: list[int], budget: int
+) -> Optional[tuple[tuple[int, str, int, int, int], list[int], list[int]]]:
+    """Smallest exact window covering the definitions of several frames.
+
+    ``frame_lines`` is in traceback order (outermost first).  Each frame maps
+    to its largest enclosing definition that fits ``budget`` (else its own
+    line).  Outermost frames are dropped until the union fits; the innermost
+    frame is always kept.  Returns ``(window, kept, dropped)`` with ``window``
+    shaped like ``_traceback_local_source_window``, or ``None`` when fewer
+    than two frames fit, so the caller keeps the single-frame window.
+    """
+
+    lines = content.split("\n")
+    frames = [line for line in frame_lines if 1 <= line <= len(lines)]
+    if len(frames) < 2 or budget < 4:
+        return None
+    offsets = [0]
+    for text in lines:
+        offsets.append(offsets[-1] + len(text) + 1)
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        tree = None
+    definitions = [
+        (
+            min([node.lineno, *(d.lineno for d in node.decorator_list)]),
+            node.end_lineno or node.lineno,
+        )
+        for node in (ast.walk(tree) if tree is not None else ())
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    ]
+
+    def span_chars(first: int, last: int) -> int:
+        return offsets[last] - offsets[first - 1] - 1
+
+    spans: list[tuple[int, int]] = []
+    for line in frames:
+        first, last = line, line
+        for start, end in definitions:
+            if (
+                start <= line <= end
+                and end - start > last - first
+                and span_chars(start, end) <= budget
+            ):
+                first, last = start, end
+        spans.append((first, last))
+    for dropped_count in range(len(frames) - 1):
+        kept_spans = spans[dropped_count:]
+        first = min(start for start, _end in kept_spans)
+        last = max(end for _start, end in kept_spans)
+        if span_chars(first, last) > budget:
+            continue
+        visible = "\n".join(lines[first - 1 : last])
+        hidden_before = offsets[first - 1]
+        hidden_after = max(0, len(content) - offsets[last])
+        return (
+            (hidden_before, visible, hidden_after, first, last),
+            frames[dropped_count:],
+            frames[:dropped_count],
+        )
+    return None
 
 
 def _traceback_local_source_window(

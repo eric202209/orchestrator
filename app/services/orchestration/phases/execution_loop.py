@@ -2604,6 +2604,7 @@ def execute_step_loop(
                         step_index,
                     ),
                     authorized_generated_test_paths=generated_test_paths,
+                    task_description=prompt,
                 )
                 debug_prompt = debug_prompt_result.prompt
                 debug_source_api_contract_metadata = dict(
