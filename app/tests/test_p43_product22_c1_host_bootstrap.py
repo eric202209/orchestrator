@@ -177,7 +177,14 @@ def test_unit_passes_systemd_analyze_when_available(tmp_path):
         text=True,
         timeout=60,
     )
-    assert (out.returncode, out.stdout.strip(), out.stderr.strip()) == (0, "", "")
+    # The runner's own installed units may emit unrelated diagnostics (e.g. xfs_scrub
+    # CPUAccounting= deprecation on GitHub runners); only lines about the units under test count.
+    ours = [
+        line
+        for line in (out.stdout + out.stderr).splitlines()
+        if UNIT.name in line or str(tmp_path) in line
+    ]
+    assert (out.returncode, ours) == (0, [])
 
 
 # 2. Socket directory permissions
