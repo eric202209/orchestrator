@@ -1,0 +1,51 @@
+# P43-PRODUCT-22-C1 Host Sandbox Bridge Launcher.
+# Installed to /etc/systemd/system/ by scripts/maintenance/p43_sandbox_bridge_host.sh install.
+# Runs a root-owned copy of app/services/sandbox_bridge from /opt (not the ai-agent-writable repo).
+# SupplementaryGroups=docker is root-equivalent on rootful Docker; see the PRODUCT-22 C1 report.
+[Unit]
+Description=P43 Host Sandbox Bridge Launcher (fixed-profile Docker executor)
+Requires=docker.service
+After=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=p43-sandbox
+Group=p43-sandbox
+SupplementaryGroups=docker
+UMask=0077
+WorkingDirectory=/opt/p43-sandbox-bridge/lib
+ExecStart=/usr/bin/python3 -B -E -s -m sandbox_bridge.host_service serve
+Environment=P43_SANDBOX_BRIDGE_ALLOWED_UID=0
+LoadCredential=bridge.key:/etc/p43-sandbox-bridge/bridge.key
+StateDirectory=p43-sandbox-bridge p43-sandbox-bridge/socket p43-sandbox-bridge/ledger p43-sandbox-bridge/staging
+StateDirectoryMode=0700
+Restart=on-failure
+RestartSec=5
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=40
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

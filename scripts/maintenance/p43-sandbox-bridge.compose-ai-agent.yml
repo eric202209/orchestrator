@@ -1,0 +1,20 @@
+# P43-PRODUCT-22-C1: the only Compose change. Append these two entries to the existing
+# `services.ai-agent.volumes` list in /home/ericgx10/ai/openclaw-test/docker-compose.yml.
+# Applying it requires recreating ai-agent (operator approval required).
+# Exposes only the Launcher socket directory and the client HMAC key, both read-only.
+# Never add /var/run/docker.sock, the ledger, or the staging root.
+services:
+  ai-agent:
+    volumes:
+      - type: bind
+        source: /var/lib/p43-sandbox-bridge/socket
+        target: /run/p43-sandbox-bridge
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /etc/p43-sandbox-bridge/bridge.key
+        target: /run/secrets/p43-sandbox-bridge.key
+        read_only: true
+        bind:
+          create_host_path: false
