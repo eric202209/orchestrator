@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # P43-PRODUCT-22-C1 one-time Host Launcher bootstrap. Run on the GX10 Host as root.
+#   source-check                   read-only: this checkout must be a root-only copy ai-agent cannot write
 #   preflight                      read-only checks; changes nothing
 #   install --operator-approved    create service user, root-owned code copy, key (if absent),
 #                                  state dirs, systemd unit; enable and start the service
@@ -31,7 +32,43 @@ bad() { printf 'FAIL %s\n' "$*"; FAILURES=$((FAILURES + 1)); }
 info() { printf 'INFO %s\n' "$*"; }
 need_approval() { [[ "${1:-}" == --operator-approved ]] || { echo "refusing: requires --operator-approved" >&2; exit 64; }; }
 
+# C1A: everything run as Host root must come from a copy ai-agent cannot modify. ai-agent is UID 0
+# with no userns remap, so any Host path bind-mounted into it is ai-agent-writable. Printed hashes
+# from a mutable tree prove nothing; the operator reviews this copy itself (see the C1A addendum).
+# This check guards against running from the wrong tree; it is not a trust anchor on its own.
+source_check() {
+  local p sources s unit=scripts/maintenance/$SERVICE script=scripts/maintenance/p43_sandbox_bridge_host.sh
+  local files=("$script" "$unit") rel
+  for m in "${MODULES[@]}"; do files+=("app/services/sandbox_bridge/$m"); done
+  for rel in "${files[@]}"; do
+    p=$REPO/$rel
+    if [[ -L "$p" || ! -f "$p" ]]; then bad "source $rel missing or symlink"; continue; fi
+    [[ "$(stat -c '%u' "$p")" == 0 && $(( 0$(stat -c '%a' "$p") & 022 )) -eq 0 ]] \
+      || bad "source $rel not root-owned or group/other-writable ($(stat -c '%u:%g %a' "$p"))"
+  done
+  p=$REPO/app/services/sandbox_bridge
+  while :; do # every directory from the module dir up to / (sticky root-owned dirs such as /tmp allowed)
+    if [[ -L "$p" ]] || ! { [[ "$(stat -c '%u' "$p")" == 0 ]] && { (( (0$(stat -c '%a' "$p") & 022) == 0 )) || [[ -k "$p" ]]; }; }; then
+      bad "source dir $p not root-owned/non-writable ($(stat -c '%u:%g %a' "$p"))"
+    fi
+    [[ "$p" == / ]] && break
+    p=$(dirname "$p")
+  done
+  if ! sources=$(docker inspect "$AI_AGENT" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null); then
+    bad "ai-agent mounts unavailable: cannot prove the source is outside them"
+  else
+    while IFS= read -r s; do
+      [[ -z "$s" ]] && continue
+      s=$(readlink -m "$s")
+      [[ "$s" == / || "$REPO" == "$s" || "$REPO" == "$s"/* ]] && bad "source $REPO is inside ai-agent mount $s"
+    done <<<"$sources"
+  fi
+  [[ $FAILURES -eq 0 ]] && ok "source $REPO is root-only and outside ai-agent mounts"
+  return 0
+}
+
 preflight() {
+  source_check
   [[ $EUID -eq 0 ]] && ok "running as root" || bad "must run as root on the Host"
   [[ "$(ps -p 1 -o comm= | xargs)" == systemd ]] && ok "systemd is PID 1" || bad "systemd is not PID 1"
   local sdv; sdv=$(systemctl --version | awk 'NR==1{print $2}')
@@ -162,9 +199,10 @@ rollback() {
 }
 
 case "${1:-}" in
+  source-check) source_check; printf 'SOURCE_CHECK=%s failures=%d\n' "$([[ $FAILURES -eq 0 ]] && echo PASS || echo FAIL)" "$FAILURES"; [[ $FAILURES -eq 0 ]] ;;
   preflight) preflight ;;
   install) install_host "${2:-}" ;;
   verify) verify_host ;;
   rollback) rollback "${2:-}" ;;
-  *) echo "usage: $0 {preflight|install --operator-approved|verify|rollback --operator-approved}" >&2; exit 64 ;;
+  *) echo "usage: $0 {source-check|preflight|install --operator-approved|verify|rollback --operator-approved}" >&2; exit 64 ;;
 esac
