@@ -87,12 +87,8 @@ def load_key(path: str | Path) -> bytes:
             and st.st_gid == 0
             and stat.S_IMODE(st.st_mode) == 0o440
         )
-        if (
-            not stat.S_ISREG(st.st_mode)
-            or (
-                (st.st_mode & 0o077 or st.st_uid != os.geteuid())
-                and not systemd_credential
-            )
+        if not stat.S_ISREG(st.st_mode) or (
+            (st.st_mode & 0o077 or st.st_uid != os.geteuid()) and not systemd_credential
         ):
             raise BootstrapError("unsafe_secret_permissions")
         raw = os.read(fd, 4097)

@@ -309,6 +309,7 @@ def test_systemd_credential_root_0440_is_accepted_only_in_credentials_dir(
             self.st_mode = (actual.st_mode & ~0o777) | 0o440
             self.st_uid = 0
             self.st_gid = 0
+            self.st_size = actual.st_size
 
     monkeypatch.setattr(os, "fstat", CredentialStat)
     monkeypatch.setattr(os, "geteuid", lambda: 995)
