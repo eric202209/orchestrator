@@ -293,6 +293,33 @@ def test_group_or_world_readable_secret_is_refused(tmp_path, mode):
         load_key(config.key_path)
 
 
+def test_systemd_credential_root_0440_is_accepted_only_in_credentials_dir(
+    tmp_path, monkeypatch
+):
+    credentials_dir = tmp_path / "credentials"
+    credentials_dir.mkdir(mode=0o700)
+    key_path = credentials_dir / "bridge.key"
+    key_path.write_text(secrets.token_hex(32) + "\n")
+    key_path.chmod(0o400)
+    real_fstat = os.fstat
+
+    class CredentialStat:
+        def __init__(self, fd):
+            actual = real_fstat(fd)
+            self.st_mode = (actual.st_mode & ~0o777) | 0o440
+            self.st_uid = 0
+            self.st_gid = 0
+
+    monkeypatch.setattr(os, "fstat", CredentialStat)
+    monkeypatch.setattr(os, "geteuid", lambda: 995)
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(credentials_dir))
+    assert len(load_key(key_path)) == 32
+
+    monkeypatch.setenv("CREDENTIALS_DIRECTORY", str(tmp_path))
+    with pytest.raises(BootstrapError, match="unsafe_secret_permissions"):
+        load_key(key_path)
+
+
 @pytest.mark.parametrize(
     "content,error",
     [
