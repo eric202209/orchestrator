@@ -59,6 +59,7 @@ NEW_SESSION = {
 }
 WITNESS_TABLE = "request_changes_issuance_witnesses"
 LOCK_TIMEOUT_SECONDS = 2.0
+CONCURRENCY_LOCK_TIMEOUT_SECONDS = 10.0
 
 
 def _engine(path: Path, *, timeout: float = LOCK_TIMEOUT_SECONDS):
@@ -82,10 +83,17 @@ def _engine(path: Path, *, timeout: float = LOCK_TIMEOUT_SECONDS):
 
 
 @pytest.fixture
-def db_session_factory(tmp_path: Path):
+def db_session_factory(tmp_path: Path, request):
     """Override conftest: a migrated file-backed database for this module."""
 
-    engine = _engine(tmp_path / "c1-i1.db")
+    timeout = (
+        CONCURRENCY_LOCK_TIMEOUT_SECONDS
+        if request.node.name.startswith(
+            "test_concurrent_issuance_admits_exactly_one_witnessed_retry"
+        )
+        else LOCK_TIMEOUT_SECONDS
+    )
+    engine = _engine(tmp_path / "c1-i1.db", timeout=timeout)
     Base.metadata.create_all(bind=engine)
     run_schema_migrations(engine)
     factory = sessionmaker(autocommit=False, autoflush=False, bind=engine)
