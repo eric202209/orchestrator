@@ -1,0 +1,53 @@
+FROM python:3.12-slim
+
+ARG ORCHESTRATOR_GIT_SHA
+ARG ORCHESTRATOR_BUILD_TIME=unknown
+ARG ORCHESTRATOR_IMAGE_TAG=unknown
+ARG ORCHESTRATOR_IMAGE_ID=unknown
+
+RUN test -n "${ORCHESTRATOR_GIT_SHA}" \
+    && test "${ORCHESTRATOR_GIT_SHA}" != "unknown"
+
+WORKDIR /opt/orchestrator
+
+ENV ORCHESTRATOR_GIT_SHA=${ORCHESTRATOR_GIT_SHA} \
+    ORCHESTRATOR_BUILD_TIME=${ORCHESTRATOR_BUILD_TIME} \
+    ORCHESTRATOR_IMAGE_TAG=${ORCHESTRATOR_IMAGE_TAG} \
+    ORCHESTRATOR_IMAGE_ID=${ORCHESTRATOR_IMAGE_ID} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    WORKER_APP_ROOT=/opt/orchestrator
+
+# The Worker needs Git for the existing workspace/checkpoint lifecycle and CA
+# roots for structured HTTP providers. It does not need Node, a Docker client,
+# Redis, Qdrant, or the development CLI tools used by the API image.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt /tmp/orchestrator-worker-requirements.txt
+RUN pip install --no-cache-dir -r /tmp/orchestrator-worker-requirements.txt \
+    && rm -f /tmp/orchestrator-worker-requirements.txt
+
+# The application release is owned by root and made non-writable. Runtime
+# read-only enforcement is supplied by the container run contract as well.
+COPY --chown=root:root . /opt/orchestrator
+COPY --chown=root:root scripts/worker-entrypoint.sh /usr/local/bin/orchestrator-worker-entrypoint
+
+RUN groupadd --system --gid 10001 orchestrator-worker \
+    && useradd --system --uid 10001 --gid orchestrator-worker \
+        --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin \
+        orchestrator-worker \
+    && find /opt/orchestrator -type d -exec chmod 0555 {} + \
+    && find /opt/orchestrator -type f -exec chmod 0444 {} + \
+    && chmod 0555 /usr/local/bin/orchestrator-worker-entrypoint \
+    && install -d -o orchestrator-worker -g orchestrator-worker -m 0700 \
+        /var/lib/orchestrator-worker/db \
+        /var/lib/orchestrator-worker/runtime \
+        /var/lib/orchestrator-worker/checkpoints \
+        /var/lib/orchestrator-worker/identity \
+        /workspace/authoritative
+
+USER orchestrator-worker
+
+ENTRYPOINT ["/usr/local/bin/orchestrator-worker-entrypoint"]
