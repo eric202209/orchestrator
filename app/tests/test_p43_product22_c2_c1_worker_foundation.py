@@ -16,6 +16,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 ENTRYPOINT = REPO_ROOT / "scripts" / "worker-entrypoint.sh"
 DOCKERFILE = REPO_ROOT / "Dockerfile.worker"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
+PRIVILEGED_SOCKET_PATHS = (
+    Path("/var/run/docker.sock"),
+    Path("/run/orchestrator/host-launcher.sock"),
+    Path("/run/orchestrator/bridge.sock"),
+    Path("/run/host-launcher.sock"),
+)
 
 
 def _prepare_non_root_writable_dir(directory: Path, nobody: pwd.struct_passwd) -> None:
@@ -137,7 +143,32 @@ def _run_entrypoint(
         raise
 
 
+def _skip_if_host_exposes_privileged_socket() -> None:
+    for socket_path in PRIVILEGED_SOCKET_PATHS:
+        if socket_path.exists():
+            pytest.skip(
+                "host-side entrypoint acceptance requires an isolated "
+                f"filesystem; privileged socket is visible: {socket_path}"
+            )
+
+
+def test_host_side_acceptance_requires_isolated_filesystem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_exists = Path.exists
+
+    def fake_exists(path: Path) -> bool:
+        if path == Path("/var/run/docker.sock"):
+            return True
+        return real_exists(path)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    with pytest.raises(pytest.skip.Exception, match="isolated filesystem"):
+        _skip_if_host_exposes_privileged_socket()
+
+
 def test_worker_entrypoint_accepts_structured_http_contract(tmp_path: Path) -> None:
+    _skip_if_host_exposes_privileged_socket()
     env = _make_contract_fixture(tmp_path)
     result = _run_entrypoint(env, user=pwd.getpwnam("nobody"))
     assert result.returncode == 0, result.stderr
@@ -147,6 +178,8 @@ def test_worker_entrypoint_accepts_structured_http_contract(tmp_path: Path) -> N
 def test_worker_entrypoint_accepts_without_chown_capability(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _skip_if_host_exposes_privileged_socket()
+
     def deny_chown(*_args: object) -> None:
         raise PermissionError("operation not permitted")
 
@@ -210,6 +243,7 @@ def test_worker_release_and_docker_context_are_read_only_by_contract() -> None:
 def test_required_writable_paths_are_not_the_application_release(
     tmp_path: Path,
 ) -> None:
+    _skip_if_host_exposes_privileged_socket()
     env = _make_contract_fixture(tmp_path)
     result = _run_entrypoint(env, user=pwd.getpwnam("nobody"))
     assert result.returncode == 0, result.stderr
