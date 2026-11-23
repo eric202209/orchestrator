@@ -17,6 +17,15 @@ DOCKERFILE = REPO_ROOT / "Dockerfile.worker"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 
 
+def _prepare_non_root_writable_dir(directory: Path, nobody: pwd.struct_passwd) -> None:
+    try:
+        os.chown(directory, nobody.pw_uid, nobody.pw_gid)
+    except PermissionError:
+        # Hosted runners may intentionally remove CAP_CHOWN. Preserve the
+        # non-root access check without requiring a privileged test process.
+        directory.chmod(0o733)
+
+
 def _make_contract_fixture(tmp_path: Path) -> dict[str, str]:
     # The subprocess runs as nobody, so it must be able to traverse the
     # pytest-created parent directory just as it would traverse /opt in the
@@ -56,7 +65,7 @@ def _make_contract_fixture(tmp_path: Path) -> dict[str, str]:
         identity_dir,
         workspace_dir,
     ):
-        os.chown(directory, nobody.pw_uid, nobody.pw_gid)
+        _prepare_non_root_writable_dir(directory, nobody)
 
     return {
         "WORKER_ENVIRONMENT": "c2-c1-test",
@@ -114,6 +123,19 @@ def _run_entrypoint(
 
 
 def test_worker_entrypoint_accepts_structured_http_contract(tmp_path: Path) -> None:
+    env = _make_contract_fixture(tmp_path)
+    result = _run_entrypoint(env, user=pwd.getpwnam("nobody"))
+    assert result.returncode == 0, result.stderr
+    assert "validation only" in result.stdout
+
+
+def test_worker_entrypoint_accepts_without_chown_capability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def deny_chown(*_args: object) -> None:
+        raise PermissionError("operation not permitted")
+
+    monkeypatch.setattr(os, "chown", deny_chown)
     env = _make_contract_fixture(tmp_path)
     result = _run_entrypoint(env, user=pwd.getpwnam("nobody"))
     assert result.returncode == 0, result.stderr
