@@ -95,6 +95,7 @@ require_exact CONTROLLED_WORKER_IDENTITY_REQUIRED true
 require_exact CONTROLLED_WORKER_NODE_IDENTITY orchestrator-worker-c2-c1
 require_exact WORKER_IDENTITY_SOURCE container-start
 require_exact PLANNING_PROVIDER direct_openai_compatible
+require_exact WORKER_TASK_ALLOWLIST "app.tasks.worker.answer_human_intervention_query,app.tasks.worker.execute_orchestration_task,app.tasks.worker.receive_execution_task_dispatch"
 
 require_value WORKER_INSTANCE_ID
 case "$(value_of WORKER_INSTANCE_ID)" in
@@ -155,11 +156,40 @@ case "$(value_of WORKER_CANDIDATE_PIN_PATH)" in
     *) fail "Worker candidate pin must remain inside the Worker identity mount" ;;
 esac
 
-case "$database_dir:$runtime_root:$checkpoint_dir:$identity_root:$workspace_root" in
-    "$app_root"*|*":$app_root"*)
-        fail "a writable Worker path may not be below the application release"
-        ;;
-esac
+assert_disjoint_path() {
+    left_path="$1"
+    right_path="$2"
+    case "$right_path" in
+        "$left_path"|"$left_path"/*)
+            fail "Worker authority paths overlap: $left_path and $right_path"
+            ;;
+    esac
+    case "$left_path" in
+        "$right_path"|"$right_path"/*)
+            fail "Worker authority paths overlap: $left_path and $right_path"
+            ;;
+    esac
+}
+
+for authority_path in \
+    "$database_dir" \
+    "$runtime_root" \
+    "$checkpoint_dir" \
+    "$identity_root" \
+    "$workspace_root"
+do
+    assert_disjoint_path "$app_root" "$authority_path"
+done
+assert_disjoint_path "$database_dir" "$runtime_root"
+assert_disjoint_path "$database_dir" "$checkpoint_dir"
+assert_disjoint_path "$database_dir" "$identity_root"
+assert_disjoint_path "$database_dir" "$workspace_root"
+assert_disjoint_path "$runtime_root" "$checkpoint_dir"
+assert_disjoint_path "$runtime_root" "$identity_root"
+assert_disjoint_path "$runtime_root" "$workspace_root"
+assert_disjoint_path "$checkpoint_dir" "$identity_root"
+assert_disjoint_path "$checkpoint_dir" "$workspace_root"
+assert_disjoint_path "$identity_root" "$workspace_root"
 
 worker_env_file=$(value_of WORKER_ENV_FILE)
 case "$worker_env_file" in
@@ -184,7 +214,9 @@ for forbidden_name in \
     HOST_BRIDGE_SOCKET \
     HOST_BRIDGE_KEY_FILE \
     SANDBOX_BRIDGE_SOCKET \
-    SANDBOX_BRIDGE_KEY_FILE
+    SANDBOX_BRIDGE_KEY_FILE \
+    MODEL_WORKSPACE_ROOT \
+    WORKER_MODEL_WORKSPACE_ROOT
 do
     [ -z "$(value_of "$forbidden_name")" ] \
         || fail "$forbidden_name is not part of the Worker credential allowlist"

@@ -83,6 +83,7 @@ def _make_contract_fixture(tmp_path: Path) -> dict[str, str]:
         "CONTROLLED_WORKER_IDENTITY_REQUIRED": "true",
         "CONTROLLED_WORKER_NODE_IDENTITY": "orchestrator-worker-c2-c1",
         "WORKER_IDENTITY_SOURCE": "container-start",
+        "WORKER_TASK_ALLOWLIST": "app.tasks.worker.answer_human_intervention_query,app.tasks.worker.execute_orchestration_task,app.tasks.worker.receive_execution_task_dispatch",
         "WORKER_INSTANCE_ID": "c2-c1-test-instance",
         "HOSTNAME": "container-hostname",
         "WORKER_QUEUE_NAME": "orchestrator-c2-c1-test",
@@ -227,6 +228,14 @@ def test_worker_entrypoint_rejects_full_env_and_bridge_paths(tmp_path: Path) -> 
     assert "SECRET_KEY" in result.stderr
 
 
+def test_worker_entrypoint_rejects_model_workspace_mount(tmp_path: Path) -> None:
+    env = _make_contract_fixture(tmp_path)
+    env["MODEL_WORKSPACE_ROOT"] = env["WORKSPACE_ROOT"]
+    result = _run_entrypoint(env, user=pwd.getpwnam("nobody"))
+    assert result.returncode == 78
+    assert "MODEL_WORKSPACE_ROOT" in result.stderr
+
+
 def test_worker_release_and_docker_context_are_read_only_by_contract() -> None:
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
     dockerignore = DOCKERIGNORE.read_text(encoding="utf-8")
@@ -297,6 +306,8 @@ def test_built_worker_image_is_non_root_and_has_no_privileged_mounts() -> None:
         "CONTROLLED_WORKER_IDENTITY_REQUIRED=true",
         "-e",
         "CONTROLLED_WORKER_NODE_IDENTITY=orchestrator-worker-c2-c1",
+        "-e",
+        "WORKER_TASK_ALLOWLIST=app.tasks.worker.answer_human_intervention_query,app.tasks.worker.execute_orchestration_task,app.tasks.worker.receive_execution_task_dispatch",
         "-e",
         "WORKER_IDENTITY_SOURCE=container-start",
         "-e",

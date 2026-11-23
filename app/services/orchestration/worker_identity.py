@@ -89,6 +89,7 @@ DEFAULT_AFFECTED_MODULES = (
     "app.task_intent",
     "app.services",
     "app.celery_app",
+    "app.services.orchestration.worker_boundary",
     "app.tasks.worker",
     "app.tasks.maintenance",
     # Celery includes these modules explicitly; their registered Task
@@ -275,6 +276,7 @@ _WORKER_EVALUATOR_PRELOAD_PROVENANCE: dict[str, Any] | None = None
 # inspected because their transitive dependencies are outside this contract.
 WORKER_PROVENANCE_REGISTRATION_ROOTS = (
     "app.celery_app",
+    "app.services.orchestration.worker_boundary",
     "app.tasks.worker",
     "app.tasks.maintenance",
     "app.tasks.github_tasks",
