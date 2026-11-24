@@ -1,0 +1,56 @@
+# P43-PRODUCT-22-C2-C3A isolated strict Launcher for ONE disposable C2 live slice.
+# Installed by scripts/maintenance/p43_sandbox_bridge_host.sh c2-install --operator-approved.
+# Coexists with p43-sandbox-bridge.service and shares nothing with it: separate service
+# user, code copy, key, ledger, staging, socket, and sandbox container prefix (p43-sbx-c2-).
+# Strict: v2 authorization with the current Launcher epoch is required; v1 is refused.
+# Never enabled at boot; started only for the disposable run and bounded by RuntimeMaxSec.
+# SupplementaryGroups=docker is root-equivalent on rootful Docker; see the PRODUCT-22 C1 report.
+[Unit]
+Description=P43 C2 disposable strict Sandbox Launcher (fixed-profile Docker executor)
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=simple
+User=p43-sandbox-c2
+Group=p43-sandbox-c2
+SupplementaryGroups=docker
+UMask=0077
+WorkingDirectory=/opt/p43-sandbox-bridge-c2/lib
+ExecStart=/usr/bin/python3 -B -E -s -m sandbox_bridge.host_service serve
+Environment=P43_SANDBOX_BRIDGE_INSTANCE=c2
+# Restricted Worker image UID (Dockerfile.worker). Docker has no userns remap,
+# so SO_PEERCRED reports this Host UID for the disposable Worker container.
+Environment=P43_SANDBOX_BRIDGE_ALLOWED_UID=10001
+LoadCredential=bridge.key:/etc/p43-sandbox-bridge-c2/bridge.key
+# The socket lives in /run and disappears when the unit stops: a restarted
+# Launcher has a new directory, socket, and epoch.
+RuntimeDirectory=p43-sandbox-bridge-c2
+RuntimeDirectoryMode=0710
+StateDirectory=p43-sandbox-bridge-c2 p43-sandbox-bridge-c2/ledger p43-sandbox-bridge-c2/staging
+StateDirectoryMode=0700
+Restart=no
+RuntimeMaxSec=1800
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=40
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native

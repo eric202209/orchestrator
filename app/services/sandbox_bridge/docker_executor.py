@@ -16,8 +16,15 @@ IMAGE = "python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c36
 
 
 class DockerExecutor:
-    def __init__(self, staging_root: str | Path, *, docker: str = "docker"):
+    def __init__(
+        self,
+        staging_root: str | Path,
+        *,
+        docker: str = "docker",
+        name_prefix: str = "p43-sbx-",
+    ):
         self.staging_root, self.docker = Path(staging_root), docker
+        self.name_prefix = name_prefix
 
     def _argv(self, name: str, workspace: Path) -> list[str]:
         return [
@@ -77,7 +84,7 @@ class DockerExecutor:
 
     def execute(self, request: ExecutionRequest, cancel) -> ExecutionResult:
         started = time.monotonic()
-        name = "p43-sbx-" + uuid.uuid4().hex
+        name = self.name_prefix + uuid.uuid4().hex
         staged = None
         proc = None
         out, err = bytearray(), bytearray()

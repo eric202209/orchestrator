@@ -21,6 +21,9 @@ DISPOSABLE_WORKER_TASK_ALLOWLIST = frozenset(
     }
 )
 STRUCTURED_HTTP_BACKENDS = frozenset({"direct_ollama", "openai_chat_completions"})
+DISPOSABLE_WORKER_ENVIRONMENT = "c2-c1-test"
+C2_BRIDGE_MODE = "c2b-sandbox"
+C2_DISPOSABLE_EXECUTION_ADMISSION = "c2-c3-single-sandbox-slice"
 
 # These values are authority inputs, not model/provider configuration. A
 # future Sandbox adapter must build a provider environment without them.
@@ -35,6 +38,7 @@ WORKER_AUTHORITY_ENV_NAMES = frozenset(
         "WORKER_ENVIRONMENT",
         "WORKER_ISOLATION_MODE",
         "WORKER_BRIDGE_MODE",
+        "C2_DISPOSABLE_EXECUTION_ADMISSION",
         "WORKER_ENV_FILE",
         "WORKER_IDENTITY_SOURCE",
         "WORKER_INSTANCE_ID",
@@ -100,6 +104,37 @@ def validate_disposable_task_admission(
         raise WorkerTaskAdmissionError(
             f"task is not admitted to the disposable Worker: {task_name}"
         )
+
+
+def disposable_c2_publication_admitted(
+    environment: Mapping[str, str],
+    *,
+    queue_name: str | None,
+    database_url: str | None,
+    production_database_url: str,
+) -> bool:
+    """True only for the exact disposable C2 live-slice configuration.
+
+    This admits Celery publication while ``EXECUTION_ENABLED=false``; it never
+    enables the API, eager execution, or a production queue/database. Task
+    names and queues are still checked by ``validate_disposable_task_admission``.
+    """
+
+    def value(name: str) -> str:
+        return str(environment.get(name, "") or "").strip()
+
+    database_dir = value("WORKER_DATABASE_DIR")
+    return bool(
+        value("WORKER_ISOLATION_MODE") == DISPOSABLE_WORKER_ISOLATION_MODE
+        and value("WORKER_ENVIRONMENT") == DISPOSABLE_WORKER_ENVIRONMENT
+        and value("WORKER_BRIDGE_MODE") == C2_BRIDGE_MODE
+        and value("C2_DISPOSABLE_EXECUTION_ADMISSION")
+        == C2_DISPOSABLE_EXECUTION_ADMISSION
+        and str(queue_name or "").strip() == DISPOSABLE_WORKER_QUEUE
+        and database_dir.startswith("/")
+        and str(database_url or "") == f"sqlite:///{database_dir}/orchestrator.db"
+        and str(database_url or "") != production_database_url
+    )
 
 
 def _resolved_absolute(path: str | Path | None, *, name: str) -> Path:
@@ -191,6 +226,8 @@ def model_environment_authority_violations(
 
 
 __all__ = [
+    "C2_DISPOSABLE_EXECUTION_ADMISSION",
+    "disposable_c2_publication_admitted",
     "DISPOSABLE_WORKER_ISOLATION_MODE",
     "DISPOSABLE_WORKER_QUEUE",
     "DISPOSABLE_WORKER_TASK_ALLOWLIST",

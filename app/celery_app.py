@@ -27,9 +27,10 @@ from celery.signals import (
     task_prerun,
     worker_process_init,
 )
-from .config import settings
+from .config import DEFAULT_DATABASE_URL, settings
 from app.services.orchestration.worker_boundary import (
     WorkerBoundaryViolation,
+    disposable_c2_publication_admitted,
     validate_disposable_task_admission,
     validate_structured_http_provider_contract,
     validate_worker_authority_paths,
@@ -133,16 +134,26 @@ def _require_fresh_disposable_worker_identity() -> None:
         raise WorkerBoundaryViolation(f"fresh Worker identity required: {reason}")
 
 
-def _require_execution_enabled() -> None:
+def _require_execution_enabled(*, disposable_publication: bool = False) -> None:
     if settings.DEV_API_ONLY:
         raise RuntimeError("DEVELOPMENT_EXECUTION_DISABLED")
-    if not settings.EXECUTION_ENABLED:
-        raise RuntimeError("EXECUTION_DISABLED")
+    if settings.EXECUTION_ENABLED:
+        return
+    # C2-C3A: only Celery publication, and only for the exact disposable C2
+    # slice (isolated queue + Worker-owned database). Production stays off.
+    if disposable_publication and disposable_c2_publication_admitted(
+        os.environ,
+        queue_name=_disposable_worker_queue(),
+        database_url=settings.DATABASE_URL,
+        production_database_url=DEFAULT_DATABASE_URL,
+    ):
+        return
+    raise RuntimeError("EXECUTION_DISABLED")
 
 
 class DevelopmentGatedTask(Task):
     def apply_async(self, *args, **kwargs):
-        _require_execution_enabled()
+        _require_execution_enabled(disposable_publication=True)
         _validate_disposable_publication(
             task_name=self.name,
             queue_name=kwargs.get("queue")
@@ -160,7 +171,7 @@ class DevelopmentGatedCelery(Celery):
     def send_task(self, *args, **kwargs):
         # A before_task_publish signal cannot enforce this: Celery signals
         # can swallow receiver exceptions. Refuse before reaching transport.
-        _require_execution_enabled()
+        _require_execution_enabled(disposable_publication=True)
         _validate_disposable_publication(
             task_name=args[0] if args else None,
             queue_name=kwargs.get("queue") or kwargs.get("routing_key"),

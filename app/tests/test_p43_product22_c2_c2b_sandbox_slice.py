@@ -416,12 +416,23 @@ def test_invalid_authority_never_reaches_host(
 # --- Host admission negatives (real Launcher verification) ------------------
 
 
-def _authorized_request(db, session, task, execution, *, clock=time.time):
-    """Capture the exact request the Gateway would authenticate."""
+def _authorized_request(
+    db, session, task, execution, *, clock=time.time, path=None, epoch=None
+):
+    """Capture the exact request the Gateway would authenticate.
+
+    The epoch is read from the running Launcher over the authenticated socket
+    (C2-C3A), exactly as the Gateway does, unless a test supplies one.
+    """
 
     captured = []
+    if epoch is None:
+        epoch = SandboxClient(path, KEY).launcher_epoch()
 
     class Capture:
+        def launcher_epoch(self):
+            return epoch
+
         def execute(self, request):
             captured.append(request)
             return ExecutionResult.unavailable(request.request_id)
@@ -448,13 +459,13 @@ def test_operation_bytes_modified_after_authorization_are_rejected(lifecycle, ho
     session, task, _, execution = _claimed_attempt(db)
     docker = FakeDocker()
     path = host(docker)
-    wire = _authorized_request(db, session, task, execution).to_wire()
+    wire = _authorized_request(db, session, task, execution, path=path).to_wire()
     wire["code"] = "import sys; sys.exit(1)"
 
     # Re-authenticated with the real key: only the binding catches it.
     assert _raw(path, wire)["error_code"] == "operation_digest_mismatch"
     # Not re-authenticated: HMAC catches it.
-    original = _authorized_request(db, session, task, execution).to_wire()
+    original = _authorized_request(db, session, task, execution, path=path).to_wire()
     payload = json.dumps(original, separators=(",", ":"), sort_keys=True).encode()
     tampered = dict(original, code="import sys; sys.exit(1)")
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -466,7 +477,7 @@ def test_operation_bytes_modified_after_authorization_are_rejected(lifecycle, ho
         )
         assert _receive(sock)["error_code"] == "invalid_authentication"
     # Rebinding the operation to another attempt also fails the identity check.
-    rebound = _authorized_request(db, session, task, execution).to_wire()
+    rebound = _authorized_request(db, session, task, execution, path=path).to_wire()
     rebound["execution_id"] = f"te-{execution.id}-a2"
     assert _raw(path, rebound)["error_code"] == "authorization_identity_mismatch"
     assert docker.calls == []
@@ -482,7 +493,7 @@ def test_invalid_authentication_expiry_replay_and_v1_are_rejected(
 
     # Expired: contract age window (30 s) still open, binding TTL (20 s) closed.
     stale = _authorized_request(
-        db, session, task, execution, clock=lambda: time.time() - 25
+        db, session, task, execution, clock=lambda: time.time() - 25, path=path
     )
     assert _raw(path, stale.to_wire())["error_code"] == "authorization_expired"
 
@@ -501,7 +512,7 @@ def test_invalid_authentication_expiry_replay_and_v1_are_rejected(
     assert _raw(path, v1.to_wire())["error_code"] == "authorization_required"
 
     # Replay: the nonce is the ledger request_id; second delivery is refused.
-    good = _authorized_request(db, session, task, execution).to_wire()
+    good = _authorized_request(db, session, task, execution, path=path).to_wire()
     assert _raw(path, good)["execution_status"] == "SUCCESS"
     assert _raw(path, good)["error_code"] == "duplicate_request"
     assert len(docker.calls) == 1
@@ -513,9 +524,9 @@ def test_invalid_authentication_expiry_replay_and_v1_are_rejected(
     monkeypatch.setenv("SANDBOX_BRIDGE_KEY_FILE", str(key_file))
     result = _run_step(tmp_path, _context(db, session, task, execution))
     assert result["status"] == "failed"
-    # Pre-parse Host rejections carry request_id "invalid"; the existing
-    # client refuses them as uncorrelated. Either way: rejected, no fallback.
-    assert "bridge_result_invalid:result_request_mismatch" in result["output"]
+    # C2-C3A: the wrong key now fails at the authenticated epoch read, before
+    # any execute request is built. Rejected, no fallback.
+    assert "host_rejected:epoch_reply_invalid" in result["output"]
     assert len(docker.calls) == 1
 
 
@@ -577,6 +588,8 @@ def test_transport_timeout_never_falls_back_to_local_execution(
             monkeypatch.setattr(socket.socket, "settimeout", real)
 
     monkeypatch.setattr(SandboxClient, "execute", short_timeout)
+    # Exercise the execute wait (the epoch read has its own bounded wait).
+    monkeypatch.setattr(SandboxClient, "launcher_epoch", lambda self: 1)
     try:
         result = _run_step(tmp_path, _context(db, session, task, execution))
     finally:

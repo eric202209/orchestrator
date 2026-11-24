@@ -21,6 +21,10 @@ PRIVILEGED_SOCKET_PATHS = (
     Path("/run/orchestrator/host-launcher.sock"),
     Path("/run/orchestrator/bridge.sock"),
     Path("/run/host-launcher.sock"),
+    # C2-C3A: the deployed C1B Launcher socket/key (ai-agent mounts) are also
+    # refused by the entrypoint in every mode.
+    Path("/run/p43-sandbox-bridge/launcher.sock"),
+    Path("/run/secrets/p43-sandbox-bridge.key"),
 )
 
 

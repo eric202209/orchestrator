@@ -41,6 +41,12 @@ from app.services.sandbox_bridge.contract import (
 
 C2_BRIDGE_MODE = "c2b-sandbox"
 AUTHORIZATION_TTL_SECONDS = 20
+# C2-C3A: the execution loop's _reserve_mutation_authority holds the SQLite
+# writer lock across this call. Worst-case hold is connect (2 s) + epoch reply
+# (5 s) + timeout + 10 s response wait; with this cap it stays below the
+# 30 s SQLite busy_timeout, so a concurrent cancellation waits instead of
+# failing with "database is locked". Not a cancellation mechanism.
+C2_SANDBOX_TIMEOUT_CAP_SECONDS = 10
 
 
 def sandbox_c2_mode_enabled() -> bool:
@@ -230,7 +236,20 @@ class SandboxExecutionGateway:
             authority = resolve_attempt_authority(context)
         except SandboxAuthorityError as exc:
             return SandboxGatewayOutcome(False, exc.reason)
-        timeout = max(1, min(int(timeout_seconds), MAX_TIMEOUT_SECONDS))
+        timeout = max(
+            1,
+            min(
+                int(timeout_seconds),
+                MAX_TIMEOUT_SECONDS,
+                C2_SANDBOX_TIMEOUT_CAP_SECONDS,
+            ),
+        )
+        try:
+            launcher_epoch = self.client.launcher_epoch()
+        except RequestRejected as exc:
+            return SandboxGatewayOutcome(False, f"host_rejected:{exc}")
+        except (OSError, TimeoutError):
+            return SandboxGatewayOutcome(False, "host_unavailable")
         issued_at = int(self.clock())
         request_id = str(uuid.uuid4())
         authorization = {
@@ -243,9 +262,9 @@ class SandboxExecutionGateway:
             "nonce": request_id,
             "issued_at": issued_at,
             "expires_at": issued_at + AUTHORIZATION_TTL_SECONDS,
-            # The Worker cannot observe the Launcher epoch over the current
-            # socket protocol; the Launcher still refuses pre-start requests.
-            "launcher_epoch": None,
+            # Read over the authenticated socket just before binding; a
+            # restarted Launcher has a new epoch and refuses this binding.
+            "launcher_epoch": launcher_epoch,
         }
         request = ExecutionRequest(
             request_id,
@@ -292,6 +311,7 @@ class SandboxExecutionGateway:
 
 __all__ = [
     "C2_BRIDGE_MODE",
+    "C2_SANDBOX_TIMEOUT_CAP_SECONDS",
     "SandboxAuthorityError",
     "SandboxExecutionContext",
     "SandboxExecutionGateway",

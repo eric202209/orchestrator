@@ -29,12 +29,20 @@ from .docker_executor import IMAGE, DockerExecutor
 from .transport import HostSocketLauncher, SandboxClient, _mac, _receive, _send
 
 STATE_DIR = Path("/var/lib/p43-sandbox-bridge")
+# C2-C3A isolated strict instance (p43-sandbox-bridge-c2.service). It never
+# shares socket, key, ledger, staging, or code with the deployed C1B Launcher.
+C2_INSTANCE = "c2"
+C2_STATE_DIR = Path("/var/lib/p43-sandbox-bridge-c2")
+C2_SOCKET_DIR = Path("/run/p43-sandbox-bridge-c2")
 SOCKET_NAME = "launcher.sock"
 CLIENT_SOCKET = Path("/run/p43-sandbox-bridge") / SOCKET_NAME
 CLIENT_KEY = Path("/run/secrets/p43-sandbox-bridge.key")
 MAX_ACTIVE = 4
 STOP_GRACE_SECONDS = 20
-_CONTAINER = re.compile(r"^p43-sbx-[0-9a-f]{32}$")
+DEFAULT_CONTAINER_PREFIX = "p43-sbx-"
+# The C1B regex below never matches this prefix, so neither instance's
+# startup recovery can remove the other's sandbox containers.
+C2_CONTAINER_PREFIX = "p43-sbx-c2-"
 _STAGING_ENTRY = re.compile(r"^request-[A-Za-z0-9_]{8}$")
 log = logging.getLogger("p43-sandbox-bridge")
 
@@ -50,10 +58,14 @@ class ServiceConfig:
     key_path: Path
     docker: str = "docker"
     max_active: int = MAX_ACTIVE
+    require_authorization: bool = False
+    socket_dir_override: Path | None = None
+    socket_group_traverse: bool = False
+    container_prefix: str = DEFAULT_CONTAINER_PREFIX
 
     @property
     def socket_dir(self) -> Path:
-        return self.state_dir / "socket"
+        return self.socket_dir_override or self.state_dir / "socket"
 
     @property
     def socket_path(self) -> Path:
@@ -103,19 +115,28 @@ def load_key(path: str | Path) -> bytes:
     return key
 
 
-def _private_dir(path: Path) -> None:
+def _private_dir(path: Path, *, group_traverse: bool = False) -> None:
     try:
         st = os.lstat(path)
     except FileNotFoundError:
         raise BootstrapError(f"missing_directory:{path.name}") from None
-    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid() or st.st_mode & 0o077:
+    allowed = 0o010 if group_traverse else 0
+    if (
+        not stat.S_ISDIR(st.st_mode)
+        or st.st_uid != os.geteuid()
+        or st.st_mode & 0o077 & ~allowed
+    ):
         raise BootstrapError(f"unsafe_directory:{path.name}")
 
 
 def check_directories(config: ServiceConfig) -> None:
-    """Socket, ledger and staging must be separate, owner-only, non-symlink directories."""
+    """Socket, ledger and staging must be separate, owner-only, non-symlink directories.
+
+    Only the isolated C2 socket directory may also grant group search (0710).
+    """
     _private_dir(config.state_dir)
-    for path in (config.socket_dir, config.ledger_path.parent, config.staging_root):
+    _private_dir(config.socket_dir, group_traverse=config.socket_group_traverse)
+    for path in (config.ledger_path.parent, config.staging_root):
         _private_dir(path)
 
 
@@ -163,7 +184,7 @@ def recover_orphans(config: ServiceConfig) -> dict[str, int]:
             "-a",
             "--no-trunc",
             "--filter",
-            "name=^/p43-sbx-",
+            f"name=^/{config.container_prefix}",
             "--format",
             "{{.Names}}\t{{.Image}}",
         ],
@@ -177,9 +198,10 @@ def recover_orphans(config: ServiceConfig) -> dict[str, int]:
     if listed.returncode != 0:
         raise BootstrapError("docker_unavailable")
     removed = skipped = 0
+    exact_name = re.compile(f"^{re.escape(config.container_prefix)}[0-9a-f]{{32}}$")
     for line in listed.stdout.splitlines():
         name, _, image = line.partition("\t")
-        if not _CONTAINER.fullmatch(name) or image != IMAGE:
+        if not exact_name.fullmatch(name) or image != IMAGE:
             skipped += 1
             continue
         rm = subprocess.run(
@@ -271,18 +293,31 @@ def serve(config: ServiceConfig, stop: threading.Event, *, executor=None) -> int
     check_socket_dir_contents(config)
     recovered = recover_orphans(config) if executor is None else {}
     log.info(
-        "startup stale_socket_removed=%s recovery=%s allowed_uid=%d max_active=%d",
+        "startup stale_socket_removed=%s recovery=%s allowed_uid=%d max_active=%d"
+        " require_authorization=%s",
         stale,
         json.dumps(recovered, sort_keys=True),
         config.allowed_uid,
         config.max_active,
+        config.require_authorization,
     )
     bounded = BoundedExecutor(
-        executor or DockerExecutor(config.staging_root, docker=config.docker).execute,
+        executor
+        or DockerExecutor(
+            config.staging_root,
+            docker=config.docker,
+            name_prefix=config.container_prefix,
+        ).execute,
         config.max_active,
     )
     launcher = HostSocketLauncher(
-        config.socket_path, key, config.allowed_uid, bounded, config.ledger_path
+        config.socket_path,
+        key,
+        config.allowed_uid,
+        bounded,
+        config.ledger_path,
+        require_authorization=config.require_authorization,
+        socket_dir_group_traverse=config.socket_group_traverse,
     )
     try:
         launcher.serve_forever(stop)
@@ -408,7 +443,28 @@ def _config_from_env() -> ServiceConfig:
         uid = int(os.environ["P43_SANDBOX_BRIDGE_ALLOWED_UID"])
     except (KeyError, ValueError):
         raise BootstrapError("missing_allowed_uid") from None
-    return ServiceConfig(STATE_DIR, uid, Path(creds) / "bridge.key")
+    instance = os.environ.get("P43_SANDBOX_BRIDGE_INSTANCE", "")
+    if instance == "":
+        return ServiceConfig(STATE_DIR, uid, Path(creds) / "bridge.key")
+    if instance != C2_INSTANCE:
+        raise BootstrapError("unknown_instance")
+    # Strict C2: v2 only, current epoch required, non-root Worker peer, one
+    # sandbox at a time, socket in the unit's RuntimeDirectory (0710).
+    if uid == 0:
+        raise BootstrapError("c2_requires_non_root_peer")
+    runtime_dir = os.environ.get("RUNTIME_DIRECTORY", "")
+    if os.path.abspath(runtime_dir or "/nonexistent") != str(C2_SOCKET_DIR):
+        raise BootstrapError("c2_runtime_directory_mismatch")
+    return ServiceConfig(
+        C2_STATE_DIR,
+        uid,
+        Path(creds) / "bridge.key",
+        max_active=1,
+        require_authorization=True,
+        socket_dir_override=C2_SOCKET_DIR,
+        socket_group_traverse=True,
+        container_prefix=C2_CONTAINER_PREFIX,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -424,12 +480,19 @@ def main(argv: list[str] | None = None) -> int:
                 signal.signal(sig, lambda *_: stop.set())
             return serve(_config_from_env(), stop)
         if command == "status":
-            print(
-                json.dumps(
-                    status(ServiceConfig(STATE_DIR, -1, Path("/nonexistent"))),
-                    sort_keys=True,
+            if args[1:] not in ([], [C2_INSTANCE]):
+                raise BootstrapError("unknown_instance")
+            config = (
+                ServiceConfig(
+                    C2_STATE_DIR,
+                    -1,
+                    Path("/nonexistent"),
+                    socket_dir_override=C2_SOCKET_DIR,
                 )
+                if args[1:]
+                else ServiceConfig(STATE_DIR, -1, Path("/nonexistent"))
             )
+            print(json.dumps(status(config), sort_keys=True))
             return 0
         if command == "client-check":
             report = client_check(CLIENT_SOCKET, CLIENT_KEY)
@@ -438,7 +501,7 @@ def main(argv: list[str] | None = None) -> int:
     except BootstrapError as exc:
         log.error("bootstrap_error=%s", exc)
         return 2
-    print("usage: host_service {serve|status|client-check}", file=sys.stderr)
+    print("usage: host_service {serve|status [c2]|client-check}", file=sys.stderr)
     return 64
 
 

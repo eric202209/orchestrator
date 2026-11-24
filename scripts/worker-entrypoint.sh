@@ -89,7 +89,13 @@ assert_backend_is_structured_http() {
 require_exact WORKER_ENVIRONMENT c2-c1-test
 require_exact WORKER_ISOLATION_MODE disposable
 require_exact WORKER_BROKER_NAMESPACE p43-c2-c1-disposable
-require_exact WORKER_BRIDGE_MODE disabled
+# WORKER_BRIDGE_MODE: 'disabled' by default. 'c2b-sandbox' is admitted only
+# for the single disposable C2 live slice (C2-C3A) with its exact opt-in and
+# the isolated strict C2 Launcher socket/key; see the bridge block below.
+case "$(value_of WORKER_BRIDGE_MODE)" in
+    disabled|c2b-sandbox) ;;
+    *) fail "WORKER_BRIDGE_MODE must be 'disabled' or 'c2b-sandbox'" ;;
+esac
 require_exact EXECUTION_ENABLED false
 require_exact CONTROLLED_WORKER_IDENTITY_REQUIRED true
 require_exact CONTROLLED_WORKER_NODE_IDENTITY orchestrator-worker-c2-c1
@@ -213,8 +219,6 @@ for forbidden_name in \
     DOCKER_HOST \
     HOST_BRIDGE_SOCKET \
     HOST_BRIDGE_KEY_FILE \
-    SANDBOX_BRIDGE_SOCKET \
-    SANDBOX_BRIDGE_KEY_FILE \
     MODEL_WORKSPACE_ROOT \
     WORKER_MODEL_WORKSPACE_ROOT
 do
@@ -240,14 +244,42 @@ for env_candidate in "$app_root"/.env.*; do
 done
 assert_not_writable "$app_root"
 
+c2_socket=/run/p43-sandbox-bridge-c2/launcher.sock
+c2_key=/run/secrets/p43-sandbox-bridge-c2.key
+if [ "$(value_of WORKER_BRIDGE_MODE)" = "disabled" ]; then
+    for bridge_name in \
+        SANDBOX_BRIDGE_SOCKET \
+        SANDBOX_BRIDGE_KEY_FILE \
+        C2_DISPOSABLE_EXECUTION_ADMISSION
+    do
+        [ -z "$(value_of "$bridge_name")" ] \
+            || fail "$bridge_name is not part of the Worker credential allowlist"
+    done
+    [ ! -e "$c2_socket" ] && [ ! -e "$c2_key" ] \
+        || fail "C2 Launcher material is visible while the bridge is disabled"
+else
+    require_exact C2_DISPOSABLE_EXECUTION_ADMISSION c2-c3-single-sandbox-slice
+    require_exact SANDBOX_BRIDGE_SOCKET "$c2_socket"
+    require_exact SANDBOX_BRIDGE_KEY_FILE "$c2_key"
+    require_exact WORKER_CONCURRENCY 1
+    [ -S "$c2_socket" ] || fail "C2 Launcher socket is not mounted: $c2_socket"
+    [ -f "$c2_key" ] && [ ! -L "$c2_key" ] \
+        || fail "C2 Worker bridge key is not mounted: $c2_key"
+    [ "$(stat -c '%u' "$c2_key")" = "$(id -u)" ] \
+        && case "$(stat -c '%a' "$c2_key")" in 400|600) true ;; *) false ;; esac \
+        || fail "C2 Worker bridge key must be owner-only and owned by the Worker UID"
+fi
+
 # These paths are intentionally checked even though they are not configurable
-# by the foundation contract. A future Host bridge must be explicitly mounted
-# and enabled in a later C2 task.
+# by the foundation contract. The deployed C1B Launcher socket/key belong to
+# ai-agent and are never Worker inputs, in any mode.
 for forbidden_socket in \
     /var/run/docker.sock \
     /run/orchestrator/host-launcher.sock \
     /run/orchestrator/bridge.sock \
-    /run/host-launcher.sock
+    /run/host-launcher.sock \
+    /run/p43-sandbox-bridge/launcher.sock \
+    /run/secrets/p43-sandbox-bridge.key
 do
     [ ! -e "$forbidden_socket" ] \
         || fail "unapproved privileged socket is visible: $forbidden_socket"

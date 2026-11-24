@@ -7,6 +7,10 @@
 #   verify                         after the Compose change + ai-agent recreation: socket identity,
 #                                  ai-agent mounts, synthetic client check from inside ai-agent
 #   rollback --operator-approved   stop/disable only this service; remove only its socket and unit
+#   c2-preflight                   read-only checks for the isolated strict C2 Launcher
+#   c2-install --operator-approved create the separate C2 user, code copy, keys, and unit; never
+#                                  enables or starts it and never touches the C1B service
+#   c2-rollback --operator-approved stop the C2 unit; remove only its unit and Worker key copy
 # Never prints key contents. Never runs broad Docker cleanup. Never edits Compose.
 set -Eeuo pipefail
 umask 077
@@ -23,7 +27,18 @@ AI_AGENT=ai-agent
 AI_AGENT_REPO=${AI_AGENT_REPO:-/root/.openclaw/workspace/vault/orchestrator}
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 SRC=$REPO/app/services/sandbox_bridge
-MODULES=(__init__.py contract.py docker_executor.py host_service.py ipc_contract.py ledger.py staging.py transport.py)
+MODULES=(__init__.py authorization.py contract.py docker_executor.py host_service.py ipc_contract.py ledger.py staging.py transport.py)
+# C2-C3A isolated strict instance: shares nothing with the C1B service above.
+C2_SERVICE=p43-sandbox-bridge-c2.service
+C2_USER=p43-sandbox-c2
+C2_OPT=/opt/p43-sandbox-bridge-c2
+C2_KEY_DIR=/etc/p43-sandbox-bridge-c2
+C2_KEY=$C2_KEY_DIR/bridge.key
+C2_WORKER_KEY=$C2_KEY_DIR/worker.key
+C2_WORKER_UID=10001
+C2_STATE=/var/lib/p43-sandbox-bridge-c2
+C2_RUN=/run/p43-sandbox-bridge-c2
+C2_UNIT_DST=/etc/systemd/system/$C2_SERVICE
 IMAGE=$(sed -n 's/^IMAGE = "\(.*\)"$/\1/p' "$SRC/docker_executor.py")
 FAILURES=0
 
@@ -38,7 +53,7 @@ need_approval() { [[ "${1:-}" == --operator-approved ]] || { echo "refusing: req
 # This check guards against running from the wrong tree; it is not a trust anchor on its own.
 source_check() {
   local p sources s unit=scripts/maintenance/$SERVICE script=scripts/maintenance/p43_sandbox_bridge_host.sh
-  local files=("$script" "$unit") rel
+  local files=("$script" "$unit" "scripts/maintenance/$C2_SERVICE") rel
   for m in "${MODULES[@]}"; do files+=("app/services/sandbox_bridge/$m"); done
   for rel in "${files[@]}"; do
     p=$REPO/$rel
@@ -198,11 +213,72 @@ rollback() {
   info "to restore the previous ai-agent mounts: remove the two p43-sandbox-bridge entries from Compose and recreate ai-agent"
 }
 
+c2_preflight() {
+  preflight || true
+  local mounts
+  if ! mounts=$(docker inspect "$AI_AGENT" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null); then
+    bad "ai-agent mounts unavailable: cannot prove the C2 key/socket stay outside the model environment"
+  elif grep -Eq "^($C2_KEY_DIR|$C2_STATE|$C2_RUN)(/|\$)" <<<"$mounts"; then
+    bad "ai-agent mounts C2 Launcher material"
+  else ok "ai-agent mounts no C2 key, state, or socket path"; fi
+  getent passwd "$C2_WORKER_UID" >/dev/null && info "Host account owns UID $C2_WORKER_UID: $(getent passwd "$C2_WORKER_UID" | cut -d: -f1) (cannot traverse $C2_RUN unless in group $C2_USER)" || info "no Host account owns UID $C2_WORKER_UID"
+  systemctl is-active --quiet "$C2_SERVICE" && bad "C2 Launcher already active" || ok "C2 Launcher not active"
+  [[ -e "$C2_UNIT_DST" ]] && info "C2 unit already installed" || info "C2 unit absent"
+  [[ -e "$C2_KEY" ]] && info "C2 key present: $(stat -c '%U:%G %a' "$C2_KEY")" || info "C2 key absent (c2-install generates it)"
+  printf 'C2_PREFLIGHT=%s failures=%d\n' "$([[ $FAILURES -eq 0 ]] && echo READY || echo BLOCKED)" "$FAILURES"
+  [[ $FAILURES -eq 0 ]]
+}
+
+c2_install() {
+  need_approval "${1:-}"
+  c2_preflight
+  if ! id "$C2_USER" >/dev/null 2>&1; then
+    useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$C2_USER"
+  fi
+  id -nG "$C2_USER" | tr ' ' '\n' | grep -qx docker && { echo "refusing: $C2_USER is a permanent docker group member" >&2; exit 1; }
+  install -d -o root -g root -m 0755 "$C2_OPT" "$C2_OPT/lib" "$C2_OPT/lib/sandbox_bridge"
+  for m in "${MODULES[@]}"; do install -o root -g root -m 0644 "$SRC/$m" "$C2_OPT/lib/sandbox_bridge/$m"; done
+  (cd "$C2_OPT/lib/sandbox_bridge" && sha256sum "${MODULES[@]}") > "$C2_OPT/MANIFEST.sha256"
+  chmod 0644 "$C2_OPT/MANIFEST.sha256"
+  (cd "$SRC" && sha256sum -c --quiet "$C2_OPT/MANIFEST.sha256") || { echo "installed C2 code does not match source" >&2; exit 1; }
+  # Dedicated key: never the C1B key. The Launcher reads it via LoadCredential; the
+  # Worker gets an owner-only copy for its UID (load_key requires owner == reader).
+  install -d -o root -g root -m 0700 "$C2_KEY_DIR"
+  if [[ ! -e "$C2_KEY" ]]; then
+    local tmp; tmp=$(mktemp "$C2_KEY_DIR/.bridge.key.XXXXXX")
+    /usr/bin/python3 -c 'import secrets,sys; sys.stdout.write(secrets.token_hex(32) + "\n")' > "$tmp"
+    chmod 0600 "$tmp"
+    mv -n "$tmp" "$C2_KEY"; rm -f "$tmp"
+  fi
+  [[ -f "$C2_KEY" && ! -L "$C2_KEY" && "$(stat -c '%u:%g %a' "$C2_KEY")" == "0:0 600" ]] || { echo "unsafe key file $C2_KEY" >&2; exit 1; }
+  cmp -s "$C2_KEY" "$KEY" && { echo "refusing: C2 key equals the C1B key" >&2; exit 1; }
+  install -o "$C2_WORKER_UID" -g "$C2_WORKER_UID" -m 0400 "$C2_KEY" "$C2_WORKER_KEY"
+  install -o root -g root -m 0644 "$REPO/scripts/maintenance/$C2_SERVICE" "$C2_UNIT_DST"
+  systemctl daemon-reload
+  ok "C2 unit installed (not enabled, not started); Worker key $(stat -c '%u:%g %a' "$C2_WORKER_KEY")"
+  info "C2 socket group gid: $(getent group "$C2_USER" | cut -d: -f3) (pass to the Worker as --group-add)"
+}
+
+c2_rollback() {
+  need_approval "${1:-}"
+  systemctl stop "$C2_SERVICE" 2>/dev/null || true
+  [[ -f "$C2_UNIT_DST" ]] && rm -f -- "$C2_UNIT_DST"
+  [[ -f "$C2_WORKER_KEY" && ! -L "$C2_WORKER_KEY" ]] && rm -f -- "$C2_WORKER_KEY"
+  systemctl daemon-reload
+  systemctl reset-failed "$C2_SERVICE" 2>/dev/null || true
+  ok "C2 Launcher stopped; unit and Worker key copy removed; $C2_RUN is removed by systemd"
+  info "preserved for evidence: $C2_STATE (ledger, staging), $C2_KEY, $C2_OPT, user $C2_USER"
+  info "C1B service $SERVICE was not touched"
+}
+
 case "${1:-}" in
   source-check) source_check; printf 'SOURCE_CHECK=%s failures=%d\n' "$([[ $FAILURES -eq 0 ]] && echo PASS || echo FAIL)" "$FAILURES"; [[ $FAILURES -eq 0 ]] ;;
   preflight) preflight ;;
   install) install_host "${2:-}" ;;
   verify) verify_host ;;
   rollback) rollback "${2:-}" ;;
-  *) echo "usage: $0 {source-check|preflight|install --operator-approved|verify|rollback --operator-approved}" >&2; exit 64 ;;
+  c2-preflight) c2_preflight ;;
+  c2-install) c2_install "${2:-}" ;;
+  c2-rollback) c2_rollback "${2:-}" ;;
+  *) echo "usage: $0 {source-check|preflight|install --operator-approved|verify|rollback --operator-approved|c2-preflight|c2-install --operator-approved|c2-rollback --operator-approved}" >&2; exit 64 ;;
 esac

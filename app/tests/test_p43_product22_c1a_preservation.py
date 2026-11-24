@@ -400,10 +400,12 @@ def test_restore_boundaries(tmp_path):
 BUNDLE = [
     "scripts/maintenance/p43_sandbox_bridge_host.sh",
     "scripts/maintenance/p43-sandbox-bridge.service",
+    "scripts/maintenance/p43-sandbox-bridge-c2.service",
     *(
         f"app/services/sandbox_bridge/{m}"
         for m in (
             "__init__.py",
+            "authorization.py",
             "contract.py",
             "docker_executor.py",
             "host_service.py",

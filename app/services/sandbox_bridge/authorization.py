@@ -74,9 +74,18 @@ def _positive_int(value: Any) -> bool:
 
 
 def verify_authorization(
-    request: Any, *, now: int | None = None, launcher_epoch: int | None = None
+    request: Any,
+    *,
+    now: int | None = None,
+    launcher_epoch: int | None = None,
+    require_epoch: bool = False,
 ) -> None:
-    """Fail closed unless the v2 binding matches this exact request."""
+    """Fail closed unless the v2 binding matches this exact request.
+
+    ``require_epoch`` (strict C2 Launcher) refuses a binding without the
+    current Launcher instance epoch, so an authorization minted against a
+    previous Launcher instance can never execute on this one.
+    """
 
     auth = request.authorization
     if not isinstance(auth, dict) or set(auth) != AUTHORIZATION_FIELDS:
@@ -117,5 +126,7 @@ def verify_authorization(
     if (int(time.time()) if now is None else now) > expires:
         raise RequestRejected("authorization_expired")
     epoch = auth["launcher_epoch"]
+    if epoch is None and require_epoch:
+        raise RequestRejected("launcher_epoch_required")
     if epoch is not None and (type(epoch) is not int or epoch != launcher_epoch):
         raise RequestRejected("launcher_epoch_mismatch")

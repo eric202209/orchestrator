@@ -10,6 +10,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import secrets
 import socket
 import stat
 import struct
@@ -57,6 +58,10 @@ def _receive(sock: socket.socket) -> dict[str, object]:
     if not isinstance(value, dict):
         raise RequestRejected("invalid_frame")
     return value
+
+
+def _canonical(value: dict[str, object]) -> bytes:
+    return json.dumps(value, separators=(",", ":"), sort_keys=True).encode()
 
 
 def _result_wire(result: ExecutionResult) -> dict[str, object]:
@@ -170,6 +175,34 @@ class SandboxClient:
                 raise
             raise RequestRejected("invalid_result") from None
 
+    def launcher_epoch(self) -> int:
+        """Return the current Launcher instance epoch (HMAC request and reply).
+
+        The nonce binds the reply to this call, so a recorded reply from a
+        previous Launcher instance cannot be replayed as the current epoch.
+        Raises OSError/TimeoutError when unavailable, RequestRejected when the
+        reply is not authentic.
+        """
+
+        nonce = secrets.token_hex(32)
+        body = {"operation": "epoch", "nonce": nonce}
+        sock = self._connect_before_submission()
+        with sock:
+            sock.settimeout(self.connect_timeout + 3)
+            _send(sock, {**body, "mac": _mac(self.key, _canonical(body))})
+            response = _receive(sock)
+        if set(response) != {"launcher_epoch", "nonce", "mac"}:
+            raise RequestRejected("epoch_reply_invalid")
+        reply = {"launcher_epoch": response["launcher_epoch"], "nonce": nonce}
+        if response["nonce"] != nonce or not hmac.compare_digest(
+            str(response["mac"]), _mac(self.key, _canonical(reply))
+        ):
+            raise RequestRejected("epoch_reply_unauthenticated")
+        epoch = response["launcher_epoch"]
+        if type(epoch) is not int or epoch < 1:
+            raise RequestRejected("epoch_reply_invalid")
+        return epoch
+
     def cancel(self, request_id: str, cancellation_token: str) -> bool:
         body = {
             "operation": "cancel",
@@ -201,6 +234,7 @@ class HostSocketLauncher:
         ledger_path: str | Path | None = None,
         *,
         require_authorization: bool = False,
+        socket_dir_group_traverse: bool = False,
     ):
         if len(key) < 32:
             raise ValueError("bridge key must contain at least 32 bytes")
@@ -211,20 +245,27 @@ class HostSocketLauncher:
         )
         # C2-B: when set, only v2 requests with a verified binding execute.
         self.require_authorization = require_authorization
+        # C2-C3A isolated instance only: the socket directory may additionally
+        # grant group search (0710) so a non-root Worker in that group can
+        # connect; SO_PEERCRED and HMAC still gate every request.
+        self.socket_dir_group_traverse = socket_dir_group_traverse
         self.execute_in_sandbox = execute_in_sandbox
         self.ledger = RequestLedger(
             ledger_path or self.socket_path.with_suffix(".sqlite3")
         )
         self.started_at = int(time.time())
+        # C2-C3A: fresh per Launcher instance; never persisted or reused.
+        self.epoch = secrets.randbelow(2**62) + 1
         self._active: dict[str, tuple[threading.Event, bytes]] = {}
         self._lock = threading.Lock()
 
     def serve_forever(self, stop: threading.Event) -> None:
         self.socket_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         parent_stat = self.socket_path.parent.lstat()
+        allowed_other_bits = 0o010 if self.socket_dir_group_traverse else 0
         if (
             not stat.S_ISDIR(parent_stat.st_mode)
-            or parent_stat.st_mode & 0o077
+            or parent_stat.st_mode & 0o077 & ~allowed_other_bits
             or parent_stat.st_uid != os.geteuid()
         ):
             raise RuntimeError("unsafe_socket_directory")
@@ -283,6 +324,20 @@ class HostSocketLauncher:
             try:
                 self._authorized_peer(conn)
                 envelope = _receive(conn)
+                if envelope.get("operation") == "epoch":
+                    body = {"operation": "epoch", "nonce": envelope.get("nonce")}
+                    if (
+                        set(envelope) != {"operation", "nonce", "mac"}
+                        or not isinstance(body["nonce"], str)
+                        or len(body["nonce"]) != 64
+                        or not hmac.compare_digest(
+                            str(envelope["mac"]), _mac(self.key, _canonical(body))
+                        )
+                    ):
+                        raise RequestRejected("invalid_authentication")
+                    reply = {"launcher_epoch": self.epoch, "nonce": body["nonce"]}
+                    _send(conn, {**reply, "mac": _mac(self.key, _canonical(reply))})
+                    return
                 if envelope.get("operation") == "cancel":
                     body = {
                         k: envelope[k]
@@ -322,7 +377,11 @@ class HostSocketLauncher:
                 if request.issued_at < self.started_at:
                     raise RequestRejected("request_predates_launcher")
                 if request.version == 2:
-                    verify_authorization(request)
+                    verify_authorization(
+                        request,
+                        launcher_epoch=self.epoch,
+                        require_epoch=self.require_authorization,
+                    )
                 elif self.require_authorization:
                     raise RequestRejected("authorization_required")
                 if not self.ledger.admit(request_id):
