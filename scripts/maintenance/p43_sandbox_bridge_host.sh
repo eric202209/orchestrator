@@ -61,6 +61,36 @@ source_check() {
     [[ "$(stat -c '%u' "$p")" == 0 && $(( 0$(stat -c '%a' "$p") & 022 )) -eq 0 ]] \
       || bad "source $rel not root-owned or group/other-writable ($(stat -c '%u:%g %a' "$p"))"
   done
+  if [[ -n "${P43_C2_CANDIDATE:-}" ]]; then
+    if [[ -e "$REPO/.git" || ! -f "$REPO/.orchestrator-release-identity.json" ]]; then
+      bad "C2 source is not a protected git-archive release"
+    else
+      if ! PYTHONPATH="$REPO" /usr/bin/python3 - "$REPO" "$P43_C2_CANDIDATE" <<'PY'
+import importlib.util, pathlib, stat, sys
+sys.dont_write_bytecode = True
+root = pathlib.Path(sys.argv[1])
+expected = sys.argv[2]
+module_path = root / "app/services/orchestration/worker_identity.py"
+spec = importlib.util.spec_from_file_location("p43_worker_identity", module_path)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+dirty, head, tree = module._release_identity(root)
+if dirty or head != expected:
+    raise SystemExit("candidate identity mismatch")
+for current, dirs, files in __import__("os").walk(root, followlinks=False):
+    for name in dirs + files:
+        path = pathlib.Path(current) / name
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o222:
+            raise SystemExit("release path ownership or permissions unsafe")
+print(f"CANDIDATE_HEAD={head} CANDIDATE_TREE={tree}")
+PY
+      then bad "protected C2 candidate verification failed"
+      else ok "protected C2 candidate identity, tree, ownership, and immutability verified"
+      fi
+    fi
+  fi
   p=$REPO/app/services/sandbox_bridge
   while :; do # every directory from the module dir up to / (sticky root-owned dirs such as /tmp allowed)
     if [[ -L "$p" ]] || ! { [[ "$(stat -c '%u' "$p")" == 0 ]] && { (( (0$(stat -c '%a' "$p") & 022) == 0 )) || [[ -k "$p" ]]; }; }; then

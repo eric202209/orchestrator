@@ -2,8 +2,8 @@
 # P43-PRODUCT-22-C2-C3B: ONE controlled disposable live TaskExecution through the
 # restricted Worker, the strict C2 Host Launcher, and a real Docker sandbox.
 #
-# Run on the GX10 Host as root, from a root-only reviewed clone checked out at
-# the candidate commit (C1A rule: never from a tree ai-agent can modify):
+# Run on the GX10 Host as root, from the protected git-archive source staged
+# by p43_c2_worker_release.sh (never from an ai-agent-writable checkout):
 #
 #   export P43_C2_CANDIDATE=<40-hex commit>      # the reviewed, committed candidate
 #   export P43_C2_REDIS_IMAGE=redis:<tag>@sha256:<64-hex>   # operator-supplied pin
@@ -49,10 +49,27 @@ need_approval() { [[ "${1:-}" == --operator-approved ]] || refuse "requires --op
 require_host() {
     [[ $EUID -eq 0 ]] || refuse "must run as root on the Host"
     [[ ! -e /.dockerenv && ! -e /run/.containerenv ]] || refuse "must run on the Host, not in a container"
-    [[ -z "$(git -C "$REPO" status --porcelain)" ]] || refuse "reviewed clone is not clean"
-    [[ "$(git -C "$REPO" rev-parse HEAD)" == "${P43_C2_CANDIDATE:-}" ]] ||
-        refuse "clone HEAD is not P43_C2_CANDIDATE"
     [[ "$(stat -c '%u' "$REPO")" == 0 ]] || refuse "reviewed clone is not root-owned"
+    [[ ! -e "$REPO/.git" && -f "$REPO/.orchestrator-release-identity.json" ]] ||
+        refuse "source is not a protected git-archive release"
+    local identity
+    identity=$(/usr/bin/python3 - "$REPO" "$P43_C2_CANDIDATE" <<'PY'
+import importlib.util, pathlib, sys
+sys.dont_write_bytecode = True
+root = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location(
+    "p43_worker_identity", root / "app/services/orchestration/worker_identity.py"
+)
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+dirty, head, tree = module._release_identity(root)
+if dirty or head != sys.argv[2]:
+    raise SystemExit("candidate identity mismatch")
+print(tree)
+PY
+) || refuse "protected candidate identity/tree verification failed"
+    CANDIDATE_TREE=$identity
 }
 
 require_inputs() {
@@ -116,7 +133,7 @@ cmd_setup() {
     cmd_check
     c1b_fingerprint >"$ROOT.c1b-before" 2>/dev/null || true
     local tree inst node pw c2gid interp
-    tree=$(git -C "$REPO" rev-parse HEAD^{tree})
+    tree=$CANDIDATE_TREE
     inst=c2-c1-$(/usr/bin/python3 -c 'import uuid; print(uuid.uuid4().hex[:16])')
     node=orchestrator-worker-c2-c1@$inst
 
@@ -162,12 +179,11 @@ cmd_setup() {
     [[ -S $C2_RUN/launcher.sock ]] || refuse "C2 Launcher socket did not appear"
     printf 'C2_GID=%s\nNODE=%s\nCANDIDATE_TREE=%s\n' "$c2gid" "$node" "$tree" >"$ROOT/env/run.vars"
 
-    # Worker image from a git-archive release of exactly the candidate commit.
-    bash "$REPO/scripts/maintenance/p43_c2_worker_release.sh" stage "$P43_C2_CANDIDATE" "$ROOT/context"
-    docker build -q -f "$ROOT/context/Dockerfile.worker" \
+    # The protected Host source is also the exact Worker image build context.
+    docker build -q -f "$REPO/Dockerfile.worker" \
         --build-arg "PYTHON_BASE_IMAGE=$BASE_IMAGE" \
         --build-arg "ORCHESTRATOR_GIT_SHA=$P43_C2_CANDIDATE" \
-        -t "$IMAGE_TAG" "$ROOT/context" >"$ROOT/env/image.id"
+        -t "$IMAGE_TAG" "$REPO" >"$ROOT/env/image.id"
     ok "built $IMAGE_TAG $(cat "$ROOT/env/image.id")"
 
     # Candidate pin for the release inside the image (existing worksheet).
