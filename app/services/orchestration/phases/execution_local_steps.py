@@ -13,6 +13,9 @@ from typing import Any
 
 from app.config import settings
 from app.services.agents.agent_backends import ExecutionTopology
+from app.services.orchestration.execution.sandbox_gateway import (
+    refuse_local_execution,
+)
 from app.services.orchestration.execution.execution_flow import (
     execute_verification_command,
     workspace_python_command_env,
@@ -611,6 +614,7 @@ def _execute_local_shell_commands_step(
     normalized_cmds = _admitted_local_shell_commands(project_dir, commands)
     if normalized_cmds is None:
         return None
+    refuse_local_execution("local_shell_commands")
 
     files_before = set(
         os.path.relpath(os.path.join(root, f), project_dir)
@@ -728,6 +732,7 @@ def _execute_simple_verification_step(
     commands: list[Any],
     verification_command: Any,
     execution_topology: ExecutionTopology | None = None,
+    sandbox_context: Any = None,
 ) -> dict[str, Any] | None:
     command_to_run = _simple_verification_command_to_run(
         project_dir, commands, verification_command
@@ -742,6 +747,7 @@ def _execute_simple_verification_step(
         include_evidence=True,
         execution_topology=execution_topology,
         check_structured_verification=bool(str(verification_command or "").strip()),
+        sandbox_context=sandbox_context,
     )
     return {
         "status": "completed" if result.get("success") else "failed",

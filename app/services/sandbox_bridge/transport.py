@@ -23,6 +23,7 @@ from .contract import (
     MAX_RESULT_BYTES,
     RequestRejected,
 )
+from .authorization import verify_authorization
 from .ledger import RequestLedger
 
 MAX_FRAME = MAX_RESULT_BYTES
@@ -198,6 +199,8 @@ class HostSocketLauncher:
             [ExecutionRequest, threading.Event], ExecutionResult
         ],
         ledger_path: str | Path | None = None,
+        *,
+        require_authorization: bool = False,
     ):
         if len(key) < 32:
             raise ValueError("bridge key must contain at least 32 bytes")
@@ -206,6 +209,8 @@ class HostSocketLauncher:
             key,
             allowed_uid,
         )
+        # C2-B: when set, only v2 requests with a verified binding execute.
+        self.require_authorization = require_authorization
         self.execute_in_sandbox = execute_in_sandbox
         self.ledger = RequestLedger(
             ledger_path or self.socket_path.with_suffix(".sqlite3")
@@ -316,6 +321,10 @@ class HostSocketLauncher:
                 request_id = request.request_id
                 if request.issued_at < self.started_at:
                     raise RequestRejected("request_predates_launcher")
+                if request.version == 2:
+                    verify_authorization(request)
+                elif self.require_authorization:
+                    raise RequestRejected("authorization_required")
                 if not self.ledger.admit(request_id):
                     raise RequestRejected("duplicate_request")
                 cancel = threading.Event()

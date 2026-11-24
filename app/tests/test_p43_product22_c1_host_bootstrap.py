@@ -700,7 +700,11 @@ def test_bridge_is_not_imported_by_production_code():
         for h in hits
         if "/app/tests/" not in h and "/app/services/sandbox_bridge/" not in h
     ]
-    assert production == []
+    # C2-C2B: the only permitted production caller is the disposable-mode
+    # Gateway (inert unless WORKER_BRIDGE_MODE=c2b-sandbox).
+    assert production == [
+        str(REPO / "app/services/orchestration/execution/sandbox_gateway.py")
+    ]
 
 
 # 16. Stage A contract compatibility: the injected executor sees the unchanged wire contract.

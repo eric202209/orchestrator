@@ -674,6 +674,11 @@ def _execute_command(
     A None returncode means the command timed out; the output is then only what
     was captured before the deadline, without the runner's timeout marker.
     """
+    from app.services.orchestration.execution.sandbox_gateway import (
+        refuse_local_execution,
+    )
+
+    refuse_local_execution("candidate_validation_command")
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTEST_ADDOPTS"] = (

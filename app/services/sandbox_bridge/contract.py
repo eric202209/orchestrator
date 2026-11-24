@@ -33,6 +33,8 @@ class ExecutionRequest:
     issued_at: int
     cancellation_token: str = ""
     version: int = 1
+    # v2 only: C2-B operation binding (see authorization.py), HMAC-covered.
+    authorization: dict[str, object] | None = None
 
     def validate(self, *, now: int | None = None) -> None:
         for name, value in (
@@ -48,8 +50,10 @@ class ExecutionRequest:
             uuid.UUID(self.workspace_ref)
         except (ValueError, AttributeError):
             raise RequestRejected("invalid_uuid") from None
-        if self.version != 1:
+        if self.version not in (1, 2):
             raise RequestRejected("unsupported_version")
+        if (self.version == 2) != isinstance(self.authorization, dict):
+            raise RequestRejected("invalid_authorization_presence")
         if self.execution_profile != PROFILE:
             raise RequestRejected("unauthorized_execution_profile")
         if (
@@ -80,7 +84,11 @@ class ExecutionRequest:
 
     def to_wire(self) -> dict[str, object]:
         self.validate()
-        return asdict(self)
+        wire = asdict(self)
+        if self.version == 1:
+            # v1 wire shape is unchanged for the deployed Launcher.
+            wire.pop("authorization")
+        return wire
 
     @classmethod
     def from_wire(cls, value: object, *, now: int | None = None) -> "ExecutionRequest":
@@ -96,6 +104,8 @@ class ExecutionRequest:
             "cancellation_token",
             "version",
         }
+        if isinstance(value, dict) and value.get("version") == 2:
+            expected = expected | {"authorization"}
         if not isinstance(value, dict) or set(value) != expected:
             raise RequestRejected("invalid_request_shape")
         try:

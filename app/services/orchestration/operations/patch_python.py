@@ -57,6 +57,11 @@ def add_missing_import(file_path: Path | str, import_stmt: str) -> PatchResult:
     Locates the last import node via AST and inserts after it.
     Runs py_compile to verify the result is valid.
     """
+    from app.services.orchestration.execution.sandbox_gateway import (
+        refuse_local_execution,
+    )
+
+    refuse_local_execution("deterministic_patch_add_missing_import")
     path = Path(file_path)
     try:
         content = path.read_text(encoding="utf-8")
@@ -132,6 +137,11 @@ def replace_test_function(
     Locates the target via AST, validates the replacement has assertions and is
     not a placeholder, splices it in, then runs py_compile and targeted pytest.
     """
+    from app.services.orchestration.execution.sandbox_gateway import (
+        refuse_local_execution,
+    )
+
+    refuse_local_execution("deterministic_patch_replace_test_function")
     path = Path(file_path)
     try:
         original = path.read_text(encoding="utf-8")

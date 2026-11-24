@@ -360,6 +360,7 @@ def execute_verification_command(
     include_evidence: bool = False,
     execution_topology: ExecutionTopology | None = None,
     check_structured_verification: bool = True,
+    sandbox_context: Any = None,
 ) -> Dict[str, Any]:
     def result_with_evidence(
         result: Dict[str, Any], evidence: Dict[str, Any]
@@ -465,6 +466,17 @@ def execute_verification_command(
             },
             evidence,
         )
+
+    from app.services.orchestration.execution.sandbox_gateway import (
+        sandbox_c2_mode_enabled,
+    )
+
+    if sandbox_c2_mode_enabled():
+        # C2-B: never fall through to in-process or subprocess execution.
+        result, evidence = _execute_verification_in_sandbox(
+            raw_command, timeout_seconds, sandbox_context
+        )
+        return result_with_evidence(result, evidence)
 
     portable_started_at = datetime.now(UTC).isoformat()
     portable_started_monotonic = time.monotonic()
@@ -661,6 +673,100 @@ def _captured_process_stream(value: Any) -> tuple[bytes, str]:
     with io.TextIOWrapper(io.BytesIO(raw), newline=None) as stream:
         decoded = stream.read()
     return raw, decoded
+
+
+def _execute_verification_in_sandbox(
+    raw_command: str, timeout_seconds: int, sandbox_context: Any
+) -> tuple[Dict[str, Any], Dict[str, Any]]:
+    """Route the admitted self-contained command through the C2 Gateway only."""
+
+    from app.services.orchestration.execution.sandbox_gateway import (
+        SandboxAuthorityError,
+        SandboxExecutionGateway,
+        sandboxable_python_script,
+    )
+
+    def refused(reason: str) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        output = f"Sandbox gateway refused verification command: {reason}"
+        evidence = _verification_evidence_record(
+            declared_command=raw_command,
+            executed_command=raw_command,
+            command_execution_status="rejected",
+            verification_status="failed",
+            process_exit_code=None,
+            started_at=None,
+            ended_at=None,
+            duration_seconds=None,
+            stdout_bytes=None,
+            stderr_bytes=None,
+            output_text=output,
+            execution_kind="not_started",
+            capture_error="sandbox_gateway_rejected",
+        )
+        return (
+            {
+                "success": False,
+                "command": raw_command,
+                "returncode": 126,
+                "output": output,
+                "sandbox_rejection": reason,
+            },
+            evidence,
+        )
+
+    script = sandboxable_python_script(raw_command)
+    if script is None:
+        return refused("unsupported_operation")
+    if sandbox_context is None:
+        return refused("trusted_execution_context_missing")
+    try:
+        gateway = SandboxExecutionGateway.from_environment()
+    except SandboxAuthorityError as exc:
+        return refused(exc.reason)
+    started_at = datetime.now(UTC).isoformat()
+    outcome = gateway.execute_python(sandbox_context, script, timeout_seconds)
+    ended_at = datetime.now(UTC).isoformat()
+    if not outcome.accepted or outcome.result is None:
+        return refused(outcome.reason or "sandbox_result_missing")
+    result = outcome.result
+    stdout_bytes = result.stdout.encode("utf-8")
+    stderr_bytes = result.stderr.encode("utf-8")
+    output = "\n".join(
+        part for part in (result.stdout.strip(), result.stderr.strip()) if part
+    )
+    success = result.execution_status == "SUCCESS" and result.exit_code == 0
+    returncode = result.exit_code if result.exit_code is not None else 125
+    if not success and not output:
+        output = (
+            f"Sandbox verification {result.execution_status.lower()} "
+            f"(exit {result.exit_code}): {raw_command}"
+        )
+    evidence = _verification_evidence_record(
+        declared_command=raw_command,
+        executed_command=raw_command,
+        command_execution_status=(
+            "timed_out" if result.execution_status == "TIMEOUT" else "completed"
+        ),
+        verification_status="passed" if success else "failed",
+        process_exit_code=result.exit_code,
+        started_at=started_at,
+        ended_at=ended_at,
+        duration_seconds=float(result.duration),
+        stdout_bytes=stdout_bytes,
+        stderr_bytes=stderr_bytes,
+        output_text=output,
+        execution_kind="host_sandbox",
+    )
+    return (
+        {
+            "success": success,
+            "command": raw_command,
+            "returncode": returncode,
+            "output": output[:4000],
+            "sandbox_request_id": result.request_id,
+        },
+        evidence,
+    )
 
 
 def _verification_evidence_record(

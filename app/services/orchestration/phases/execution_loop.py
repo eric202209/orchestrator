@@ -60,6 +60,10 @@ from app.services.orchestration.diagnostics.signature_guard import (
 from app.services.orchestration.execution import ExecutorService
 from app.services.agents.agent_backends import ExecutionTopology
 from app.services.agents.runtime_invocation import RuntimeInvocationOptions
+from app.services.orchestration.execution.sandbox_gateway import (
+    SandboxExecutionContext,
+    refuse_local_execution,
+)
 from app.services.orchestration.execution.path_guard import (
     detect_advisory_nested_scaffold,
 )
@@ -1156,6 +1160,17 @@ def execute_step_loop(
                         execution_topology=_execution_topology_for_runtime(
                             runtime_service
                         ),
+                        sandbox_context=(
+                            SandboxExecutionContext(
+                                db=db,
+                                task_execution_id=ctx.task_execution_id,
+                                session_id=session_id,
+                                task_id=task_id,
+                                session_instance_id=session.instance_id,
+                            )
+                            if ctx.task_execution_id
+                            else None
+                        ),
                     )
                     if local_verification_result is not None:
                         step_result = local_verification_result
@@ -2193,6 +2208,7 @@ def execute_step_loop(
                 return extract_structured_text(_result.get("output", ""))
 
             def _recovery_command_runner(_cmd: str) -> tuple:
+                refuse_local_execution("recovery_command_runner")
                 try:
                     _proc = subprocess.run(
                         _cmd,

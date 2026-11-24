@@ -586,6 +586,12 @@ class ExecutorService:
         authority is gone; no further op touches the workspace after that.
         """
 
+        if ops:
+            from app.services.orchestration.execution.sandbox_gateway import (
+                refuse_local_execution,
+            )
+
+            refuse_local_execution("structured_file_ops")
         if not ops:
             return {
                 "success": True,

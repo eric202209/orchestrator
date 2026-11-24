@@ -116,6 +116,11 @@ def attempt_incremental_execution(
     - On any failure: plan remains empty, returns {"status": "failed", "reason": ...}.
     - Retry budget (debug_attempts) is never modified.
     """
+    from app.services.orchestration.execution.sandbox_gateway import (
+        refuse_local_execution,
+    )
+
+    refuse_local_execution("incremental_direct_write_and_verify")
     from app.services.orchestration.planning.incremental_classifier import (
         _extract_file_paths,
     )

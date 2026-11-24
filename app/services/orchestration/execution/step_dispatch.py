@@ -287,6 +287,12 @@ def dispatch_execution_runtime_step(
     back onto ``step_result["_runtime_backend_result"]``.
     """
 
+    from app.services.orchestration.execution.sandbox_gateway import (
+        refuse_local_execution,
+    )
+
+    refuse_local_execution("execution_runtime_dispatch")
+
     runtime_started_at = time.monotonic()
     provider_start_timestamp = datetime.now(UTC).isoformat()
     previous_provenance_context = getattr(
