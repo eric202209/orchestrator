@@ -14,8 +14,10 @@ Redis transport, the Worker boot manifest/candidate pin, real Docker.
 from __future__ import annotations
 
 import json
+import base64
 import os
 import pwd
+import re
 import shlex
 import socket
 import stat
@@ -482,6 +484,126 @@ def _stage(release: Path) -> tuple[Path, str, str]:
     return release, values["CANDIDATE_HEAD"], values["CANDIDATE_TREE"]
 
 
+def test_host_source_provenance_does_not_execute_candidate_modules_as_root():
+    stager = RELEASE_SCRIPT.read_text(encoding="utf-8")
+    host_script = (REPO / "scripts/maintenance/p43_sandbox_bridge_host.sh").read_text(
+        encoding="utf-8"
+    )
+    live_runner = (REPO / "scripts/maintenance/p43_c2_live_run.sh").read_text(
+        encoding="utf-8"
+    )
+
+    # The verifier is committed inline code; provenance checks must not import
+    # candidate Python from either the writable checkout or the staged tree.
+    assert "importlib" not in stager + host_script + live_runner
+    assert "worker_identity._release_identity" not in stager + host_script + live_runner
+    assert "core.fsmonitor=false" in stager
+    assert "core.hooksPath=/dev/null" in stager
+    assert "GIT_CONFIG_NOSYSTEM=1" in stager
+    assert "stage-host requires full candidate/tree ids" in stager
+    assert "not (member.isfile() or member.isdir())" in stager
+    assert "path.as_posix() != raw_name" in stager
+    assert '"$mount_source" == "$destination"/*' in stager
+    assert "candidate archive is incomplete or contains untracked files" in stager
+    assert "staged bytes do not reproduce the independently supplied Git tree" in stager
+    assert "release content does not reproduce expected Git tree" in host_script
+    assert '"$s" == "$REPO"/*' in host_script
+    assert "P43_C2_CANDIDATE_TREE" in live_runner
+
+
+def test_host_release_tree_verifier_checks_committed_inventory_and_bytes(tmp_path):
+    stager_text = RELEASE_SCRIPT.read_text(encoding="utf-8")
+    python_blocks = re.findall(r"<<'PY'\n(.*?)\nPY", stager_text, re.S)
+    verifier = python_blocks[1].replace(
+        "info.st_uid != 0", "info.st_uid != os.getuid()"
+    )
+    repo = tmp_path / "repo"
+    release = tmp_path / "release"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "C2 verifier test"], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "c2-verifier@example.invalid"],
+        check=True,
+    )
+    regular = repo / "src" / "input.txt"
+    executable = repo / "bin" / "run.sh"
+    regular.parent.mkdir()
+    executable.parent.mkdir()
+    regular.write_text("committed input\n", encoding="utf-8")
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o755)
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "src/input.txt", "bin/run.sh"], check=True
+    )
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "test tree"], check=True)
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD^{tree}"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    tree_manifest = tmp_path / "git-tree"
+    tree_manifest.write_bytes(
+        subprocess.run(
+            ["git", "-C", str(repo), "ls-tree", "-rz", "-r", "--full-tree", head],
+            check=True,
+            capture_output=True,
+        ).stdout
+    )
+    release.mkdir()
+    for rel in ("src/input.txt", "bin/run.sh"):
+        target = release / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((repo / rel).read_bytes())
+        target.chmod((repo / rel).stat().st_mode & 0o777)
+    commit_object = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "commit", head],
+        check=True,
+        capture_output=True,
+    ).stdout
+    (release / ".orchestrator-release-identity.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "git-archive-release",
+                "candidate_head": head,
+                "candidate_tree": tree,
+                "commit_object": base64.b64encode(commit_object).decode("ascii"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def verify():
+        return subprocess.run(
+            [sys.executable, "-I", "-", str(tree_manifest), str(release), head, tree],
+            input=verifier,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    assert verify().returncode == 0
+    assert (
+        json.loads((release / "release-manifest.json").read_text())["candidate_tree"]
+        == tree
+    )
+    (release / "release-manifest.json").unlink()
+    (release / "src/input.txt").write_text("substituted input\n", encoding="utf-8")
+    rejected = verify()
+    assert rejected.returncode != 0
+    assert "candidate file content mismatch" in rejected.stderr
+
+
 @pytest.fixture(scope="module")
 def staged_release(tmp_path_factory):
     staged = _stage(tmp_path_factory.mktemp("c2-release") / "context")
@@ -741,6 +863,7 @@ def test_broker_password_applies_only_in_disposable_mode(tmp_path, isolation):
 LIVE_RUN_SCRIPT = REPO / "scripts" / "maintenance" / "p43_c2_live_run.sh"
 _VALID_LIVE_INPUTS = {
     "P43_C2_CANDIDATE": "a" * 40,
+    "P43_C2_CANDIDATE_TREE": "b" * 40,
     "P43_C2_REDIS_IMAGE": "redis:7@sha256:" + "b" * 64,
     "P43_C2_OPERATOR": "operator",
 }

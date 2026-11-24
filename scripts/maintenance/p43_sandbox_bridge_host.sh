@@ -25,7 +25,7 @@ SOCK=$STATE/socket/launcher.sock
 UNIT_DST=/etc/systemd/system/$SERVICE
 AI_AGENT=ai-agent
 AI_AGENT_REPO=${AI_AGENT_REPO:-/root/.openclaw/workspace/vault/orchestrator}
-REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 SRC=$REPO/app/services/sandbox_bridge
 MODULES=(__init__.py authorization.py contract.py docker_executor.py host_service.py ipc_contract.py ledger.py staging.py transport.py)
 # C2-C3A isolated strict instance: shares nothing with the C1B service above.
@@ -62,33 +62,114 @@ source_check() {
       || bad "source $rel not root-owned or group/other-writable ($(stat -c '%u:%g %a' "$p"))"
   done
   if [[ -n "${P43_C2_CANDIDATE:-}" ]]; then
-    if [[ -e "$REPO/.git" || ! -f "$REPO/.orchestrator-release-identity.json" ]]; then
+    if [[ -e "$REPO/.git" || -L "$REPO/.git" || ! -f "$REPO/.orchestrator-release-identity.json" ]]; then
       bad "C2 source is not a protected git-archive release"
-    else
-      if ! PYTHONPATH="$REPO" /usr/bin/python3 - "$REPO" "$P43_C2_CANDIDATE" <<'PY'
-import importlib.util, pathlib, stat, sys
-sys.dont_write_bytecode = True
+    elif ! /usr/bin/python3 -I - "$REPO" "$P43_C2_CANDIDATE" "${P43_C2_CANDIDATE_TREE:-}" <<'PY'
+import base64, hashlib, json, os, pathlib, re, stat, sys
 root = pathlib.Path(sys.argv[1])
-expected = sys.argv[2]
-module_path = root / "app/services/orchestration/worker_identity.py"
-spec = importlib.util.spec_from_file_location("p43_worker_identity", module_path)
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-dirty, head, tree = module._release_identity(root)
-if dirty or head != expected:
-    raise SystemExit("candidate identity mismatch")
-for current, dirs, files in __import__("os").walk(root, followlinks=False):
+expected_head, expected_tree = sys.argv[2:4]
+def git_oid(kind, data):
+    return hashlib.sha1(kind + b" " + str(len(data)).encode() + b"\0" + data).digest()
+if not re.fullmatch(r"[0-9a-f]{40}", expected_head) or not re.fullmatch(r"[0-9a-f]{40}", expected_tree):
+    raise SystemExit("candidate identity inputs invalid")
+manifest_path = root / "release-manifest.json"
+marker_path = root / ".orchestrator-release-identity.json"
+for metadata_path in (manifest_path, marker_path):
+    info = metadata_path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != 0 or info.st_mode & 0o222:
+        raise SystemExit("release identity metadata file unsafe")
+raw_manifest = manifest_path.read_bytes()
+manifest = json.loads(raw_manifest.decode("utf-8"))
+canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode() + b"\n"
+if raw_manifest != canonical:
+    raise SystemExit("release manifest is not canonical")
+if (set(manifest) != {"schema_version", "kind", "candidate_head", "candidate_tree", "files"} or
+        manifest["schema_version"] != 1 or manifest["kind"] != "p43-host-source" or
+        manifest["candidate_head"] != expected_head or manifest["candidate_tree"] != expected_tree or
+        not isinstance(manifest["files"], list)):
+    raise SystemExit("release manifest identity mismatch")
+expected = {}
+last_path = None
+for entry in manifest["files"]:
+    if not isinstance(entry, dict) or set(entry) != {"path", "mode", "blob_sha1"}:
+        raise SystemExit("release manifest entry malformed")
+    path, mode, blob = entry["path"], entry["mode"], entry["blob_sha1"]
+    pure = pathlib.PurePosixPath(path) if isinstance(path, str) else None
+    if (pure is None or "\\" in path or pure.is_absolute() or not pure.parts or
+            pure.as_posix() != path or any(part in {"", ".", ".."} for part in pure.parts) or
+            mode not in {"100644", "100755"} or not re.fullmatch(r"[0-9a-f]{40}", blob) or
+            path in expected or (last_path is not None and path <= last_path)):
+        raise SystemExit("release manifest path or file metadata invalid")
+    expected[path] = (mode, blob)
+    last_path = path
+marker = json.loads(marker_path.read_text(encoding="utf-8"))
+commit = base64.b64decode(marker["commit_object"], validate=True)
+if (set(marker) != {"schema_version", "kind", "candidate_head", "candidate_tree", "commit_object"} or
+        marker["schema_version"] != 1 or marker["kind"] != "git-archive-release" or
+        marker["candidate_head"] != expected_head or marker["candidate_tree"] != expected_tree or
+        git_oid(b"commit", commit).hex() != expected_head or
+        not commit.startswith(f"tree {expected_tree}\n".encode())):
+    raise SystemExit("release identity marker mismatch")
+actual_files, actual_dirs = set(), set()
+for current, dirs, files in os.walk(root, followlinks=False):
+    base = pathlib.Path(current)
     for name in dirs + files:
-        path = pathlib.Path(current) / name
-        info = path.lstat()
-        if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o222:
-            raise SystemExit("release path ownership or permissions unsafe")
-print(f"CANDIDATE_HEAD={head} CANDIDATE_TREE={tree}")
+        item = base / name
+        info = item.lstat()
+        if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o222:
+            raise SystemExit("release ownership, link, or permissions unsafe")
+        rel = item.relative_to(root).as_posix()
+        if stat.S_ISDIR(info.st_mode):
+            actual_dirs.add(rel)
+        elif stat.S_ISREG(info.st_mode):
+            if rel not in {"release-manifest.json", ".orchestrator-release-identity.json"}:
+                actual_files.add(rel)
+        else:
+            raise SystemExit("release has an unmanifested entry")
+if actual_files != set(expected):
+    raise SystemExit("release file inventory mismatch")
+expected_dirs = set()
+for path in expected:
+    parent = pathlib.PurePosixPath(path).parent
+    while str(parent) != ".":
+        expected_dirs.add(str(parent))
+        parent = parent.parent
+if actual_dirs != expected_dirs:
+    raise SystemExit("release directory inventory mismatch")
+for path, (mode, blob) in expected.items():
+    item = root / pathlib.PurePosixPath(path)
+    info = item.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or bool(info.st_mode & stat.S_IXUSR) != (mode == "100755"):
+        raise SystemExit(f"release file mode/type mismatch: {path}")
+    digest = hashlib.sha1(f"blob {info.st_size}\0".encode())
+    with item.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != blob:
+        raise SystemExit(f"release file content mismatch: {path}")
+def tree_oid(directory, rel=""):
+    entries = []
+    for child in directory.iterdir():
+        child_rel = f"{rel}/{child.name}".lstrip("/")
+        if child_rel in {"release-manifest.json", ".orchestrator-release-identity.json"}:
+            continue
+        info = child.lstat()
+        name = os.fsencode(child.name)
+        if stat.S_ISDIR(info.st_mode):
+            entries.append((name + b"/", b"40000 " + name + b"\0" + tree_oid(child, child_rel)))
+        else:
+            mode, blob = expected[child_rel]
+            entries.append((name, mode.encode() + b" " + name + b"\0" + bytes.fromhex(blob)))
+    entries.sort(key=lambda entry: entry[0])
+    return git_oid(b"tree", b"".join(entry for _, entry in entries))
+if tree_oid(root).hex() != expected_tree:
+    raise SystemExit("release content does not reproduce expected Git tree")
+print(f"CANDIDATE_HEAD={expected_head} CANDIDATE_TREE={expected_tree}")
 PY
-      then bad "protected C2 candidate verification failed"
-      else ok "protected C2 candidate identity, tree, ownership, and immutability verified"
-      fi
+    then
+      bad "protected C2 candidate verification failed"
+    else
+      ok "protected C2 candidate identity, tree, ownership, and immutability verified"
     fi
   fi
   p=$REPO/app/services/sandbox_bridge
@@ -105,7 +186,8 @@ PY
     while IFS= read -r s; do
       [[ -z "$s" ]] && continue
       s=$(readlink -m "$s")
-      [[ "$s" == / || "$REPO" == "$s" || "$REPO" == "$s"/* ]] && bad "source $REPO is inside ai-agent mount $s"
+      [[ "$s" == / || "$REPO" == "$s" || "$REPO" == "$s"/* || "$s" == "$REPO"/* ]] &&
+        bad "source $REPO overlaps ai-agent mount $s"
     done <<<"$sources"
   fi
   [[ $FAILURES -eq 0 ]] && ok "source $REPO is root-only and outside ai-agent mounts"

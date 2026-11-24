@@ -5,7 +5,8 @@
 # Run on the GX10 Host as root, from the protected git-archive source staged
 # by p43_c2_worker_release.sh (never from an ai-agent-writable checkout):
 #
-#   export P43_C2_CANDIDATE=<40-hex commit>      # the reviewed, committed candidate
+#   export P43_C2_CANDIDATE=<40-hex commit>      # reviewed candidate commit
+#   export P43_C2_CANDIDATE_TREE=<40-hex tree>   # independently reviewed tree
 #   export P43_C2_REDIS_IMAGE=redis:<tag>@sha256:<64-hex>   # operator-supplied pin
 #   export P43_C2_OPERATOR=<operator id>          # recorded in the candidate pin
 #   bash scripts/maintenance/p43_c2_live_run.sh check
@@ -20,7 +21,7 @@
 # ai-agent, the production database, Redis, or workspace. No automatic retry.
 set -euo pipefail
 
-REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd -P)
 HOST_SCRIPT=$REPO/scripts/maintenance/p43_sandbox_bridge_host.sh
 ROOT=/srv/p43-c2
 EVIDENCE=/root/p43-c2-evidence
@@ -49,31 +50,33 @@ need_approval() { [[ "${1:-}" == --operator-approved ]] || refuse "requires --op
 require_host() {
     [[ $EUID -eq 0 ]] || refuse "must run as root on the Host"
     [[ ! -e /.dockerenv && ! -e /run/.containerenv ]] || refuse "must run on the Host, not in a container"
-    [[ "$(stat -c '%u' "$REPO")" == 0 ]] || refuse "reviewed clone is not root-owned"
-    [[ ! -e "$REPO/.git" && -f "$REPO/.orchestrator-release-identity.json" ]] ||
+    [[ "$(stat -c '%u' "$REPO")" == 0 ]] || refuse "protected source release is not root-owned"
+    [[ ! -e "$REPO/.git" && ! -L "$REPO/.git" &&
+       -f "$REPO/.orchestrator-release-identity.json" &&
+       -f "$REPO/release-manifest.json" ]] ||
         refuse "source is not a protected git-archive release"
-    local identity
-    identity=$(/usr/bin/python3 - "$REPO" "$P43_C2_CANDIDATE" <<'PY'
-import importlib.util, pathlib, sys
-sys.dont_write_bytecode = True
+    /usr/bin/python3 -I - "$REPO" "$P43_C2_CANDIDATE" "$P43_C2_CANDIDATE_TREE" <<'PY' ||
+import base64, hashlib, json, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
-spec = importlib.util.spec_from_file_location(
-    "p43_worker_identity", root / "app/services/orchestration/worker_identity.py"
-)
-module = importlib.util.module_from_spec(spec)
-sys.modules[spec.name] = module
-spec.loader.exec_module(module)
-dirty, head, tree = module._release_identity(root)
-if dirty or head != sys.argv[2]:
-    raise SystemExit("candidate identity mismatch")
-print(tree)
+head, tree = sys.argv[2:4]
+manifest = json.loads((root / "release-manifest.json").read_text(encoding="utf-8"))
+marker = json.loads((root / ".orchestrator-release-identity.json").read_text(encoding="utf-8"))
+commit = base64.b64decode(marker["commit_object"], validate=True)
+actual = hashlib.sha1(b"commit " + str(len(commit)).encode() + b"\0" + commit).hexdigest()
+if (not re.fullmatch(r"[0-9a-f]{40}", head) or not re.fullmatch(r"[0-9a-f]{40}", tree) or
+        manifest.get("kind") != "p43-host-source" or manifest.get("candidate_head") != head or
+        manifest.get("candidate_tree") != tree or marker.get("candidate_head") != head or
+        marker.get("candidate_tree") != tree or actual != head or
+        not commit.startswith(f"tree {tree}\n".encode())):
+    raise SystemExit("candidate identity/tree mismatch")
 PY
-) || refuse "protected candidate identity/tree verification failed"
-    CANDIDATE_TREE=$identity
+        refuse "protected candidate identity/tree verification failed"
+    CANDIDATE_TREE=$P43_C2_CANDIDATE_TREE
 }
 
 require_inputs() {
     [[ "${P43_C2_CANDIDATE:-}" =~ ^[0-9a-f]{40}$ ]] || refuse "P43_C2_CANDIDATE must be a 40-hex commit"
+    [[ "${P43_C2_CANDIDATE_TREE:-}" =~ ^[0-9a-f]{40}$ ]] || refuse "P43_C2_CANDIDATE_TREE must be a 40-hex tree"
     [[ "${P43_C2_REDIS_IMAGE:-}" =~ ^[a-z0-9./_:-]+@sha256:[0-9a-f]{64}$ ]] ||
         refuse "P43_C2_REDIS_IMAGE must be digest-pinned (operator-supplied)"
     [[ "${P43_C2_OPERATOR:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,63}$ ]] || refuse "P43_C2_OPERATOR is required"
