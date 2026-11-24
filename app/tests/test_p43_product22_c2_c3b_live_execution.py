@@ -25,6 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from celery.app.task import Task as CeleryTask
+from pydantic import TypeAdapter
 import pytest
 
 from app import celery_app as celery_module
@@ -100,10 +101,14 @@ def c2_env(tmp_path, monkeypatch):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    # Effective settings mirror the container environment (string fields).
+    # Effective settings mirror the container environment. Coerce through the
+    # declared field type: the host .env must not supply what the container
+    # env lacks (CI has no .env, so Optional fields there are None).
+    fields = type(settings).model_fields
     for name, value in env.items():
-        if isinstance(getattr(settings, name, None), str):
-            monkeypatch.setattr(settings, name, value)
+        if name in fields:
+            coerced = TypeAdapter(fields[name].annotation).validate_python(value)
+            monkeypatch.setattr(settings, name, coerced)
     monkeypatch.setattr(settings, "LOW_RESOURCE_SINGLE_MODEL", False)
     monkeypatch.setattr(settings, "EXECUTION_CONTEXT_TOKENS", 65536)
     monkeypatch.setattr(settings, "EXECUTION_ENABLED", False)
