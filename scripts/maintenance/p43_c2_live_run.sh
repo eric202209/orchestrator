@@ -191,7 +191,8 @@ PY
         --source-root /opt/orchestrator --expected-head "$P43_C2_CANDIDATE" \
         --expected-tree "$tree" --launcher-context /launcher-context.json \
         >"$ROOT/pin/worksheet.json"
-    /usr/bin/python3 - "$P43_C2_OPERATOR" <"$ROOT/pin/worksheet.json" >"$ROOT/pin/worker-pin.json" <<'PY'
+    docker_run_image --network none \
+        --entrypoint python3 "$IMAGE_TAG" -c '
 import datetime as dt, json, sys
 sheet = json.load(sys.stdin)
 assert sheet["validation"]["result"] == "VALID", sheet["validation"]
@@ -202,7 +203,7 @@ pin["approval"] = {"operator_identity": sys.argv[1],
                    "approval_id": "p43-c2-c3b-" + now.strftime("%Y%m%dT%H%M%SZ"),
                    "approved_at": stamp(now), "expires_at": stamp(now + dt.timedelta(hours=4))}
 print(json.dumps(pin, sort_keys=True))
-PY
+' "$P43_C2_OPERATOR" <"$ROOT/pin/worksheet.json" >"$ROOT/pin/worker-pin.json"
     chmod 0444 "$ROOT/pin/worker-pin.json"
     ok "candidate pin $(sha256sum "$ROOT/pin/worker-pin.json" | cut -c1-16) for $P43_C2_CANDIDATE"
 

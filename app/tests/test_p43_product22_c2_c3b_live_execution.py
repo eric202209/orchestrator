@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import pwd
+import shlex
 import socket
 import stat
 import subprocess
@@ -567,10 +568,10 @@ def test_candidate_pin_worksheet_derives_from_the_staged_release(
     """The existing worksheet, run from the release itself, pins that release."""
 
     release, head, tree = staged_release
-    celery = REPO / "venv" / "bin" / "celery"
-    if not celery.is_file():
-        pytest.skip("repository venv celery launcher is unavailable")
-    interpreter = celery.read_text(encoding="utf-8").splitlines()[0][2:].strip()
+    interpreter = sys.executable
+    celery = tmp_path / "celery"
+    celery.write_text(f"#!{interpreter}\n", encoding="utf-8")
+    celery.chmod(0o755)
     node = f"orchestrator-worker-c2-c1@{INSTANCE}"
     context = tmp_path / "launcher-context.json"
     context.write_text(
@@ -594,21 +595,27 @@ def test_candidate_pin_worksheet_derives_from_the_staged_release(
         "WORKER_SOURCE_ROOT": str(release),
         "CONTROLLED_WORKER_NODE_IDENTITY": node,
     }
+    worksheet_path = tmp_path / "worksheet.json"
     try:
         _dockerfile_modes(release)
+        generation = [
+            interpreter,
+            "-m",
+            "scripts.maintenance.worker_pin_worksheet",
+            "--source-root",
+            str(release),
+            "--expected-head",
+            head,
+            "--expected-tree",
+            tree,
+            "--launcher-context",
+            str(context),
+        ]
         out = subprocess.run(
             [
-                interpreter,
-                "-m",
-                "scripts.maintenance.worker_pin_worksheet",
-                "--source-root",
-                str(release),
-                "--expected-head",
-                head,
-                "--expected-tree",
-                tree,
-                "--launcher-context",
-                str(context),
+                "bash",
+                "-c",
+                f"{shlex.join(generation)} > {shlex.quote(str(worksheet_path))}",
             ],
             cwd=release,
             env=env,
@@ -616,18 +623,40 @@ def test_candidate_pin_worksheet_derives_from_the_staged_release(
             text=True,
             timeout=180,
         )
+        assert out.returncode == 0, out.stderr[-2000:]
+        runner = LIVE_RUN_SCRIPT.read_text(encoding="utf-8")
+        consumer_start = '--entrypoint python3 "$IMAGE_TAG" -c \'\n'
+        consumer_end = '\n\' "$P43_C2_OPERATOR" <"$ROOT/pin/worksheet.json"'
+        assert consumer_start in runner and consumer_end in runner
+        start = runner.index(consumer_start) + len(consumer_start)
+        end = runner.index(consumer_end, start)
+        approve_program = runner[start:end]
+        approved = subprocess.run(
+            [
+                "bash",
+                "-c",
+                f"{shlex.join([interpreter, '-c', approve_program, 'operator'])} < {shlex.quote(str(worksheet_path))}",
+            ],
+            cwd=release,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
     finally:
         _restore_writable(release)
-    assert out.returncode == 0, out.stderr[-2000:]
-    sheet = json.loads(out.stdout)
+    assert approved.returncode == 0, approved.stderr[-2000:]
+    pin = json.loads(approved.stdout)
+    sheet = json.loads(worksheet_path.read_text(encoding="utf-8"))
     assert sheet["approval_state"] == "NOT_APPROVED"
-    body = sheet["proposed_pin_body"]
-    assert (body["candidate_head"], body["candidate_tree"]) == (head, tree)
-    assert body["source_root"] == str(release)
-    assert body["worker_node_identity"] == node
-    assert body["approval"] is None  # the loader refuses it until approved
-    assert body["launcher_identity"]["argv"][-1] == f"--hostname={node}"
-    assert "--pool=solo" in body["launcher_identity"]["argv"]
+    assert (pin["candidate_head"], pin["candidate_tree"]) == (head, tree)
+    assert pin["source_root"] == str(release)
+    assert pin["worker_node_identity"] == node
+    assert pin["approval"]["operator_identity"] == "operator"
+    assert pin["approval"]["approval_id"].startswith("p43-c2-c3b-")
+    assert pin["launcher_identity"]["argv"][-1] == f"--hostname={node}"
+    assert "--pool=solo" in pin["launcher_identity"]["argv"]
+    assert "-m scripts.maintenance.worker_pin_worksheet" in runner
 
 
 # --- Worker entrypoint launch line -----------------------------------------
