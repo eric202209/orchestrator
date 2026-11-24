@@ -225,8 +225,18 @@ def test_peer_uid_mismatch_is_rejected_without_execution(tmp_path):
     running = Running(config, _ok_executor(calls))
     try:
         result = _raw_execute(config, load_key(config.key_path), _request())
-        with pytest.raises(RequestRejected, match="result_request_mismatch"):
-            _client(config).execute(_request())
+        # The server rejects before reading the request, so the client either reads
+        # the anonymous rejection (request_id mismatch) or, if the server already
+        # closed, sees EPIPE/ECONNRESET and reports UNAVAILABLE. Both fail closed.
+        try:
+            client_result = _client(config).execute(_request())
+        except RequestRejected as exc:
+            assert str(exc) == "result_request_mismatch"
+        else:
+            assert (client_result.execution_status, client_result.error_code) == (
+                "UNAVAILABLE",
+                "launcher_unavailable",
+            )
     finally:
         running.close()
     assert (result["execution_status"], result["error_code"], calls) == (
