@@ -305,8 +305,16 @@ case "$worker_concurrency" in
     ''|*[!0-9]*) fail "WORKER_CONCURRENCY must be numeric" ;;
 esac
 
+# The controlled identity is the exact Celery node name: the boot manifest
+# records the node, and dispatch binding/ping compare it with this setting.
+# The solo pool runs each task in the master, whose PID the boot manifest and
+# the per-task identity check bind (as scripts/dev_runtime.py does).
+CONTROLLED_WORKER_NODE_IDENTITY="$(value_of CONTROLLED_WORKER_NODE_IDENTITY)@$(value_of WORKER_INSTANCE_ID)"
+export CONTROLLED_WORKER_NODE_IDENTITY
+
 exec celery -A app.celery_app worker \
     --queues="$(value_of WORKER_QUEUE_NAME)" \
+    --pool=solo \
     --concurrency="$worker_concurrency" \
     --loglevel="${WORKER_LOGLEVEL:-INFO}" \
-    --hostname="$(value_of CONTROLLED_WORKER_NODE_IDENTITY)@$(value_of WORKER_INSTANCE_ID)"
+    --hostname="$CONTROLLED_WORKER_NODE_IDENTITY"

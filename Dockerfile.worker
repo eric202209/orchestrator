@@ -1,4 +1,7 @@
-FROM python:3.12-slim
+# Pin the base by digest at build time, e.g. the Sandbox image already pinned in
+# app/services/sandbox_bridge/docker_executor.py (IMAGE).
+ARG PYTHON_BASE_IMAGE=python:3.12-slim
+FROM ${PYTHON_BASE_IMAGE}
 
 ARG ORCHESTRATOR_GIT_SHA
 ARG ORCHESTRATOR_BUILD_TIME=unknown
@@ -31,6 +34,9 @@ RUN pip install --no-cache-dir -r /tmp/orchestrator-worker-requirements.txt \
 
 # The application release is owned by root and made non-writable. Runtime
 # read-only enforcement is supplied by the container run contract as well.
+# Git's executable bit is kept (0555 vs 0444) so a git-archive release context
+# (scripts/maintenance/p43_c2_worker_release.sh) still recomputes to its
+# recorded commit tree and can satisfy the Worker candidate pin without Git.
 COPY --chown=root:root . /opt/orchestrator
 COPY --chown=root:root scripts/worker-entrypoint.sh /usr/local/bin/orchestrator-worker-entrypoint
 
@@ -39,7 +45,8 @@ RUN groupadd --system --gid 10001 orchestrator-worker \
         --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin \
         orchestrator-worker \
     && find /opt/orchestrator -type d -exec chmod 0555 {} + \
-    && find /opt/orchestrator -type f -exec chmod 0444 {} + \
+    && find /opt/orchestrator -type f -perm -u+x -exec chmod 0555 {} + \
+    && find /opt/orchestrator -type f ! -perm -u+x -exec chmod 0444 {} + \
     && chmod 0555 /usr/local/bin/orchestrator-worker-entrypoint \
     && install -d -o orchestrator-worker -g orchestrator-worker -m 0700 \
         /var/lib/orchestrator-worker/db \

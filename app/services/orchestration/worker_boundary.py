@@ -30,6 +30,7 @@ C2_DISPOSABLE_EXECUTION_ADMISSION = "c2-c3-single-sandbox-slice"
 WORKER_AUTHORITY_ENV_NAMES = frozenset(
     {
         "CELERY_BROKER_URL",
+        "CELERY_BROKER_PASSWORD",
         "CELERY_RESULT_BACKEND",
         "CELERY_QUEUE_NAME",
         "WORKER_QUEUE_NAME",

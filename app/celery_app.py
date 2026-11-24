@@ -224,6 +224,13 @@ celery_app.conf.update(
     },
 )
 
+# C2-C3B: the disposable Redis credential stays out of the broker/result URLs,
+# which the Worker configuration fingerprint projects and refuses when they
+# carry credentials. Celery applies these to the URL host. Disposable only.
+if _disposable_worker_enabled() and os.environ.get("CELERY_BROKER_PASSWORD"):
+    celery_app.conf.broker_password = os.environ["CELERY_BROKER_PASSWORD"]
+    celery_app.conf.redis_password = os.environ["CELERY_BROKER_PASSWORD"]
+
 # Ensure tasks are registered when workers start with `-A app.celery_app worker`.
 celery_app.autodiscover_tasks(["app.tasks"])
 

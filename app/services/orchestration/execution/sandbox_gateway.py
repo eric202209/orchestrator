@@ -16,6 +16,7 @@ and again before a result is returned. Model content supplies only the script.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import secrets
@@ -38,6 +39,8 @@ from app.services.sandbox_bridge.contract import (
     ExecutionResult,
     RequestRejected,
 )
+
+logger = logging.getLogger(__name__)
 
 C2_BRIDGE_MODE = "c2b-sandbox"
 AUTHORIZATION_TTL_SECONDS = 20
@@ -285,6 +288,21 @@ class SandboxExecutionGateway:
             return SandboxGatewayOutcome(
                 False, f"bridge_result_invalid:{exc}", authorization=authorization
             )
+        # Identifiers only: correlates this attempt with the Launcher journal
+        # and ledger, which record the request ID but not the binding.
+        logger.info(
+            "[C2_SANDBOX] request=%s task_execution_id=%s attempt=%s session_id=%s"
+            " dispatch_fence=%s celery_task_id=%s launcher_epoch=%s status=%s exit=%s",
+            request_id,
+            authority["task_execution_id"],
+            authority["attempt_number"],
+            authority["session_id"],
+            authority["dispatch_fence"],
+            authority["dispatch_celery_task_id"],
+            launcher_epoch,
+            result.execution_status,
+            result.exit_code,
+        )
         if result.execution_status == "REJECTED":
             return SandboxGatewayOutcome(
                 False,
