@@ -628,12 +628,15 @@ def test_host_release_verifier_allows_directory_links_but_rejects_unsafe_entries
     directories = [path for path in entries if path.is_dir()]
     regular_files = [path for path in entries if path.is_file()]
     assert any(path.stat().st_nlink > 1 for path in directories)
-    unsafe = lambda path: (
-        path.is_symlink()
-        or path.stat().st_uid != os.getuid()
-        or path.stat().st_mode & 0o222
-        or (path.is_file() and path.stat().st_nlink != 1)
-    )
+
+    def unsafe(path):
+        return (
+            path.is_symlink()
+            or path.stat().st_uid != os.getuid()
+            or path.stat().st_mode & 0o222
+            or (path.is_file() and path.stat().st_nlink != 1)
+        )
+
     assert all(not unsafe(path) for path in entries)
     # The prior unconditional nlink check rejects the actual directory metadata.
     assert any(path.stat().st_nlink != 1 for path in directories)
