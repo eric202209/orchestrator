@@ -798,6 +798,10 @@ def test_candidate_pin_worksheet_derives_from_the_staged_release(
         assert consumer_start in runner and consumer_end in runner
         start = runner.index(consumer_start) + len(consumer_start)
         end = runner.index(consumer_end, start)
+        consumer_call = runner[runner.rfind("docker_run_image", 0, start) : start]
+        assert re.search(
+            r"(?:^|\s)-i(?:\s|$)", consumer_call
+        ), "Docker must attach stdin for the worksheet approval consumer"
         approve_program = runner[start:end]
         approved = subprocess.run(
             [

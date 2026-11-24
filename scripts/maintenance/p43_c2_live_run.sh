@@ -210,7 +210,7 @@ PY
         --source-root /opt/orchestrator --expected-head "$P43_C2_CANDIDATE" \
         --expected-tree "$tree" --launcher-context /launcher-context.json \
         >"$ROOT/pin/worksheet.json"
-    docker_run_image --network none \
+    docker_run_image -i --network none \
         --entrypoint python3 "$IMAGE_TAG" -c '
 import datetime as dt, json, sys
 sheet = json.load(sys.stdin)
