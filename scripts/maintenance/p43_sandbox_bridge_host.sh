@@ -116,7 +116,8 @@ for current, dirs, files in os.walk(root, followlinks=False):
     for name in dirs + files:
         item = base / name
         info = item.lstat()
-        if stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o222:
+        if (stat.S_ISLNK(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o222 or
+                (stat.S_ISREG(info.st_mode) and info.st_nlink != 1)):
             raise SystemExit("release ownership, link, or permissions unsafe")
         rel = item.relative_to(root).as_posix()
         if stat.S_ISDIR(info.st_mode):

@@ -604,6 +604,49 @@ def test_host_release_tree_verifier_checks_committed_inventory_and_bytes(tmp_pat
     assert "candidate file content mismatch" in rejected.stderr
 
 
+def test_host_release_verifier_allows_directory_links_but_rejects_unsafe_entries(
+    staged_release, tmp_path
+):
+    """Actual stager output passes the corrected Host metadata predicate."""
+    host_script = (REPO / "scripts/maintenance/p43_sandbox_bridge_host.sh").read_text(
+        encoding="utf-8"
+    )
+    verifier = re.search(
+        r"python3 -I - \"\$REPO\".*?<<'PY'\n(.*?)\nPY", host_script, re.S
+    )
+    assert verifier is not None
+    predicate = verifier.group(1)
+    assert "stat.S_ISREG(info.st_mode) and info.st_nlink != 1" in predicate
+
+    root = staged_release[0]
+    entries = [root, *root.rglob("*")]
+    for path in entries:
+        if path.is_dir():
+            path.chmod(0o555)
+        elif path.is_file():
+            path.chmod(0o555 if path.stat().st_mode & stat.S_IXUSR else 0o444)
+    directories = [path for path in entries if path.is_dir()]
+    regular_files = [path for path in entries if path.is_file()]
+    assert any(path.stat().st_nlink > 1 for path in directories)
+    unsafe = lambda path: (
+        path.is_symlink()
+        or path.stat().st_uid != os.getuid()
+        or path.stat().st_mode & 0o222
+        or (path.is_file() and path.stat().st_nlink != 1)
+    )
+    assert all(not unsafe(path) for path in entries)
+    # The prior unconditional nlink check rejects the actual directory metadata.
+    assert any(path.stat().st_nlink != 1 for path in directories)
+    if os.geteuid() == 0:
+        file = regular_files[0]
+        alias = tmp_path / "outside-hardlink"
+        os.link(file, alias)
+        assert unsafe(file)
+        alias.unlink()
+        file.chmod(0o644)
+        assert unsafe(file)
+
+
 @pytest.fixture(scope="module")
 def staged_release(tmp_path_factory):
     staged = _stage(tmp_path_factory.mktemp("c2-release") / "context")
