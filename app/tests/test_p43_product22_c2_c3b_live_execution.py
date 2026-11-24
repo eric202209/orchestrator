@@ -80,6 +80,7 @@ def _c2_environment(root: Path) -> dict[str, str]:
         RUNTIME_ROOT=str(dirs["runtime"]),
         CHECKPOINT_DIR=str(dirs["checkpoints"]),
         WORKSPACE_ROOT=str(root / "workspace"),
+        LOW_RESOURCE_SINGLE_MODEL="false",
     )
     # The submitter never carries Launcher material; the Worker gets it below.
     env.pop("SANDBOX_BRIDGE_SOCKET")
@@ -102,6 +103,7 @@ def c2_env(tmp_path, monkeypatch):
     for name, value in env.items():
         if isinstance(getattr(settings, name, None), str):
             monkeypatch.setattr(settings, name, value)
+    monkeypatch.setattr(settings, "LOW_RESOURCE_SINGLE_MODEL", False)
     monkeypatch.setattr(settings, "EXECUTION_ENABLED", False)
     monkeypatch.setattr(settings, "DEV_API_ONLY", False)
     monkeypatch.setattr(
@@ -339,6 +341,12 @@ def test_submitter_refuses_a_non_fresh_database(c2_env, db_session_factory):
     db.close()
     with pytest.raises(submitter.SubmitterRefused, match="database_not_fresh"):
         submitter.submit(db_session_factory)
+
+
+def test_c2_fixture_disables_low_resource_single_model(c2_env):
+    """The disposable C2 launcher path must not inherit host provider mode."""
+
+    assert settings.LOW_RESOURCE_SINGLE_MODEL is False
 
 
 def test_trusted_submitter_task_reaches_done_through_c2_launcher(
