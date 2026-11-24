@@ -81,6 +81,7 @@ def _c2_environment(root: Path) -> dict[str, str]:
         CHECKPOINT_DIR=str(dirs["checkpoints"]),
         WORKSPACE_ROOT=str(root / "workspace"),
         LOW_RESOURCE_SINGLE_MODEL="false",
+        EXECUTION_CONTEXT_TOKENS="65536",
     )
     # The submitter never carries Launcher material; the Worker gets it below.
     env.pop("SANDBOX_BRIDGE_SOCKET")
@@ -104,6 +105,7 @@ def c2_env(tmp_path, monkeypatch):
         if isinstance(getattr(settings, name, None), str):
             monkeypatch.setattr(settings, name, value)
     monkeypatch.setattr(settings, "LOW_RESOURCE_SINGLE_MODEL", False)
+    monkeypatch.setattr(settings, "EXECUTION_CONTEXT_TOKENS", 65536)
     monkeypatch.setattr(settings, "EXECUTION_ENABLED", False)
     monkeypatch.setattr(settings, "DEV_API_ONLY", False)
     monkeypatch.setattr(
@@ -347,6 +349,12 @@ def test_c2_fixture_disables_low_resource_single_model(c2_env):
     """The disposable C2 launcher path must not inherit host provider mode."""
 
     assert settings.LOW_RESOURCE_SINGLE_MODEL is False
+
+
+def test_c2_fixture_has_execution_context_capacity(c2_env):
+    """The disposable C2 path must not inherit a provider-sized context cap."""
+
+    assert settings.EXECUTION_CONTEXT_TOKENS >= 16_000
 
 
 def test_trusted_submitter_task_reaches_done_through_c2_launcher(
