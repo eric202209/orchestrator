@@ -319,7 +319,7 @@ def validate_runtime_capabilities(
             if role is BackendRole.EXECUTION
             else required_context_tokens
         )
-        if resolved_context is not None and resolved_context < required:
+        if dispatch and resolved_context is not None and resolved_context < required:
             raise RuntimeCapabilityError(
                 f"Runtime role '{role.value}' effective context {resolved_context} is below "
                 f"the required {required} tokens.",

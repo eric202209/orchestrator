@@ -290,6 +290,9 @@ def test_planning_repair_uses_registry_no_thinking_chat_path(db_session, monkeyp
     from app.services.orchestration.planning import planner as planner_module
 
     captured = {}
+    monkeypatch.setattr(
+        planner_module.settings, "PLANNING_REPAIR_CONTEXT_TOKENS", 16_000
+    )
 
     class Response:
         def raise_for_status(self):
@@ -378,6 +381,10 @@ def test_stale_replace_planning_repair_captures_prompt_and_registry_result(
     db_session, monkeypatch, tmp_path
 ):
     from app.services.orchestration.planning import planner as planner_module
+
+    monkeypatch.setattr(
+        planner_module.settings, "PLANNING_REPAIR_CONTEXT_TOKENS", 16_000
+    )
 
     monkeypatch.setattr(
         planner_module,
@@ -725,6 +732,9 @@ def test_registry_repair_uses_role_model_for_hyphen_alias(db_session, monkeypatc
     from app.services.orchestration.planning import planner as planner_module
 
     captured = {}
+    monkeypatch.setattr(
+        planner_module.settings, "PLANNING_REPAIR_CONTEXT_TOKENS", 16_000
+    )
 
     class Response:
         def raise_for_status(self):
@@ -800,6 +810,10 @@ def test_planning_repair_registry_failure_preserves_fallback_behavior(
     monkeypatch, db_session
 ):
     from app.services.orchestration.planning import planner as planner_module
+
+    monkeypatch.setattr(
+        planner_module.settings, "PLANNING_REPAIR_CONTEXT_TOKENS", 16_000
+    )
 
     captured = {}
 
