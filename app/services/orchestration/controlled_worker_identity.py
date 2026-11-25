@@ -68,14 +68,14 @@ def _fresh_source_matches_pin(
     pin: wi.CandidateIdentityPin,
     manifest: wi.WorkerBootIdentityManifest,
 ) -> tuple[bool, tuple[str, ...]]:
+    # CandidateSourceManifest hashes affected_modules as an ordered list.
+    # Boot provenance preserves that list order; sorting the names here creates
+    # a different manifest digest even when every module and file hash matches.
     names = tuple(
-        sorted(
-            {
-                str(item["module_name"])
-                for item in manifest.affected_module_provenance
-                if isinstance(item, Mapping)
-                and isinstance(item.get("module_name"), str)
-            }
+        dict.fromkeys(
+            str(item["module_name"])
+            for item in manifest.affected_module_provenance
+            if isinstance(item, Mapping) and isinstance(item.get("module_name"), str)
         )
     )
     if not names:

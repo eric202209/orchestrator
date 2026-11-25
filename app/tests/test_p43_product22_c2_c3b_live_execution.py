@@ -13,8 +13,8 @@ Redis transport, the Worker boot manifest/candidate pin, real Docker.
 
 from __future__ import annotations
 
-import json
 import base64
+import json
 import os
 import pwd
 import re
@@ -23,6 +23,7 @@ import socket
 import stat
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -41,7 +42,7 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
-from app.services.orchestration import worker_identity
+from app.services.orchestration import controlled_worker_identity, worker_identity
 from app.services.orchestration.validation.validator import ValidatorService
 from app.tasks import worker
 from app.tests import test_p43_product22_c2_c2b_sandbox_slice as c2b
@@ -731,7 +732,7 @@ def _launcher(release: Path) -> dict[str, Any]:
 
 
 def test_candidate_pin_worksheet_derives_from_the_staged_release(
-    staged_release, tmp_path, monkeypatch, c2_env
+    staged_release, tmp_path, monkeypatch, c2_env, db_session_factory
 ):
     """The existing worksheet, run from the release itself, pins that release."""
 
@@ -957,6 +958,99 @@ def test_candidate_pin_worksheet_derives_from_the_staged_release(
     _manifest_path, boot = create_boot(pin_load, identity_dir)
     assert boot.identity_status == worker_identity.IDENTITY_VERIFIED
     assert boot.candidate_pin_status == worker_identity.PIN_MATCHED
+
+    try:
+        _dockerfile_modes(release)
+        # Exercise the production dispatch-time identity resolver against the
+        # worksheet pin and boot record above. Only the OS process snapshot is
+        # represented; the binding and source-manifest checks remain production.
+        monkeypatch.setattr(
+            worker_identity,
+            "capture_process_identity",
+            lambda pid, **kwargs: process if pid == process.pid else None,
+        )
+        binding = controlled_worker_identity.current_controlled_worker_identity_binding(
+            source_root=release,
+            runtime_root=tmp_path / "runtime",
+            pin_path=approved_pin_path,
+            pin_protected_root=protected_root,
+            expected_node_identity=pin["worker_node_identity"],
+            require_responsive=False,
+        )
+        assert binding["source_manifest_digest"] == pin["source_manifest_digest"]
+
+        # Exercise the trusted submitter -> queue -> production dispatch
+        # configuration path. Stop at the publisher seam so no Task is sent.
+        for name, value in {
+            "WORKER_SOURCE_ROOT": str(release),
+            "RUNTIME_ROOT": str(tmp_path / "runtime"),
+            "WORKER_CANDIDATE_PIN_PATH": str(approved_pin_path),
+            "WORKER_CANDIDATE_PIN_PROTECTED_ROOT": str(protected_root),
+            "CONTROLLED_WORKER_NODE_IDENTITY": pin["worker_node_identity"],
+            "CONTROLLED_WORKER_IDENTITY_REQUIRED": True,
+        }.items():
+            monkeypatch.setattr(settings, name, value)
+        monkeypatch.setattr(
+            "app.celery_app.celery_app.control.inspect",
+            lambda **_kwargs: SimpleNamespace(
+                ping=lambda: {pin["worker_node_identity"]: {"ok": "pong"}}
+            ),
+        )
+        publisher_calls = []
+
+        def stop_before_publication(db, task_execution_id, *, publisher=None):
+            publisher_calls.append(task_execution_id)
+            return {"state": "not_due"}
+
+        monkeypatch.setattr(
+            "app.services.session.session_runtime_service.publish_task_execution_dispatch",
+            stop_before_publication,
+        )
+        submitted = submitter.submit(db_session_factory)
+        assert publisher_calls == [submitted["task_execution_id"]]
+        db = db_session_factory()
+        try:
+            execution = db.get(TaskExecution, submitted["task_execution_id"])
+            assert execution is not None
+            assert (
+                execution.dispatch_invocation["context"][
+                    controlled_worker_identity.CONTROLLED_WORKER_IDENTITY_CONTEXT_KEY
+                ]["source_manifest_digest"]
+                == pin["source_manifest_digest"]
+            )
+        finally:
+            db.close()
+
+        wrong_digest_pin = replace(pin_load.pin, source_manifest_digest="0" * 64)
+        wrong_digest_candidate, wrong_digest_reasons = (
+            controlled_worker_identity.verify_candidate_pin_source(
+                source_root=release, pin=wrong_digest_pin
+            )
+        )
+        assert wrong_digest_candidate is None
+        assert "expected_source_manifest_digest_mismatch" in wrong_digest_reasons
+
+        for field in ("candidate_head", "candidate_tree"):
+            value = getattr(pin_load.pin, field)
+            wrong_value = ("0" if value[0] != "0" else "1") + value[1:]
+            wrong_pin = replace(pin_load.pin, **{field: wrong_value})
+            wrong_candidate, _ = controlled_worker_identity.verify_candidate_pin_source(
+                source_root=release, pin=wrong_pin
+            )
+            assert wrong_candidate is None, field
+
+        with pytest.raises(controlled_worker_identity.ControlledWorkerIdentityError):
+            controlled_worker_identity.current_controlled_worker_identity_binding(
+                source_root=release,
+                runtime_root=tmp_path / "runtime",
+                pin_path=approved_pin_path,
+                pin_protected_root=protected_root,
+                expected_node_identity=pin["worker_node_identity"] + "-wrong",
+                require_responsive=False,
+            )
+
+    finally:
+        _restore_writable(release)
 
     mismatched_pin = dict(pin)
     mismatched_pin["candidate_tree"] = (
