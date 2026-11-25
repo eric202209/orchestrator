@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+from types import MethodType
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -1218,6 +1219,13 @@ def create_agent_runtime(
             runtime_configuration=runtime_configuration,
         )
     descriptor = require_backend_descriptor(backend_name)
+    if role is not None:
+        validate_runtime_capabilities(
+            descriptor,
+            role,
+            effective_context_tokens=_configured_context_tokens(role),
+            dispatch=False,
+        )
     runtime_factory = get_runtime_factory(descriptor.name)
     if runtime_factory is not None:
         runtime_kwargs: dict[str, Any] = {"use_demo_mode": use_demo_mode}
@@ -1228,49 +1236,31 @@ def create_agent_runtime(
             runtime.backend_role = role.value
         if runtime_configuration is not None and hasattr(runtime, "__dict__"):
             runtime.runtime_configuration = runtime_configuration
-        if runtime_configuration is not None:
-            return _ProviderContractGuard(
-                runtime,
-                db=db,
-                role=role,
-                runtime_configuration=runtime_configuration,
-            )
+        if runtime_configuration is not None and hasattr(runtime, "__dict__"):
+            for method_name in ("execute_task", "invoke_prompt"):
+                original = getattr(runtime, method_name, None)
+                if original is None:
+                    continue
+
+                async def _guarded(
+                    instance,
+                    *args,
+                    _original=original,
+                    **kwargs,
+                ):
+                    validate_runtime_provider_contract(
+                        db,
+                        role,
+                        runtime_configuration=runtime_configuration,
+                    )
+                    return await _original(*args, **kwargs)
+
+                setattr(runtime, method_name, MethodType(_guarded, runtime))
         return runtime
 
     raise UnsupportedAgentBackendError(
         f"Backend '{descriptor.name}' does not have a registered runtime adapter."
     )
-
-
-class _ProviderContractGuard:
-    """Validate role capability immediately before any provider inference."""
-
-    def __init__(self, runtime, *, db, role, runtime_configuration):
-        object.__setattr__(self, "_runtime", runtime)
-        object.__setattr__(self, "_db", db)
-        object.__setattr__(self, "_role", role)
-        object.__setattr__(self, "_runtime_configuration", runtime_configuration)
-
-    def __getattr__(self, name):
-        return getattr(self._runtime, name)
-
-    def __setattr__(self, name, value):
-        setattr(self._runtime, name, value)
-
-    def _validate_before_inference(self):
-        validate_runtime_provider_contract(
-            self._db,
-            self._role,
-            runtime_configuration=self._runtime_configuration,
-        )
-
-    async def execute_task(self, *args, **kwargs):
-        self._validate_before_inference()
-        return await self._runtime.execute_task(*args, **kwargs)
-
-    async def invoke_prompt(self, *args, **kwargs):
-        self._validate_before_inference()
-        return await self._runtime.invoke_prompt(*args, **kwargs)
 
 
 def invoke_runtime_prompt(

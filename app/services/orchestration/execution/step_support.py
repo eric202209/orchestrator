@@ -284,9 +284,17 @@ def repair_step_commands_with_self_correction(
 
     repair_runtime_fallback = False
     primary_output = str((repair_result or {}).get("output") or "").strip()
+    primary_output_is_structured = False
+    if primary_output and primary_error is None:
+        try:
+            primary_data = json.loads(extract_structured_text(primary_output))
+            primary_output_is_structured = isinstance(primary_data, dict)
+        except (TypeError, ValueError):
+            pass
     if (
         primary_error is not None
         or not primary_output
+        or not primary_output_is_structured
         or (repair_result or {}).get("error")
     ):
         # A failed primary execution lane can return an empty response before

@@ -227,6 +227,7 @@ def test_planning_repair_uses_explicit_repair_runtime_and_registry(
     db_session, monkeypatch
 ):
     _Client.captured = []
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", 32_768)
     monkeypatch.setattr(
         "app.services.agents.providers.openai_chat_adapter.httpx.AsyncClient", _Client
     )
@@ -251,6 +252,7 @@ def test_debug_repair_uses_debug_role_and_preserves_fallback_model(
     db_session, monkeypatch
 ):
     _Client.captured = []
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_CONTEXT_TOKENS", 32_768)
     monkeypatch.setattr(
         "app.services.agents.providers.openai_chat_adapter.httpx.AsyncClient", _Client
     )
@@ -283,6 +285,7 @@ def test_completion_summary_uses_repair_role_and_adapter_extraction(
     db_session, monkeypatch
 ):
     _Client.captured = []
+    monkeypatch.setattr(settings, "PLANNING_REPAIR_CONTEXT_TOKENS", 32_768)
     _Client.response_body = {
         "choices": [{"message": {"content": [{"text": "part-1"}, {"text": "part-2"}]}}]
     }

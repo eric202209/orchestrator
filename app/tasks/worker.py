@@ -226,6 +226,7 @@ from app.services.agents.agent_runtime import (
     BackendRole,
     resolve_backend_name_for_role,
     resolve_runtime_configuration,
+    validate_runtime_provider_contract,  # noqa: F401 - retained Worker seam symbol
 )
 from app.services.agents.subprocess_lifecycle import (
     register_forced_termination_cleanup,

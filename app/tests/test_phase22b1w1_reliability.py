@@ -233,6 +233,12 @@ def test_nested_step_debug_repair_keeps_runtime_binding_until_provider_returns(
     db_session.refresh(task)
 
     monkeypatch.setattr(settings, "DEBUG_REPAIR_BACKEND", "local_openclaw")
+    monkeypatch.setattr(settings, "EXECUTION_CONTEXT_TOKENS", 32_768)
+    monkeypatch.setattr(settings, "DEBUG_REPAIR_CONTEXT_TOKENS", 32_768)
+    monkeypatch.setattr(
+        "app.services.agents.agent_runtime.validate_runtime_provider_contract",
+        lambda *args, **kwargs: {},
+    )
     monkeypatch.setattr(
         OpenClawSessionService,
         "_openclaw_config_path",

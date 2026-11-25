@@ -207,7 +207,9 @@ def test_e4_t1_t3_t11_worker_capacity_writer_commits_before_retry_publication(
     assert observed["identity"]["continuation_retry_count"] == 1
     assert observed["identity"]["continuation_task_id"] == task.id
     assert observed["identity"]["task_execution_id"] is not None
-    assert len(provider_contract_calls) == 2
+    # Capacity admission commits retry intent before any provider contract
+    # check; the role runtime performs that check only at inference time.
+    assert provider_contract_calls == []
     db_session.expire_all()
     persisted_session = db_session.get(SessionModel, session.id)
     persisted_task = db_session.get(Task, task.id)
