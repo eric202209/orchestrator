@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.models import (
+    LogEntry,
     Project,
     Session as SessionModel,
     SessionTask,
@@ -26,9 +27,19 @@ from app.models import (
     TaskExecution,
     TaskStatus,
 )
+from app.services.agents.agent_runtime import RuntimeCapabilityError
 from app.services.orchestration.coordinators.failure_coordinator import (
     FailureCoordinator,
 )
+from app.services.orchestration.diagnostics.outcome_observability import (
+    build_failure_evidence,
+    persist_failure_evidence,
+)
+from app.services.orchestration.recovery.failure_classifier import FailureClassifier
+from app.services.orchestration.recovery.recovery_strategy_registry import (
+    RecoveryStrategyRegistry,
+)
+from app.services.orchestration.state.persistence import record_live_log
 from app.services.orchestration.lifecycle.transitions import schedule_continuation
 from app.services.orchestration.planning.repair_prompts import (
     PLANNING_REPAIR_INTACT_PLAN_MAX_CHARS,
@@ -299,6 +310,111 @@ def test_retry_exempt_capability_failure_does_not_queue_automatic_recovery(
     queue_fn.assert_not_called()
     db_session.refresh(task)
     assert task.status == TaskStatus.FAILED
+
+
+def test_structured_provider_context_code_overrides_capacity_text_and_is_durable(
+    db_session,
+):
+    exc = RuntimeCapabilityError(
+        "Runtime role 'execution' has no verified effective context capacity; "
+        "at least 16000 tokens are required.",
+        code="provider_context_insufficient",
+    )
+    category = classify_failure(
+        str(exc),
+        "direct_ollama",
+        {
+            "exception_type": type(exc).__name__,
+            "runtime_error_code": exc.code,
+        },
+    )
+    assert category == "backend_configuration_invalid"
+    assert category != "backend_capacity_limit"
+    assert is_retry_exempt_category(category)
+    failure_event = FailureClassifier.classify(exc)
+    assert failure_event.failure_class == "backend_configuration_invalid"
+    reflection = MagicMock()
+    decision = RecoveryStrategyRegistry.route(
+        failure_event,
+        llm_callable=reflection,
+    )
+    assert decision.strategy == "terminal"
+    reflection.assert_not_called()
+
+    evidence = build_failure_evidence(
+        exc=exc,
+        session_id=1,
+        task_id=1,
+        task_execution_id=1,
+        orchestration_phase="failure",
+        task_status_before_failure="pending",
+        session_task_status_before_failure=None,
+        task_execution_status_before_failure="pending",
+        orchestration_status_before_failure=None,
+        failure_category=category,
+        failure_class="unknown_failure",
+        retry_capacity=False,
+        automatic_recovery_eligible=False,
+        project_mutation_lock_classification=False,
+        planning_lock_classification=False,
+        timeout_classification=False,
+        authoritative_success_recorded=False,
+    )
+    assert evidence["exception_code"] == "provider_context_insufficient"
+    assert "16000 tokens" in evidence["exception_message"]
+
+    ctx, session, task = _seed_auto_ctx(db_session)
+    persist_failure_evidence(
+        evidence=evidence,
+        project_dir=None,
+        session_id=session.id,
+        task_id=task.id,
+        task_execution_id=ctx.task_execution_id,
+        session_instance_id=session.instance_id,
+        append_orchestration_event_fn=MagicMock(),
+        record_live_log_fn=record_live_log,
+        db=db_session,
+        logger=_LOG,
+    )
+    persisted = (
+        db_session.query(LogEntry)
+        .filter(
+            LogEntry.task_execution_id == ctx.task_execution_id,
+            LogEntry.message
+            == "[ORCHESTRATION] Failure evidence captured before recovery/terminal handling",
+        )
+        .one()
+    )
+    assert json.loads(persisted.log_metadata)["exception_code"] == (
+        "provider_context_insufficient"
+    )
+
+
+def test_unstructured_backend_capacity_text_keeps_capacity_classification():
+    assert (
+        classify_failure("backend at capacity", "direct_ollama", {})
+        == "backend_capacity_limit"
+    )
+
+
+def test_structured_capability_failure_skips_celery_and_auto_recovery(db_session):
+    ctx, _session, task = _seed_auto_ctx(db_session)
+    ctx.error_handler = SimpleNamespace(should_retry=lambda *_args: True)
+    queue_fn = MagicMock()
+    celery_task = _RetryCapableSelfTask()
+    exc = RuntimeCapabilityError(
+        "Runtime role 'execution' has no verified effective context capacity; "
+        "at least 16000 tokens are required.",
+        code="provider_context_insufficient",
+    )
+
+    with pytest.raises(RuntimeCapabilityError):
+        _run_handle_failure(ctx, exc, queue_fn, self_task=celery_task)
+
+    assert celery_task.retry_calls == 0
+    queue_fn.assert_not_called()
+    execution = db_session.get(TaskExecution, ctx.task_execution_id)
+    assert execution.failure_category == "backend_configuration_invalid"
 
 
 def test_generic_execution_failure_still_queues_one_automatic_recovery(db_session):

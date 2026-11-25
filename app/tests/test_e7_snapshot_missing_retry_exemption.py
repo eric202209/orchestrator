@@ -237,6 +237,38 @@ def test_snapshot_missing_only_admin_events_allows_direct_retry():
     assert retry_kwargs is None or "resume_checkpoint_name" not in (retry_kwargs or {})
 
 
+def test_preexecution_failure_without_workspace_ignores_dispatch_events():
+    """A queued delivery alone does not turn an unstarted task into dirty state."""
+    from types import SimpleNamespace
+
+    ctx = _make_ctx()
+    ctx.task = SimpleNamespace(
+        workspace_status="not_created", started_at=None, current_step=0
+    )
+    ctx.task_execution_id = 17
+    ctx.db.get.return_value = SimpleNamespace(started_at=None)
+    ctx.runtime_workspace_used = False
+    restore = MagicMock(return_value={"restored": False, "reason": "snapshot_missing"})
+    queued_events = list(_ADMIN_EVENTS) + [
+        {"event_type": EventType.TASK_QUEUED},
+    ]
+
+    with patch(_PERSISTENCE_PATH, return_value=queued_events):
+        workspace_restored, retry_kwargs, restore_blocked = _prepare_retry_workspace(
+            ctx=ctx,
+            exc=RuntimeError("backend capacity admission failed"),
+            restore_workspace_snapshot_if_needed=restore,
+            record_live_log_fn=MagicMock(),
+            logger=MagicMock(),
+            self_task=MagicMock(),
+        )
+
+    assert workspace_restored is False
+    assert retry_kwargs is None or "resume_checkpoint_name" not in (retry_kwargs or {})
+    assert restore_blocked is False
+    restore.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # _prepare_retry_workspace: exemption — blocked scenarios
 # ---------------------------------------------------------------------------

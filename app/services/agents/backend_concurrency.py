@@ -15,6 +15,7 @@ another live worker's freshly acquired slot.
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
@@ -29,11 +30,17 @@ def make_redis_client() -> Any:
     import redis
 
     url = urlparse(settings.CELERY_BROKER_URL)
+    separate_password = None
+    if os.environ.get("WORKER_ISOLATION_MODE", "").strip() == "disposable":
+        # Match Celery's C2 contract: the disposable password is supplied
+        # separately so credential material never enters the broker URL.
+        separate_password = os.environ.get("CELERY_BROKER_PASSWORD") or None
     return redis.Redis(
         host=url.hostname or "localhost",
         port=url.port or 6379,
         db=int((url.path or "/0").lstrip("/") or "0"),
-        password=url.password,
+        username=url.username,
+        password=separate_password or url.password,
         socket_connect_timeout=2,
         socket_timeout=2,
     )

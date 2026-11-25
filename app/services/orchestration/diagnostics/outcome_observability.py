@@ -8,9 +8,11 @@ import traceback
 from typing import Any, Callable, Optional
 
 from app.services.orchestration.events.event_types import EventType
+from app.services.workspace.control_state_paths import project_control_state_location
 
 _MAX_EXCEPTION_MESSAGE_CHARS = 4000
 _MAX_TRACEBACK_CHARS = 12000
+_EXCEPTION_CODE_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SENSITIVE_VALUE_PATTERN = re.compile(
     r"(?i)(\b(?:authorization|bearer|api[_-]?key|password|passwd|secret|token|"
     r"credential|cookie)\b\s*[:=]\s*)([^\s,;]+)"
@@ -107,11 +109,17 @@ def _durable_project_dir(ctx: Any, state: Any) -> Any:
                 resolve_project_workspace_path,
             )
 
-            return resolve_project_workspace_path(
+            workspace_root = resolve_project_workspace_path(
                 getattr(project, "workspace_path", None),
                 getattr(project, "name", None),
                 db=getattr(ctx, "db", None),
             )
+            project_id = getattr(project, "id", None)
+            if project_id is not None:
+                return project_control_state_location(
+                    workspace_root, project_id, db=getattr(ctx, "db", None)
+                )
+            return workspace_root
         except Exception:
             pass
     return getattr(state, "project_dir", None)
@@ -137,9 +145,17 @@ def build_failure_evidence(
     timeout_classification: bool,
     authoritative_success_recorded: bool,
 ) -> dict[str, Any]:
+    raw_exception_code = getattr(exc, "code", None)
+    exception_code = (
+        str(raw_exception_code)
+        if raw_exception_code is not None
+        and _EXCEPTION_CODE_PATTERN.fullmatch(str(raw_exception_code))
+        else None
+    )
     return {
         "exception_type": type(exc).__name__,
         "exception_module": type(exc).__module__,
+        "exception_code": exception_code,
         "exception_message": bounded_exception_message(exc),
         "traceback": bounded_exception_traceback(exc),
         "session_id": session_id,

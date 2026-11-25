@@ -95,6 +95,18 @@ class FailureClassifier:
                 **common,
             )
 
+        if getattr(exc, "code", None) in {
+            "provider_configuration_invalid",
+            "provider_context_insufficient",
+            "provider_endpoint_incompatible",
+            "provider_model_unavailable",
+        }:
+            return make_failure_event(
+                failure_class="backend_configuration_invalid",
+                source="execution",
+                **common,
+            )
+
         # Rule 1: wrapper_timeout_noise
         # A timeout that fires after the orchestration has already reached DONE.
         # Validated maintenance finding — treat as annotation, not task failure.

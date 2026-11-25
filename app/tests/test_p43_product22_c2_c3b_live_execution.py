@@ -14,6 +14,7 @@ Redis transport, the Worker boot manifest/candidate pin, real Docker.
 from __future__ import annotations
 
 import base64
+import asyncio
 import json
 import os
 import pwd
@@ -41,6 +42,11 @@ from app.models import (
     TaskCheckpoint,
     TaskExecution,
     TaskStatus,
+)
+from app.services.agents.agent_runtime import (
+    BackendRole,
+    RuntimeCapabilityError,
+    create_agent_runtime,
 )
 from app.services.orchestration import controlled_worker_identity, worker_identity
 from app.services.orchestration.validation.validator import ValidatorService
@@ -366,6 +372,7 @@ def test_c2_fixture_has_execution_context_capacity(c2_env):
     assert settings.EXECUTION_CONTEXT_TOKENS >= 16_000
 
 
+@pytest.mark.parametrize("execution_context_tokens", [65536, None])
 def test_trusted_submitter_task_reaches_done_through_c2_launcher(
     c2_env,
     host,
@@ -374,7 +381,9 @@ def test_trusted_submitter_task_reaches_done_through_c2_launcher(
     monkeypatch,
     db_session_factory,
     caplog,
+    execution_context_tokens,
 ):
+    monkeypatch.setattr(settings, "EXECUTION_CONTEXT_TOKENS", execution_context_tokens)
     caplog.set_level(
         "INFO", logger="app.services.orchestration.execution.sandbox_gateway"
     )
@@ -442,6 +451,24 @@ def test_trusted_submitter_task_reaches_done_through_c2_launcher(
     ]
     # Only Orchestrator-built git argv ran locally (Runtime Workspace).
     assert {Path(argv[0]).name for argv in no_local_step_execution} <= {"git"}
+
+
+@pytest.mark.parametrize("execution_context_tokens", [None, 8192])
+def test_provider_dependent_execution_still_requires_verified_context(
+    c2_env, no_network, monkeypatch, db_session_factory, execution_context_tokens
+):
+    monkeypatch.setattr(settings, "EXECUTION_CONTEXT_TOKENS", execution_context_tokens)
+    db = db_session_factory()
+    try:
+        runtime = create_agent_runtime(
+            db, session_id=None, task_id=None, role=BackendRole.EXECUTION
+        )
+        with pytest.raises(RuntimeCapabilityError) as exc_info:
+            asyncio.run(runtime.execute_task("provider-dependent execution"))
+        assert exc_info.value.code == "provider_context_insufficient"
+        assert no_network == []
+    finally:
+        db.close()
 
 
 # --- Worker image release identity and candidate pin -----------------------
@@ -1247,6 +1274,84 @@ def test_broker_password_applies_only_in_disposable_mode(tmp_path, isolation):
     expected = "offline-test-only" if isolation else "None"
     assert (broker, backend) == (expected, expected)
     assert "offline-test-only" not in uri
+
+
+@pytest.mark.parametrize(
+    (
+        "isolation",
+        "broker_url",
+        "separate_password",
+        "expected_host",
+        "expected_db",
+        "expected_username",
+        "expected_password",
+    ),
+    [
+        (
+            "disposable",
+            "redis://p43-c2-redis:6379/9",
+            "disposable-password",
+            "p43-c2-redis",
+            9,
+            None,
+            "disposable-password",
+        ),
+        (
+            "disposable",
+            "redis://legacy-user:url-password@127.0.0.1:6379/11",
+            None,
+            "127.0.0.1",
+            11,
+            "legacy-user",
+            "url-password",
+        ),
+        (
+            "",
+            "redis://127.0.0.1:6379/12",
+            "must-be-ignored-outside-disposable-mode",
+            "127.0.0.1",
+            12,
+            None,
+            None,
+        ),
+    ],
+)
+def test_backend_slot_client_uses_celery_auth_contract(
+    monkeypatch,
+    isolation,
+    broker_url,
+    separate_password,
+    expected_host,
+    expected_db,
+    expected_username,
+    expected_password,
+):
+    """The sync capacity/reconciliation client shares Celery's auth contract."""
+    import redis
+
+    from app.services.agents import backend_concurrency
+
+    captured = {}
+
+    def client_factory(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(redis, "Redis", client_factory)
+    monkeypatch.setenv("WORKER_ISOLATION_MODE", isolation)
+    if separate_password is None:
+        monkeypatch.delenv("CELERY_BROKER_PASSWORD", raising=False)
+    else:
+        monkeypatch.setenv("CELERY_BROKER_PASSWORD", separate_password)
+    monkeypatch.setattr(settings, "CELERY_BROKER_URL", broker_url)
+
+    client = backend_concurrency.make_redis_client()
+
+    assert client is not None
+    assert captured["host"] == expected_host
+    assert captured["db"] == expected_db
+    assert captured.get("username") == expected_username
+    assert captured["password"] == expected_password
 
 
 @pytest.mark.parametrize(

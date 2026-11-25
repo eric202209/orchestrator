@@ -204,6 +204,52 @@ def test_failure_evidence_persistence_failure_does_not_hide_original_exception(
     )
 
 
+def test_preclaim_failure_evidence_resolves_project_control_root(
+    db_session, monkeypatch
+):
+    """Failure evidence still has the owning Project when runtime state is absent."""
+    from app.services.workspace.control_state_paths import ControlStateLocation
+
+    ctx, _session, project_task, _execution = _seed_context(
+        db_session, execution_mode="manual"
+    )
+    ctx.orchestration_state = None
+    persisted_events = []
+
+    def capture_event(**kwargs):
+        persisted_events.append(kwargs)
+        return {"event_id": "failure-evidence"}
+
+    monkeypatch.setattr(
+        "app.services.orchestration.phases.failure_flow.append_orchestration_event",
+        capture_event,
+    )
+
+    with pytest.raises(RuntimeError, match="pre-claim backend capacity failure"):
+        FailureCoordinator().handle_failure(
+            self_task=_TerminalSelfTask(),
+            ctx=ctx,
+            exc=RuntimeError("pre-claim backend capacity failure"),
+            get_latest_session_task_link_fn=lambda *_args, **_kwargs: ctx.session_task_link,
+            write_project_state_snapshot_fn=_noop,
+            save_orchestration_checkpoint_fn=_noop,
+            record_live_log_fn=_noop,
+        )
+
+    evidence_event = next(
+        event
+        for event in persisted_events
+        if event["event_type"] == EventType.FAILURE_EVIDENCE_CAPTURED
+    )
+    location = evidence_event["project_dir"]
+    assert isinstance(location, ControlStateLocation)
+    assert location.project_id == project_task.project_id
+    assert location.control_root is not None
+    assert evidence_event["details"]["exception_message"] == (
+        "pre-claim backend capacity failure"
+    )
+
+
 def test_outcome_checkpoint_has_required_identity_and_operation_fields():
     from app.services.orchestration.diagnostics.outcome_observability import (
         record_outcome_checkpoint,

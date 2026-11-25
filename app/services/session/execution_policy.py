@@ -112,12 +112,24 @@ def classify_failure(exit_reason: str, backend_id: str, context: dict) -> str:
         context.get("provider_failure_classification") or ""
     ).lower()
     failure_category = str(context.get("failure_category") or "").lower()
+    runtime_error_code = str(
+        context.get("runtime_error_code") or context.get("exception_code") or ""
+    ).lower()
     if failure_category == "discovery_terminal_failure":
         return "discovery_terminal_failure"
     # An enforced attempt without a valid workflow binding is refused before
     # any provider request; a new attempt cannot repair a missing lineage.
     if failure_category == "workflow_identity_invalid":
         return "workflow_identity_invalid"
+    # Structured runtime capability codes take precedence over ambiguous
+    # message words such as "capacity", which also describe model context.
+    if runtime_error_code in {
+        "provider_configuration_invalid",
+        "provider_context_insufficient",
+        "provider_endpoint_incompatible",
+        "provider_model_unavailable",
+    }:
+        return "backend_configuration_invalid"
     if failure_category == "runtime_safety_stop" or any(
         marker in reason
         for marker in (

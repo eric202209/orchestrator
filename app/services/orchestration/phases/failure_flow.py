@@ -138,6 +138,47 @@ def _prepare_retry_workspace(
     session_id = ctx.session_id
     task_id = ctx.task_id
     orchestration_state = ctx.orchestration_state
+
+    # Capacity/dispatch failures can arrive before the Task Execution claims
+    # authority or creates a Task Workspace. A queued event is not evidence of
+    # workspace mutation, and an absent pre-run snapshot is expected then.
+    task_execution = None
+    task_execution_id = getattr(ctx, "task_execution_id", None)
+    if task_execution_id is not None:
+        try:
+            task_execution = db.get(TaskExecution, task_execution_id)
+        except Exception:
+            task_execution = None
+    if (
+        task_execution is not None
+        and getattr(ctx, "runtime_workspace_used", False) is False
+        and getattr(ctx.task, "workspace_status", None) == "not_created"
+        and getattr(ctx.task, "started_at", None) is None
+        and getattr(ctx.task, "current_step", None) == 0
+        and getattr(task_execution, "started_at", None) is None
+        and getattr(task_execution, "dispatch_claimed_at", None) is None
+        and getattr(task_execution, "runtime_lease_id", None) is None
+        and getattr(task_execution, "worker_pid", None) is None
+        and getattr(task_execution, "worker_hostname", None) is None
+        and getattr(task_execution, "worker_process_start_identity", None) is None
+    ):
+        record_live_log_fn(
+            db,
+            session_id,
+            task_id,
+            "WARN",
+            "[ORCHESTRATION] Pre-execution failure left the Task Workspace uncreated; no restore or checkpoint resume is required",
+            session_instance_id=session.instance_id if session else None,
+            task_execution_id=task_execution_id,
+            metadata={
+                "phase": "failure",
+                "reason": "pre_execution_workspace_uncreated",
+                "error": str(exc)[:500],
+                "workspace_status": "not_created",
+            },
+        )
+        return False, None, False
+
     retry_details = {
         "phase": "failure",
         "reason": "retryable_task_failure",

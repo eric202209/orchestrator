@@ -226,7 +226,6 @@ from app.services.agents.agent_runtime import (
     BackendRole,
     resolve_backend_name_for_role,
     resolve_runtime_configuration,
-    validate_runtime_provider_contract,
 )
 from app.services.agents.subprocess_lifecycle import (
     register_forced_termination_cleanup,
@@ -1144,12 +1143,12 @@ def execute_orchestration_task(
             db,
             BackendRole.PLANNING,
         )
-        validate_runtime_provider_contract(
-            db,
-            BackendRole.EXECUTION,
-            runtime_configuration=execution_configuration,
-        )
-        validate_runtime_provider_contract(db, BackendRole.DEBUG_REPAIR)
+        # Resolving role configurations is not provider admission. A trusted
+        # stored Plan can complete through structured Orchestrator/Sandbox
+        # operations without inference. The role runtime validates its full
+        # provider contract immediately before execute_task/invoke_prompt, so
+        # any planning, execution, repair, or recovery inference still fails
+        # closed before the provider call.
         _resolved_execution_backend = execution_configuration.backend_name
         resolved_planning_backend = planning_configuration.backend_name
 

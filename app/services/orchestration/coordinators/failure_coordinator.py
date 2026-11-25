@@ -24,6 +24,7 @@ from app.runtime_naming import (
 from app.services.orchestration.events.event_types import EventType
 from app.services.orchestration.events.telemetry import record_phase_event
 from app.services.orchestration.diagnostics.outcome_observability import (
+    _durable_project_dir,
     build_failure_evidence,
     persist_failure_evidence,
     status_value,
@@ -357,6 +358,7 @@ class FailureCoordinator:
                 ),
                 "failure_category": getattr(exc, "failure_category", None),
                 "exception_type": type(exc).__name__,
+                "runtime_error_code": getattr(exc, "code", None),
                 "provider_failure_classification": getattr(
                     exc, "provider_failure_classification", None
                 ),
@@ -651,7 +653,7 @@ class FailureCoordinator:
                 timeout_classification=is_timeout,
                 authoritative_success_recorded=authoritative_success_recorded,
             ),
-            project_dir=getattr(orchestration_state, "project_dir", None),
+            project_dir=_durable_project_dir(ctx, orchestration_state),
             session_id=session_id,
             task_id=task_id,
             task_execution_id=task_execution_id,

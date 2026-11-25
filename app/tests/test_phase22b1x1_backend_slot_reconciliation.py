@@ -194,6 +194,16 @@ class TestSlotOwnerEvidence:
         assert _acquire(redis, 1, max_slots=1) is True
         assert _acquire(redis, 2, max_slots=1) is False
 
+    def test_authentication_failure_propagates_from_capacity_acquisition(self):
+        import redis as redis_module
+
+        class AuthenticationFailureRedis(FakeRedis):
+            def eval(self, *_args, **_kwargs):
+                raise redis_module.AuthenticationError("invalid test credential")
+
+        with pytest.raises(redis_module.AuthenticationError):
+            _acquire(AuthenticationFailureRedis(), 1)
+
     def test_fenced_release_refuses_when_evidence_changed(self):
         redis = FakeRedis()
         _acquire(redis, 111)
