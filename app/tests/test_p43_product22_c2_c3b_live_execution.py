@@ -996,6 +996,8 @@ def test_live_boundary_normalizes_mount_rendering_and_preserves_pin_independence
         "WORKER_CANDIDATE_PIN_PROTECTED_ROOT=" "/var/lib/orchestrator-worker/identity"
     ) in config
     assert f'-v "$ROOT/pin/worker-pin.json:{pin_path}:ro"' in runner
+    assert 'wait_for_worker_identity "$WORKER" "$worker_logs" 60' in runner
+    assert "required controlled Worker identity status was not established" in runner
     assert "| canonical_mounts)" in runner
     canonicalizer = re.search(r"(?ms)^canonical_mounts\(\) \{\n(.*?)^\}", runner)
     assert canonicalizer is not None
@@ -1151,6 +1153,62 @@ def test_broker_password_applies_only_in_disposable_mode(tmp_path, isolation):
     expected = "offline-test-only" if isolation else "None"
     assert (broker, backend) == (expected, expected)
     assert "offline-test-only" not in uri
+
+
+@pytest.mark.parametrize(
+    ("status", "logs", "expected"),
+    [
+        ("exited", "configuration error: invalid pin path", "exited during startup"),
+        (
+            "running",
+            "Worker boot identity manifest unavailable",
+            "identity status was not established",
+        ),
+        (
+            "running",
+            "Worker boot identity manifest created: status=IDENTITY_VERIFIED pin_status=PIN_MATCHED",
+            "Worker startup identity",
+        ),
+    ],
+)
+def test_worker_startup_gate_propagates_exit_and_identity_status(
+    tmp_path, status, logs, expected
+):
+    runner = LIVE_RUN_SCRIPT.read_text(encoding="utf-8")
+    function = re.search(r"(?ms)^wait_for_worker_identity\(\) \{\n(.*?)^\}", runner)
+    assert function is not None
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        f'case "$1" in inspect) echo {shlex.quote(status)} ;; '
+        f"logs) echo {shlex.quote(logs)} ;; esac\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    logs_path = tmp_path / "worker.log"
+    command = (
+        "set -eu\n"
+        'info() { echo "INFO $*"; }\n'
+        'refuse() { echo "FAIL $*" >&2; exit 78; }\n'
+        f"wait_for_worker_identity() {{\n{function.group(1)}}}\n"
+        f"wait_for_worker_identity worker {shlex.quote(str(logs_path))} 1\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", command],
+        env={"PATH": f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}"},
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    if status == "running" and "PIN_MATCHED" in logs:
+        assert result.returncode == 0, result.stderr
+        assert expected in result.stdout
+    else:
+        assert result.returncode == 78
+        assert expected in result.stderr
+    assert logs in logs_path.read_text(encoding="utf-8")
 
 
 LIVE_RUN_SCRIPT = REPO / "scripts" / "maintenance" / "p43_c2_live_run.sh"

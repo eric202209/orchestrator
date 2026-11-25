@@ -104,7 +104,7 @@ def _make_contract_fixture(tmp_path: Path) -> dict[str, str]:
         "WORKER_RUNTIME_ROOT": str(runtime_dir),
         "WORKER_CHECKPOINT_DIR": str(checkpoint_dir),
         "WORKER_IDENTITY_ROOT": str(identity_dir),
-        "WORKER_CANDIDATE_PIN_PATH": str(identity_dir / "worker-pin.json"),
+        "WORKER_CANDIDATE_PIN_PATH": "/run/secrets/worker-pin.json",
         "WORKER_CANDIDATE_PIN_PROTECTED_ROOT": str(identity_dir),
         "PLANNING_PROVIDER": "direct_openai_compatible",
         "AGENT_BACKEND": "direct_ollama",
@@ -178,6 +178,17 @@ def test_worker_entrypoint_accepts_structured_http_contract(tmp_path: Path) -> N
     result = _run_entrypoint(env, user=pwd.getpwnam("nobody"))
     assert result.returncode == 0, result.stderr
     assert "validation only" in result.stdout
+
+
+def test_worker_entrypoint_rejects_candidate_pin_inside_identity_mount(
+    tmp_path: Path,
+) -> None:
+    _skip_if_host_exposes_privileged_socket()
+    env = _make_contract_fixture(tmp_path)
+    env["WORKER_CANDIDATE_PIN_PATH"] = f"{env['WORKER_IDENTITY_ROOT']}/worker-pin.json"
+    result = _run_entrypoint(env, user=pwd.getpwnam("nobody"))
+    assert result.returncode == 78
+    assert "independent of the Worker identity mount" in result.stderr
 
 
 def test_worker_entrypoint_accepts_without_chown_capability(

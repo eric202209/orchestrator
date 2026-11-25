@@ -158,8 +158,10 @@ workspace_root=$(value_of WORKSPACE_ROOT)
 [ "$(value_of WORKER_CANDIDATE_PIN_PROTECTED_ROOT)" = "$identity_root" ] \
     || fail "Worker identity protection root is not the Worker identity mount"
 case "$(value_of WORKER_CANDIDATE_PIN_PATH)" in
-    "$identity_root"/*) ;;
-    *) fail "Worker candidate pin must remain inside the Worker identity mount" ;;
+    "$identity_root"|"$identity_root"/*)
+        fail "Worker candidate pin must be independent of the Worker identity mount" ;;
+    /*) ;;
+    *) fail "WORKER_CANDIDATE_PIN_PATH must be an absolute path" ;;
 esac
 
 assert_disjoint_path() {

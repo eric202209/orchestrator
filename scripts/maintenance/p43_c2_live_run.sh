@@ -47,6 +47,40 @@ info() { printf 'INFO %s\n' "$*"; }
 refuse() { echo "p43-c2-live-run: $*" >&2; exit 78; }
 need_approval() { [[ "${1:-}" == --operator-approved ]] || refuse "requires --operator-approved"; }
 
+wait_for_worker_identity() {
+    local worker_name="$1" logs_path="$2" startup_seconds="${3:-60}"
+    local worker_status="" identity_ready=0
+    for _ in $(seq "$startup_seconds"); do
+        worker_status=$(docker inspect --format '{{.State.Status}}' "$worker_name" 2>/dev/null || true)
+        docker logs "$worker_name" >"$logs_path" 2>&1 || true
+        if [[ $worker_status == exited || $worker_status == dead ]]; then
+            info "Worker exited during startup (status=${worker_status:-unavailable}); retained diagnostics:"
+            cat "$logs_path" >&2
+            refuse "Worker exited during startup"
+        fi
+        if [[ $worker_status == created ]]; then
+            sleep 1
+            continue
+        fi
+        if [[ $worker_status != running ]]; then
+            info "Worker startup state is unavailable or unexpected (status=${worker_status:-unavailable}); retained diagnostics:"
+            cat "$logs_path" >&2
+            refuse "Worker startup state could not be verified"
+        fi
+        if grep -Fq 'status=IDENTITY_VERIFIED pin_status=PIN_MATCHED' "$logs_path"; then
+            identity_ready=1
+            break
+        fi
+        sleep 1
+    done
+    if [[ $identity_ready -ne 1 ]]; then
+        info "Worker did not establish controlled identity within $startup_seconds seconds; retained diagnostics:"
+        cat "$logs_path" >&2
+        refuse "required controlled Worker identity status was not established"
+    fi
+    info "Worker startup identity: $(grep -F 'Worker boot identity manifest created:' "$logs_path" | tail -n 1)"
+}
+
 require_host() {
     [[ $EUID -eq 0 ]] || refuse "must run as root on the Host"
     [[ ! -e /.dockerenv && ! -e /run/.containerenv ]] || refuse "must run on the Host, not in a container"
@@ -246,10 +280,8 @@ print(json.dumps(pin, sort_keys=True))
         -v "$C2_RUN:$C2_RUN:ro" \
         -v "$C2_WORKER_KEY:/run/secrets/p43-sandbox-bridge-c2.key:ro" \
         "$IMAGE_TAG" >/dev/null
-    for _ in $(seq 60); do
-        docker logs "$WORKER" 2>&1 | grep -q 'Worker boot identity manifest' && break; sleep 1
-    done
-    docker logs "$WORKER" 2>&1 | grep 'Worker boot identity manifest' || bad "no boot identity line"
+    local worker_logs="$ROOT/env/worker-startup.log"
+    wait_for_worker_identity "$WORKER" "$worker_logs" 60
     info "setup complete; run: $0 boundary"
 }
 
