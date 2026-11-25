@@ -266,6 +266,7 @@ def validate_runtime_capabilities(
     effective_context_tokens: Optional[int] = None,
     required_context_tokens: int = MIN_REPAIR_CONTEXT_TOKENS,
     dispatch: bool = True,
+    defer_context_validation: bool = False,
     execution_topology: ExecutionTopology = ExecutionTopology.STRUCTURED_ORCHESTRATOR,
 ) -> dict[str, Any]:
     """Validate provider-neutral capabilities before explicit-role dispatch.
@@ -319,7 +320,11 @@ def validate_runtime_capabilities(
             if role is BackendRole.EXECUTION
             else required_context_tokens
         )
-        if dispatch and resolved_context is not None and resolved_context < required:
+        if (
+            not defer_context_validation
+            and resolved_context is not None
+            and resolved_context < required
+        ):
             raise RuntimeCapabilityError(
                 f"Runtime role '{role.value}' effective context {resolved_context} is below "
                 f"the required {required} tokens.",
@@ -1225,6 +1230,7 @@ def create_agent_runtime(
             role,
             effective_context_tokens=_configured_context_tokens(role),
             dispatch=False,
+            defer_context_validation=role is BackendRole.EXECUTION,
         )
     runtime_factory = get_runtime_factory(descriptor.name)
     if runtime_factory is not None:
