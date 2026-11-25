@@ -341,7 +341,7 @@ def test_built_worker_image_is_non_root_and_has_no_privileged_mounts() -> None:
         "-e",
         "WORKER_IDENTITY_ROOT=/var/lib/orchestrator-worker/identity",
         "-e",
-        "WORKER_CANDIDATE_PIN_PATH=/var/lib/orchestrator-worker/identity/worker-pin.json",
+        "WORKER_CANDIDATE_PIN_PATH=/run/secrets/p43-sandbox-bridge-c2-worker-pin.json",
         "-e",
         "WORKER_CANDIDATE_PIN_PROTECTED_ROOT=/var/lib/orchestrator-worker/identity",
         "-e",

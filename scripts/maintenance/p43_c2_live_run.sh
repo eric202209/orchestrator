@@ -127,7 +127,7 @@ authority_mounts() {
         -v "$ROOT/runtime:/var/lib/orchestrator-worker/runtime" \
         -v "$ROOT/checkpoints:/var/lib/orchestrator-worker/checkpoints" \
         -v "$ROOT/identity:/var/lib/orchestrator-worker/identity" \
-        -v "$ROOT/pin/worker-pin.json:/var/lib/orchestrator-worker/identity/worker-pin.json:ro" \
+        -v "$ROOT/pin/worker-pin.json:/run/secrets/p43-sandbox-bridge-c2-worker-pin.json:ro" \
         -v "$ROOT/workspace:/workspace/authoritative"
 }
 
@@ -258,6 +258,10 @@ expect() { # LABEL EXPECTED ACTUAL
     [[ "$2" == "$3" ]] && ok "$1" || bad "$1: expected '$2' got '$3'"
 }
 
+canonical_mounts() {
+    sed '/^$/d' | sort
+}
+
 cmd_boundary() {
     require_host
     # shellcheck disable=SC1091
@@ -270,13 +274,13 @@ cmd_boundary() {
     fmt='{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Privileged}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.HostConfig.Memory}} {{.HostConfig.NanoCpus}} {{.HostConfig.PidsLimit}} {{len .HostConfig.Devices}} pid=[{{.HostConfig.PidMode}}]'
     expect "Worker HostConfig" "true false [ALL] [no-new-privileges:true] 1073741824 1000000000 256 0 pid=[]" \
         "$(docker inspect "$WORKER" --format "$fmt")"
-    mounts=$(docker inspect "$WORKER" --format '{{range .Mounts}}{{.Source}}:{{.Destination}}:{{.RW}}{{"\n"}}{{end}}' | sort)
+    mounts=$(docker inspect "$WORKER" --format '{{range .Mounts}}{{.Source}}:{{.Destination}}:{{.RW}}{{"\n"}}{{end}}' | canonical_mounts)
     expected=$(printf '%s\n' \
         "$ROOT/db:/var/lib/orchestrator-worker/db:true" \
         "$ROOT/runtime:/var/lib/orchestrator-worker/runtime:true" \
         "$ROOT/checkpoints:/var/lib/orchestrator-worker/checkpoints:true" \
         "$ROOT/identity:/var/lib/orchestrator-worker/identity:true" \
-        "$ROOT/pin/worker-pin.json:/var/lib/orchestrator-worker/identity/worker-pin.json:false" \
+        "$ROOT/pin/worker-pin.json:/run/secrets/p43-sandbox-bridge-c2-worker-pin.json:false" \
         "$ROOT/workspace:/workspace/authoritative:true" \
         "$C2_RUN:$C2_RUN:false" \
         "$C2_WORKER_KEY:/run/secrets/p43-sandbox-bridge-c2.key:false" | sort)
@@ -343,6 +347,56 @@ cmd_submit() {
 }
 
 # ---------------------------------------------------------------- evidence
+preserve_worker_boot_identity_diagnostics() {
+    local source="$ROOT/runtime/worker-identities" owner
+    if [[ ! -d "$source" || -L "$source" ]]; then
+        info "no Worker boot identity directory to preserve"
+        return 0
+    fi
+    if [[ -e "$EVIDENCE" || -L "$EVIDENCE" ]]; then
+        [[ -d "$EVIDENCE" && ! -L "$EVIDENCE" ]] || return 1
+        owner=$(stat -c '%u' "$EVIDENCE")
+        [[ "$owner" == 0 || "$owner" == "$EUID" ]] || return 1
+    else
+        install -d -m 0700 "$EVIDENCE"
+    fi
+    chmod 0700 "$EVIDENCE"
+    /usr/bin/python3 -I - "$source" "$EVIDENCE" <<'PY' || return $?
+import json, pathlib, re, sys
+
+source, destination = map(pathlib.Path, sys.argv[1:])
+allowed = (
+    "schema_version", "candidate_head", "candidate_tree", "candidate_source_root",
+    "source_manifest_digest", "boot_timestamp", "worker_pid", "worker_start_ticks",
+    "worker_executable", "worker_cwd", "worker_argv", "worker_node_identity",
+    "configuration_fingerprint", "configuration_schema_version",
+    "configuration_policy_id", "identity_status", "record_id", "candidate_pin_status",
+    "candidate_pin_identity", "identity_status_reasons",
+)
+saved = 0
+for path in sorted(source.glob("worker-*.json")):
+    if path.is_symlink() or not path.is_file():
+        continue
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        record = manifest.get("record_id")
+        if not isinstance(record, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,160}", record):
+            continue
+        summary = {key: manifest[key] for key in allowed if key in manifest}
+        if not {"record_id", "identity_status", "candidate_pin_status", "identity_status_reasons"} <= summary.keys():
+            continue
+        target = destination / f"worker-boot-identity-{record}.json"
+        with target.open("x", encoding="utf-8") as handle:
+            json.dump(summary, handle, sort_keys=True)
+            handle.write("\n")
+        target.chmod(0o600)
+        saved += 1
+    except FileExistsError:
+        continue
+print(f"WORKER_BOOT_IDENTITY_DIAGNOSTICS={saved}")
+PY
+}
+
 cmd_evidence() {
     require_host
     local since; since=$(cat "$ROOT/env/submitted")
@@ -353,6 +407,7 @@ cmd_evidence() {
     docker image inspect "$IMAGE_TAG" --format '{{.Id}} {{.Created}}' >"$EVIDENCE/image.txt"
     docker logs "$WORKER" 2>&1 | grep -E 'boot identity|C2_SANDBOX|Received task|Reusing stored plan|Step 1|completed successfully|succeeded in|ERROR|WARNING' \
         >"$EVIDENCE/worker.log" || true
+    preserve_worker_boot_identity_diagnostics
     journalctl -u "$C2_SERVICE" -b --no-pager -o short-iso >"$EVIDENCE/launcher.journal" || true
     (cd /opt/p43-sandbox-bridge-c2/lib && runuser -u p43-sandbox-c2 -- /usr/bin/python3 -B -E -s -c '
 import sqlite3
@@ -373,6 +428,9 @@ for row in db.execute("SELECT request_id, admitted, status FROM sandbox_requests
 cmd_cleanup() {
     need_approval "${1:-}"
     [[ $EUID -eq 0 ]] || refuse "must run as root on the Host"
+    if ! preserve_worker_boot_identity_diagnostics; then
+        bad "Worker boot identity diagnostics could not be preserved"
+    fi
     docker rm -f p43-c2-submitter "$WORKER" >/dev/null 2>&1 || true
     systemctl stop "$C2_SERVICE" 2>/dev/null || true
     docker ps -a --format '{{.Names}}' | grep -E '^p43-sbx-c2-[0-9a-f]{32}$' | xargs -r docker rm -f || true

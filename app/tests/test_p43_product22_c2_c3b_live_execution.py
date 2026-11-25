@@ -731,7 +731,7 @@ def _launcher(release: Path) -> dict[str, Any]:
 
 
 def test_candidate_pin_worksheet_derives_from_the_staged_release(
-    staged_release, tmp_path
+    staged_release, tmp_path, monkeypatch, c2_env
 ):
     """The existing worksheet, run from the release itself, pins that release."""
 
@@ -757,8 +757,7 @@ def test_candidate_pin_worksheet_derives_from_the_staged_release(
         encoding="utf-8",
     )
     env = {
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        **_c2_environment(tmp_path / "c2"),
+        **c2_env,
         "WORKER_APP_ROOT": str(release),
         "WORKER_SOURCE_ROOT": str(release),
         "CONTROLLED_WORKER_NODE_IDENTITY": node,
@@ -829,6 +828,250 @@ def test_candidate_pin_worksheet_derives_from_the_staged_release(
     assert pin["launcher_identity"]["argv"][-1] == f"--hostname={node}"
     assert "--pool=solo" in pin["launcher_identity"]["argv"]
     assert "-m scripts.maintenance.worker_pin_worksheet" in runner
+
+    try:
+        _dockerfile_modes(release)
+        candidate_manifest = worker_identity.build_candidate_source_manifest(
+            release,
+            launcher_identity=sheet["OBSERVED_SOURCE"]["digest_launcher_identity"],
+            expected_head=head,
+            expected_tree=tree,
+        )
+    finally:
+        _restore_writable(release)
+
+    # Feed the worksheet-produced pin through the production Worker loader and
+    # boot verifier using a representative matching runtime identity.
+    pin_dir = tmp_path / "run-secrets"
+    protected_root = tmp_path / "protected-identity"
+    identity_dir = tmp_path / "runtime/worker-identities"
+    pin_dir.mkdir()
+    protected_root.mkdir()
+    pin_dir.chmod(0o700)
+    protected_root.chmod(0o700)
+    approved_pin_path = pin_dir / "worker-pin.json"
+    approved_pin_path.write_text(approved.stdout, encoding="utf-8")
+    approved_pin_path.chmod(0o444)
+    pin_load = worker_identity.load_candidate_identity_pin(
+        approved_pin_path,
+        source_root=release,
+        runtime_root=protected_root,
+        require_outside_runtime=True,
+    )
+    assert pin_load.status == worker_identity.PIN_LOADED, pin_load.reasons
+    assert set(pin["approval"]) == {
+        "operator_identity",
+        "approval_id",
+        "approved_at",
+        "expires_at",
+    }
+    in_root_pin = protected_root / "worker-pin.json"
+    in_root_pin.write_text(approved.stdout, encoding="utf-8")
+    in_root_pin.chmod(0o444)
+    rejected_path = worker_identity.load_candidate_identity_pin(
+        in_root_pin,
+        source_root=release,
+        runtime_root=protected_root,
+        require_outside_runtime=True,
+    )
+    assert rejected_path.status == worker_identity.PIN_INVALID
+    assert rejected_path.reasons == ("candidate_pin_path_not_independent",)
+
+    assert candidate_manifest.source_manifest_digest == pin["source_manifest_digest"]
+    module_by_name = {
+        module.module_name: module for module in candidate_manifest.resolved_modules
+    }
+
+    def loaded_candidate_modules(candidate):
+        records = []
+        for name in candidate.affected_modules:
+            module = module_by_name[name]
+            record = {
+                "module_name": name,
+                "expected_source_path": module.expected_source_path,
+                "resolved_source_path": module.expected_source_path,
+                "expected_source_sha256": module.source_sha256,
+                "source_sha256": module.source_sha256,
+                "loaded": True,
+            }
+            if name == worker_identity.EVALUATOR_MODULE_NAME:
+                record["evaluator_identity_status"] = (
+                    worker_identity.LOADED_MODULE_IDENTITY_VERIFIED
+                )
+            records.append(record)
+        return tuple(records)
+
+    monkeypatch.setattr(
+        worker_identity, "capture_loaded_module_provenance", loaded_candidate_modules
+    )
+    launcher = pin["launcher_identity"]
+    process = worker_identity.ProcessIdentity(
+        pid=501,
+        linux_boot_id="p43-pin-verification-probe",
+        start_ticks="501",
+        executable=launcher["executable"],
+        cwd=launcher["cwd"],
+        argv=tuple(launcher["argv"]),
+        ppid=1,
+        pgid=501,
+        sid=501,
+    )
+    configuration_probe = subprocess.run(
+        [
+            interpreter,
+            "-c",
+            "import json; from scripts.maintenance.worker_pin_worksheet "
+            "import _configuration_identity; "
+            "print(json.dumps(_configuration_identity(1)))",
+        ],
+        cwd=release,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert configuration_probe.returncode == 0, configuration_probe.stderr[-2000:]
+    runtime_configuration = tuple(json.loads(configuration_probe.stdout))
+    assert runtime_configuration[0] == pin["configuration_fingerprint"]
+    projection = runtime_configuration[1]
+    assert projection["schema_version"] == pin["configuration_schema_version"]
+    assert projection["projection_policy_id"] == pin["configuration_policy_id"]
+
+    def create_boot(pin_result, target_dir):
+        try:
+            _dockerfile_modes(release)
+            return worker_identity.create_worker_boot_identity(
+                source_root=release,
+                identity_dir=target_dir,
+                candidate_manifest=candidate_manifest,
+                candidate_pin_load=pin_result,
+                worker_node_identity=pin["worker_node_identity"],
+                registered_tasks=worker_identity.EXPECTED_TASK_REGISTRATIONS,
+                configuration_fingerprint=runtime_configuration,
+                process_identity=process,
+                child_identities=(),
+            )
+        finally:
+            _restore_writable(release)
+
+    _manifest_path, boot = create_boot(pin_load, identity_dir)
+    assert boot.identity_status == worker_identity.IDENTITY_VERIFIED
+    assert boot.candidate_pin_status == worker_identity.PIN_MATCHED
+
+    mismatched_pin = dict(pin)
+    mismatched_pin["candidate_tree"] = (
+        "1" if pin["candidate_tree"][0] != "1" else "2"
+    ) + pin["candidate_tree"][1:]
+    mismatch_dir = tmp_path / "mismatched-pin"
+    mismatch_dir.mkdir(mode=0o700)
+    mismatch_dir.chmod(0o700)
+    mismatch_path = mismatch_dir / "worker-pin.json"
+    mismatch_path.write_text(json.dumps(mismatched_pin), encoding="utf-8")
+    mismatch_path.chmod(0o444)
+    mismatch_load = worker_identity.load_candidate_identity_pin(
+        mismatch_path,
+        source_root=release,
+        runtime_root=protected_root,
+        require_outside_runtime=True,
+    )
+    assert mismatch_load.status == worker_identity.PIN_LOADED
+    _manifest_path, mismatched_boot = create_boot(
+        mismatch_load, tmp_path / "mismatched-runtime/worker-identities"
+    )
+    assert mismatched_boot.identity_status == worker_identity.IDENTITY_MISMATCH
+    assert mismatched_boot.candidate_pin_status == worker_identity.PIN_MISMATCHED
+    assert "boot_pinned_candidate_tree_mismatch" in (
+        mismatched_boot.identity_status_reasons
+    )
+
+
+def test_live_boundary_normalizes_mount_rendering_and_preserves_pin_independence(
+    tmp_path,
+):
+    config = (REPO / "config/worker-c2-live.env.example").read_text(encoding="utf-8")
+    runner = LIVE_RUN_SCRIPT.read_text(encoding="utf-8")
+    pin_path = "/run/secrets/p43-sandbox-bridge-c2-worker-pin.json"
+    assert f"WORKER_CANDIDATE_PIN_PATH={pin_path}" in config
+    assert (
+        "WORKER_CANDIDATE_PIN_PROTECTED_ROOT=" "/var/lib/orchestrator-worker/identity"
+    ) in config
+    assert f'-v "$ROOT/pin/worker-pin.json:{pin_path}:ro"' in runner
+    assert "| canonical_mounts)" in runner
+    canonicalizer = re.search(r"(?ms)^canonical_mounts\(\) \{\n(.*?)^\}", runner)
+    assert canonicalizer is not None
+    command = "canonical_mounts() {\n" + canonicalizer.group(1) + "}\ncanonical_mounts"
+    expected = sorted(("/host/a:/worker/a:true", "/host/b:/worker/b:false"))
+
+    def normalize(raw: str) -> list[str]:
+        result = subprocess.run(
+            ["bash", "-c", command], input=raw, capture_output=True, text=True
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout.splitlines()
+
+    # Docker CLI adds a terminal newline after the Go template's per-mount
+    # newline. Blank records and mount order are representation details.
+    assert (
+        normalize("\n/host/b:/worker/b:false\n\n/host/a:/worker/a:true\n\n") == expected
+    )
+    for changed in (
+        "/host/a:/worker/a:true",
+        "/host/a:/worker/a:false\n/host/b:/worker/b:false",
+        "/host/a:/worker/a:true\n/host/b:/worker/b:false\n/host/c:/worker/c:false",
+        "/host/a:/worker/a:true\n/host/a:/worker/a:true\n/host/b:/worker/b:false",
+    ):
+        assert normalize(changed) != expected
+
+    cleanup = runner[runner.index("cmd_cleanup() {") :]
+    assert cleanup.index("preserve_worker_boot_identity_diagnostics") < cleanup.index(
+        "docker rm -f p43-c2-submitter"
+    )
+
+    evidence_function = re.search(
+        r"(?ms)^preserve_worker_boot_identity_diagnostics\(\) \{\n(.*?)^\}",
+        runner,
+    )
+    assert evidence_function is not None
+    source = tmp_path / "runtime/worker-identities"
+    source.mkdir(parents=True)
+    evidence = tmp_path / "evidence"
+    (source / "worker-probe.json").write_text(
+        json.dumps(
+            {
+                "record_id": "probe-1",
+                "identity_status": "IDENTITY_INCONCLUSIVE",
+                "candidate_pin_status": "PIN_INVALID",
+                "identity_status_reasons": ["candidate_pin_path_not_independent"],
+                "candidate_head": "a" * 40,
+                "worker_argv": ["celery", "worker"],
+                "redis_password": "must-not-be-preserved",
+            }
+        ),
+        encoding="utf-8",
+    )
+    preserve_command = (
+        "set -euo pipefail\n"
+        f"ROOT={shlex.quote(str(tmp_path))}\n"
+        f"EVIDENCE={shlex.quote(str(evidence))}\n"
+        "info() { :; }\n"
+        "preserve_worker_boot_identity_diagnostics() {\n"
+        + evidence_function.group(1)
+        + "}\npreserve_worker_boot_identity_diagnostics\n"
+    )
+    preserved = subprocess.run(
+        ["bash", "-c", preserve_command], capture_output=True, text=True
+    )
+    assert preserved.returncode == 0, preserved.stderr
+    files = list(evidence.glob("worker-boot-identity-*.json"))
+    assert len(files) == 1
+    diagnostic = json.loads(files[0].read_text(encoding="utf-8"))
+    assert diagnostic["identity_status"] == "IDENTITY_INCONCLUSIVE"
+    assert diagnostic["candidate_pin_status"] == "PIN_INVALID"
+    assert diagnostic["identity_status_reasons"] == [
+        "candidate_pin_path_not_independent"
+    ]
+    assert "redis_password" not in diagnostic
+    assert stat.S_IMODE(files[0].stat().st_mode) == 0o600
 
 
 # --- Worker entrypoint launch line -----------------------------------------
