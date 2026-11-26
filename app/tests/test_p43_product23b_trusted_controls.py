@@ -20,8 +20,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
+import sqlite3
 import subprocess
+import time
 
 import pytest
 
@@ -32,6 +35,7 @@ from app.services.orchestration.execution.sandbox_gateway import (
     build_workspace_snapshot,
 )
 from app.services.sandbox_bridge.contract import ExecutionResult
+from app.services.sandbox_bridge.ledger import RequestLedger
 from app.tests import test_p43_product22_c2_c3b_live_execution as c3b
 from app.tests import test_p43_product23a_contained_coding as c23a
 from scripts.maintenance import p43_c2_trusted_submitter as submitter
@@ -598,3 +602,259 @@ def test_live_run_refuses_unknown_controls_before_host_actions():
             timeout=30,
         )
         assert out.returncode == 78 and reason in out.stderr, out.stderr
+
+
+# --- Retained C2 ledger: per-window baseline (PRODUCT-23B correction) -------
+
+PRODUCT22_REQUEST = "e0bbff3c-e67b-4bee-8fc4-174e76d35171"
+_LEDGER_FUNCTIONS = (
+    "ledger_snapshot",
+    "ledger_verify",
+    "ledger_check",
+    "window_start",
+    "preserve_ledger_attribution",
+)
+
+
+def _runner_functions() -> str:
+    runner = LIVE_RUN.read_text(encoding="utf-8")
+    out = []
+    for name in _LEDGER_FUNCTIONS:
+        match = re.search(rf"(?ms)^{name}\(\) \{{.*?\n(.*?)^\}}", runner)
+        assert match is not None, name
+        out.append(f"{name}() {{\n{match.group(1)}}}\n")
+    return "".join(out)
+
+
+class _Window:
+    """The committed runner ledger functions against a real RequestLedger.
+
+    ``runuser`` is stubbed to run as the current user; the Host runs the same
+    read-only snapshot as the C2 service user.
+    """
+
+    def __init__(self, tmp_path: Path):
+        self.ledger = tmp_path / "state" / "ledger" / "ledger.sqlite3"
+        self.root = tmp_path / "root"
+        self.evidence = tmp_path / "evidence"
+        (self.root / "env").mkdir(parents=True)
+
+    def run(self, body: str) -> subprocess.CompletedProcess:
+        script = (
+            "set -euo pipefail\n"
+            f"C2_LEDGER={shlex.quote(str(self.ledger))}\n"
+            f"ROOT={shlex.quote(str(self.root))}\n"
+            f"EVIDENCE={shlex.quote(str(self.evidence))}\n"
+            'runuser() { shift 3; "$@"; }\n' + _runner_functions() + body
+        )
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    def baseline(self) -> dict:
+        out = self.run('ledger_snapshot >"$ROOT/env/ledger-baseline.json"\n')
+        assert out.returncode == 0, out.stderr
+        return json.loads((self.root / "env/ledger-baseline.json").read_text())
+
+    def check(self, name: str, start: float | None = None) -> tuple[int, dict]:
+        arg = "" if start is None else shlex.quote(repr(start))
+        out = self.run(f"ledger_check {name} {arg}\n")
+        report = self.root / "env" / f"ledger-{name}.json"
+        assert report.is_file(), out.stderr
+        return out.returncode, json.loads(report.read_text())
+
+    def launcher(self) -> RequestLedger:  # Launcher startup opens the ledger
+        self.ledger.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        return RequestLedger(self.ledger)
+
+
+def _historical_product22(window: _Window) -> None:
+    ledger = window.launcher()
+    assert ledger.admit(PRODUCT22_REQUEST)
+    ledger.terminal(PRODUCT22_REQUEST, "SUCCESS")
+
+
+def test_ledger_baseline_supports_a_fresh_empty_ledger(tmp_path):
+    window = _Window(tmp_path)
+    baseline = window.baseline()
+    assert baseline["present"] is False and baseline["requests"] == []
+    window.launcher()
+    assert window.check("boundary") == (
+        0,
+        {
+            "verdict": "PASS",
+            "violations": [],
+            "baseline_taken_at": baseline["taken_at"],
+            "window_start": None,
+            "historical": [],
+            "current_window": [],
+        },
+    )
+    start = time.time()
+    current = "11111111-1111-4111-8111-111111111111"
+    window.launcher().admit(current)
+    rc, report = window.check("final", start)
+    assert rc == 0 and [r["request_id"] for r in report["current_window"]] == [current]
+
+
+def test_retained_historical_success_does_not_block_a_new_window(tmp_path):
+    window = _Window(tmp_path)
+    _historical_product22(window)
+    baseline = window.baseline()
+    assert [
+        (r["request_id"], r["status"], r["tombstoned"]) for r in baseline["requests"]
+    ] == [(PRODUCT22_REQUEST, "SUCCESS", True)]
+    ledger = window.launcher()  # this window's Launcher startup
+    rc, report = window.check("boundary")
+    assert rc == 0, report
+    assert report["historical"] == [
+        {
+            "request_id": PRODUCT22_REQUEST,
+            "admitted": baseline["requests"][0]["admitted"],
+            "status_before": "SUCCESS",
+            "status_now": "SUCCESS",
+        }
+    ]
+    assert report["current_window"] == []
+    # The aggregate-count assertion that blocked the first window is gone.
+    assert '"ledger": {}' not in LIVE_RUN.read_text(encoding="utf-8")
+
+    start = time.time()
+    current = "22222222-2222-4222-8222-222222222222"
+    assert ledger.admit(current)
+    ledger.terminal(current, "SUCCESS")
+    rc, report = window.check("final", start)
+    assert rc == 0, report
+    assert [r["request_id"] for r in report["historical"]] == [PRODUCT22_REQUEST]
+    assert report["current_window"] == [
+        {
+            "request_id": current,
+            "admitted": report["current_window"][0]["admitted"],
+            "status": "SUCCESS",
+        }
+    ]
+    assert report["current_window"][0]["admitted"] >= start
+    # Replay protection is intact for both the historical and the new request.
+    assert ledger.admit(PRODUCT22_REQUEST) is False
+    assert ledger.admit(current) is False
+
+
+def test_unexpected_admission_before_submission_fails_closed(tmp_path):
+    window = _Window(tmp_path)
+    _historical_product22(window)
+    window.baseline()
+    early = "33333333-3333-4333-8333-333333333333"
+    window.launcher().admit(early)
+    rc, report = window.check("boundary")
+    assert rc == 1 and report["verdict"] == "FAIL"
+    assert report["violations"] == [f"unexpected_admission_before_submission:{early}"]
+    # Nor can it be attributed to a submission that came after it.
+    rc, report = window.check("final", time.time() + 60)
+    assert rc == 1
+    assert report["violations"] == [f"unattributed_admission:{early}"]
+
+
+@pytest.mark.parametrize(
+    ("mutation", "violation"),
+    [
+        (
+            "UPDATE sandbox_requests SET status='FAILED' WHERE request_id=?",
+            "historical_modified",
+        ),
+        (
+            "UPDATE sandbox_requests SET admitted=admitted+1 WHERE request_id=?",
+            "historical_modified",
+        ),
+        ("DELETE FROM sandbox_requests WHERE request_id=?", "historical_removed"),
+        (
+            "UPDATE replay_bloom SET bits=zeroblob(length(bits)) WHERE ?=?",
+            "historical_tombstone_cleared",
+        ),
+        (
+            "DELETE FROM replay_bloom WHERE ?=?",
+            "ledger_absent_or_replay_bloom_incomplete",
+        ),
+    ],
+)
+def test_historical_record_change_or_removal_is_detected(tmp_path, mutation, violation):
+    window = _Window(tmp_path)
+    _historical_product22(window)
+    window.baseline()
+    window.launcher()
+    params = (PRODUCT22_REQUEST,) * mutation.count("?")
+    with sqlite3.connect(window.ledger) as db:
+        db.execute(mutation, params)
+    rc, report = window.check("boundary")
+    assert rc == 1 and report["verdict"] == "FAIL"
+    assert any(v.startswith(violation) for v in report["violations"]), report
+
+
+def test_startup_reclassification_of_an_uncertain_request_is_lifecycle(tmp_path):
+    # RequestLedger startup turns an ACCEPTED row (uncertain outcome) into
+    # INTERNAL_ERROR; that is the only change a historical row may undergo.
+    window = _Window(tmp_path)
+    assert window.launcher().admit(PRODUCT22_REQUEST)
+    assert window.baseline()["requests"][0]["status"] == "ACCEPTED"
+    window.launcher()
+    rc, report = window.check("boundary")
+    assert rc == 0, report
+    assert (
+        report["historical"][0]["status_before"],
+        report["historical"][0]["status_now"],
+    ) == ("ACCEPTED", "INTERNAL_ERROR")
+
+
+def test_runner_takes_the_baseline_before_launcher_start_and_checks_each_stage(
+    tmp_path,
+):
+    runner = LIVE_RUN.read_text(encoding="utf-8")
+    setup = runner[runner.index("cmd_setup() {") : runner.index("cmd_boundary() {")]
+    assert (
+        setup.index("C2 Launcher active before the ledger baseline")
+        < setup.index('ledger_snapshot >"$ROOT/env/ledger-baseline.json"')
+        < setup.index('systemctl start "$C2_SERVICE"')
+    )
+    assert "ledger_check boundary &&" in runner[runner.index("cmd_boundary() {") :]
+    submit = runner[runner.index("cmd_submit() {") : runner.index("cmd_evaluate() {")]
+    assert submit.index(
+        'ledger_check "pre-submit$sfx" "$(window_start)"'
+    ) < submit.index('date -u +%Y-%m-%dT%H:%M:%SZ >"$ROOT/env/submitted$sfx"')
+    evidence = runner[
+        runner.index("cmd_evidence() {") : runner.index("cmd_cleanup() {")
+    ]
+    assert 'ledger_check final "$(window_start)" || ledger_rc=1' in evidence
+    cleanup = runner[runner.index("cmd_cleanup() {") :]
+    assert cleanup.index("ledger_check cleanup") < cleanup.index(
+        'rm -rf --one-file-system -- "$ROOT"'
+    )
+    # The persistent ledger and its tombstones are never removed or reset.
+    for line in runner.splitlines():
+        if re.search(r"\brm\b|DELETE|DROP|truncate", line):
+            assert "C2_LEDGER" not in line and "p43-sandbox-bridge-c2" not in line, line
+    host = HOST_SCRIPT.read_text(encoding="utf-8")
+    rollback = host[host.index("c2_rollback() {") :]
+    assert "preserved for evidence: $C2_STATE (ledger, staging)" in rollback
+    assert "C2_STATE" not in rollback[: rollback.index("preserved for evidence")]
+
+    # window_start is empty before the first submission, then its epoch.
+    window = _Window(tmp_path)
+    assert window.run("window_start\n").stdout == ""
+    (window.root / "env/submitted").write_text("2026-11-26T10:00:00Z\n")
+    assert window.run("window_start\n").stdout.strip() == "1795687200"
+
+
+def test_cleanup_preserves_ledger_attribution_without_overwriting(tmp_path):
+    window = _Window(tmp_path)
+    env = window.root / "env"
+    (env / "ledger-baseline.json").write_text("new-baseline")
+    (env / "ledger-cleanup.json").write_text("cleanup")
+    window.evidence.mkdir()
+    (window.evidence / "ledger-baseline.json").write_text("from-evidence")
+    out = window.run("preserve_ledger_attribution\n")
+    assert out.returncode == 0, out.stderr
+    assert (window.evidence / "ledger-baseline.json").read_text() == "from-evidence"
+    assert (window.evidence / "ledger-cleanup.json").read_text() == "cleanup"
+    link = tmp_path / "evidence-link"
+    link.symlink_to(window.evidence)
+    out = window.run(
+        f"EVIDENCE={shlex.quote(str(link))}\npreserve_ledger_attribution\n"
+    )
+    assert out.returncode == 1

@@ -26,6 +26,10 @@
 # reference control reach the submitter; the hidden suite is mounted only into
 # the network-less evaluation container on the pinned pytest image.
 #
+# The persistent C2 ledger is never reset: setup snapshots it before Launcher
+# startup and every later stage verifies against that baseline by request ID
+# (ledger-*.json in the evidence separates historical and current-window rows).
+#
 # Every resource it creates is named p43-c2-* / orchestrator-worker:c2c3b or
 # lives under /srv/p43-c2. It never modifies p43-sandbox-bridge.service (C1B),
 # ai-agent, the production database, Redis, or workspace. No automatic retry.
@@ -46,6 +50,7 @@ C2_SERVICE=p43-sandbox-bridge-c2.service
 C1B_SERVICE=p43-sandbox-bridge.service
 C2_RUN=/run/p43-sandbox-bridge-c2
 C2_WORKER_KEY=/etc/p43-sandbox-bridge-c2/worker.key
+C2_LEDGER=/var/lib/p43-sandbox-bridge-c2/ledger/ledger.sqlite3
 AI_AGENT=ai-agent
 # The Sandbox image the Launcher already pins; reused as the Worker base.
 BASE_IMAGE=$(sed -n 's/^IMAGE = "\(.*\)"$/\1/p' "$REPO/app/services/sandbox_bridge/docker_executor.py")
@@ -136,6 +141,112 @@ c1b_fingerprint() {
         "$(systemctl show "$C1B_SERVICE" -p MainPID -p ActiveEnterTimestamp --value | tr '\n' ' ')" \
         "$(sha256sum /opt/p43-sandbox-bridge/MANIFEST.sha256 2>/dev/null | cut -d' ' -f1)" \
         "$(docker inspect "$AI_AGENT" --format '{{.Id}} {{.State.StartedAt}}' 2>/dev/null)"
+}
+
+# The C2 ledger persists across windows (replay protection), so a window is
+# judged against a baseline taken before its Launcher starts, by request
+# identity: historical rows must survive unchanged and stay tombstoned, and a
+# new row is valid only once this window has submitted a control.
+ledger_snapshot() { # read-only JSON snapshot, as the service user (owner of the WAL files)
+    [[ ! -L $C2_LEDGER ]] || return 1
+    if [[ ! -e $C2_LEDGER ]]; then # fresh Host: the Launcher creates the ledger
+        printf '{"bloom_buckets": 0, "present": false, "requests": [], "taken_at": %s}\n' "$(date +%s)"
+        return 0
+    fi
+    (cd / && runuser -u p43-sandbox-c2 -- /usr/bin/python3 -I - "$C2_LEDGER") <<'PY'
+import hashlib, json, sqlite3, sys, time
+
+BITS = 1 << 18  # RequestLedger.BITS; positions as RequestLedger.admit (pinned by tests)
+taken_at = time.time()
+db = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=10)
+try:
+    db.execute("BEGIN")
+    rows = db.execute(
+        "SELECT request_id, admitted, status FROM sandbox_requests ORDER BY admitted, request_id"
+    ).fetchall()
+    bloom = {b: bits for b, bits in db.execute("SELECT bucket, bits FROM replay_bloom") if len(bits) == BITS // 8}
+finally:
+    db.close()
+
+
+def tombstoned(request_id):
+    digest = hashlib.sha256(request_id.encode()).digest()
+    bits = bloom.get(digest[0])
+    positions = [int.from_bytes(digest[i : i + 4], "big") % BITS for i in (1, 5, 9, 13)]
+    return bits is not None and all(bits[p // 8] & (1 << (p % 8)) for p in positions)
+
+
+requests = [
+    {"request_id": r, "admitted": a, "status": s, "tombstoned": tombstoned(r)} for r, a, s in rows
+]
+print(json.dumps({"present": True, "taken_at": taken_at, "bloom_buckets": len(bloom), "requests": requests}, sort_keys=True))
+PY
+}
+
+ledger_verify() { # BASELINE CURRENT [WINDOW_START_EPOCH]; attribution JSON, exit 1 on any violation
+    /usr/bin/python3 -I - "$@" <<'PY'
+import json, sys
+
+
+def load(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+baseline, current = load(sys.argv[1]), load(sys.argv[2])
+window_start = float(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
+before = {r["request_id"]: r for r in baseline["requests"]}
+now = {r["request_id"]: r for r in current["requests"]}
+violations = []
+if not current["present"] or current["bloom_buckets"] != 256:
+    violations.append("ledger_absent_or_replay_bloom_incomplete")
+historical = []
+for rid, old in before.items():
+    if old["admitted"] > baseline["taken_at"]:
+        violations.append(f"baseline_row_after_snapshot:{rid}")
+    row = now.get(rid)
+    if row is None:
+        violations.append(f"historical_removed:{rid}")
+        continue
+    # Launcher startup reclassifies an uncertain ACCEPTED row; nothing else may change.
+    lifecycle = (old["status"], row["status"]) == ("ACCEPTED", "INTERNAL_ERROR")
+    if row["admitted"] != old["admitted"] or (row["status"] != old["status"] and not lifecycle):
+        violations.append(f"historical_modified:{rid}")
+    if not row["tombstoned"]:
+        violations.append(f"historical_tombstone_cleared:{rid}")
+    historical.append({"request_id": rid, "admitted": old["admitted"],
+                       "status_before": old["status"], "status_now": row["status"]})
+window = []
+for rid, row in now.items():
+    if rid in before:
+        continue
+    if window_start is None:
+        violations.append(f"unexpected_admission_before_submission:{rid}")
+    elif row["admitted"] < window_start or row["admitted"] <= baseline["taken_at"]:
+        violations.append(f"unattributed_admission:{rid}")
+    if not row["tombstoned"]:
+        violations.append(f"window_request_not_tombstoned:{rid}")
+    window.append({"request_id": rid, "admitted": row["admitted"], "status": row["status"]})
+report = dict(
+    verdict="FAIL" if violations else "PASS", violations=violations,
+    baseline_taken_at=baseline["taken_at"], window_start=window_start,
+    historical=historical, current_window=window,
+)
+print(json.dumps(report, indent=2, sort_keys=True))
+sys.exit(1 if violations else 0)
+PY
+}
+
+ledger_check() { # NAME [WINDOW_START_EPOCH]: snapshot now, verify against the baseline
+    local name=$1; shift
+    ledger_snapshot >"$ROOT/env/ledger-$name.snapshot.json" || return 1
+    ledger_verify "$ROOT/env/ledger-baseline.json" "$ROOT/env/ledger-$name.snapshot.json" "$@" \
+        >"$ROOT/env/ledger-$name.json"
+}
+
+window_start() { # epoch of this window's first submission; empty before it
+    [[ -f $ROOT/env/submitted ]] || return 0
+    date -u -d "$(cat "$ROOT/env/submitted")" +%s
 }
 
 check_no_c2_containers() { # ABSENT_LABEL PRESENT_LABEL; failed inspection is never absence
@@ -249,6 +360,12 @@ cmd_setup() {
     local orphan
     orphan=p43-sbx-c2-$(/usr/bin/python3 -c 'import uuid; print(uuid.uuid4().hex)')
     docker create --pull=never --name "$orphan" --network none "$PYTEST_IMAGE" true >/dev/null
+    # Ledger baseline: only the Launcher admits, so rows present while it is
+    # inactive are historical (retained by design; never reset or rewritten).
+    systemctl is-active --quiet "$C2_SERVICE" && refuse "C2 Launcher active before the ledger baseline"
+    ledger_snapshot >"$ROOT/env/ledger-baseline.json" || refuse "C2 ledger baseline could not be read"
+    info "C2 ledger baseline: $(/usr/bin/python3 -I -c 'import json, sys; print(len(json.load(open(sys.argv[1]))["requests"]))' \
+        "$ROOT/env/ledger-baseline.json") historical request(s)"
     systemctl start "$C2_SERVICE"
     for _ in $(seq 50); do [[ -S $C2_RUN/launcher.sock ]] && break; sleep 0.2; done
     [[ -S $C2_RUN/launcher.sock ]] || refuse "C2 Launcher socket did not appear"
@@ -392,8 +509,9 @@ print("NO_EGRESS")'
     expect "Redis container" "true false [ALL] $REDIS_UID:$REDIS_UID $NET" "$(docker inspect "$REDIS" --format "$fmt")"
     systemctl is-active --quiet "$C2_SERVICE" && ok "C2 Launcher active" || bad "C2 Launcher inactive"
     strict_launcher_started && ok "strict Launcher startup line" || bad "strict Launcher startup line missing"
-    expect "C2 ledger empty before submission" '"ledger": {}' \
-        "$(cd /opt/p43-sandbox-bridge-c2/lib && runuser -u p43-sandbox-c2 -- env P43_SANDBOX_BRIDGE_INSTANCE=c2 /usr/bin/python3 -B -E -s -m sandbox_bridge.host_service status c2 | grep -o '"ledger": {[^}]*}')"
+    ledger_check boundary &&
+        ok "C2 ledger: historical requests preserved and tombstoned; no admission before submission" ||
+        bad "C2 ledger baseline check: $(cat "$ROOT/env/ledger-boundary.json" 2>/dev/null || echo unreadable)"
     docker inspect "$AI_AGENT" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' |
         grep -Eq '^(/etc/p43-sandbox-bridge-c2|/var/lib/p43-sandbox-bridge-c2|/run/p43-sandbox-bridge-c2|/srv/p43-c2)(/|$)' &&
         bad "ai-agent mounts C2 material" || ok "ai-agent mounts no C2 material"
@@ -430,6 +548,10 @@ cmd_submit() {
         [[ -d $ROOT/u1-submit ]] || refuse "U1 material not staged (set P43_C2_U1_EVIDENCE before setup)"
         material=(-v "$ROOT/u1-submit:/run/p43-u1-material:ro")
     fi
+    # Before the first submission no new row may exist; later ones may only
+    # follow this window's first submission.
+    ledger_check "pre-submit$sfx" "$(window_start)" ||
+        refuse "C2 ledger check failed before $control: $(cat "$ROOT/env/ledger-pre-submit$sfx.json" 2>/dev/null || echo unreadable)"
     date -u +%Y-%m-%dT%H:%M:%SZ >"$ROOT/env/submitted$sfx"
     [[ -e $ROOT/env/submitted ]] || cp "$ROOT/env/submitted$sfx" "$ROOT/env/submitted"
     # Same image, same DB; no Launcher key/socket; shares only the Worker PID
@@ -568,6 +690,10 @@ import sqlite3
 db = sqlite3.connect("file:/var/lib/p43-sandbox-bridge-c2/ledger/ledger.sqlite3?mode=ro", uri=True)
 for row in db.execute("SELECT request_id, admitted, status FROM sandbox_requests ORDER BY admitted"):
     print(*row)') >"$EVIDENCE/ledger.txt" || true
+    # Historical vs current-window attribution (ledger.txt is the raw table).
+    local ledger_rc=0
+    ledger_check final "$(window_start)" || ledger_rc=1
+    preserve_ledger_attribution
     docker events --since "$since" --until "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --filter type=container \
         --format '{{.TimeNano}} {{.Action}} {{.Actor.Attributes.name}} {{.Actor.Attributes.image}}' |
         grep ' p43-sbx-c2-' >"$EVIDENCE/docker-events.txt" || true
@@ -576,6 +702,18 @@ for row in db.execute("SELECT request_id, admitted, status FROM sandbox_requests
         "$ROOT/db/orchestrator.db" "$EVIDENCE/orchestrator.db"
     chmod 0600 "$EVIDENCE"/*
     info "evidence in $EVIDENCE (no credentials)"
+    [[ $ledger_rc -eq 0 ]] || { info "C2 ledger attribution failed: see $EVIDENCE/ledger-final.json"; return 1; }
+}
+
+preserve_ledger_attribution() { # copy ledger-*.json from the disposable root; never overwrite
+    local f
+    [[ -d $ROOT/env ]] || return 0
+    [[ ! -L $EVIDENCE ]] || return 1
+    [[ -d $EVIDENCE ]] || install -d -m 0700 "$EVIDENCE"
+    for f in "$ROOT"/env/ledger-*.json; do
+        [[ -f $f && ! -L $f && ! -e $EVIDENCE/$(basename "$f") ]] && cp -- "$f" "$EVIDENCE/"
+    done
+    chmod 0600 "$EVIDENCE"/ledger-*.json 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------- cleanup
@@ -592,6 +730,15 @@ cmd_cleanup() {
     docker network rm "$NET" >/dev/null 2>&1 || true
     docker image rm "$IMAGE_TAG" >/dev/null 2>&1 || true
     "$HOST_SCRIPT" c2-rollback --operator-approved
+    # The persistent ledger is never removed here; verify it survived the window.
+    if [[ -f $ROOT/env/ledger-baseline.json ]]; then
+        ledger_check cleanup "$(window_start)" &&
+            ok "historical C2 ledger preserved; current-window requests attributed" ||
+            bad "C2 ledger after cleanup: $(cat "$ROOT/env/ledger-cleanup.json" 2>/dev/null || echo unreadable)"
+        preserve_ledger_attribution || bad "C2 ledger attribution could not be preserved"
+    else
+        info "no C2 ledger baseline (setup did not reach Launcher startup)"
+    fi
     local before=""
     [[ -f $ROOT/env/c1b-before ]] && before=$(cat "$ROOT/env/c1b-before")
     rm -rf --one-file-system -- "$ROOT"
