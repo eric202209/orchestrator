@@ -126,12 +126,20 @@ c1b_fingerprint() {
         "$(docker inspect "$AI_AGENT" --format '{{.Id}} {{.State.StartedAt}}' 2>/dev/null)"
 }
 
+check_no_c2_containers() { # ABSENT_LABEL PRESENT_LABEL; failed inspection is never absence
+    local names
+    if ! names=$(docker ps -a --format '{{.Names}}'); then
+        bad "container inspection failed"
+        return 0
+    fi
+    grep -Eq '^(p43-c2-|p43-sbx-c2-)' <<<"$names" && bad "$2" || ok "$1"
+}
+
 # ---------------------------------------------------------------- check
 cmd_check() {
     require_inputs
     require_host
-    docker ps -a --format '{{.Names}}' | grep -Eq '^(p43-c2-|p43-sbx-c2-)' &&
-        bad "a p43-c2-*/p43-sbx-c2-* container already exists" || ok "no p43-c2 containers"
+    check_no_c2_containers "no p43-c2 containers" "a p43-c2-*/p43-sbx-c2-* container already exists"
     docker network inspect "$NET" >/dev/null 2>&1 && bad "network $NET exists" || ok "network $NET absent"
     docker image inspect "$IMAGE_TAG" >/dev/null 2>&1 && bad "image tag $IMAGE_TAG exists" || ok "image tag absent"
     [[ -e $ROOT || -e $EVIDENCE ]] && bad "$ROOT or $EVIDENCE exists" || ok "$ROOT and $EVIDENCE absent"
@@ -290,6 +298,14 @@ expect() { # LABEL EXPECTED ACTUAL
     [[ "$2" == "$3" ]] && ok "$1" || bad "$1: expected '$2' got '$3'"
 }
 
+strict_launcher_started() { # current invocation only; no `| grep -q` (SIGPIPE under pipefail)
+    local inv
+    inv=$(systemctl show -p InvocationID --value "$C2_SERVICE") || return 1
+    [[ -n "$inv" ]] || return 1
+    grep -q 'startup .*allowed_uid=10001 max_active=1 require_authorization=True' \
+        <<<"$(journalctl _SYSTEMD_INVOCATION_ID="$inv" --no-pager -o cat)"
+}
+
 canonical_mounts() {
     sed '/^$/d' | sort
 }
@@ -327,7 +343,7 @@ cmd_boundary() {
     done
     expect "C2 key in Worker" "$WORKER_UID 400" "$(docker exec "$WORKER" stat -c '%u %a' /run/secrets/p43-sandbox-bridge-c2.key)"
     expect "Worker launch line" "1" "$(docker exec "$WORKER" sh -c 'tr "\0" " " </proc/1/cmdline' | grep -c -- "--pool=solo --concurrency=1 --loglevel=INFO --hostname=$NODE")"
-    docker logs "$WORKER" 2>&1 | grep -q 'Worker boot identity manifest created: .*status=IDENTITY_VERIFIED pin_status=PIN_MATCHED' &&
+    grep -q 'Worker boot identity manifest created: .*status=IDENTITY_VERIFIED pin_status=PIN_MATCHED' <<<"$(docker logs "$WORKER" 2>&1)" &&
         ok "boot identity VERIFIED with PIN_MATCHED" || bad "boot identity not verified against the pin"
     local probe='import socket,sys
 for host, port in (("model-provider", 11434), ("ai-gateway", 8000), ("ai-agent", 6379), ("1.1.1.1", 443)):
@@ -340,8 +356,7 @@ print("NO_EGRESS")'
     fmt='{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Privileged}} {{.HostConfig.CapDrop}} {{.Config.User}} {{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}'
     expect "Redis container" "true false [ALL] $REDIS_UID:$REDIS_UID $NET" "$(docker inspect "$REDIS" --format "$fmt")"
     systemctl is-active --quiet "$C2_SERVICE" && ok "C2 Launcher active" || bad "C2 Launcher inactive"
-    journalctl -u "$C2_SERVICE" -b --no-pager | grep -q 'startup .*allowed_uid=10001 max_active=1 require_authorization=True' &&
-        ok "strict Launcher startup line" || bad "strict Launcher startup line missing"
+    strict_launcher_started && ok "strict Launcher startup line" || bad "strict Launcher startup line missing"
     expect "C2 ledger empty before submission" '"ledger": {}' \
         "$(cd /opt/p43-sandbox-bridge-c2/lib && runuser -u p43-sandbox-c2 -- env P43_SANDBOX_BRIDGE_INSTANCE=c2 /usr/bin/python3 -B -E -s -m sandbox_bridge.host_service status c2 | grep -o '"ledger": {[^}]*}')"
     docker inspect "$AI_AGENT" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' |
@@ -473,7 +488,7 @@ cmd_cleanup() {
     local before=""
     [[ -f $ROOT/env/c1b-before ]] && before=$(cat "$ROOT/env/c1b-before")
     rm -rf --one-file-system -- "$ROOT"
-    docker ps -a --format '{{.Names}}' | grep -Eq '^(p43-c2-|p43-sbx-c2-)' && bad "p43-c2 containers remain" || ok "no p43-c2 containers remain"
+    check_no_c2_containers "no p43-c2 containers remain" "p43-c2 containers remain"
     docker network inspect "$NET" >/dev/null 2>&1 && bad "network remains" || ok "network removed"
     systemctl is-active --quiet "$C2_SERVICE" && bad "C2 Launcher active" || ok "C2 Launcher stopped"
     [[ ! -e $C2_WORKER_KEY ]] && ok "C2 Worker key copy removed" || bad "C2 Worker key copy remains"

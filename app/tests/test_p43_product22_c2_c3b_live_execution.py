@@ -1460,3 +1460,102 @@ def test_live_run_refuses_outside_a_root_host_reviewed_clone():
         for text in ("must run as root on the Host", "must run on the Host")
     )
     assert "docker" not in out.stdout
+
+
+def test_strict_launcher_check_is_invocation_scoped_and_sigpipe_safe():
+    runner = LIVE_RUN_SCRIPT.read_text(encoding="utf-8")
+    function = re.search(r"(?ms)^strict_launcher_started\(\) \{.*?\n(.*?)^\}", runner)
+    assert function is not None
+    strict = "startup x allowed_uid=10001 max_active=1 require_authorization=True"
+
+    def check(invocation: str, records: dict[str, str], trailing: int = 0) -> str:
+        stub = "".join(
+            f'[[ "$1" == _SYSTEMD_INVOCATION_ID={inv} ]] && '
+            f"{{ printf %s {shlex.quote(text)}; seq 1 {trailing}; return 0; }}\n"
+            for inv, text in records.items()
+        )
+        command = (
+            "set -euo pipefail\nC2_SERVICE=p43-sandbox-bridge-c2.service\n"
+            f"systemctl() {{ printf '%s\\n' {shlex.quote(invocation)}; }}\n"
+            "journalctl() {\n" + stub + "}\n"
+            "strict_launcher_started() {\n" + function.group(1) + "}\n"
+            "strict_launcher_started && echo PASS || echo FAIL\n"
+        )
+        out = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+        assert out.returncode == 0, out.stderr
+        return out.stdout.strip()
+
+    # Large output after the match made `journalctl | grep -q` exit 141 under
+    # pipefail even though the strict record was present.
+    assert check("cur", {"cur": f"{strict}\n"}, trailing=200000) == "PASS"
+    # A strict record from a previous invocation in the same boot cannot pass.
+    assert check("cur", {"old": f"{strict}\n", "cur": "startup other\n"}) == "FAIL"
+    assert check("", {"": f"{strict}\n"}) == "FAIL"
+    non_strict = strict.replace(
+        "require_authorization=True", "require_authorization=False"
+    )
+    assert check("cur", {"cur": f"{non_strict}\n"}) == "FAIL"
+
+
+def _run_runner_snippet(stubs: str, body: str) -> str:
+    command = (
+        "set -euo pipefail\nFAILURES=0\n"
+        "ok() { printf 'PASS %s\\n' \"$*\"; }\n"
+        "bad() { printf 'FAIL %s\\n' \"$*\"; FAILURES=$((FAILURES + 1)); }\n"
+        + stubs
+        + "\n"
+        + body
+        + '\necho "failures=$FAILURES"\n'
+    )
+    out = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+def test_container_absence_distinguishes_absent_present_and_inspection_failure():
+    runner = LIVE_RUN_SCRIPT.read_text(encoding="utf-8")
+    helper = re.search(r"(?ms)^check_no_c2_containers\(\) \{.*?\n(.*?)^\}", runner)
+    assert helper is not None
+    # Both the pre-setup check and the cleanup acceptance use the helper.
+    assert runner.count('check_no_c2_containers "') == 2
+    assert "docker ps -a --format '{{.Names}}' | grep -Eq" not in runner
+    function = "check_no_c2_containers() {\n" + helper.group(1) + "}\n"
+    body = function + 'check_no_c2_containers "absent" "present"'
+
+    def docker(script: str) -> str:
+        return "docker() { " + script + "; }"
+
+    absent = _run_runner_snippet(docker("printf 'other\\nc1b-worker\\n'"), body)
+    assert "PASS absent" in absent and "failures=0" in absent
+    empty = _run_runner_snippet(docker("return 0"), body)
+    assert "PASS absent" in empty and "failures=0" in empty
+    present = _run_runner_snippet(
+        docker("echo other; echo p43-sbx-c2-" + "a" * 32 + "; seq 1 200000"), body
+    )
+    assert "FAIL present" in present and "failures=1" in present
+    failed = _run_runner_snippet(docker("echo daemon unreachable >&2; return 1"), body)
+    assert "FAIL container inspection failed" in failed
+    assert "PASS" not in failed and "failures=1" in failed
+
+
+def test_worker_identity_log_check_is_sigpipe_safe():
+    runner = LIVE_RUN_SCRIPT.read_text(encoding="utf-8")
+    start = runner.index("    grep -q 'Worker boot identity manifest created:")
+    end = runner.index('bad "boot identity not verified against the pin"', start)
+    check = runner[
+        start : end + len('bad "boot identity not verified against the pin"')
+    ]
+    verified = (
+        "Worker boot identity manifest created: /x status=IDENTITY_VERIFIED "
+        "pin_status=PIN_MATCHED"
+    )
+    logs = f"docker() {{ echo {shlex.quote(verified)}; seq 1 200000; }}"
+    out = _run_runner_snippet("WORKER=w\n" + logs, check)
+    assert "PASS boot identity VERIFIED with PIN_MATCHED" in out and "failures=0" in out
+    unmatched = verified.replace("PIN_MATCHED", "PIN_INVALID")
+    out = _run_runner_snippet(
+        f"WORKER=w\ndocker() {{ echo {shlex.quote(unmatched)}; }}", check
+    )
+    assert "FAIL boot identity not verified" in out and "failures=1" in out
+    out = _run_runner_snippet("WORKER=w\ndocker() { return 1; }", check)
+    assert "FAIL boot identity not verified" in out
