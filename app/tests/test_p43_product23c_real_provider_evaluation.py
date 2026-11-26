@@ -1118,19 +1118,167 @@ def test_runner_relay_and_worker_launch_contracts():
     order = [
         window.index(stage)
         for stage in (
+            "trap model_window_interrupted INT TERM HUP",
             "setup --operator-approved",
-            '"${self[@]}" boundary',
+            '"${WINDOW_SELF[@]}" boundary',
             "submit --operator-approved model",
             "evaluate model",
-            'if ! "${self[@]}" evidence; then',
-            '"${self[@]}" cleanup --operator-approved || rc=1',
+            "model_window_finish",
         )
     ]
     assert order == sorted(order)
     assert window.count("submit --operator-approved model") == 1
-    assert "EVIDENCE_FAILED_STATE_RETAINED" in window
+    finish = c23b._shell_function(LIVE_RUN, "model_window_finish")
+    assert "EVIDENCE_FAILED_STATE_RETAINED" in finish
+    assert finish.index('"${WINDOW_SELF[@]}" evidence') < finish.index(
+        '"${WINDOW_SELF[@]}" cleanup --operator-approved'
+    )
+    observe = c23b._shell_function(LIVE_RUN, "observe_model")
+    assert "observation_failed" in observe
+    assert observe.count('docker stop --time 30 "$WORKER"') == 2
     cleanup = c23b._shell_function(LIVE_RUN, "cmd_cleanup")
     assert '"$WORKER" "$RELAY"' in cleanup
+
+
+_WINDOW_STUB = r"""#!/bin/bash
+echo "$1" >>"$LOG"
+case "$1" in
+setup) mkdir -p "$ROOT/env"; [[ $FAIL != setup ]] ;;
+boundary) [[ $FAIL != boundary ]] ;;
+submit)
+    date >"$ROOT/env/submitted"
+    if [[ $FAIL == interrupt ]]; then kill -INT "$PPID"; sleep 0.3; exit 130; fi
+    [[ $FAIL == submit ]] && exit 1
+    echo terminal >"$ROOT/env/model-window.outcome" ;;
+evaluate) exit 0 ;;
+evidence) [[ $FAIL != evidence ]] ;;
+cleanup) exit 0 ;;
+esac
+"""
+
+
+def _run_window(tmp_path: Path, fail: str) -> tuple[int, str, list[str], Path]:
+    repo, root = tmp_path / "release", tmp_path / "srv"
+    (repo / "scripts" / "maintenance").mkdir(parents=True)
+    (repo / "scripts" / "maintenance" / "p43_c2_live_run.sh").write_text(_WINDOW_STUB)
+    log, evidence = tmp_path / "stages.log", tmp_path / "evidence"
+    functions = "".join(
+        c23b._shell_function(LIVE_RUN, name)
+        for name in (
+            "cmd_run_model_window",
+            "model_window_interrupted",
+            "model_window_finish",
+            "model_window_presubmission_capture",
+        )
+    )
+    prelude = (
+        f"REPO={repo}\nROOT={root}\nEVIDENCE={evidence}\n"
+        "WORKER=p43-c2-worker\nRELAY=p43-c2-relay\n"
+        + next(
+            line + "\n"
+            for line in LIVE_RUN.read_text(encoding="utf-8").splitlines()
+            if line.startswith("need_approval() {")
+        )
+        + 'info() { echo "INFO $*"; }\nrefuse() { echo "refused: $*"; exit 78; }\n'
+        "provider_mode_requested() { true; }\nrequire_provider_inputs() { :; }\n"
+        'docker() { echo "docker $1" >>"$LOG"; }\n'
+        'observe_once() { echo "observe $(basename "$1") $2" >>"$LOG"; echo {} >"$1"; }\n'
+    )
+    out = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "set -euo pipefail\n"
+            + prelude
+            + functions
+            + "cmd_run_model_window --operator-approved",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LOG": str(log),
+            "ROOT": str(root),
+            "FAIL": fail,
+        },
+    )
+    stages = log.read_text().split("\n")[:-1] if log.exists() else []
+    return out.returncode, out.stdout, stages, root
+
+
+@pytest.mark.parametrize(
+    "fail, rc, status, stages, outcome",
+    [
+        (
+            "none",
+            0,
+            "COMPLETE",
+            ["setup", "boundary", "submit", "evaluate", "docker stop", "evidence"],
+            "terminal",
+        ),
+        ("setup", 1, "SETUP_FAILED", ["setup", "docker stop", "docker logs"], None),
+        (
+            "boundary",
+            1,
+            "BOUNDARY_FAILED",
+            ["setup", "boundary", "docker stop", "docker logs"],
+            None,
+        ),
+        (
+            "submit",
+            1,
+            "COMPLETE_WITH_FAILURES",
+            [
+                "setup",
+                "boundary",
+                "submit",
+                "evaluate",
+                "docker stop",
+                "observe observe.model.after-stop.json 0",
+                "evidence",
+            ],
+            "submission_incomplete",
+        ),
+        (
+            "interrupt",
+            130,
+            "INTERRUPTED",
+            [
+                "setup",
+                "boundary",
+                "submit",
+                "docker stop",
+                "observe observe.model.after-stop.json 0",
+                "evidence",
+            ],
+            "interrupted",
+        ),
+    ],
+)
+def test_model_window_collects_evidence_then_cleans_up_on_every_path(
+    tmp_path, fail, rc, status, stages, outcome
+):
+    code, stdout, observed, root = _run_window(tmp_path, fail)
+    assert code == rc, stdout
+    assert stdout.strip().splitlines()[-1] == f"C2_MODEL_WINDOW={status}"
+    sequence = [s for s in observed if s != "docker logs"]
+    assert sequence == [s for s in stages if s != "docker logs"] + ["cleanup"]
+    assert observed.count("submit") <= 1
+    if "submit" not in stages:
+        assert (tmp_path / "evidence").is_dir() and "evidence" not in observed
+    if outcome:
+        assert (root / "env" / "model-window.outcome").read_text().strip() == outcome
+
+
+def test_model_window_retains_state_when_evidence_fails(tmp_path):
+    code, stdout, observed, _ = _run_window(tmp_path, "evidence")
+    assert code == 1
+    assert stdout.strip().splitlines()[-1] == (
+        "C2_MODEL_WINDOW=EVIDENCE_FAILED_STATE_RETAINED"
+    )
+    assert observed[-1] == "evidence" and "cleanup" not in observed
+    assert "docker stop" in observed
 
 
 def test_runner_shell_syntax():

@@ -854,7 +854,13 @@ observe_model() {
         ok "model TaskExecution reached a terminal state within the evaluation window"
         return 0
     fi
-    [[ $rc -eq 2 ]] || { bad "model observation failed (rc=$rc)"; return 1; }
+    if [[ $rc -ne 2 ]]; then
+        # Not a model outcome: stop the Worker so nothing changes unobserved.
+        printf 'observation_failed\n' >"$ROOT/env/model-window.outcome"
+        docker stop --time 30 "$WORKER" >/dev/null 2>&1 || true
+        bad "model observation failed (rc=$rc); Worker stopped"
+        return 1
+    fi
     printf 'evaluation_deadline_exhausted\n' >"$ROOT/env/model-window.outcome"
     info "evaluation deadline reached with the Task nonterminal; stopping the disposable Worker"
     docker stop --time 30 "$WORKER" >/dev/null 2>&1 || true
@@ -1090,35 +1096,86 @@ cmd_cleanup() {
 # One approval covers the whole controlled window. Each stage is its own
 # process, so a refusal ends that stage only; once the model is submitted,
 # evaluation, evidence and cleanup always run. No stage is retried and the
-# model is submitted at most once.
+# model is submitted at most once. Evidence precedes cleanup and cleanup runs
+# once: after success, after a stage failure, and after an INT/TERM/HUP
+# (handled once the running stage returns). The Worker and the relay are
+# stopped first, so the recorded state is final.
 cmd_run_model_window() {
     need_approval "${1:-}"
     provider_mode_requested || refuse "run-model-window requires P43_C2_PROVIDER_UPSTREAM/MODEL/NETWORK"
     require_provider_inputs
-    local self=("$BASH" "$REPO/scripts/maintenance/p43_c2_live_run.sh") rc=0
-    if ! "${self[@]}" setup --operator-approved; then
-        info "setup failed; cleaning up without submission"
-        "${self[@]}" cleanup --operator-approved || true
-        return 1
+    WINDOW_SELF=("$BASH" "$REPO/scripts/maintenance/p43_c2_live_run.sh")
+    WINDOW_RC=0
+    WINDOW_STATUS=""
+    trap model_window_interrupted INT TERM HUP
+    if ! "${WINDOW_SELF[@]}" setup --operator-approved; then
+        WINDOW_STATUS=SETUP_FAILED
+    elif ! "${WINDOW_SELF[@]}" boundary; then
+        WINDOW_STATUS=BOUNDARY_FAILED
+    else
+        "${WINDOW_SELF[@]}" submit --operator-approved model || WINDOW_RC=1
+        "${WINDOW_SELF[@]}" evaluate model || WINDOW_RC=1
     fi
-    if ! "${self[@]}" boundary; then
-        info "boundary failed; cleaning up without submission"
-        "${self[@]}" evidence || true
-        "${self[@]}" cleanup --operator-approved || true
-        return 1
+    model_window_finish
+}
+
+model_window_interrupted() {
+    WINDOW_STATUS=INTERRUPTED
+    info "interrupted; stopping the window, then evidence and cleanup"
+    model_window_finish
+    exit 130
+}
+
+model_window_finish() {
+    trap '' INT TERM HUP
+    set +e
+    [[ -z $WINDOW_STATUS ]] || WINDOW_RC=1
+    docker stop --time 30 p43-c2-submitter "$WORKER" "$RELAY" >/dev/null 2>&1
+    if [[ -f $ROOT/env/submitted ]]; then
+        if [[ ! -f $ROOT/env/model-window.outcome ]]; then
+            if [[ $WINDOW_STATUS == INTERRUPTED ]]; then
+                printf 'interrupted\n' >"$ROOT/env/model-window.outcome"
+            else
+                printf 'submission_incomplete\n' >"$ROOT/env/model-window.outcome"
+            fi
+        fi
+        if [[ ! -f $ROOT/env/observe.model.after-stop.json ]] &&
+            ! grep -qx terminal "$ROOT/env/model-window.outcome"; then
+            observe_once "$ROOT/env/observe.model.after-stop.json" 0
+        fi
+        if ! "${WINDOW_SELF[@]}" evidence; then
+            info "evidence failed; Worker and relay stopped, $ROOT retained; inspect, then run: cleanup --operator-approved"
+            printf 'C2_MODEL_WINDOW=EVIDENCE_FAILED_STATE_RETAINED\n'
+            WINDOW_RC=1
+            return 1
+        fi
+    else
+        model_window_presubmission_capture
     fi
-    "${self[@]}" submit --operator-approved model || rc=1
-    "${self[@]}" evaluate model || rc=1
-    if ! "${self[@]}" evidence; then
-        # Never delete the only copy of the window's state: stop, keep, report.
-        docker stop --time 30 "$WORKER" "$RELAY" >/dev/null 2>&1 || true
-        info "evidence failed; Worker and relay stopped, $ROOT retained; inspect, then run: cleanup --operator-approved"
-        printf 'C2_MODEL_WINDOW=EVIDENCE_FAILED_STATE_RETAINED\n'
-        return 1
+    "${WINDOW_SELF[@]}" cleanup --operator-approved || WINDOW_RC=1
+    if [[ -z $WINDOW_STATUS ]]; then
+        WINDOW_STATUS=COMPLETE
+        [[ $WINDOW_RC -eq 0 ]] || WINDOW_STATUS=COMPLETE_WITH_FAILURES
     fi
-    "${self[@]}" cleanup --operator-approved || rc=1
-    printf 'C2_MODEL_WINDOW=%s\n' "$([[ $rc -eq 0 ]] && echo COMPLETE || echo COMPLETE_WITH_FAILURES)"
-    return "$rc"
+    printf 'C2_MODEL_WINDOW=%s\n' "$WINDOW_STATUS"
+    return "$WINDOW_RC"
+}
+
+# Before any submission no completion can be admitted (window unarmed); keep
+# the diagnostics that cleanup would otherwise remove.
+model_window_presubmission_capture() {
+    [[ ! -L $EVIDENCE ]] || return 1
+    install -d -m 0700 "$EVIDENCE"
+    local f
+    for f in run.vars provider-facts.json contract.env worker-startup.log boundary.pass; do
+        [[ -f $ROOT/env/$f && ! -L $ROOT/env/$f ]] && cp -- "$ROOT/env/$f" "$EVIDENCE/presubmission-$f"
+    done
+    [[ -f $ROOT/relay/ledger.jsonl ]] && cp -- "$ROOT/relay/ledger.jsonl" "$EVIDENCE/presubmission-relay-ledger.jsonl"
+    docker logs "$WORKER" >"$EVIDENCE/presubmission-worker.log" 2>&1
+    docker logs "$RELAY" >"$EVIDENCE/presubmission-relay.log" 2>&1
+    chmod 0600 "$EVIDENCE"/presubmission-* 2>/dev/null
+    info "pre-submission diagnostics in $EVIDENCE"
+    return 0
 }
 
 case "${1:-}" in
