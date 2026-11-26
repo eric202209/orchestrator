@@ -474,7 +474,7 @@ def execute_verification_command(
     if sandbox_c2_mode_enabled():
         # C2-B: never fall through to in-process or subprocess execution.
         result, evidence = _execute_verification_in_sandbox(
-            raw_command, timeout_seconds, sandbox_context
+            raw_command, timeout_seconds, sandbox_context, project_dir=project_dir
         )
         return result_with_evidence(result, evidence)
 
@@ -676,13 +676,22 @@ def _captured_process_stream(value: Any) -> tuple[bytes, str]:
 
 
 def _execute_verification_in_sandbox(
-    raw_command: str, timeout_seconds: int, sandbox_context: Any
+    raw_command: str,
+    timeout_seconds: int,
+    sandbox_context: Any,
+    *,
+    project_dir: Path | None = None,
 ) -> tuple[Dict[str, Any], Dict[str, Any]]:
-    """Route the admitted self-contained command through the C2 Gateway only."""
+    """Route an admitted command through the C2 Gateway only.
+
+    Admitted: the self-contained ``sys.exit`` script (C2-C2B) and, with the
+    Task workspace, an admitted pytest command (P43-PRODUCT-23A).
+    """
 
     from app.services.orchestration.execution.sandbox_gateway import (
         SandboxAuthorityError,
         SandboxExecutionGateway,
+        sandbox_pytest_arguments,
         sandboxable_python_script,
     )
 
@@ -715,7 +724,12 @@ def _execute_verification_in_sandbox(
         )
 
     script = sandboxable_python_script(raw_command)
-    if script is None:
+    pytest_args = (
+        sandbox_pytest_arguments(raw_command, Path(project_dir))
+        if script is None and project_dir is not None
+        else None
+    )
+    if script is None and pytest_args is None:
         return refused("unsupported_operation")
     if sandbox_context is None:
         return refused("trusted_execution_context_missing")
@@ -724,7 +738,12 @@ def _execute_verification_in_sandbox(
     except SandboxAuthorityError as exc:
         return refused(exc.reason)
     started_at = datetime.now(UTC).isoformat()
-    outcome = gateway.execute_python(sandbox_context, script, timeout_seconds)
+    if script is not None:
+        outcome = gateway.execute_python(sandbox_context, script, timeout_seconds)
+    else:
+        outcome = gateway.execute_pytest(
+            sandbox_context, pytest_args, Path(project_dir), timeout_seconds
+        )
     ended_at = datetime.now(UTC).isoformat()
     if not outcome.accepted or outcome.result is None:
         return refused(outcome.reason or "sandbox_result_missing")
@@ -1007,6 +1026,7 @@ def assess_step_execution(
     validation_severity: str = "standard",
     relaxed_mode: bool = False,
     execution_topology: ExecutionTopology | None = None,
+    sandbox_context: Any = None,
 ) -> StepExecutionAssessment:
     step_output = str(step_result.get("output", ""))
     raw_status = str(step_result.get("status") or "").strip().lower()
@@ -1104,6 +1124,9 @@ def assess_step_execution(
             command=verification_command,
             include_evidence=True,
             execution_topology=execution_topology,
+            # C2: the declared verification is the same contained route as
+            # the step command; without the trusted context it fails closed.
+            sandbox_context=sandbox_context,
         )
         verification_output = verification_result.get("output", "")
         step_result["verification_output"] = verification_output

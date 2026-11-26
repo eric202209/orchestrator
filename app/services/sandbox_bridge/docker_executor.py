@@ -4,15 +4,52 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import re
 import selectors
 import subprocess
 import time
 import uuid
 
-from .contract import ExecutionRequest, ExecutionResult, MAX_OUTPUT_BYTES
+from .contract import (
+    PYTEST_PROFILE,
+    ExecutionRequest,
+    ExecutionResult,
+    MAX_OUTPUT_BYTES,
+    decode_workspace_snapshot,
+)
 from .staging import StagedWorkspace
 
 IMAGE = "python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b"
+# P43-PRODUCT-23A: local image ID (``sha256:<64 hex>``) of the image built from
+# scripts/sandbox/pytest-image/ on the Host. Unpinned until PRODUCT-23B records
+# the Host build; until then every pytest-profile request fails closed.
+PYTEST_IMAGE: str | None = None
+_PINNED_IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# Fixed in-container bootstrap, run with cwd /ws/src. The request supplies only
+# /ws/args.json, read before any workspace code runs. ``compileall`` mirrors
+# ``python -m compileall -q`` (exit 1 on any syntax error) without writing
+# bytecode, since the snapshot is read-only.
+PYTEST_BOOTSTRAP = (
+    "import json,sys\n"
+    "spec=json.load(open('../args.json',encoding='utf-8'))\n"
+    "if spec['tool']=='compileall':\n"
+    "    import traceback\n"
+    "    failed=0\n"
+    "    for path in spec['args']:\n"
+    "        try:\n"
+    "            compile(open(path,'rb').read(),path,'exec',dont_inherit=True)\n"
+    "        except (SyntaxError,ValueError,OSError):\n"
+    "            failed=1\n"
+    "            traceback.print_exc(limit=0)\n"
+    "    sys.exit(failed)\n"
+    "import pytest\n"
+    "sys.exit(int(pytest.main(['-p','no:cacheprovider',*spec['args']])))\n"
+)
+
+
+def pinned_pytest_image() -> str | None:
+    image = PYTEST_IMAGE
+    return image if isinstance(image, str) and _PINNED_IMAGE.fullmatch(image) else None
 
 
 class DockerExecutor:
@@ -26,7 +63,11 @@ class DockerExecutor:
         self.staging_root, self.docker = Path(staging_root), docker
         self.name_prefix = name_prefix
 
-    def _argv(self, name: str, workspace: Path) -> list[str]:
+    def _argv(
+        self, name: str, workspace: Path, profile: str | None = None
+    ) -> list[str]:
+        if profile == PYTEST_PROFILE:
+            return self._pytest_argv(name, workspace)
         return [
             self.docker,
             "run",
@@ -66,6 +107,57 @@ class DockerExecutor:
             "/ws/input.py",
         ]
 
+    def _pytest_argv(self, name: str, workspace: Path) -> list[str]:
+        # Same fixed isolation as the script profile. The bind is read-only
+        # and the only writable path is a size-capped noexec tmpfs, so nothing
+        # the sandbox writes survives it or reaches the Worker.
+        image = pinned_pytest_image()
+        if image is None:
+            raise RuntimeError("pytest_image_unpinned")
+        return [
+            self.docker,
+            "run",
+            "--pull=never",
+            "--platform",
+            "linux/arm64",
+            "--rm",
+            "--name",
+            name,
+            "--network=none",
+            "--ipc=none",
+            "--read-only",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--user=65534:65534",
+            "--cpus=1",
+            "--memory=512m",
+            "--memory-swap=512m",
+            "--pids-limit=64",
+            "--ulimit",
+            "nofile=256:256",
+            "--ulimit",
+            "fsize=16777216:16777216",
+            "--mount",
+            f"type=bind,src={workspace},dst=/ws,readonly",
+            "--tmpfs",
+            "/tmp:rw,noexec,nosuid,nodev,size=67108864,mode=1777",
+            "--workdir=/ws/src",
+            "--entrypoint",
+            "/usr/bin/env",
+            image,
+            "-i",
+            "HOME=/tmp",
+            "TMPDIR=/tmp",
+            "PATH=/usr/local/bin:/usr/bin:/bin",
+            "LC_CTYPE=C.UTF-8",
+            "python3",
+            "-B",
+            "-E",
+            "-s",
+            "-c",
+            PYTEST_BOOTSTRAP,
+        ]
+
     def _docker_control(self, *args: str) -> bool:
         try:
             return (
@@ -92,12 +184,27 @@ class DockerExecutor:
         status, code, error = "EXECUTION_FAILED", None, None
         manifest, artifacts = [], []
         cleanup_ok = True
+        pytest_profile = request.execution_profile == PYTEST_PROFILE
+        if pytest_profile and pinned_pytest_image() is None:
+            return ExecutionResult(
+                request.request_id,
+                "REJECTED",
+                None,
+                "",
+                "",
+                error_code="pytest_image_unpinned",
+            )
         try:
-            staged = StagedWorkspace(self.staging_root, request.code)
+            snapshot = (
+                decode_workspace_snapshot(request.workspace_snapshot)[0]
+                if pytest_profile
+                else None
+            )
+            staged = StagedWorkspace(self.staging_root, request.code, snapshot)
             if "," in str(staged.path):
                 raise RuntimeError("unsafe_docker_mount_path")
             proc = subprocess.Popen(
-                self._argv(name, staged.path),
+                self._argv(name, staged.path, request.execution_profile),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -150,7 +257,8 @@ class DockerExecutor:
                 proc.stdout.close()
             if proc.stderr:
                 proc.stderr.close()
-            if status == "SUCCESS":
+            if status == "SUCCESS" and not pytest_profile:
+                # v3 returns no artifacts: sandbox files never propagate.
                 manifest, artifacts = staged.collect()
         except FileNotFoundError:
             status, error = "UNAVAILABLE", "docker_unavailable"

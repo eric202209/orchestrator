@@ -404,6 +404,30 @@ class CompletionCoordinator:
         }
 
     def complete_task(
+        self, *, ctx: OrchestrationRunContext, **kwargs: Any
+    ) -> Dict[str, Any]:
+        """Run ``_complete_task`` with this attempt bound for the C2 Gateway."""
+
+        from app.services.orchestration.execution.sandbox_gateway import (
+            SandboxExecutionContext,
+            bound_sandbox_execution_context,
+        )
+
+        context = (
+            SandboxExecutionContext(
+                db=ctx.db,
+                task_execution_id=ctx.task_execution_id,
+                session_id=ctx.session_id,
+                task_id=ctx.task_id,
+                session_instance_id=getattr(ctx.session, "instance_id", None),
+            )
+            if ctx.task_execution_id
+            else None
+        )
+        with bound_sandbox_execution_context(context):
+            return self._complete_task(ctx=ctx, **kwargs)
+
+    def _complete_task(
         self,
         *,
         ctx: OrchestrationRunContext,

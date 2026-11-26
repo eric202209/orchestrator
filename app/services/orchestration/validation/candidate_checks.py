@@ -675,10 +675,15 @@ def _execute_command(
     was captured before the deadline, without the runner's timeout marker.
     """
     from app.services.orchestration.execution.sandbox_gateway import (
-        refuse_local_execution,
+        execute_candidate_command_in_sandbox,
+        sandbox_c2_mode_enabled,
     )
 
-    refuse_local_execution("candidate_validation_command")
+    if sandbox_c2_mode_enabled():
+        # P43-PRODUCT-23A: contained, never local; see the Gateway contract.
+        return execute_candidate_command_in_sandbox(
+            project_dir=project_dir, command=command, timeout_seconds=timeout_seconds
+        )
     env = dict(os.environ)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTEST_ADDOPTS"] = (

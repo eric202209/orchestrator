@@ -16,7 +16,11 @@ import re
 import time
 from typing import Any
 
-from .contract import MAX_REQUEST_AGE_SECONDS, RequestRejected
+from .contract import (
+    MAX_REQUEST_AGE_SECONDS,
+    RequestRejected,
+    decode_workspace_snapshot,
+)
 
 AUTHORIZATION_VERSION = 1
 AUTHORIZATION_FIELDS = frozenset(
@@ -47,22 +51,36 @@ def canonical_bytes(value: Any) -> bytes:
     ).encode("ascii")
 
 
-def operation_sha256(*, execution_profile: str, code: str, timeout_seconds: int) -> str:
+def operation_sha256(
+    *,
+    execution_profile: str,
+    code: str,
+    timeout_seconds: int,
+    snapshot_sha256: str | None = None,
+) -> str:
+    operation = {
+        "execution_profile": execution_profile,
+        "code": code,
+        "timeout_seconds": timeout_seconds,
+    }
+    if snapshot_sha256 is not None:
+        # v3: the executed workspace state is part of the operation.
+        operation["snapshot_sha256"] = snapshot_sha256
+    return hashlib.sha256(canonical_bytes(operation)).hexdigest()
+
+
+def input_sha256(code: str, snapshot_sha256: str | None = None) -> str:
+    """Digest of the staged input.
+
+    v2 stages only ``input.py``. v3 stages the pytest arguments plus the
+    workspace snapshot, so its input digest binds both.
+    """
+
+    if snapshot_sha256 is None:
+        return hashlib.sha256(code.encode("utf-8")).hexdigest()
     return hashlib.sha256(
-        canonical_bytes(
-            {
-                "execution_profile": execution_profile,
-                "code": code,
-                "timeout_seconds": timeout_seconds,
-            }
-        )
+        canonical_bytes({"code": code, "snapshot_sha256": snapshot_sha256})
     ).hexdigest()
-
-
-def input_sha256(code: str) -> str:
-    """Digest of the only staged input (``input.py``); no workspace is staged."""
-
-    return hashlib.sha256(code.encode("utf-8")).hexdigest()
 
 
 def execution_ref(task_execution_id: int, attempt_number: int) -> str:
@@ -106,15 +124,20 @@ def verify_authorization(
         execution_ref(auth["task_execution_id"], auth["attempt_number"])
     ):
         raise RequestRejected("authorization_identity_mismatch")
+    snapshot_digest = None
+    if request.version == 3:
+        # Recomputed from the received bytes, never taken from the request.
+        _files, snapshot_digest = decode_workspace_snapshot(request.workspace_snapshot)
     if not (_SHA256.fullmatch(str(auth["operation_sha256"]))) or auth[
         "operation_sha256"
     ] != operation_sha256(
         execution_profile=request.execution_profile,
         code=request.code,
         timeout_seconds=request.timeout_seconds,
+        snapshot_sha256=snapshot_digest,
     ):
         raise RequestRejected("operation_digest_mismatch")
-    if auth["input_sha256"] != input_sha256(request.code):
+    if auth["input_sha256"] != input_sha256(request.code, snapshot_digest):
         raise RequestRejected("input_digest_mismatch")
     issued, expires = auth["issued_at"], auth["expires_at"]
     if type(issued) is not int or type(expires) is not int:

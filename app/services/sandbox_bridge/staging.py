@@ -29,7 +29,20 @@ def validate_artifact_path(name: str) -> PurePosixPath:
 
 
 class StagedWorkspace:
-    def __init__(self, root: str | Path, code: str):
+    def __init__(
+        self,
+        root: str | Path,
+        code: str,
+        snapshot: list[tuple[PurePosixPath, bytes]] | None = None,
+    ):
+        """Stage ``input.py`` (v2) or pytest arguments plus a snapshot (v3).
+
+        ``snapshot`` is the already validated output of
+        ``contract.decode_workspace_snapshot``. It is written read-only under
+        ``src/``; nothing staged here is ever copied back to the Worker.
+        """
+
+        self.snapshot = snapshot
         raw = code.encode("utf-8")
         if not raw or len(raw) > MAX_INPUT_BYTES:
             raise StagingRejected("invalid_input_size")
@@ -51,11 +64,25 @@ class StagedWorkspace:
             shutil.rmtree(self.path, ignore_errors=True)
             raise
 
+    @staticmethod
+    def _write_readonly(path: Path, data: bytes) -> None:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o444)
+        try:
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+            os.fchmod(fd, 0o444)
+        finally:
+            os.close(fd)
+
     def _initialize(self, raw: bytes) -> None:
         # The Host-only 0700 parent contains the 0755 bind root. Only the
         # artifact directory is writable by the fixed sandbox UID; its sticky
         # bit prevents replacing entries owned by another identity.
         os.chmod(self.path, 0o755)
+        if self.snapshot is not None:
+            self._initialize_snapshot(raw)
+            return
         self.input_path = self.path / "input.py"
         # Docker executes as uid/gid 65534; the source must be readable by that
         # identity while remaining immutable inside the read-only bind root.
@@ -70,6 +97,30 @@ class StagedWorkspace:
         self.output_path = self.path / "output"
         self.output_path.mkdir(mode=0o1777)
         os.chmod(self.output_path, 0o1777)
+
+    def _initialize_snapshot(self, raw: bytes) -> None:
+        # v3: the whole bind is mounted read-only; the sandbox writes only to
+        # its own tmpfs. Directories are created fresh here, so no component
+        # can be a pre-existing link.
+        self.input_path = self.path / "args.json"
+        self._write_readonly(self.input_path, raw)
+        self.source_path = self.path / "src"
+        self.source_path.mkdir(mode=0o755)
+        created = {self.source_path}
+        for rel, data in self.snapshot or []:
+            target = self.source_path.joinpath(*rel.parts)
+            for parent in reversed(target.parents):
+                if parent in created or self.source_path not in (
+                    parent,
+                    *parent.parents,
+                ):
+                    continue
+                parent.mkdir(mode=0o755)
+                created.add(parent)
+            self._write_readonly(target, data)
+        for directory in sorted(created, key=lambda d: len(d.parts), reverse=True):
+            os.chmod(directory, 0o555)
+        self.output_path = None
 
     def collect(self) -> tuple[list[dict[str, object]], list[bytes]]:
         manifest: list[dict[str, object]] = []
@@ -121,4 +172,8 @@ class StagedWorkspace:
         return manifest, contents
 
     def cleanup(self) -> None:
+        if self.snapshot is not None:
+            # Read-only snapshot directories must be writable to be removed.
+            for directory, _dirs, _files in os.walk(self.path):
+                os.chmod(directory, 0o700)
         shutil.rmtree(self.path, ignore_errors=False)

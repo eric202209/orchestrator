@@ -25,7 +25,7 @@ import uuid
 import secrets
 
 from .contract import PROFILE, ExecutionRequest, ExecutionResult
-from .docker_executor import IMAGE, DockerExecutor
+from .docker_executor import IMAGE, DockerExecutor, pinned_pytest_image
 from .transport import HostSocketLauncher, SandboxClient, _mac, _receive, _send
 
 STATE_DIR = Path("/var/lib/p43-sandbox-bridge")
@@ -201,7 +201,10 @@ def recover_orphans(config: ServiceConfig) -> dict[str, int]:
     exact_name = re.compile(f"^{re.escape(config.container_prefix)}[0-9a-f]{{32}}$")
     for line in listed.stdout.splitlines():
         name, _, image = line.partition("\t")
-        if not exact_name.fullmatch(name) or image != IMAGE:
+        if not exact_name.fullmatch(name) or image not in {
+            IMAGE,
+            pinned_pytest_image(),
+        }:
             skipped += 1
             continue
         rm = subprocess.run(

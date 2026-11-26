@@ -386,7 +386,7 @@ class HostSocketLauncher:
                 request_id = request.request_id
                 if request.issued_at < self.started_at:
                     raise RequestRejected("request_predates_launcher")
-                if request.version == 2:
+                if request.version in (2, 3):
                     verify_authorization(
                         request,
                         launcher_epoch=self.epoch,

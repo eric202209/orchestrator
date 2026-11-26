@@ -349,6 +349,22 @@ def _reserve_mutation_authority(
     return _committed_session_stop_status(db, session_id)
 
 
+def _sandbox_execution_context(
+    db: Any, ctx: Any, session: Any, session_id: int, task_id: int
+) -> Optional[SandboxExecutionContext]:
+    """Trusted attempt identifiers for the C2 Gateway and file-op admission."""
+
+    if not ctx.task_execution_id:
+        return None
+    return SandboxExecutionContext(
+        db=db,
+        task_execution_id=ctx.task_execution_id,
+        session_id=session_id,
+        task_id=task_id,
+        session_instance_id=session.instance_id,
+    )
+
+
 def _execution_topology_for_runtime(runtime_service: Any) -> Any:
     """Resolve the dispatching runtime's execution topology (deferred import).
 
@@ -984,6 +1000,9 @@ def execute_step_loop(
             authority_check=lambda: _reserve_mutation_authority(
                 db, session_id, task_id
             ),
+            attempt_context=_sandbox_execution_context(
+                db, ctx, session, session_id, task_id
+            ),
         )
         # P41-G2-B boundary A: a stop committed mid-step leaves the op unapplied.
         if ops_result.get("failure_category") == "execution_authority_lost":
@@ -1160,16 +1179,8 @@ def execute_step_loop(
                         execution_topology=_execution_topology_for_runtime(
                             runtime_service
                         ),
-                        sandbox_context=(
-                            SandboxExecutionContext(
-                                db=db,
-                                task_execution_id=ctx.task_execution_id,
-                                session_id=session_id,
-                                task_id=task_id,
-                                session_instance_id=session.instance_id,
-                            )
-                            if ctx.task_execution_id
-                            else None
+                        sandbox_context=_sandbox_execution_context(
+                            db, ctx, session, session_id, task_id
                         ),
                     )
                     if local_verification_result is not None:
@@ -1393,6 +1404,9 @@ def execute_step_loop(
             validation_severity=ctx.validation_severity,
             relaxed_mode=orchestration_state.relaxed_mode,
             execution_topology=_execution_topology_for_runtime(runtime_service),
+            sandbox_context=_sandbox_execution_context(
+                db, ctx, session, session_id, task_id
+            ),
         )
         step_output = assessment.step_output
         step_status = assessment.step_status

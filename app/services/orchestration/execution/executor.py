@@ -579,19 +579,27 @@ class ExecutorService:
         accepted_path_authority: AcceptedPathAuthority | None = None,
         authority_check: Callable[[], Optional[str]] | None = None,
         debug_repair_generated_test_paths: Iterable[str] = (),
+        attempt_context: Any = None,
     ) -> Dict[str, Any]:
         """Execute structured file operations without shell quoting.
 
         ``authority_check`` returns a reason when the caller's execution
         authority is gone; no further op touches the workspace after that.
+        In C2 mode ``attempt_context`` (the trusted Worker lifecycle's
+        ``SandboxExecutionContext``) is required and re-verified per op.
         """
 
         if ops:
             from app.services.orchestration.execution.sandbox_gateway import (
-                refuse_local_execution,
+                c2_structured_file_ops_authority_check,
             )
 
-            refuse_local_execution("structured_file_ops")
+            authority_check = c2_structured_file_ops_authority_check(
+                project_dir,
+                accepted_path_authority=accepted_path_authority,
+                authority_check=authority_check,
+                attempt_context=attempt_context,
+            )
         if not ops:
             return {
                 "success": True,
