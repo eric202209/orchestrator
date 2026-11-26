@@ -107,6 +107,26 @@ def validate_disposable_task_admission(
         )
 
 
+def disposable_c2_execution_mode(environment: Mapping[str, str]) -> bool:
+    """True for the exact disposable C2 Worker contract (P43-PRODUCT-23C B1).
+
+    A failed C2 attempt is terminal: the FailureCoordinator then schedules no
+    Celery retry of the same TaskExecution and no automatic recovery rerun.
+    Bounded repair inside the one authorized execution is unaffected.
+    """
+
+    def value(name: str) -> str:
+        return str(environment.get(name, "") or "").strip()
+
+    return bool(
+        value("WORKER_ISOLATION_MODE") == DISPOSABLE_WORKER_ISOLATION_MODE
+        and value("WORKER_ENVIRONMENT") == DISPOSABLE_WORKER_ENVIRONMENT
+        and value("WORKER_BRIDGE_MODE") == C2_BRIDGE_MODE
+        and value("C2_DISPOSABLE_EXECUTION_ADMISSION")
+        == C2_DISPOSABLE_EXECUTION_ADMISSION
+    )
+
+
 def disposable_c2_publication_admitted(
     environment: Mapping[str, str],
     *,
@@ -228,6 +248,7 @@ def model_environment_authority_violations(
 
 __all__ = [
     "C2_DISPOSABLE_EXECUTION_ADMISSION",
+    "disposable_c2_execution_mode",
     "disposable_c2_publication_admitted",
     "DISPOSABLE_WORKER_ISOLATION_MODE",
     "DISPOSABLE_WORKER_QUEUE",

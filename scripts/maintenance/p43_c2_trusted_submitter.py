@@ -30,10 +30,18 @@ TaskExecution is in flight. The frozen naive control is not submitted: the
 product rejects it at completion, which enters provider-dependent repair. It
 is judged by the independent evaluation only (``verdict``), like PRODUCT-18.
 
+P43-PRODUCT-23C adds the ``model`` control: the frozen U1 task text and
+baseline project files only, submitted with no stored Plan through the normal
+full-lifecycle path (Discovery and Planning admission, manual mode). Its
+material mount holds exactly the pinned manifest, task and baseline
+(``MODEL_PARTS``); reference, naive, hidden and oracle material never reach
+this container, the Worker, or the provider.
+
 Host-side, with only the standard library (``python3 -I <this file> ...``):
 
     verify-material ROOT      verify the staged evaluation material
     verdict --control C ...   integrity + oracle + hidden verdict for C
+    contamination EVAL RELAY  scan recorded provider requests (supplementary)
 """
 
 from __future__ import annotations
@@ -87,8 +95,13 @@ TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 # --- P43-PRODUCT-23B trusted controls ---------------------------------------
 
 EXIT_CHECK = "exit-check"
-CONTROLS = (EXIT_CHECK, "reference", "probe")
-CONTROL_PROJECTS = {"reference": "p43-c2-u1-reference", "probe": "p43-c2-probe"}
+MODEL = "model"
+CONTROLS = (EXIT_CHECK, "reference", "probe", MODEL)
+CONTROL_PROJECTS = {
+    "reference": "p43-c2-u1-reference",
+    "probe": "p43-c2-probe",
+    MODEL: "p43-c2-u1-model",
+}
 # Frozen PRODUCT-18 identities (freeze.json). Only hashes live here.
 U1_MANIFEST_SHA256 = "26965b02fe87e35de753267d0b0ee5741c0e555e1e019180a913224543b91f86"
 ORACLE_SHA256 = "b28ea4b22e26942b3e8462db62c2f4d790a4dd293d00e5a228a1b3e09687ecdc"
@@ -100,6 +113,10 @@ HIDDEN_SUITE_PATH = "p43-product-18/tools/hidden_suite.py"
 # Read-only bind into the submitter container only (never the Worker).
 U1_MATERIAL_ROOT = "/run/p43-u1-material"
 SUBMIT_PARTS = ("baseline", "reference")
+# The model control's mount: manifest, task and baseline only.
+MODEL_PARTS = ("baseline",)
+# P43-PRODUCT-23C: the evaluation window (the relay enforces the deadline).
+MODEL_TIMEOUT_SECONDS = 1200
 EVALUATION_PARTS = ("baseline", "reference", "naive", "hidden", "case", "tools")
 
 PROBE_TASK_DESCRIPTION = (
@@ -509,6 +526,24 @@ def _control_definition(control: str) -> dict[str, Any]:
                 rel: (baseline / rel).read_bytes() for rel in manifest["baseline_files"]
             },
         }
+    if control == MODEL:
+        root = Path(U1_MATERIAL_ROOT)
+        # Exact verification: a mount holding any reference, naive, hidden or
+        # case file is refused, not filtered.
+        manifest = verify_u1_material(root, MODEL_PARTS)
+        baseline = root / U1_DIR / "baseline"
+        return {
+            "project": CONTROL_PROJECTS[control],
+            "project_description": "P43-PRODUCT-23C U1 real-provider evaluation.",
+            "title": "U1 rangekit task",
+            "description": (root / U1_DIR / "task.txt").read_text(encoding="utf-8"),
+            "profile": "full_lifecycle",
+            "plan": None,
+            "session": "P43-PRODUCT-23C U1 model evaluation",
+            "seed": {
+                rel: (baseline / rel).read_bytes() for rel in manifest["baseline_files"]
+            },
+        }
     if control == "probe":
         return {
             "project": CONTROL_PROJECTS[control],
@@ -633,7 +668,11 @@ def submit(
                 title=definition["title"],
                 description=definition["description"],
                 execution_profile=definition["profile"],
-                steps=json.dumps(definition["plan"]),
+                steps=(
+                    None
+                    if definition["plan"] is None
+                    else json.dumps(definition["plan"])
+                ),
             ),
             db=db,
             current_user=user,
@@ -651,7 +690,14 @@ def submit(
             current_user=user,
         )
         queued = queue_task_for_session(
-            db, session, task.id, timeout_seconds=ORCHESTRATION_TIMEOUT_SECONDS
+            db,
+            session,
+            task.id,
+            timeout_seconds=(
+                MODEL_TIMEOUT_SECONDS
+                if control == MODEL
+                else ORCHESTRATION_TIMEOUT_SECONDS
+            ),
         )
         result = {
             "project_id": project.id,
@@ -702,8 +748,9 @@ def _control_observation(db: Any, control: str, execution: Any) -> dict[str, Any
     workspace_files = _workspace_files(Path(workspace))
     status = str(getattr(execution.status, "value", execution.status)).lower()
     error = task.error_message or ""
-    if control == "reference":
+    if control in ("reference", MODEL):
         # The unchanged baseline is compared by ``verdict`` (frozen hashes).
+        # For ``model`` this is "delivered and held", not an expectation.
         met = (
             status == "done"
             and change_set is not None
@@ -734,6 +781,30 @@ def _control_observation(db: Any, control: str, execution: Any) -> dict[str, Any
         "workspace_files": workspace_files,
         "change_set": change_set,
         "expected_outcome_met": bool(met),
+    }
+
+
+def _model_attempt_observation(task: Any, session: Any, executions: list) -> dict:
+    """Retry, rerun and accepted-Plan facts for the model control."""
+
+    steps = task.steps or ""
+    return {
+        "task_execution_count": len(executions),
+        "task_executions": [
+            {
+                "id": row.id,
+                "attempt_number": row.attempt_number,
+                "status": str(getattr(row.status, "value", row.status)),
+                "failure_category": row.failure_category,
+            }
+            for row in executions
+        ],
+        "accepted_plan_sha256": _sha256_bytes(steps.encode("utf-8")) if steps else None,
+        "accepted_plan_step_count": len(_plan_commands(steps) or []),
+        "session_continuation_kind": getattr(session, "continuation_kind", None),
+        "session_continuation_retry_count": getattr(
+            session, "continuation_retry_count", None
+        ),
     }
 
 
@@ -768,8 +839,9 @@ def observe(
                 query = query.join(Task, Task.id == TaskExecution.task_id).filter(
                     Task.project_id == project.id
                 )
-            executions = query.all()
-            if len(executions) != 1:
+            executions = sorted(query.all(), key=lambda row: row.id)
+            # A model run reports a second execution instead of hiding it.
+            if len(executions) != 1 and not (control == MODEL and executions):
                 raise SubmitterRefused(f"expected_one_task_execution:{len(executions)}")
             execution = executions[0]
             status = getattr(execution.status, "value", execution.status)
@@ -802,6 +874,8 @@ def observe(
                         execution.worker_process_start_identity
                     ),
                 }
+                if control == MODEL:
+                    result.update(_model_attempt_observation(task, session, executions))
                 if control != EXIT_CHECK:
                     result.update(_control_observation(db, control, execution))
                     result["expected_outcome_met"] = bool(
@@ -909,19 +983,21 @@ def evaluation_verdict(
     ``reference`` is the product-captured Change Set and needs the
     ``observe`` record; ``naive`` is the frozen control Change Set itself.
     The verdict is compared with the frozen PRODUCT-18 expectation.
+    ``model`` (PRODUCT-23C) is the actual held model Change Set, judged on
+    its own: it has no frozen expectation and is never replaced.
     """
 
-    if control not in ("reference", "naive"):
+    if control not in ("reference", "naive", MODEL):
         raise SubmitterRefused(f"unknown_evaluation_control:{control}")
     root = Path(material_root)
     manifest = verify_u1_material(root, EVALUATION_PARTS)
     case = json.loads((root / U1_DIR / "case.json").read_text(encoding="utf-8"))
-    expected = case["expectations"][control]
+    expected = {} if control == MODEL else case["expectations"][control]
     row = None
     held = None
-    if control == "reference":
-        if not observed or observed.get("control") != "reference":
-            raise SubmitterRefused("reference_observation_required")
+    if control in ("reference", MODEL):
+        if not observed or observed.get("control") != control:
+            raise SubmitterRefused(f"{control}_observation_required")
         row = observed.get("change_set") or {}
         baseline_unchanged = observed.get("workspace_files") == dict(
             manifest["baseline_files"]
@@ -950,6 +1026,20 @@ def evaluation_verdict(
     ]
     if control == "reference" and not (integrity["ok"] and held):
         mismatches.append("reference_not_held_or_integrity_failed")
+    if control == MODEL:
+        if not integrity["ok"]:
+            outcome = "INTEGRITY_FAILED"
+        elif delivery:
+            outcome = "COMPLETE_DELIVERY"
+        else:
+            outcome = "INCOMPLETE_DELIVERY"
+        return {
+            "control": control,
+            "integrity": integrity,
+            "product_held_and_baseline_unchanged": held,
+            "observed": observed_fields,
+            "verdict": outcome,
+        }
     return {
         "control": control,
         "integrity": integrity,
@@ -958,6 +1048,105 @@ def evaluation_verdict(
         "expected": expected,
         "mismatches": mismatches,
         "verdict": "MATCHES_FROZEN_EXPECTATION" if not mismatches else "MISMATCH",
+    }
+
+
+CONTAMINATION_MIN_LINE_CHARS = 24
+
+
+def _chat_text(payload: Any, key: str) -> str:
+    """Concatenated message text of a chat request (``messages``) or response."""
+
+    if not isinstance(payload, dict):
+        return ""
+    if key == "messages":
+        messages = payload.get("messages") or []
+    else:
+        messages = [
+            (choice or {}).get("message") or {}
+            for choice in payload.get("choices") or []
+            if isinstance(choice, dict)
+        ]
+    parts: list[str] = []
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(
+                str(item.get("text") or "")
+                for item in content
+                if isinstance(item, dict)
+            )
+    return "\n".join(parts)
+
+
+def provider_request_contamination(
+    material_root: str | Path, relay_state_dir: str | Path
+) -> dict[str, Any]:
+    """Supplementary evidence: evaluation-only lines in recorded requests.
+
+    A marker is a stripped line of at least ``CONTAMINATION_MIN_LINE_CHARS``
+    from a reference, naive, hidden, case or tool file that does not occur in
+    the task text or baseline. A request hit is *explained* when an earlier
+    provider response already contained the line, i.e. the model produced it
+    itself. Unexplained hits need review; they are not a leakage verdict, and
+    model output matching the reference is never leakage by itself. Only line
+    digests are reported.
+    """
+
+    root = Path(material_root)
+    manifest = verify_u1_material(root, EVALUATION_PARTS)
+    files = _material_files(manifest, EVALUATION_PARTS)
+    visible = set(_material_files(manifest, MODEL_PARTS))
+    allowed = "\n".join(
+        (root / rel).read_text(encoding="utf-8", errors="replace")
+        for rel in sorted(visible)
+    )
+    markers: dict[str, str] = {}
+    for rel in sorted(set(files) - visible):
+        text = (root / rel).read_text(encoding="utf-8", errors="replace")
+        for line in text.splitlines():
+            stripped = line.strip()
+            if (
+                len(stripped) >= CONTAMINATION_MIN_LINE_CHARS
+                and stripped not in allowed
+            ):
+                markers.setdefault(stripped, rel)
+    bodies = Path(relay_state_dir) / "bodies"
+    requests = sorted(bodies.glob("*.request.json")) if bodies.is_dir() else []
+    produced = ""
+    hits: list[dict[str, Any]] = []
+    for request in requests:
+        sequence = request.name.split(".", 1)[0]
+        text = _chat_text(json.loads(request.read_bytes()), "messages")
+        for line, source in markers.items():
+            if line in text:
+                hits.append(
+                    {
+                        "sequence": sequence,
+                        "source": source,
+                        "line_sha256": _sha256_bytes(line.encode("utf-8")),
+                        "explained_by_prior_response": line in produced,
+                    }
+                )
+        response = request.with_name(f"{sequence}.response.json")
+        if response.is_file() and not response.is_symlink():
+            try:
+                produced += "\n" + _chat_text(
+                    json.loads(response.read_bytes()), "choices"
+                )
+            except ValueError:
+                pass
+    unexplained = [hit for hit in hits if not hit["explained_by_prior_response"]]
+    return {
+        "requests_scanned": len(requests),
+        "marker_lines": len(markers),
+        "hits": hits,
+        "unexplained_hits": len(unexplained),
+        "classification": (
+            "REVIEW_REQUIRED" if unexplained else "NO_EVALUATION_MATERIAL_IN_REQUESTS"
+        ),
     }
 
 
@@ -976,21 +1165,31 @@ def main(argv: list[str] | None = None) -> int:
             "stage-material",
             "verify-material",
             "verdict",
+            "contamination",
         ),
     )
     parser.add_argument("paths", nargs="*")
     parser.add_argument("--deadline-seconds", type=float, default=600.0)
     parser.add_argument("--control", default=EXIT_CHECK, choices=(*CONTROLS, "naive"))
-    parser.add_argument("--parts", choices=("submit", "evaluation"))
+    parser.add_argument("--parts", choices=("submit", "evaluation", "model"))
     parser.add_argument("--oracle")
     parser.add_argument("--hidden")
     parser.add_argument("--observed")
     args = parser.parse_args(argv)
     # Paths are Host-side evaluation inputs only; nothing else takes input.
-    arity = {"stage-material": 2, "verify-material": 1, "verdict": 2}
+    arity = {
+        "stage-material": 2,
+        "verify-material": 1,
+        "verdict": 2,
+        "contamination": 2,
+    }
     if len(args.paths) != arity.get(args.command, 0):
         parser.error(f"{args.command} takes {arity.get(args.command, 0)} path(s)")
-    parts = {"submit": SUBMIT_PARTS, "evaluation": EVALUATION_PARTS}
+    parts = {
+        "submit": SUBMIT_PARTS,
+        "evaluation": EVALUATION_PARTS,
+        "model": MODEL_PARTS,
+    }
     try:
         if args.command == "init":
             result = init_database()
@@ -1007,6 +1206,8 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "verify-material":
             verify_u1_material(args.paths[0], parts[args.parts])
             result = {"verified": args.paths[0], "parts": args.parts}
+        elif args.command == "contamination":
+            result = provider_request_contamination(*args.paths)
         else:
             material, change_set = args.paths
             result = evaluation_verdict(
@@ -1022,10 +1223,16 @@ def main(argv: list[str] | None = None) -> int:
         return 78
     print(json.dumps(result, indent=2, sort_keys=True))
     if args.command == "observe":
+        if args.control == MODEL:
+            # An observation, not a pass/fail gate: terminal or not, it is
+            # the evidence; the outcome is judged by ``verdict``.
+            return 0 if result["terminal"] else 2
         if args.control != EXIT_CHECK:
             return 0 if result["expected_outcome_met"] else 1
         return 0 if result["task_execution_status"].lower() == "done" else 1
     if args.command == "verdict":
+        if args.control == MODEL:
+            return 0
         return 0 if result["verdict"] == "MATCHES_FROZEN_EXPECTATION" else 1
     return 0
 

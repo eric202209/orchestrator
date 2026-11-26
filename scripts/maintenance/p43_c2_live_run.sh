@@ -26,6 +26,19 @@
 # reference control reach the submitter; the hidden suite is mounted only into
 # the network-less evaluation container on the pinned pytest image.
 #
+# P43-PRODUCT-23C provider-enabled mode (one real-provider model window):
+#   export P43_C2_PROVIDER_UPSTREAM=http://<host>:<port>   # the one upstream
+#   export P43_C2_PROVIDER_MODEL=<served model id>         # the one model
+#   export P43_C2_PROVIDER_NETWORK=<docker network>        # relay egress only
+#   bash scripts/maintenance/p43_c2_live_run.sh run-model-window --operator-approved
+# runs check -> setup -> boundary -> submit model -> evaluate model ->
+# evidence -> cleanup under that single approval. setup then starts the
+# disposable relay p43-c2-relay (alias model-provider on the internal network,
+# plus P43_C2_PROVIDER_NETWORK); the Worker stays on the internal network
+# only. The relay forwards at most 6 completions and none outside the
+# 20-minute window armed immediately before the model submission. Provider
+# mode admits only the model control; provider-free mode never admits it.
+#
 # The persistent C2 ledger is never reset: setup snapshots it before Launcher
 # startup and every later stage verifies against that baseline by request ID
 # (ledger-*.json in the evidence separates historical and current-window rows).
@@ -57,6 +70,14 @@ BASE_IMAGE=$(sed -n 's/^IMAGE = "\(.*\)"$/\1/p' "$REPO/app/services/sandbox_brid
 SUBMITTER=$REPO/scripts/maintenance/p43_c2_trusted_submitter.py
 PYTEST_IMAGE=""
 FAILURES=0
+# P43-PRODUCT-23C provider-enabled mode.
+RELAY=p43-c2-relay
+RELAY_UID=10003
+RELAY_PORT=8000
+RELAY_SCRIPT=/opt/orchestrator/scripts/maintenance/p43_c2_provider_relay.py
+PROVIDER_DELTA=$REPO/config/worker-c2-provider.env.example
+MODEL_WINDOW_SECONDS=1200
+PROVIDER_FACTS=""
 
 ok() { printf 'PASS %s\n' "$*"; }
 bad() { printf 'FAIL %s\n' "$*"; FAILURES=$((FAILURES + 1)); }
@@ -132,6 +153,61 @@ require_inputs() {
         refuse "P43_C2_REDIS_IMAGE must be digest-pinned (operator-supplied)"
     [[ "${P43_C2_OPERATOR:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,63}$ ]] || refuse "P43_C2_OPERATOR is required"
     [[ "$BASE_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || refuse "pinned Sandbox base image not found"
+}
+
+provider_mode_requested() {
+    [[ -n ${P43_C2_PROVIDER_UPSTREAM:-} ]]
+}
+
+require_provider_inputs() {
+    [[ "${P43_C2_PROVIDER_UPSTREAM:-}" =~ ^http://[A-Za-z0-9][A-Za-z0-9.-]{0,252}:[0-9]{1,5}$ ]] ||
+        refuse "P43_C2_PROVIDER_UPSTREAM must be http://host:port (no path, query or credentials)"
+    [[ "${P43_C2_PROVIDER_MODEL:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,127}$ ]] ||
+        refuse "P43_C2_PROVIDER_MODEL is required"
+    [[ "${P43_C2_PROVIDER_NETWORK:-}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] ||
+        refuse "P43_C2_PROVIDER_NETWORK is required"
+    [[ $P43_C2_PROVIDER_NETWORK != "$NET" ]] || refuse "P43_C2_PROVIDER_NETWORK must not be $NET"
+    [[ -f $PROVIDER_DELTA ]] || refuse "provider env delta missing: $PROVIDER_DELTA"
+}
+
+# Recorded by setup; later stages never re-read the provider environment.
+provider_mode() {
+    [[ -f $ROOT/env/run.vars ]] && grep -qx 'PROVIDER_MODE=1' "$ROOT/env/run.vars"
+}
+
+declared_context() { sed -n 's/^EXECUTION_CONTEXT_TOKENS=\([0-9]*\)$/\1/p' "$PROVIDER_DELTA"; }
+
+# Read-only provider facts (GET /v1/models only; no inference) from a one-shot
+# unprivileged container on the provider network. Never through the Worker.
+provider_facts() {
+    docker run --rm --pull=never --network "$P43_C2_PROVIDER_NETWORK" --read-only --cap-drop=ALL \
+        --security-opt=no-new-privileges:true --user 65534:65534 --memory=128m --pids-limit=32 \
+        --entrypoint python3 "$BASE_IMAGE" -I -c '
+import http.client, json, socket, sys, urllib.parse
+upstream, model, declared = sys.argv[1], sys.argv[2], int(sys.argv[3])
+parts = urllib.parse.urlsplit(upstream)
+facts = {"upstream": upstream, "approved_model": model, "declared_context_tokens": declared}
+try:
+    facts["upstream_ip"] = socket.gethostbyname(parts.hostname)
+    connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=10)
+    connection.request("GET", "/v1/models")  # http.client never follows redirects
+    response = connection.getresponse()
+    facts["status"] = response.status
+    if response.status != 200:
+        raise RuntimeError("model list status %d" % response.status)
+    listed = json.loads(response.read(1048576)).get("data") or []
+except Exception as exc:
+    facts["error"] = type(exc).__name__ + ": " + str(exc)[:200]
+    print(json.dumps(facts, sort_keys=True)); sys.exit(1)
+facts["served_models"] = [{k: e.get(k) for k in ("id", "root", "owned_by", "max_model_len")} for e in listed]
+match = [e for e in listed if e.get("id") == model]
+facts["approved_model_served"] = len(match) == 1
+limit = match[0].get("max_model_len") if match else None
+facts["provider_context_tokens"] = limit if isinstance(limit, int) else None
+facts["context_verified"] = isinstance(limit, int) and limit >= declared
+print(json.dumps(facts, sort_keys=True))
+sys.exit(0 if facts["approved_model_served"] and facts["context_verified"] else 1)
+' "$P43_C2_PROVIDER_UPSTREAM" "$P43_C2_PROVIDER_MODEL" "$(declared_context)"
 }
 
 instance_value() { sed -n "s/^$1=//p" "$ROOT/env/instance.env"; }
@@ -281,6 +357,18 @@ cmd_check() {
     [[ -n $PYTEST_IMAGE ]] && ok "pytest image execution-ready: $PYTEST_IMAGE" ||
         bad "pytest image not execution-ready (unpinned, absent or mismatched)"
     info "C1B/ai-agent fingerprint: $(c1b_fingerprint)"
+    if provider_mode_requested; then
+        require_provider_inputs
+        [[ -n ${P43_C2_U1_EVIDENCE:-} ]] || bad "provider mode requires P43_C2_U1_EVIDENCE"
+        docker network inspect "$P43_C2_PROVIDER_NETWORK" >/dev/null 2>&1 &&
+            ok "provider network present: $P43_C2_PROVIDER_NETWORK" || bad "provider network absent"
+        if PROVIDER_FACTS=$(provider_facts); then
+            ok "provider serves $P43_C2_PROVIDER_MODEL with context >= $(declared_context) (read-only model list)"
+        else
+            bad "provider facts not verified: $PROVIDER_FACTS"
+        fi
+        info "provider facts: $PROVIDER_FACTS"
+    fi
     printf 'C2_LIVE_CHECK=%s failures=%d\n' "$([[ $FAILURES -eq 0 ]] && echo READY || echo BLOCKED)" "$FAILURES"
     [[ $FAILURES -eq 0 ]]
 }
@@ -302,6 +390,33 @@ authority_mounts() {
         -v "$ROOT/workspace:/workspace/authoritative"
 }
 
+# Disposable provider relay (23C): the Worker image, non-root, read-only, no
+# capabilities, no Docker socket, no Worker/Sandbox/C1B/evaluation material.
+# Internal network alias model-provider; only it joins the provider network.
+start_relay() {
+    install -d -o "$RELAY_UID" -g "$RELAY_UID" -m 0700 "$ROOT/relay"
+    install -d -o root -g root -m 0755 "$ROOT/relay-ctl"
+    docker run -d --name "$RELAY" --network "$NET" --network-alias model-provider \
+        --user "$RELAY_UID:$RELAY_UID" --read-only --cap-drop=ALL \
+        --security-opt=no-new-privileges:true --tmpfs /tmp:rw,nosuid,nodev,size=8m \
+        --memory=256m --memory-swap=256m --pids-limit=64 --cpus=0.5 --restart=no \
+        -e P43_RELAY_UPSTREAM="$P43_C2_PROVIDER_UPSTREAM" -e P43_RELAY_MODEL="$P43_C2_PROVIDER_MODEL" \
+        -e P43_RELAY_STATE_DIR=/var/lib/p43-relay -e P43_RELAY_DEADLINE_FILE=/run/p43-relay-ctl/deadline \
+        -e P43_RELAY_PORT="$RELAY_PORT" \
+        -v "$ROOT/relay:/var/lib/p43-relay" -v "$ROOT/relay-ctl:/run/p43-relay-ctl:ro" \
+        -e P43_RELAY_BIND=self --entrypoint python3 "$IMAGE_TAG" -I "$RELAY_SCRIPT" >/dev/null
+    # The listener binds its internal-network address first; only then does
+    # the relay gain the provider network, on which it never listens.
+    local started=0
+    for _ in $(seq 50); do # no `| grep -q` (SIGPIPE under pipefail)
+        grep -q '^p43-c2-relay listening ' <<<"$(docker logs "$RELAY" 2>&1)" && { started=1; break; }
+        sleep 0.2
+    done
+    [[ $started -eq 1 ]] || refuse "relay did not start: $(docker logs "$RELAY" 2>&1 | tail -n 5)"
+    docker network connect "$P43_C2_PROVIDER_NETWORK" "$RELAY"
+    ok "relay started (alias model-provider) for $P43_C2_PROVIDER_MODEL at $P43_C2_PROVIDER_UPSTREAM"
+}
+
 cmd_setup() {
     need_approval "${1:-}"
     cmd_check
@@ -318,6 +433,16 @@ cmd_setup() {
 
     # Non-secret contract files (no duplicate keys: docker env precedence is moot).
     local template=$REPO/config/worker-c2-live.env.example
+    if provider_mode_requested; then
+        # Provider mode: the template with every delta key replaced (23C).
+        local keys
+        keys=$(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$PROVIDER_DELTA" | paste -sd'|')
+        { grep -Ev "^($keys)=" "$template"
+          grep -E '^[A-Z][A-Z0-9_]*=' "$PROVIDER_DELTA" | sed "s|@MODEL@|$P43_C2_PROVIDER_MODEL|g"
+        } >"$ROOT/env/contract.env"
+        template=$ROOT/env/contract.env
+        printf '%s\n' "$PROVIDER_FACTS" >"$ROOT/env/provider-facts.json"
+    fi
     install -m 0600 "$template" "$ROOT/env/worker.env"
     sed -e '/^SANDBOX_BRIDGE_/d' \
         -e "s|^CONTROLLED_WORKER_NODE_IDENTITY=.*|CONTROLLED_WORKER_NODE_IDENTITY=$node|" \
@@ -346,7 +471,12 @@ cmd_setup() {
     ok "Redis started on internal $NET"
 
     # Frozen U1 material (PRODUCT-23B), copied and verified by committed code.
-    if [[ -n ${P43_C2_U1_EVIDENCE:-} ]]; then
+    if [[ -n ${P43_C2_U1_EVIDENCE:-} ]] && provider_mode_requested; then
+        # Model mount: manifest, task and baseline only (no reference control).
+        /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-model" --parts model
+        /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-eval" --parts evaluation
+        ok "U1 model and evaluation material staged and verified against the pinned frozen manifest"
+    elif [[ -n ${P43_C2_U1_EVIDENCE:-} ]]; then
         /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-submit" --parts submit
         /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-eval" --parts evaluation
         ok "U1 material staged and verified against the pinned frozen manifest"
@@ -375,6 +505,12 @@ cmd_setup() {
     ok "Launcher startup removed the pytest-image orphan $orphan"
     printf 'C2_GID=%s\nNODE=%s\nCANDIDATE_TREE=%s\nPYTEST_IMAGE=%s\nORPHAN=%s\n' \
         "$c2gid" "$node" "$tree" "$PYTEST_IMAGE" "$orphan" >"$ROOT/env/run.vars"
+    if provider_mode_requested; then
+        printf 'PROVIDER_MODE=1\nPROVIDER_MODEL=%s\nPROVIDER_NETWORK=%s\nUPSTREAM_IP=%s\nUPSTREAM_PORT=%s\n' \
+            "$P43_C2_PROVIDER_MODEL" "$P43_C2_PROVIDER_NETWORK" \
+            "$(/usr/bin/python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["upstream_ip"])' "$ROOT/env/provider-facts.json")" \
+            "${P43_C2_PROVIDER_UPSTREAM##*:}" >>"$ROOT/env/run.vars"
+    fi
 
     # The protected Host source is also the exact Worker image build context.
     docker build -q -f "$REPO/Dockerfile.worker" \
@@ -427,6 +563,10 @@ print(json.dumps(pin, sort_keys=True))
         $(authority_mounts) --entrypoint python3 "$IMAGE_TAG" \
         -m scripts.maintenance.p43_c2_trusted_submitter init
 
+    if provider_mode_requested; then
+        start_relay
+    fi
+
     # Restricted Worker.
     # shellcheck disable=SC2046
     docker run -d --name "$WORKER" --network "$NET" \
@@ -462,6 +602,99 @@ canonical_mounts() {
     sed '/^$/d' | sort
 }
 
+# 23C provider mode: the relay is the Worker's only route to a model, and it
+# is not a proxy. Uses only the read-only model list; zero completions.
+relay_boundary() {
+    local fmt expected probe direct
+    fmt='{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Privileged}} {{.HostConfig.CapDrop}} {{.HostConfig.SecurityOpt}} {{.Config.User}} {{len .HostConfig.Devices}} {{.HostConfig.RestartPolicy.Name}}'
+    expect "Relay HostConfig" "true false [ALL] [no-new-privileges:true] $RELAY_UID:$RELAY_UID 0 no" \
+        "$(docker inspect "$RELAY" --format "$fmt")"
+    expect "Relay mounts (exact)" "$(printf '%s\n' "$ROOT/relay:/var/lib/p43-relay:true" \
+        "$ROOT/relay-ctl:/run/p43-relay-ctl:false" | sort)" \
+        "$(docker inspect "$RELAY" --format '{{range .Mounts}}{{.Source}}:{{.Destination}}:{{.RW}}{{"\n"}}{{end}}' | canonical_mounts)"
+    expect "Relay networks" "$(printf '%s\n' "$NET" "$PROVIDER_NETWORK" | sort | xargs)" \
+        "$(docker inspect "$RELAY" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' | sort | xargs)"
+    expect "Relay alias on $NET" "True" \
+        "$(docker inspect "$RELAY" --format '{{json .NetworkSettings.Networks}}' | /usr/bin/python3 -I -c \
+            'import json, sys; print("model-provider" in (json.load(sys.stdin)[sys.argv[1]].get("Aliases") or []))' "$NET")"
+    local internal_ip provider_ip
+    internal_ip=$(docker inspect "$RELAY" --format "{{(index .NetworkSettings.Networks \"$NET\").IPAddress}}")
+    provider_ip=$(docker inspect "$RELAY" --format "{{(index .NetworkSettings.Networks \"$PROVIDER_NETWORK\").IPAddress}}")
+    expect "Relay listens on its internal address only" "1" \
+        "$(grep -c "^p43-c2-relay listening bind=$internal_ip port=$RELAY_PORT " <<<"$(docker logs "$RELAY" 2>&1)")"
+    expect "Relay unreachable from the provider network" "REFUSED" \
+        "$(docker run --rm --pull=never --network "$PROVIDER_NETWORK" --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges:true --user 65534:65534 --memory=64m --entrypoint python3 \
+            "$BASE_IMAGE" -I -c 'import socket, sys
+try:
+    socket.create_connection((sys.argv[1], int(sys.argv[2])), 3).close(); print("REACHABLE")
+except OSError:
+    print("REFUSED")' "$provider_ip" "$RELAY_PORT" 2>&1 | tail -1)"
+    expect "Discovery search executable for the non-root Worker (B2)" "uid=$WORKER_UID /usr/bin/rg" \
+        "$(docker exec "$WORKER" sh -c 'echo "uid=$(id -u) $(command -v rg)"' 2>&1)"
+    expect "Sandbox network disabled (pinned executor argv)" "2" \
+        "$(grep -c -- '"--network=none",' "$REPO/app/services/sandbox_bridge/docker_executor.py")"
+    direct='import socket, sys
+port = int(sys.argv[2])
+for host, p in ((sys.argv[1], port), ("ai-gateway", port), ("ai-agent", 8080), ("172.17.0.1", 8080),
+                ("172.17.0.1", 6379), ("172.17.0.1", port), ("8.8.8.8", 53)):
+    try:
+        socket.create_connection((host, p), 3).close(); print("REACHABLE", host, p); sys.exit(1)
+    except OSError:
+        pass
+print("NO_DIRECT_ROUTE")'
+    expect "Worker cannot reach upstream/production/external directly" "NO_DIRECT_ROUTE" \
+        "$(docker exec "$WORKER" python3 -c "$direct" "$UPSTREAM_IP" "$UPSTREAM_PORT" 2>&1 | tail -1)"
+    probe='import http.client, json, socket, sys
+model = sys.argv[1]
+def call(method, path, body=None):
+    c = http.client.HTTPConnection("model-provider", 8000, timeout=15)
+    c.request(method, path, body=body, headers={"Content-Type": "application/json"} if body else {})
+    r = c.getresponse(); data = r.read(); c.close(); return r.status, data
+def raw(line):
+    s = socket.create_connection(("model-provider", 8000), 5); s.sendall(line); data = s.recv(4096); s.close()
+    return int(data.split(b" ", 2)[1])
+chat = lambda m: json.dumps({"model": m, "messages": [{"role": "user", "content": "boundary"}]}).encode()
+status, data = call("GET", "/v1/models")
+print(json.dumps({
+    "models": [status, [e.get("id") for e in json.loads(data).get("data", [])] if status == 200 else None],
+    "other_path": call("GET", "/v1/models/other")[0],
+    "legacy_completions": call("POST", "/v1/completions", b"{}")[0],
+    "delete": call("DELETE", "/v1/models")[0],
+    "absolute_form": raw(b"GET http://1.1.1.1/ HTTP/1.1\r\nHost: 1.1.1.1\r\n\r\n"),
+    "connect": raw(b"CONNECT 1.1.1.1:443 HTTP/1.1\r\nHost: 1.1.1.1:443\r\n\r\n"),
+    "other_model": call("POST", "/v1/chat/completions", chat(model + "-other"))[0],
+    "unarmed_completion": call("POST", "/v1/chat/completions", chat(model))[0],
+}, sort_keys=True))'
+    expect "Relay allowlist from the Worker (no completion forwarded)" \
+        "{\"absolute_form\": 404, \"connect\": 405, \"delete\": 405, \"legacy_completions\": 404, \"models\": [200, [\"$PROVIDER_MODEL\"]], \"other_model\": 403, \"other_path\": 404, \"unarmed_completion\": 503}" \
+        "$(docker exec "$WORKER" python3 -c "$probe" "$PROVIDER_MODEL" 2>&1 | tail -1)"
+    expect "Relay ledger: no completion admitted or forwarded before arming" "0 0" \
+        "$(relay_counts "$ROOT/relay" | /usr/bin/python3 -I -c 'import json, sys; c = json.load(sys.stdin); print(c["completions_admitted"], c["completions_forwarded"])')"
+    [[ ! -e $ROOT/relay-ctl/deadline ]] && ok "evaluation window not armed" || bad "deadline already armed"
+}
+
+relay_counts() { # STATE_DIR: bounded summary of the relay ledger (no bodies, no headers)
+    /usr/bin/python3 -I - "$1/ledger.jsonl" <<'PY'
+import collections, json, sys
+events = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+completions = [e for e in events if e.get("event") == "completion"]
+refused = collections.Counter(e["reason"] for e in events if e.get("event") == "refused")
+print(json.dumps({
+    "started": next((e for e in events if e.get("event") == "relay_started"), None),
+    "completions_admitted": sum(e.get("event") == "completion_admitted" for e in events),
+    "completions_forwarded": len(completions),
+    "completions_completed": sum(e.get("outcome") == "completed" for e in completions),
+    "completion_outcomes": dict(collections.Counter(e.get("outcome") for e in completions)),
+    "refused": dict(refused),
+    "model_lists": sum(e.get("event") == "model_list" for e in events),
+    "requests": [{k: e.get(k) for k in ("sequence", "completion_index", "at", "duration_seconds",
+                  "timeout_seconds", "outcome", "http_status", "upstream_status", "response_model",
+                  "usage", "request_sha256", "client_delivered")} for e in completions],
+}, indent=2, sort_keys=True))
+PY
+}
+
 cmd_boundary() {
     require_host
     # shellcheck disable=SC1091
@@ -488,7 +721,9 @@ cmd_boundary() {
     nets=$(docker inspect "$WORKER" --format '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}')
     expect "Worker networks" "$NET " "$nets"
     expect "Network internal" "true" "$(docker network inspect "$NET" --format '{{.Internal}}')"
-    expect "Network members" "$REDIS $WORKER" \
+    local members="$REDIS $WORKER"
+    provider_mode && members=$(printf '%s\n' "$REDIS" "$RELAY" "$WORKER" | sort | xargs)
+    expect "Network members" "$members" \
         "$(docker network inspect "$NET" --format '{{range .Containers}}{{.Name}}{{"\n"}}{{end}}' | sort | xargs)"
     for p in /var/run/docker.sock /run/docker.sock /run/secrets/p43-sandbox-bridge.key /run/p43-sandbox-bridge/launcher.sock; do
         docker exec "$WORKER" test ! -e "$p" && ok "absent in Worker: $p" || bad "visible in Worker: $p"
@@ -505,6 +740,7 @@ for host, port in (("model-provider", 11434), ("ai-gateway", 8000), ("ai-agent",
         pass
 print("NO_EGRESS")'
     expect "No provider/production/egress reachability" "NO_EGRESS" "$(docker exec "$WORKER" python3 -c "$probe" 2>&1 | tail -1)"
+    provider_mode && relay_boundary
     fmt='{{.HostConfig.ReadonlyRootfs}} {{.HostConfig.Privileged}} {{.HostConfig.CapDrop}} {{.Config.User}} {{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}'
     expect "Redis container" "true false [ALL] $REDIS_UID:$REDIS_UID $NET" "$(docker inspect "$REDIS" --format "$fmt")"
     systemctl is-active --quiet "$C2_SERVICE" && ok "C2 Launcher active" || bad "C2 Launcher inactive"
@@ -539,14 +775,22 @@ control_suffix() { # exit-check keeps the PRODUCT-22 file names
 cmd_submit() {
     need_approval "${1:-}"
     local control=${2:-exit-check} sfx material=()
-    [[ $control =~ ^(exit-check|reference|probe)$ ]] || refuse "unknown control: $control"
+    [[ $control =~ ^(exit-check|reference|probe|model)$ ]] || refuse "unknown control: $control"
     require_host
     [[ -f $ROOT/env/boundary.pass ]] || refuse "boundary has not passed; run: $0 boundary"
+    if provider_mode; then
+        [[ $control == model ]] || refuse "provider mode admits only the model control"
+    else
+        [[ $control != model ]] || refuse "the model control requires provider mode (set up with P43_C2_PROVIDER_*)"
+    fi
     sfx=$(control_suffix "$control")
     [[ ! -e $ROOT/env/submitted$sfx ]] || refuse "$control already submitted once; no retry"
     if [[ $control == reference ]]; then
         [[ -d $ROOT/u1-submit ]] || refuse "U1 material not staged (set P43_C2_U1_EVIDENCE before setup)"
         material=(-v "$ROOT/u1-submit:/run/p43-u1-material:ro")
+    elif [[ $control == model ]]; then
+        [[ -d $ROOT/u1-model ]] || refuse "U1 model material not staged"
+        material=(-v "$ROOT/u1-model:/run/p43-u1-material:ro")
     fi
     # Before the first submission no new row may exist; later ones may only
     # follow this window's first submission.
@@ -554,6 +798,16 @@ cmd_submit() {
         refuse "C2 ledger check failed before $control: $(cat "$ROOT/env/ledger-pre-submit$sfx.json" 2>/dev/null || echo unreadable)"
     date -u +%Y-%m-%dT%H:%M:%SZ >"$ROOT/env/submitted$sfx"
     [[ -e $ROOT/env/submitted ]] || cp "$ROOT/env/submitted$sfx" "$ROOT/env/submitted"
+    local deadline=""
+    if [[ $control == model ]]; then
+        # The one authoritative evaluation deadline, armed before submission.
+        # Write-once; the relay reads it once and refuses completions after it.
+        deadline=$(($(date +%s) + MODEL_WINDOW_SECONDS))
+        (set -o noclobber && printf '%s\n' "$deadline" >"$ROOT/relay-ctl/deadline") ||
+            refuse "evaluation deadline already armed; no second window"
+        chmod 0444 "$ROOT/relay-ctl/deadline"
+        info "evaluation window armed: deadline $(date -u -d "@$deadline" +%Y-%m-%dT%H:%M:%SZ)"
+    fi
     # Same image, same DB; no Launcher key/socket; shares only the Worker PID
     # namespace, which the existing publish-side identity binding inspects.
     # shellcheck disable=SC2046
@@ -563,6 +817,10 @@ cmd_submit() {
         $(authority_mounts) "${material[@]}" --entrypoint python3 "$IMAGE_TAG" \
         -m scripts.maintenance.p43_c2_trusted_submitter submit --control "$control" |
         tee "$ROOT/env/submit$sfx.json"
+    if [[ $control == model ]]; then
+        observe_model "$deadline"
+        return
+    fi
     # Observation needs only the database: no network, no broker credential.
     # shellcheck disable=SC2046
     docker_run_image --network none -w /opt/orchestrator \
@@ -570,6 +828,42 @@ cmd_submit() {
         $(authority_mounts) --entrypoint python3 "$IMAGE_TAG" \
         -m scripts.maintenance.p43_c2_trusted_submitter observe --control "$control" \
         --deadline-seconds 600 | tee "$ROOT/env/observe$sfx.json"
+}
+
+observe_once() { # OUT DEADLINE_SECONDS; exit 0 terminal, 2 nonterminal at its deadline
+    # shellcheck disable=SC2046
+    docker_run_image --network none -w /opt/orchestrator \
+        --env-file "$ROOT/env/submitter.env" --env-file "$ROOT/env/instance.env" \
+        $(authority_mounts) --entrypoint python3 "$IMAGE_TAG" \
+        -m scripts.maintenance.p43_c2_trusted_submitter observe --control model \
+        --deadline-seconds "$2" >"$1"
+}
+
+# Observe until terminal or the evaluation deadline. A Task still nonterminal
+# at the deadline is an evaluation timeout, not a product FAILED: the Worker
+# is stopped (Celery warm shutdown, then SIGKILL) and the state it actually
+# left is observed again. Nothing is rewritten to make the record complete.
+observe_model() {
+    local deadline=$1 remaining rc=0
+    remaining=$((deadline - $(date +%s)))
+    ((remaining > 0)) || remaining=0
+    observe_once "$ROOT/env/observe.model.json" "$remaining" || rc=$?
+    cat "$ROOT/env/observe.model.json"
+    if [[ $rc -eq 0 ]]; then
+        printf 'terminal\n' >"$ROOT/env/model-window.outcome"
+        ok "model TaskExecution reached a terminal state within the evaluation window"
+        return 0
+    fi
+    [[ $rc -eq 2 ]] || { bad "model observation failed (rc=$rc)"; return 1; }
+    printf 'evaluation_deadline_exhausted\n' >"$ROOT/env/model-window.outcome"
+    info "evaluation deadline reached with the Task nonterminal; stopping the disposable Worker"
+    docker stop --time 30 "$WORKER" >/dev/null 2>&1 || true
+    docker logs "$WORKER" >"$ROOT/env/worker-at-deadline.log" 2>&1 || true
+    rc=0
+    observe_once "$ROOT/env/observe.model.after-stop.json" 0 || rc=$?
+    cat "$ROOT/env/observe.model.after-stop.json"
+    info "post-stop observation recorded (rc=$rc); classification: evaluation_deadline_exhausted"
+    return 0
 }
 
 # ---------------------------------------------------------------- evaluate
@@ -582,7 +876,7 @@ eval_container() { # independent evaluation: pinned pytest image, no network, re
 
 cmd_evaluate() {
     local control=${1:-} out source cs observed=() u1=/eval/p43-product-18/u1
-    [[ $control =~ ^(reference|naive)$ ]] || refuse "unknown evaluation control: ${control:-none}"
+    [[ $control =~ ^(reference|naive|model)$ ]] || refuse "unknown evaluation control: ${control:-none}"
     require_host
     # shellcheck disable=SC1091
     source "$ROOT/env/run.vars"
@@ -598,6 +892,24 @@ cmd_evaluate() {
         [[ $source == /var/lib/orchestrator-worker/runtime/* ]] || refuse "unexpected Change Set path: $source"
         source=$ROOT/runtime/${source#/var/lib/orchestrator-worker/runtime/}
         observed=(--observed "$ROOT/env/observe.reference.json")
+    elif [[ $control == model ]]; then
+        provider_mode || refuse "model evaluation requires provider mode"
+        local record=$ROOT/env/observe.model.json
+        [[ -f $ROOT/env/observe.model.after-stop.json ]] && record=$ROOT/env/observe.model.after-stop.json
+        [[ -f $record ]] || refuse "model not observed"
+        # Supplementary contamination evidence from the recorded requests.
+        /usr/bin/python3 -I "$SUBMITTER" contamination "$ROOT/u1-eval" "$ROOT/relay" >"$out/contamination.json" ||
+            bad "contamination scan failed"
+        # The actual held Change Set, whatever the outcome; never a substitute.
+        source=$(/usr/bin/python3 -I -c 'import json, sys; cs = json.load(open(sys.argv[1])).get("change_set"); print(cs["directory"] if cs else "")' \
+            "$record")
+        if [[ -z $source ]]; then
+            printf '{"control": "model", "verdict": "NO_CHANGE_SET"}\n' | tee "$out/verdict.json"
+            return 0
+        fi
+        [[ $source == /var/lib/orchestrator-worker/runtime/* ]] || refuse "unexpected Change Set path: $source"
+        source=$ROOT/runtime/${source#/var/lib/orchestrator-worker/runtime/}
+        observed=(--observed "$record")
     else
         source=$ROOT/u1-eval/p43-product-18/u1/controls/naive
     fi
@@ -675,7 +987,7 @@ cmd_evidence() {
     local verdict
     for verdict in "$ROOT"/eval/*/; do
         [[ -d $verdict ]] || continue
-        for f in oracle hidden verdict; do
+        for f in oracle hidden verdict contamination; do
             [[ -f $verdict$f.json ]] && cp "$verdict$f.json" "$EVIDENCE/$(basename "$verdict").$f.json"
         done
     done
@@ -684,6 +996,7 @@ cmd_evidence() {
     docker logs "$WORKER" 2>&1 | grep -E 'boot identity|C2_SANDBOX|Received task|Reusing stored plan|Step 1|completed successfully|succeeded in|ERROR|WARNING' \
         >"$EVIDENCE/worker.log" || true
     preserve_worker_boot_identity_diagnostics
+    provider_mode && preserve_provider_evidence
     journalctl -u "$C2_SERVICE" -b --no-pager -o short-iso >"$EVIDENCE/launcher.journal" || true
     (cd /opt/p43-sandbox-bridge-c2/lib && runuser -u p43-sandbox-c2 -- /usr/bin/python3 -B -E -s -c '
 import sqlite3
@@ -705,6 +1018,26 @@ for row in db.execute("SELECT request_id, admitted, status FROM sandbox_requests
     [[ $ledger_rc -eq 0 ]] || { info "C2 ledger attribution failed: see $EVIDENCE/ledger-final.json"; return 1; }
 }
 
+# 23C: provider/relay evidence. Root-only (0700/0600), outside every Worker
+# mount; bodies are bounded by the relay (6 x 2 MiB each way); no headers or
+# credentials are recorded anywhere.
+preserve_provider_evidence() {
+    local f
+    for f in provider-facts.json contract.env model-window.outcome worker-at-deadline.log; do
+        [[ -f $ROOT/env/$f ]] && cp "$ROOT/env/$f" "$EVIDENCE/"
+    done
+    [[ -f $ROOT/relay-ctl/deadline ]] && cp "$ROOT/relay-ctl/deadline" "$EVIDENCE/evaluation-deadline"
+    cp "$ROOT/relay/ledger.jsonl" "$EVIDENCE/relay-ledger.jsonl"
+    relay_counts "$ROOT/relay" >"$EVIDENCE/relay-summary.json"
+    install -d -m 0700 "$EVIDENCE/relay-bodies"
+    cp "$ROOT"/relay/bodies/* "$EVIDENCE/relay-bodies/" 2>/dev/null || true
+    chmod 0600 "$EVIDENCE"/relay-bodies/* 2>/dev/null || true
+    docker logs "$RELAY" >"$EVIDENCE/relay.log" 2>&1 || true
+    docker logs "$WORKER" 2>&1 | grep -E 'RETRY|HTTP Request|Discovery|Planning|Debug Repair|Completion|TaskExecution|FAILED|terminal' \
+        >"$EVIDENCE/worker-provider.log" || true
+    info "relay: $(/usr/bin/python3 -I -c 'import json, sys; c = json.load(open(sys.argv[1])); print("admitted=%d forwarded=%d completed=%d refused=%s model_lists=%d" % (c["completions_admitted"], c["completions_forwarded"], c["completions_completed"], c["refused"], c["model_lists"]))' "$EVIDENCE/relay-summary.json")"
+}
+
 preserve_ledger_attribution() { # copy ledger-*.json from the disposable root; never overwrite
     local f
     [[ -d $ROOT/env ]] || return 0
@@ -723,7 +1056,7 @@ cmd_cleanup() {
     if ! preserve_worker_boot_identity_diagnostics; then
         bad "Worker boot identity diagnostics could not be preserved"
     fi
-    docker rm -f p43-c2-submitter "$WORKER" >/dev/null 2>&1 || true
+    docker rm -f p43-c2-submitter "$WORKER" "$RELAY" >/dev/null 2>&1 || true
     systemctl stop "$C2_SERVICE" 2>/dev/null || true
     docker ps -a --format '{{.Names}}' | grep -E '^p43-sbx-c2-[0-9a-f]{32}$' | xargs -r docker rm -f || true
     docker rm -f "$REDIS" >/dev/null 2>&1 || true
@@ -753,6 +1086,41 @@ cmd_cleanup() {
     [[ $FAILURES -eq 0 ]]
 }
 
+# ---------------------------------------------------------------- 23C window
+# One approval covers the whole controlled window. Each stage is its own
+# process, so a refusal ends that stage only; once the model is submitted,
+# evaluation, evidence and cleanup always run. No stage is retried and the
+# model is submitted at most once.
+cmd_run_model_window() {
+    need_approval "${1:-}"
+    provider_mode_requested || refuse "run-model-window requires P43_C2_PROVIDER_UPSTREAM/MODEL/NETWORK"
+    require_provider_inputs
+    local self=("$BASH" "$REPO/scripts/maintenance/p43_c2_live_run.sh") rc=0
+    if ! "${self[@]}" setup --operator-approved; then
+        info "setup failed; cleaning up without submission"
+        "${self[@]}" cleanup --operator-approved || true
+        return 1
+    fi
+    if ! "${self[@]}" boundary; then
+        info "boundary failed; cleaning up without submission"
+        "${self[@]}" evidence || true
+        "${self[@]}" cleanup --operator-approved || true
+        return 1
+    fi
+    "${self[@]}" submit --operator-approved model || rc=1
+    "${self[@]}" evaluate model || rc=1
+    if ! "${self[@]}" evidence; then
+        # Never delete the only copy of the window's state: stop, keep, report.
+        docker stop --time 30 "$WORKER" "$RELAY" >/dev/null 2>&1 || true
+        info "evidence failed; Worker and relay stopped, $ROOT retained; inspect, then run: cleanup --operator-approved"
+        printf 'C2_MODEL_WINDOW=EVIDENCE_FAILED_STATE_RETAINED\n'
+        return 1
+    fi
+    "${self[@]}" cleanup --operator-approved || rc=1
+    printf 'C2_MODEL_WINDOW=%s\n' "$([[ $rc -eq 0 ]] && echo COMPLETE || echo COMPLETE_WITH_FAILURES)"
+    return "$rc"
+}
+
 case "${1:-}" in
     check) cmd_check ;;
     setup) cmd_setup "${2:-}" ;;
@@ -761,5 +1129,6 @@ case "${1:-}" in
     evaluate) cmd_evaluate "${2:-}" ;;
     evidence) cmd_evidence ;;
     cleanup) cmd_cleanup "${2:-}" ;;
-    *) echo "usage: $0 {check|setup --operator-approved|boundary|submit --operator-approved [exit-check|reference|probe]|evaluate reference|naive|evidence|cleanup --operator-approved}" >&2; exit 64 ;;
+    run-model-window) cmd_run_model_window "${2:-}" ;;
+    *) echo "usage: $0 {check|setup --operator-approved|boundary|submit --operator-approved [exit-check|reference|probe|model]|evaluate reference|naive|model|evidence|cleanup --operator-approved|run-model-window --operator-approved}" >&2; exit 64 ;;
 esac

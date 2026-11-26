@@ -12,6 +12,7 @@ import asyncio
 import concurrent.futures
 import json
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Any, Callable, Optional
 
@@ -58,6 +59,7 @@ from app.services.orchestration.state.session_state import (
     mark_session_running,
 )
 from app.services.orchestration.types import OrchestrationRunContext
+from app.services.orchestration.worker_boundary import disposable_c2_execution_mode
 from app.services.orchestration.prompt_templates import OrchestrationStatus
 from app.services.workspace.project_mutation_lock import ProjectMutationLockError
 from app.services.workspace.control_state_paths import control_state_of
@@ -400,8 +402,13 @@ class FailureCoordinator:
             "timeout_boundary"
         ) == "planning_lock_wait" or "OpenClaw planning lock wait timed out" in str(exc)
         is_project_mutation_lock_conflict = isinstance(exc, ProjectMutationLockError)
+        # P43-PRODUCT-23C B1: in the exact disposable C2 mode a failed attempt
+        # is terminal. Neither the Celery retry of this TaskExecution nor an
+        # automatic recovery rerun may execute it again.
+        c2_automatic_retry_refused = disposable_c2_execution_mode(os.environ)
         has_retry_capacity = (
             should_retry
+            and not c2_automatic_retry_refused
             and retry_count < max_retries
             and not is_bounded_debug_repair_timeout
             and not is_planning_lock_wait_timeout
@@ -453,6 +460,7 @@ class FailureCoordinator:
         auto_recovery_eligible = bool(
             session
             and task
+            and not c2_automatic_retry_refused
             and session.execution_mode == "automatic"
             and status_value(getattr(session, "status", None))
             not in _TERMINAL_SESSION_STATUSES
@@ -766,6 +774,7 @@ class FailureCoordinator:
                     details={
                         "retryable": has_retry_capacity,
                         "error_handler_retryable": should_retry,
+                        "c2_automatic_retry_refused": c2_automatic_retry_refused,
                         "is_timeout": is_timeout,
                         **bounded_debug_repair_timeout_alias_details(
                             is_bounded_debug_repair_timeout

@@ -21,11 +21,12 @@ ENV ORCHESTRATOR_GIT_SHA=${ORCHESTRATOR_GIT_SHA} \
     PYTHONUNBUFFERED=1 \
     WORKER_APP_ROOT=/opt/orchestrator
 
-# The Worker needs Git for the existing workspace/checkpoint lifecycle and CA
-# roots for structured HTTP providers. It does not need Node, a Docker client,
-# Redis, Qdrant, or the development CLI tools used by the API image.
+# The Worker needs Git for the existing workspace/checkpoint lifecycle, CA
+# roots for structured HTTP providers, and ripgrep for read-only Discovery
+# search_text (fixed argv, shell=False; P43-PRODUCT-23C B2). It does not need
+# Node, a Docker client, Redis, Qdrant, or the API image's other CLI tools.
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates git \
+    && apt-get install --no-install-recommends -y ca-certificates git ripgrep \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt /tmp/orchestrator-worker-requirements.txt
@@ -56,5 +57,8 @@ RUN groupadd --system --gid 10001 orchestrator-worker \
         /workspace/authoritative
 
 USER orchestrator-worker
+
+# Discovery's search executable must resolve for the non-root Worker.
+RUN rg --version
 
 ENTRYPOINT ["/usr/local/bin/orchestrator-worker-entrypoint"]
