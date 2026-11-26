@@ -285,6 +285,34 @@ def test_peer_rejection_is_read_after_launcher_closes_first(tmp_path, monkeypatc
     )
 
 
+@pytest.mark.parametrize("disconnect", [BrokenPipeError, ConnectionResetError])
+def test_rejected_response_ignores_peer_disconnect(monkeypatch, disconnect):
+    from app.services.sandbox_bridge import transport
+
+    class ClosedPeer:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def settimeout(self, _timeout):
+            pass
+
+    launcher = object.__new__(transport.HostSocketLauncher)
+    monkeypatch.setattr(
+        launcher,
+        "_authorized_peer",
+        lambda _conn: (_ for _ in ()).throw(RequestRejected("unauthorized_peer")),
+    )
+
+    def send_to_closed_peer(_sock, _value):
+        raise disconnect()
+
+    monkeypatch.setattr(transport, "_send", send_to_closed_peer)
+    launcher._handle(ClosedPeer())
+
+
 def test_wrong_hmac_is_rejected_without_execution(tmp_path):
     calls = []
     config = _state(tmp_path)

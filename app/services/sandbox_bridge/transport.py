@@ -41,6 +41,16 @@ def _send(sock: socket.socket, value: dict[str, object]) -> None:
     sock.sendall(struct.pack("!I", len(data)) + data)
 
 
+def _send_response(sock: socket.socket, value: dict[str, object]) -> None:
+    """Send a handler response, tolerating a peer that already disconnected."""
+    try:
+        _send(sock, value)
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        # The result cannot be delivered once the peer has gone away, and there
+        # is no useful recovery for a per-connection handler thread to perform.
+        return
+
+
 def _receive(sock: socket.socket) -> dict[str, object]:
     def exact(n):
         data = bytearray()
@@ -427,4 +437,4 @@ class HostSocketLauncher:
                 rejected = ExecutionResult(
                     request_id, "REJECTED", None, "", "", error_code=str(exc)[:80]
                 )
-                _send(conn, _result_wire(rejected))
+                _send_response(conn, _result_wire(rejected))
