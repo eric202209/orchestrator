@@ -115,6 +115,16 @@ class LocalPytestExecutor:
         try:
             home = staged.path.parent / f"{staged.path.name}-tmp"
             home.mkdir()
+            # Docker provides a disposable writable execution layer over the
+            # read-only snapshot bind.  The local double cannot mount that
+            # layer, so run from a private writable copy while keeping the
+            # real staged snapshot immutable and outside the Worker root.
+            execution_source = staged.path / "run-src"
+            shutil.copytree(staged.source_path, execution_source)
+            for directory, _directories, filenames in os.walk(execution_source):
+                os.chmod(directory, 0o755)
+                for filename in filenames:
+                    os.chmod(Path(directory) / filename, 0o644)
             with _REAL_POPEN(
                 [
                     sys.executable,
@@ -124,7 +134,7 @@ class LocalPytestExecutor:
                     "-c",
                     docker_executor.PYTEST_BOOTSTRAP,
                 ],
-                cwd=staged.source_path,
+                cwd=execution_source,
                 env={"PATH": "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home)},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
