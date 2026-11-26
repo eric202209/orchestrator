@@ -16,6 +16,16 @@
 #   bash scripts/maintenance/p43_c2_live_run.sh evidence
 #   bash scripts/maintenance/p43_c2_live_run.sh cleanup --operator-approved
 #
+# P43-PRODUCT-23B trusted controls (one setup serves all; each runs once):
+#   export P43_C2_U1_EVIDENCE=<dir holding p43-product-02/ and p43-product-18/>
+#   ... submit --operator-approved reference ; ... evaluate reference
+#   ... evaluate naive                       # frozen control, never submitted
+#   ... submit --operator-approved probe
+# The frozen material is copied by the committed submitter, byte-verified
+# against the pinned frozen manifest. Only manifest, task, baseline and the
+# reference control reach the submitter; the hidden suite is mounted only into
+# the network-less evaluation container on the pinned pytest image.
+#
 # Every resource it creates is named p43-c2-* / orchestrator-worker:c2c3b or
 # lives under /srv/p43-c2. It never modifies p43-sandbox-bridge.service (C1B),
 # ai-agent, the production database, Redis, or workspace. No automatic retry.
@@ -39,6 +49,8 @@ C2_WORKER_KEY=/etc/p43-sandbox-bridge-c2/worker.key
 AI_AGENT=ai-agent
 # The Sandbox image the Launcher already pins; reused as the Worker base.
 BASE_IMAGE=$(sed -n 's/^IMAGE = "\(.*\)"$/\1/p' "$REPO/app/services/sandbox_bridge/docker_executor.py")
+SUBMITTER=$REPO/scripts/maintenance/p43_c2_trusted_submitter.py
+PYTEST_IMAGE=""
 FAILURES=0
 
 ok() { printf 'PASS %s\n' "$*"; }
@@ -150,7 +162,13 @@ cmd_check() {
         info "Redis image not local; setup pulls exactly $P43_C2_REDIS_IMAGE"
     getent passwd "$REDIS_UID" >/dev/null && info "Host UID $REDIS_UID: $(getent passwd "$REDIS_UID" | cut -d: -f1)" ||
         ok "no Host account owns UID $REDIS_UID"
-    "$HOST_SCRIPT" c2-preflight || bad "c2-preflight"
+    local preflight_out
+    preflight_out=$("$HOST_SCRIPT" c2-preflight) || bad "c2-preflight"
+    printf '%s\n' "$preflight_out"
+    # Execution-ready stage: the pinned pytest image must be present (no pull).
+    PYTEST_IMAGE=$(sed -n 's/^C2_PYTEST_IMAGE=\(sha256:[0-9a-f]\{64\}\)$/\1/p' <<<"$preflight_out")
+    [[ -n $PYTEST_IMAGE ]] && ok "pytest image execution-ready: $PYTEST_IMAGE" ||
+        bad "pytest image not execution-ready (unpinned, absent or mismatched)"
     info "C1B/ai-agent fingerprint: $(c1b_fingerprint)"
     printf 'C2_LIVE_CHECK=%s failures=%d\n' "$([[ $FAILURES -eq 0 ]] && echo READY || echo BLOCKED)" "$FAILURES"
     [[ $FAILURES -eq 0 ]]
@@ -216,13 +234,30 @@ cmd_setup() {
         "$P43_C2_REDIS_IMAGE" redis-server /etc/redis.conf >/dev/null
     ok "Redis started on internal $NET"
 
+    # Frozen U1 material (PRODUCT-23B), copied and verified by committed code.
+    if [[ -n ${P43_C2_U1_EVIDENCE:-} ]]; then
+        /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-submit" --parts submit
+        /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-eval" --parts evaluation
+        ok "U1 material staged and verified against the pinned frozen manifest"
+    fi
+
     # Strict C2 Launcher (separate user/key/state/socket; C1B untouched).
     "$HOST_SCRIPT" c2-install --operator-approved
     c2gid=$(getent group p43-sandbox-c2 | cut -d: -f3)
+    # Orphan recovery: a stopped Sandbox-named container on the pinned pytest
+    # image must be removed by the strict Launcher's startup.
+    local orphan
+    orphan=p43-sbx-c2-$(/usr/bin/python3 -c 'import uuid; print(uuid.uuid4().hex)')
+    docker create --pull=never --name "$orphan" --network none "$PYTEST_IMAGE" true >/dev/null
     systemctl start "$C2_SERVICE"
     for _ in $(seq 50); do [[ -S $C2_RUN/launcher.sock ]] && break; sleep 0.2; done
     [[ -S $C2_RUN/launcher.sock ]] || refuse "C2 Launcher socket did not appear"
-    printf 'C2_GID=%s\nNODE=%s\nCANDIDATE_TREE=%s\n' "$c2gid" "$node" "$tree" >"$ROOT/env/run.vars"
+    if docker inspect "$orphan" >/dev/null 2>&1; then
+        refuse "Launcher startup did not remove the orphan $orphan"
+    fi
+    ok "Launcher startup removed the pytest-image orphan $orphan"
+    printf 'C2_GID=%s\nNODE=%s\nCANDIDATE_TREE=%s\nPYTEST_IMAGE=%s\nORPHAN=%s\n' \
+        "$c2gid" "$node" "$tree" "$PYTEST_IMAGE" "$orphan" >"$ROOT/env/run.vars"
 
     # The protected Host source is also the exact Worker image build context.
     docker build -q -f "$REPO/Dockerfile.worker" \
@@ -365,32 +400,97 @@ print("NO_EGRESS")'
     docker exec "$AI_AGENT" sh -c "test ! -e $C2_RUN/launcher.sock && test ! -e $C2_WORKER_KEY && test ! -e $ROOT" &&
         ok "C2 socket/key/state not visible in ai-agent" || bad "C2 material visible in ai-agent"
     expect "C1B Launcher and ai-agent unchanged" "$(cat "$ROOT/env/c1b-before")" "$(c1b_fingerprint)"
+    # Direct Docker negative control (not the Launcher path): an absent image
+    # with --pull=never fails and records no pull event.
+    local t0 absent=sha256:0000000000000000000000000000000000000000000000000000000000000000
+    t0=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    if docker run --rm --pull=never --network=none "$absent" true >/dev/null 2>&1; then
+        bad "direct Docker: absent image ran"
+    else ok "direct Docker: absent image fails with --pull=never"; fi
+    expect "direct Docker: no pull event" "" \
+        "$(docker events --since "$t0" --until "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --filter type=image --filter event=pull --format '{{.Actor.ID}}')"
     printf 'C2_BOUNDARY=%s failures=%d\n' "$([[ $FAILURES -eq 0 ]] && echo PASS || echo FAIL)" "$FAILURES"
     if [[ $FAILURES -eq 0 ]]; then date -u +%s >"$ROOT/env/boundary.pass"; else rm -f "$ROOT/env/boundary.pass"; return 1; fi
 }
 
 # ---------------------------------------------------------------- submit
+control_suffix() { # exit-check keeps the PRODUCT-22 file names
+    [[ $1 == exit-check ]] && echo "" || echo ".$1"
+}
+
 cmd_submit() {
     need_approval "${1:-}"
+    local control=${2:-exit-check} sfx material=()
+    [[ $control =~ ^(exit-check|reference|probe)$ ]] || refuse "unknown control: $control"
     require_host
     [[ -f $ROOT/env/boundary.pass ]] || refuse "boundary has not passed; run: $0 boundary"
-    [[ ! -e $ROOT/env/submitted ]] || refuse "already submitted once; no retry"
-    date -u +%Y-%m-%dT%H:%M:%SZ >"$ROOT/env/submitted"
+    sfx=$(control_suffix "$control")
+    [[ ! -e $ROOT/env/submitted$sfx ]] || refuse "$control already submitted once; no retry"
+    if [[ $control == reference ]]; then
+        [[ -d $ROOT/u1-submit ]] || refuse "U1 material not staged (set P43_C2_U1_EVIDENCE before setup)"
+        material=(-v "$ROOT/u1-submit:/run/p43-u1-material:ro")
+    fi
+    date -u +%Y-%m-%dT%H:%M:%SZ >"$ROOT/env/submitted$sfx"
+    [[ -e $ROOT/env/submitted ]] || cp "$ROOT/env/submitted$sfx" "$ROOT/env/submitted"
     # Same image, same DB; no Launcher key/socket; shares only the Worker PID
     # namespace, which the existing publish-side identity binding inspects.
     # shellcheck disable=SC2046
     docker_run_image --name p43-c2-submitter --network "$NET" --pid "container:$WORKER" \
         -w /opt/orchestrator --env-file "$ROOT/env/submitter.env" \
         --env-file "$ROOT/env/instance.env" --env-file "$ROOT/env/secrets.env" \
-        $(authority_mounts) --entrypoint python3 "$IMAGE_TAG" \
-        -m scripts.maintenance.p43_c2_trusted_submitter submit | tee "$ROOT/env/submit.json"
+        $(authority_mounts) "${material[@]}" --entrypoint python3 "$IMAGE_TAG" \
+        -m scripts.maintenance.p43_c2_trusted_submitter submit --control "$control" |
+        tee "$ROOT/env/submit$sfx.json"
     # Observation needs only the database: no network, no broker credential.
     # shellcheck disable=SC2046
     docker_run_image --network none -w /opt/orchestrator \
         --env-file "$ROOT/env/submitter.env" --env-file "$ROOT/env/instance.env" \
         $(authority_mounts) --entrypoint python3 "$IMAGE_TAG" \
-        -m scripts.maintenance.p43_c2_trusted_submitter observe --deadline-seconds 600 |
-        tee "$ROOT/env/observe.json"
+        -m scripts.maintenance.p43_c2_trusted_submitter observe --control "$control" \
+        --deadline-seconds 600 | tee "$ROOT/env/observe$sfx.json"
+}
+
+# ---------------------------------------------------------------- evaluate
+eval_container() { # independent evaluation: pinned pytest image, no network, read-only
+    docker run --rm --pull=never --network=none --read-only --cap-drop=ALL \
+        --security-opt=no-new-privileges:true --user=65534:65534 --memory=1g \
+        --pids-limit=128 --tmpfs /tmp:rw,nosuid,nodev,size=256m -e HOME=/tmp -e TMPDIR=/tmp \
+        -v "$ROOT/u1-eval:/eval:ro" -v "$1:/cs:ro" --entrypoint python3 "$PYTEST_IMAGE" -I "${@:2}"
+}
+
+cmd_evaluate() {
+    local control=${1:-} out source cs observed=() u1=/eval/p43-product-18/u1
+    [[ $control =~ ^(reference|naive)$ ]] || refuse "unknown evaluation control: ${control:-none}"
+    require_host
+    # shellcheck disable=SC1091
+    source "$ROOT/env/run.vars"
+    [[ -d $ROOT/u1-eval ]] || refuse "U1 material not staged"
+    out=$ROOT/eval/$control
+    [[ ! -e $out ]] || refuse "$control already evaluated"
+    install -d -m 0700 "$ROOT/eval" && install -d -m 0755 "$out"
+    if [[ $control == reference ]]; then
+        [[ -f $ROOT/env/observe.reference.json ]] || refuse "reference not observed"
+        # Container path -> Host path of the captured Change Set.
+        source=$(/usr/bin/python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["change_set"]["directory"])' \
+            "$ROOT/env/observe.reference.json")
+        [[ $source == /var/lib/orchestrator-worker/runtime/* ]] || refuse "unexpected Change Set path: $source"
+        source=$ROOT/runtime/${source#/var/lib/orchestrator-worker/runtime/}
+        observed=(--observed "$ROOT/env/observe.reference.json")
+    else
+        source=$ROOT/u1-eval/p43-product-18/u1/controls/naive
+    fi
+    [[ -f $source/manifest.json && ! -L $source ]] || refuse "Change Set missing: $source"
+    # A private, read-only copy: the Worker cannot change what is judged.
+    cs=$out/change-set
+    cp -R --no-preserve=ownership,mode "$source" "$cs"
+    find "$cs" -type l | grep -q . && refuse "Change Set contains links"
+    chmod -R a+rX,go-w "$cs"
+    eval_container "$cs" /eval/p43-product-02/oracle.py "$u1/baseline" /cs \
+        tests/test_rangekit_acceptance.py tests/test_ranges.py >"$out/oracle.json" || true
+    eval_container "$cs" /eval/p43-product-18/tools/hidden_suite.py "$u1/baseline" /cs \
+        "$u1/hidden" >"$out/hidden.json" || true
+    /usr/bin/python3 -I "$SUBMITTER" verdict "$ROOT/u1-eval" "$cs" --control "$control" \
+        --oracle "$out/oracle.json" --hidden "$out/hidden.json" "${observed[@]}" | tee "$out/verdict.json"
 }
 
 # ---------------------------------------------------------------- evidence
@@ -448,8 +548,15 @@ cmd_evidence() {
     require_host
     local since; since=$(cat "$ROOT/env/submitted")
     install -d -m 0700 "$EVIDENCE"
-    cp "$ROOT/env/submit.json" "$ROOT/env/observe.json" "$ROOT/env/image.id" "$ROOT/env/run.vars" \
+    cp "$ROOT"/env/submit*.json "$ROOT"/env/observe*.json "$ROOT/env/image.id" "$ROOT/env/run.vars" \
         "$ROOT/pin/worker-pin.json" "$ROOT/pin/launcher-context.json" "$EVIDENCE/"
+    local verdict
+    for verdict in "$ROOT"/eval/*/; do
+        [[ -d $verdict ]] || continue
+        for f in oracle hidden verdict; do
+            [[ -f $verdict$f.json ]] && cp "$verdict$f.json" "$EVIDENCE/$(basename "$verdict").$f.json"
+        done
+    done
     sed -n 's/^\(WORKER_INSTANCE_ID\|CELERY_[A-Z_]*_URL\|CELERY_RESULT_BACKEND\)=/&/p' "$ROOT/env/instance.env" >"$EVIDENCE/instance.env"
     docker image inspect "$IMAGE_TAG" --format '{{.Id}} {{.Created}}' >"$EVIDENCE/image.txt"
     docker logs "$WORKER" 2>&1 | grep -E 'boot identity|C2_SANDBOX|Received task|Reusing stored plan|Step 1|completed successfully|succeeded in|ERROR|WARNING' \
@@ -503,8 +610,9 @@ case "${1:-}" in
     check) cmd_check ;;
     setup) cmd_setup "${2:-}" ;;
     boundary) cmd_boundary ;;
-    submit) cmd_submit "${2:-}" ;;
+    submit) cmd_submit "${2:-}" "${3:-}" ;;
+    evaluate) cmd_evaluate "${2:-}" ;;
     evidence) cmd_evidence ;;
     cleanup) cmd_cleanup "${2:-}" ;;
-    *) echo "usage: $0 {check|setup --operator-approved|boundary|submit --operator-approved|evidence|cleanup --operator-approved}" >&2; exit 64 ;;
+    *) echo "usage: $0 {check|setup --operator-approved|boundary|submit --operator-approved [exit-check|reference|probe]|evaluate reference|naive|evidence|cleanup --operator-approved}" >&2; exit 64 ;;
 esac

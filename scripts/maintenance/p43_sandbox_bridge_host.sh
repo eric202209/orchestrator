@@ -40,6 +40,17 @@ C2_STATE=/var/lib/p43-sandbox-bridge-c2
 C2_RUN=/run/p43-sandbox-bridge-c2
 C2_UNIT_DST=/etc/systemd/system/$C2_SERVICE
 IMAGE=$(sed -n 's/^IMAGE = "\(.*\)"$/\1/p' "$SRC/docker_executor.py")
+# P43-PRODUCT-23B: the pytest image pin, parsed (never imported) from the staged
+# source, so black's wrapped form is read too. Empty while unpinned.
+PYTEST_IMAGE=$(/usr/bin/python3 -I - "$SRC/docker_executor.py" <<'PY' 2>/dev/null || true
+import ast, sys
+for node in ast.parse(open(sys.argv[1], encoding="utf-8").read()).body:
+    target = getattr(node, "target", None) or (getattr(node, "targets", None) or [None])[0]
+    if getattr(target, "id", None) == "PYTEST_IMAGE":
+        value = getattr(node.value, "value", None)
+        print(value if isinstance(value, str) else "")
+PY
+)
 FAILURES=0
 
 ok() { printf 'PASS %s\n' "$*"; }
@@ -326,8 +337,34 @@ rollback() {
   info "to restore the previous ai-agent mounts: remove the two p43-sandbox-bridge entries from Compose and recreate ai-agent"
 }
 
+# Image-build preparation stage (unpinned) is reported, not failed; a pinned image
+# must be the immutable, locally present linux/arm64 build FROM the pinned base.
+pytest_image_check() {
+  local identity base_layers layers
+  if [[ -z "$PYTEST_IMAGE" ]]; then
+    info "pytest image unpinned: image-build preparation stage; the pytest profile fails closed"
+    echo "C2_PYTEST_IMAGE=UNPINNED"
+    return 0
+  fi
+  if [[ ! "$PYTEST_IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    bad "pytest image pin is not an immutable local image ID: $PYTEST_IMAGE"
+  elif ! identity=$(docker image inspect --format '{{.Id}} {{.Os}}/{{.Architecture}}' "$PYTEST_IMAGE" 2>/dev/null); then
+    bad "pinned pytest image absent locally (never pulled): $PYTEST_IMAGE"
+  elif [[ "$identity" != "$PYTEST_IMAGE linux/arm64" ]]; then
+    bad "pinned pytest image identity mismatch: $identity"
+  elif ! base_layers=$(docker image inspect --format '{{range .RootFS.Layers}}{{.}} {{end}}' "$IMAGE" 2>/dev/null) ||
+       ! layers=$(docker image inspect --format '{{range .RootFS.Layers}}{{.}} {{end}}' "$PYTEST_IMAGE" 2>/dev/null) ||
+       [[ -z "$base_layers" || "$layers" != "$base_layers"* ]]; then
+    bad "pinned pytest image is not built FROM the pinned base $IMAGE"
+  else
+    ok "pinned pytest image present: $identity"
+    echo "C2_PYTEST_IMAGE=$PYTEST_IMAGE"
+  fi
+}
+
 c2_preflight() {
   preflight || true
+  pytest_image_check
   local mounts
   if ! mounts=$(docker inspect "$AI_AGENT" --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' 2>/dev/null); then
     bad "ai-agent mounts unavailable: cannot prove the C2 key/socket stay outside the model environment"

@@ -352,13 +352,25 @@ def _credential_like(name: str) -> bool:
 
 def build_workspace_snapshot(
     project_dir: Path,
+    *,
+    task_sandbox_root: bool = False,
 ) -> tuple[list[dict[str, object]], str]:
     """Read the Task workspace into the bounded v3 wire snapshot.
 
     Fails closed (never skips) on symlinks, special or multiply-linked files,
     credential-like names, unsafe paths and any bound. The returned digest is
     computed from exactly the bytes sent.
+
+    P43-PRODUCT-23B: Orchestrator-owned metadata at the root is not sent. The
+    root ``.agent`` directory is control state (hydration never copies a
+    project's own, Path Authority rejects declarations naming it). The root
+    ``runtime.json`` is skipped only when ``task_sandbox_root`` says the root
+    is this attempt's Task Sandbox, whose allocator writes it there (hydration
+    never copies a project's own). Neither skip applies below the root.
     """
+
+    from app.services.workspace.control_state_paths import CONTROL_STATE_DIR_NAME
+    from app.services.workspace.workspace_paths import RUNTIME_METADATA_FILENAME
 
     root = Path(project_dir)
     if not root.is_absolute() or root.is_symlink() or not root.is_dir():
@@ -376,7 +388,9 @@ def build_workspace_snapshot(
             rel = f"{prefix}{child.name}"
             st = child.stat(follow_symlinks=False)
             if stat.S_ISDIR(st.st_mode):
-                if child.name in _SNAPSHOT_SKIPPED_DIRS:
+                if child.name in _SNAPSHOT_SKIPPED_DIRS or (
+                    not prefix and child.name == CONTROL_STATE_DIR_NAME
+                ):
                     continue
                 walk(directory / child.name, rel + "/")
                 continue
@@ -386,6 +400,8 @@ def build_workspace_snapshot(
                 raise SandboxSnapshotRejected("snapshot_symlink_rejected")
             if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
                 raise SandboxSnapshotRejected("snapshot_special_file_rejected")
+            if task_sandbox_root and rel == RUNTIME_METADATA_FILENAME:
+                continue
             if _credential_like(child.name):
                 raise SandboxSnapshotRejected("snapshot_credential_material")
             try:
@@ -584,8 +600,17 @@ class SandboxExecutionGateway:
             resolve_attempt_authority(context)
         except SandboxAuthorityError as exc:
             return SandboxGatewayOutcome(False, exc.reason)
+        from app.services.workspace.system_settings import get_effective_runtime_root
+
+        root = Path(project_dir)
+        # The allocator's layout: RUNTIME_ROOT/tasks/<project>/<task execution>.
+        task_sandbox_root = root.name == str(context.task_execution_id) and (
+            root.parent.parent == get_effective_runtime_root(context.db) / "tasks"
+        )
         try:
-            snapshot, digest = build_workspace_snapshot(Path(project_dir))
+            snapshot, digest = build_workspace_snapshot(
+                root, task_sandbox_root=task_sandbox_root
+            )
         except SandboxSnapshotRejected as exc:
             return SandboxGatewayOutcome(False, exc.reason)
         code = encode_tool_invocation(tool, list(pytest_args))
