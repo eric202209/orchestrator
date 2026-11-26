@@ -115,16 +115,6 @@ class LocalPytestExecutor:
         try:
             home = staged.path.parent / f"{staged.path.name}-tmp"
             home.mkdir()
-            # Docker provides a disposable writable execution layer over the
-            # read-only snapshot bind.  The local double cannot mount that
-            # layer, so run from a private writable copy while keeping the
-            # real staged snapshot immutable and outside the Worker root.
-            execution_source = staged.path / "run-src"
-            shutil.copytree(staged.source_path, execution_source)
-            for directory, _directories, filenames in os.walk(execution_source):
-                os.chmod(directory, 0o755)
-                for filename in filenames:
-                    os.chmod(Path(directory) / filename, 0o644)
             with _REAL_POPEN(
                 [
                     sys.executable,
@@ -134,7 +124,7 @@ class LocalPytestExecutor:
                     "-c",
                     docker_executor.PYTEST_BOOTSTRAP,
                 ],
-                cwd=execution_source,
+                cwd=staged.source_path,
                 env={"PATH": "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(home)},
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -1081,14 +1071,23 @@ def test_candidate_validation_routes_pytest_and_compileall_only(
 def test_sandbox_writes_never_reach_the_worker_workspace(
     claimed, host, no_local_step_execution, tmp_path
 ):
-    """Actual local subprocess: a test writes into its cwd and /tmp."""
+    """Actual local subprocess: a test writes into its cwd and /tmp.
+
+    The snapshot is read-only (EROFS under the Docker bind, EACCES for a
+    non-root runner); root bypasses the mode bits.  Either way nothing may
+    reach the Worker workspace.
+    """
 
     db, context, root = claimed
     (root / "tests" / "test_pkg.py").write_text(
-        "import pathlib\n"
+        "import pathlib, tempfile\n"
         "def test_writes():\n"
-        "    pathlib.Path('leak.txt').write_text('x')\n"
-        "    pathlib.Path('pkg/__init__.py').write_text('tampered')\n"
+        "    pathlib.Path(tempfile.gettempdir(), 'scratch.txt').write_text('x')\n"
+        "    for target in ('leak.txt', 'pkg/__init__.py'):\n"
+        "        try:\n"
+        "            pathlib.Path(target).write_text('tampered')\n"
+        "        except OSError:\n"
+        "            pass\n"
     )
     staging = tmp_path / "staging"
     staging.mkdir(mode=0o700)
@@ -1104,12 +1103,13 @@ def test_sandbox_writes_never_reach_the_worker_workspace(
 # --- Host Launcher executor (real DockerExecutor code, no Docker) -----------
 
 
-def test_pytest_profile_fails_closed_until_the_image_is_pinned(tmp_path):
+def test_pytest_profile_fails_closed_until_the_image_is_pinned(tmp_path, monkeypatch):
+    # Independent of the committed pin, which PRODUCT-23B records.
+    monkeypatch.setattr(docker_executor, "PYTEST_IMAGE", None)
     executor = docker_executor.DockerExecutor(
         tmp_path / "staging", docker="/nonexistent"
     )
     request = _v3_request()
-    assert docker_executor.PYTEST_IMAGE is None
     result = executor.execute(request, None)
     assert (result.execution_status, result.error_code) == (
         "REJECTED",
