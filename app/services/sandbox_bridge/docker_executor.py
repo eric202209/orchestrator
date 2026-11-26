@@ -21,9 +21,11 @@ from .staging import StagedWorkspace
 
 IMAGE = "python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b"
 # P43-PRODUCT-23A: local image ID (``sha256:<64 hex>``) of the image built from
-# scripts/sandbox/pytest-image/ on the Host. Unpinned until PRODUCT-23B records
-# the Host build; until then every pytest-profile request fails closed.
-PYTEST_IMAGE: str | None = None
+# scripts/sandbox/pytest-image/ on the Host. PRODUCT-23B Stage Y pins the GX10
+# build of Stage X (0d2d297); a missing or different local image fails closed.
+PYTEST_IMAGE: str | None = (
+    "sha256:4fe5ac69330c35161326f6737210c24163ed525a230a24d894b1cb3b1b2fd42b"
+)
 _PINNED_IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
 # Fixed in-container bootstrap, run with cwd /ws/src. The request supplies only
 # /ws/args.json, read before any workspace code runs. ``compileall`` mirrors
