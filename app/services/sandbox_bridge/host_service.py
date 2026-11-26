@@ -370,9 +370,16 @@ def raw_execute(
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(10)
         sock.connect(str(socket_path))
-        _send(
-            sock, {"operation": "execute", "request": wire, "mac": _mac(key, payload)}
-        )
+        try:
+            _send(
+                sock,
+                {"operation": "execute", "request": wire, "mac": _mac(key, payload)},
+            )
+        except (BrokenPipeError, ConnectionResetError):
+            # The Launcher may reject (e.g. unauthorized peer) and close before
+            # reading; its rejection frame is still queued. No frame queued
+            # still fails closed in _receive with incomplete_frame.
+            pass
         return _receive(sock)
 
 

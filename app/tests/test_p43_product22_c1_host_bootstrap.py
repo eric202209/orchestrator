@@ -246,6 +246,45 @@ def test_peer_uid_mismatch_is_rejected_without_execution(tmp_path):
     )
 
 
+def test_peer_rejection_is_read_after_launcher_closes_first(tmp_path, monkeypatch):
+    """CI race: the Launcher rejects an unauthorized peer before reading, then
+    closes. A client send after that close hits EPIPE; the queued rejection must
+    still be returned rather than a BrokenPipeError."""
+    from app.services.sandbox_bridge import host_service
+
+    real_send = host_service._send
+    observed = []
+
+    def send_after_launcher_close(sock, value):
+        sock.settimeout(5)
+        assert sock.recv(1, socket.MSG_PEEK)  # rejection frame already queued
+        deadline = time.monotonic() + 5
+        while True:  # sendall succeeds until the Launcher has closed
+            try:
+                real_send(sock, value)
+            except (BrokenPipeError, ConnectionResetError) as exc:
+                observed.append(type(exc).__name__)
+                raise
+            if time.monotonic() > deadline:
+                pytest.fail("Launcher never closed the rejected connection")
+            time.sleep(0.01)
+
+    monkeypatch.setattr(host_service, "_send", send_after_launcher_close)
+    calls = []
+    config = _state(tmp_path, allowed_uid=os.geteuid() + 4242)
+    running = Running(config, _ok_executor(calls))
+    try:
+        result = _raw_execute(config, load_key(config.key_path), _request())
+    finally:
+        running.close()
+    assert observed  # the EPIPE/ECONNRESET path was exercised
+    assert (result["execution_status"], result["error_code"], calls) == (
+        "REJECTED",
+        "unauthorized_peer",
+        [],
+    )
+
+
 def test_wrong_hmac_is_rejected_without_execution(tmp_path):
     calls = []
     config = _state(tmp_path)
