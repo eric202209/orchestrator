@@ -18,11 +18,13 @@ tree and never vendored; tests needing it skip when it is absent (CI).
 from __future__ import annotations
 
 import http.client
+import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -1140,6 +1142,245 @@ def test_runner_relay_and_worker_launch_contracts():
     assert '"$WORKER" "$RELAY"' in cleanup
 
 
+def _seed_change_set_export_fixture(
+    tmp_path: Path, *, after_stop: bool = False, no_change_set: bool = False
+) -> tuple[Path, Path, Path]:
+    root = tmp_path / "srv"
+    evidence = tmp_path / "evidence"
+    runtime_source = root / "runtime" / "change-sets" / "1"
+    files_root = runtime_source / "files"
+    files_root.mkdir(parents=True)
+    root.joinpath("db").mkdir(parents=True)
+    evidence.mkdir()
+    source_bytes = {
+        "rangekit/ranges.py": b"def merge_ranges(values):\n    return values\n",
+        "tests/test_regression_touching_unsorted.py": b"def test_regression():\n    assert True\n",
+    }
+    for relative, content in source_bytes.items():
+        target = files_root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    manifest = {
+        "schema": "openclaw.task_execution_change_set_artifact.v1",
+        "task_execution_id": 1,
+        "project_id": 1,
+        "task_id": 1,
+        "source_target_path": "/var/lib/orchestrator-worker/runtime/workspace",
+        "artifact_path": "/var/lib/orchestrator-worker/runtime/change-sets/1/files",
+        "copied_files": sorted(source_bytes),
+        "deleted_files": [],
+    }
+    (runtime_source / "manifest.json").write_text(
+        json.dumps(manifest, sort_keys=True), encoding="utf-8"
+    )
+    db = sqlite3.connect(root / "db" / "orchestrator.db")
+    db.executescript(
+        """
+        CREATE TABLE task_executions (
+            id INTEGER PRIMARY KEY, session_id INTEGER, task_id INTEGER,
+            attempt_number INTEGER, status TEXT, dispatch_lease_fence INTEGER
+        );
+        CREATE TABLE task_execution_change_sets (
+            project_id INTEGER, task_id INTEGER, session_id INTEGER,
+            task_execution_id INTEGER, added_files TEXT, modified_files TEXT,
+            deleted_files TEXT, disposition TEXT, review_decision TEXT,
+            disposition_metadata TEXT, status TEXT
+        );
+        """
+    )
+    execution_status = "failed" if no_change_set else "done"
+    db.execute(
+        "INSERT INTO task_executions VALUES (?, 1, 1, 1, ?, 1)",
+        (1, execution_status),
+    )
+    if not no_change_set:
+        db.execute(
+            "INSERT INTO task_execution_change_sets VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                1,
+                1,
+                1,
+                1,
+                json.dumps([]),
+                json.dumps(sorted(source_bytes)),
+                json.dumps([]),
+                "captured",
+                json.dumps({"outcome": "hold_for_review"}),
+                json.dumps({"source": "test"}),
+                "completed",
+            ),
+        )
+    db.commit()
+    db.close()
+    observation = {
+        "terminal": True,
+        "task_execution_id": 1,
+        "task_execution_status": "done",
+        "attempt_number": 1,
+        "task_id": 1,
+        "session_id": 1,
+        "dispatch_lease_fence": 1,
+    }
+    if no_change_set:
+        observation["task_execution_status"] = "failed"
+    else:
+        observation["change_set"] = {
+            "directory": "/var/lib/orchestrator-worker/runtime/change-sets/1",
+            "artifact_present": True,
+            "added_files": [],
+            "modified_files": sorted(source_bytes),
+            "deleted_files": [],
+        }
+    (root / "env").mkdir()
+    (root / "env" / "observe.model.json").write_text(
+        json.dumps(observation), encoding="utf-8"
+    )
+    if after_stop:
+        (root / "env" / "observe.model.after-stop.json").write_text(
+            json.dumps(observation), encoding="utf-8"
+        )
+        (root / "env" / "observe.model.json").write_text("{}", encoding="utf-8")
+    return root, evidence, runtime_source
+
+
+def _run_change_set_export(tmp_path: Path, *, after_stop=False, no_change_set=False):
+    root, evidence, source = _seed_change_set_export_fixture(
+        tmp_path, after_stop=after_stop, no_change_set=no_change_set
+    )
+    function = c23b._shell_function(LIVE_RUN, "export_model_change_set")
+    command = (
+        "set -euo pipefail\n"
+        f"ROOT={root}\nEVIDENCE={evidence}\n" + function + "export_model_change_set\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", command], capture_output=True, text=True, timeout=30
+    )
+    return result, root, evidence, source
+
+
+@pytest.mark.parametrize("after_stop", [False, True])
+def test_change_set_export_preserves_terminal_artifact_and_identity(
+    tmp_path, after_stop
+):
+    result, root, evidence, source = _run_change_set_export(
+        tmp_path, after_stop=after_stop
+    )
+    assert result.returncode == 0, result.stderr
+    exported = evidence / "change-sets" / "model"
+    assert (exported / "export-provenance.json").is_file()
+    assert (exported / "manifest.json").read_bytes() == (
+        source / "manifest.json"
+    ).read_bytes()
+    for relative in (
+        "rangekit/ranges.py",
+        "tests/test_regression_touching_unsorted.py",
+    ):
+        assert (exported / "files" / relative).read_bytes() == (
+            source / "files" / relative
+        ).read_bytes()
+    provenance = json.loads((exported / "export-provenance.json").read_text())
+    assert provenance["status"] == "complete"
+    assert provenance["task_execution_id"] == 1
+    assert provenance["dispatch_lease_fence"] == 1
+    assert {entry["path"] for entry in provenance["files"]} == {
+        "rangekit/ranges.py",
+        "tests/test_regression_touching_unsorted.py",
+    }
+    assert all(
+        entry["sha256"]
+        == hashlib.sha256((exported / "files" / entry["path"]).read_bytes()).hexdigest()
+        for entry in provenance["files"]
+    )
+
+
+def test_change_set_export_keeps_failed_task_without_a_change_set_applicable(tmp_path):
+    result, _, evidence, _ = _run_change_set_export(tmp_path, no_change_set=True)
+    assert result.returncode == 0, result.stderr
+    status = json.loads(
+        (evidence / "model-change-set-export.json").read_text(encoding="utf-8")
+    )
+    assert status["status"] == "not_applicable"
+    assert not (evidence / "change-sets" / "model").exists()
+
+
+@pytest.mark.parametrize(
+    "corruption", ["missing_manifest", "manifest", "unsafe_path", "symlink"]
+)
+def test_change_set_export_fails_closed_for_corrupt_or_unsafe_artifact(
+    tmp_path, corruption
+):
+    result, _, evidence, source = _run_change_set_export(tmp_path)
+    if corruption == "missing_manifest":
+        (source / "manifest.json").unlink()
+    elif corruption == "manifest":
+        (source / "manifest.json").write_text("{}", encoding="utf-8")
+    elif corruption == "unsafe_path":
+        manifest = json.loads((source / "manifest.json").read_text())
+        manifest["copied_files"] = ["../escape.py"]
+        (source / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    else:
+        link = source / "files" / "tests" / "link.py"
+        link.symlink_to(source / "files" / "rangekit" / "ranges.py")
+    # The first call above intentionally created a valid export; remove only
+    # that test artifact so the corrupt-source run exercises a fresh boundary.
+    shutil.rmtree(evidence / "change-sets", ignore_errors=True)
+    function = c23b._shell_function(LIVE_RUN, "export_model_change_set")
+    command = (
+        "set -euo pipefail\n"
+        f"ROOT={tmp_path / 'srv'}\nEVIDENCE={evidence}\n"
+        + function
+        + "export_model_change_set\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", command], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode != 0
+    assert not (evidence / "change-sets" / "model").exists()
+
+
+def test_change_set_export_runs_when_evaluation_failed(tmp_path):
+    root, evidence, _ = _seed_change_set_export_fixture(tmp_path)
+    (root / "env" / "submitted").write_text("0\n", encoding="utf-8")
+    (root / "env" / "model-window.outcome").write_text("terminal\n", encoding="utf-8")
+    for name in ("submit.model.json", "image.id", "run.vars"):
+        (root / "env" / name).write_text("{}\n", encoding="utf-8")
+    (root / "env" / "instance.env").write_text(
+        "WORKER_INSTANCE_ID=test\n", encoding="utf-8"
+    )
+    (root / "pin").mkdir()
+    (root / "pin" / "worker-pin.json").write_text("{}\n", encoding="utf-8")
+    (root / "pin" / "launcher-context.json").write_text("{}\n", encoding="utf-8")
+    (root / "eval" / "model").mkdir(parents=True)
+    (root / "eval" / "model" / "evaluation-failed").write_text("1\n")
+    functions = "".join(
+        c23b._shell_function(LIVE_RUN, name)
+        for name in ("export_model_change_set", "cmd_evidence")
+    )
+    prelude = (
+        f"ROOT={root}\nEVIDENCE={evidence}\nIMAGE_TAG=test-image\n"
+        "WORKER=test-worker\nRELAY=test-relay\nC2_SERVICE=test-service\n"
+        "require_host() { :; }\n"
+        "provider_mode() { false; }\n"
+        "preserve_worker_boot_identity_diagnostics() { :; }\n"
+        "preserve_ledger_attribution() { :; }\n"
+        "ledger_check() { :; }\n"
+        "window_start() { echo 0; }\n"
+        "info() { :; }\n"
+        "journalctl() { :; }\n"
+        "docker() { case \"$1:$2\" in image:inspect) echo 'id created';; esac; }\n"
+        + functions
+        + "cmd_evidence\n"
+    )
+    result = subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + prelude],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (evidence / "change-sets" / "model" / "export-provenance.json").is_file()
+
+
 _WINDOW_STUB = r"""#!/bin/bash
 echo "$1" >>"$LOG"
 case "$1" in
@@ -1150,7 +1391,7 @@ submit)
     if [[ $FAIL == interrupt ]]; then kill -INT "$PPID"; sleep 0.3; exit 130; fi
     [[ $FAIL == submit ]] && exit 1
     echo terminal >"$ROOT/env/model-window.outcome" ;;
-evaluate) exit 0 ;;
+evaluate) [[ $FAIL != evaluate ]] ;;
 evidence) [[ $FAIL != evidence ]] ;;
 cleanup) exit 0 ;;
 esac
@@ -1253,6 +1494,13 @@ def _run_window(tmp_path: Path, fail: str) -> tuple[int, str, list[str], Path]:
                 "evidence",
             ],
             "interrupted",
+        ),
+        (
+            "evaluate",
+            1,
+            "COMPLETE_WITH_FAILURES",
+            ["setup", "boundary", "submit", "evaluate", "docker stop", "evidence"],
+            "terminal",
         ),
     ],
 )

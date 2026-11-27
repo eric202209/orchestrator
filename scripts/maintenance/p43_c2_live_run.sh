@@ -984,10 +984,342 @@ print(f"WORKER_BOOT_IDENTITY_DIAGNOSTICS={saved}")
 PY
 }
 
+export_model_change_set() {
+    # Export the authoritative disposable Change Set before cleanup. A
+    # reconstructed candidate is never an input to this path.
+    local observation="$ROOT/env/observe.model.json"
+    [[ -f $ROOT/env/observe.model.after-stop.json ]] && \
+        observation="$ROOT/env/observe.model.after-stop.json"
+    /usr/bin/python3 -I - "$ROOT" "$EVIDENCE" "$observation" \
+        "$ROOT/db/orchestrator.db" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import shutil
+import sqlite3
+import sys
+import tempfile
+
+root, evidence, observation_path, database = map(Path, sys.argv[1:])
+runtime_raw = root / "runtime"
+if runtime_raw.is_symlink() or not runtime_raw.is_dir():
+    raise SystemExit("disposable runtime root is missing or is a symlink")
+runtime = runtime_raw.resolve()
+if evidence.is_symlink() or not evidence.is_dir():
+    raise SystemExit("protected evidence root is missing or is a symlink")
+evidence = evidence.resolve()
+export_parent = evidence / "change-sets"
+exported = export_parent / "model"
+
+
+class ExportError(RuntimeError):
+    pass
+
+
+def fail(message):
+    raise ExportError(message)
+
+
+def read_json(path):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"invalid JSON: {path}: {exc}")
+
+
+def json_list(value, label):
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        fail(f"{label} must be a list of strings")
+    return value
+
+
+def safe_relative(value, label):
+    if not isinstance(value, str) or not value or value.startswith("/"):
+        fail(f"unsafe {label}: {value!r}")
+    if "\\" in value:
+        fail(f"unsafe {label}: {value!r}")
+    path = PurePosixPath(value)
+    if path.is_absolute() or "." in path.parts or ".." in path.parts:
+        fail(f"unsafe {label}: {value!r}")
+    if path.as_posix() != value:
+        fail(f"non-canonical {label}: {value!r}")
+    return value
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def artifact_files(directory):
+    if directory.is_symlink() or not directory.is_dir():
+        fail(f"Change Set directory is not a real directory: {directory}")
+    for child in directory.iterdir():
+        if child.is_symlink():
+            fail(f"Change Set contains symlink: {child}")
+        if child.name not in {"manifest.json", "files"}:
+            fail(f"unexpected Change Set entry: {child.name}")
+    manifest = directory / "manifest.json"
+    files_root = directory / "files"
+    if manifest.is_symlink() or not manifest.is_file():
+        fail("Change Set manifest is missing or is not a regular file")
+    if files_root.is_symlink() or not files_root.is_dir():
+        fail("Change Set files root is missing or is not a real directory")
+    found = {}
+    for current, directories, files in os.walk(files_root, followlinks=False):
+        current_path = Path(current)
+        for name in directories:
+            child = current_path / name
+            if child.is_symlink():
+                fail(f"Change Set contains symlink: {child}")
+        for name in files:
+            child = current_path / name
+            if child.is_symlink() or not child.is_file():
+                fail(f"Change Set contains non-regular file: {child}")
+            relative = child.relative_to(files_root).as_posix()
+            safe_relative(relative, "artifact path")
+            found[relative] = child
+    return manifest, found
+
+
+def fsync_file(path):
+    with path.open("rb") as handle:
+        os.fsync(handle.fileno())
+
+
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def write_private_json(path, payload):
+    path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    fsync_file(path)
+
+
+try:
+    observed = read_json(observation_path)
+    status = str(observed.get("task_execution_status") or "").lower()
+    execution_id = observed.get("task_execution_id")
+    if not isinstance(execution_id, int):
+        fail("terminal observation has no integer task_execution_id")
+    if observed.get("terminal") is not True:
+        fail("Change Set export requires a terminal observation")
+
+    database_connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    database_connection.row_factory = sqlite3.Row
+    execution = database_connection.execute(
+        """
+        SELECT id, session_id, task_id, attempt_number, status,
+               dispatch_lease_fence
+        FROM task_executions WHERE id = ?
+        """,
+        (execution_id,),
+    ).fetchone()
+    change_set = database_connection.execute(
+        """
+        SELECT project_id, task_id, session_id, task_execution_id,
+               added_files, modified_files, deleted_files, disposition,
+               review_decision, disposition_metadata, status
+        FROM task_execution_change_sets WHERE task_execution_id = ?
+        """,
+        (execution_id,),
+    ).fetchone()
+    if execution is None:
+        fail(f"TaskExecution {execution_id} is absent from authoritative DB")
+
+    identity = {
+        "task_execution_id": int(execution["id"]),
+        "task_id": int(execution["task_id"]),
+        "session_id": int(execution["session_id"]),
+        "attempt_number": int(execution["attempt_number"]),
+        "dispatch_lease_fence": execution["dispatch_lease_fence"],
+    }
+    if status != str(execution["status"] or "").lower():
+        fail("terminal observation status differs from authoritative DB")
+    for key, expected in identity.items():
+        if key not in observed or observed[key] != expected:
+            fail(f"terminal observation identity mismatch: {key}")
+
+    observed_change = observed.get("change_set")
+    if observed_change is None:
+        if change_set is not None:
+            fail("authoritative Change Set exists but terminal observation omitted it")
+        if status != "done":
+            write_private_json(
+                evidence / "model-change-set-export.json",
+                {
+                    "schema": "openclaw.p43.model-change-set-export.v1",
+                    "status": "not_applicable",
+                    "reason": "unsuccessful_task_no_captured_change_set",
+                    **identity,
+                },
+            )
+            database_connection.close()
+            raise SystemExit(0)
+        fail("DONE TaskExecution has no observed captured Change Set")
+    if change_set is None:
+        fail("terminal observation has a Change Set but authoritative DB row is absent")
+    if not isinstance(observed_change, dict):
+        fail("terminal observation Change Set is not an object")
+
+    def db_paths(name):
+        try:
+            return json_list(json.loads(change_set[name] or "[]"), f"DB {name}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            fail(f"invalid DB {name}: {exc}")
+
+    added = db_paths("added_files")
+    modified = db_paths("modified_files")
+    deleted = db_paths("deleted_files")
+    for label, values in (("added path", added), ("modified path", modified), ("deleted path", deleted)):
+        for value in values:
+            safe_relative(value, label)
+        if len(values) != len(set(values)):
+            fail(f"duplicate {label}")
+    changed = set(added) | set(modified)
+    if set(added) & set(modified):
+        fail("DB Change Set overlaps added and modified paths")
+    for name, expected in (("task_id", int(change_set["task_id"])), ("session_id", int(change_set["session_id"]))):
+        if expected != identity[name]:
+            fail(f"authoritative Change Set identity mismatch: {name}")
+    if int(change_set["task_execution_id"]) != execution_id:
+        fail("authoritative Change Set execution identity mismatch")
+    for key, expected in (("added_files", added), ("modified_files", modified), ("deleted_files", deleted)):
+        actual = json_list(observed_change.get(key), f"observed {key}")
+        if set(actual) != set(expected) or len(actual) != len(expected):
+            fail(f"terminal observation differs from authoritative {key}")
+    directory = observed_change.get("directory")
+    prefix = "/var/lib/orchestrator-worker/runtime/"
+    if not isinstance(directory, str) or not directory.startswith(prefix):
+        fail("Change Set source is outside the expected disposable artifact root")
+    suffix = directory[len(prefix):]
+    if not suffix or any(part in {"", ".", ".."} for part in PurePosixPath(suffix).parts):
+        fail("unsafe Change Set source path")
+    source_cursor = runtime
+    for part in PurePosixPath(suffix).parts:
+        source_cursor /= part
+        if source_cursor.is_symlink():
+            fail("Change Set source contains a symlink path component")
+    source = runtime / Path(*PurePosixPath(suffix).parts)
+    try:
+        source.resolve().relative_to(runtime)
+    except ValueError:
+        fail("Change Set source resolves outside the disposable runtime root")
+    if observed_change.get("artifact_present") is not True:
+        fail("terminal observation does not confirm a captured artifact")
+
+    source_manifest_path, source_files = artifact_files(source)
+    source_manifest_bytes = source_manifest_path.read_bytes()
+    source_manifest = read_json(source_manifest_path)
+    if source_manifest.get("schema") != "openclaw.task_execution_change_set_artifact.v1":
+        fail("unexpected Change Set manifest schema")
+    if source_manifest.get("task_execution_id") != execution_id:
+        fail("Change Set manifest execution identity mismatch")
+    if source_manifest.get("project_id") != int(change_set["project_id"]):
+        fail("Change Set manifest project identity mismatch")
+    if source_manifest.get("task_id") != identity["task_id"]:
+        fail("Change Set manifest task identity mismatch")
+    copied = json_list(source_manifest.get("copied_files"), "manifest copied_files")
+    manifest_deleted = json_list(source_manifest.get("deleted_files"), "manifest deleted_files")
+    for value in copied + manifest_deleted:
+        safe_relative(value, "manifest path")
+    if len(copied) != len(set(copied)) or len(manifest_deleted) != len(set(manifest_deleted)):
+        fail("manifest contains duplicate paths")
+    if set(copied) != changed or set(manifest_deleted) != set(deleted):
+        fail("manifest scope differs from authoritative Change Set")
+    if set(source_files) != set(copied):
+        fail("Change Set on-disk files differ from manifest")
+
+    export_parent.mkdir(parents=True, exist_ok=True)
+    if export_parent.is_symlink():
+        fail("protected Change Set export directory is a symlink")
+    os.chmod(export_parent, 0o700)
+    if exported.exists() or exported.is_symlink():
+        fail(f"refusing to overwrite existing export: {exported}")
+    temporary = Path(tempfile.mkdtemp(prefix=".model-change-set-", dir=export_parent))
+    os.chmod(temporary, 0o700)
+    try:
+        shutil.copyfile(source_manifest_path, temporary / "manifest.json")
+        os.chmod(temporary / "manifest.json", 0o600)
+        files_destination_root = temporary / "files"
+        files_destination_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(files_destination_root, 0o700)
+        for relative, source_file in source_files.items():
+            destination = temporary / "files" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(destination.parent, 0o700)
+            shutil.copyfile(source_file, destination)
+            os.chmod(destination, 0o600)
+        copied_hashes = []
+        for relative in sorted(source_files):
+            source_file = source_files[relative]
+            exported_file = temporary / "files" / relative
+            source_digest = sha256(source_file)
+            exported_digest = sha256(exported_file)
+            if source_digest != exported_digest or source_file.stat().st_size != exported_file.stat().st_size:
+                fail(f"source/export byte mismatch: {relative}")
+            copied_hashes.append(
+                {"path": relative, "bytes": source_file.stat().st_size, "sha256": source_digest}
+            )
+        if sha256(source_manifest_path) != sha256(temporary / "manifest.json"):
+            fail("source/export manifest byte mismatch")
+        write_private_json(
+            temporary / "export-provenance.json",
+            {
+                "schema": "openclaw.p43.model-change-set-export.v1",
+                "status": "complete",
+                "source_directory": str(source),
+                "source_manifest_sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
+                "exported_manifest_sha256": sha256(temporary / "manifest.json"),
+                "files": copied_hashes,
+                "task_id": identity["task_id"],
+                "session_id": identity["session_id"],
+                "task_execution_id": identity["task_execution_id"],
+                "attempt_number": identity["attempt_number"],
+                "dispatch_lease_fence": identity["dispatch_lease_fence"],
+                "project_id": int(change_set["project_id"]),
+                "change_set_disposition": change_set["disposition"],
+                "change_set_status": change_set["status"],
+                "review_decision": json.loads(change_set["review_decision"] or "null"),
+                "disposition_metadata": json.loads(change_set["disposition_metadata"] or "null"),
+            },
+        )
+        fsync_file(temporary / "manifest.json")
+        fsync_directory(temporary / "files")
+        fsync_directory(temporary)
+        os.rename(temporary, exported)
+        temporary = None
+        fsync_directory(export_parent)
+        if not (exported / "export-provenance.json").is_file():
+            fail("atomic export boundary is incomplete")
+        print(json.dumps({"status": "complete", "directory": str(exported), **identity}, sort_keys=True))
+    finally:
+        if temporary is not None and temporary.exists():
+            shutil.rmtree(temporary)
+    database_connection.close()
+except SystemExit:
+    raise
+except Exception as exc:
+    print(f"Change Set export refused: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
 cmd_evidence() {
     require_host
     local since; since=$(cat "$ROOT/env/submitted")
     install -d -m 0700 "$EVIDENCE"
+    local export_rc=0
+    export_model_change_set || export_rc=$?
     cp "$ROOT"/env/submit*.json "$ROOT"/env/observe*.json "$ROOT/env/image.id" "$ROOT/env/run.vars" \
         "$ROOT/pin/worker-pin.json" "$ROOT/pin/launcher-context.json" "$EVIDENCE/"
     local verdict
@@ -1019,8 +1351,12 @@ for row in db.execute("SELECT request_id, admitted, status FROM sandbox_requests
     # Disposable DB (no credentials: the submitter user has an unusable hash).
     /usr/bin/python3 -c 'import sqlite3, sys; sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).backup(sqlite3.connect(sys.argv[2]))' \
         "$ROOT/db/orchestrator.db" "$EVIDENCE/orchestrator.db"
-    chmod 0600 "$EVIDENCE"/*
+    find "$EVIDENCE" -maxdepth 1 -type f -exec chmod 0600 {} +
     info "evidence in $EVIDENCE (no credentials)"
+    [[ $export_rc -eq 0 ]] || {
+        info "captured Change Set export failed; disposable root retained"
+        return 1
+    }
     [[ $ledger_rc -eq 0 ]] || { info "C2 ledger attribution failed: see $EVIDENCE/ledger-final.json"; return 1; }
 }
 
