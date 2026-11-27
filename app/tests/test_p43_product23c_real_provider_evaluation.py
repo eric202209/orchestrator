@@ -48,6 +48,7 @@ from app.tests import test_p43_product23b_trusted_controls as c23b
 from app.tests import test_phase14b2_failure_coordinator as fc
 from scripts.maintenance import p43_c2_provider_relay as relay_module
 from scripts.maintenance import p43_c2_trusted_submitter as submitter
+from scripts.maintenance import p43_c2_u1_reconstruct_and_evaluate as u1_procedure
 
 c2_env = c3b.c2_env
 REPO = c23b.REPO
@@ -1379,6 +1380,77 @@ def test_change_set_export_runs_when_evaluation_failed(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert (evidence / "change-sets" / "model" / "export-provenance.json").is_file()
+
+
+def test_u1_reconstruction_procedure_scratch_contracts(tmp_path):
+    candidate = tmp_path / "candidate"
+    (candidate / "rangekit").mkdir(parents=True)
+    (candidate / "tests").mkdir()
+    (candidate / "rangekit" / "ranges.py").write_text(
+        "def merge_ranges(values):\n    return values\n"
+    )
+    (candidate / "tests" / "test_regression.py").write_text(
+        "def test_old():\n    assert True\n"
+    )
+    before = u1_procedure.tree_hash(candidate)
+    u1_procedure.apply_ops(
+        candidate,
+        [
+            {
+                "op": "replace_in_file",
+                "path": "rangekit/ranges.py",
+                "old": "    return values",
+                "new": "    return sorted(values)",
+            },
+            {
+                "op": "write_file",
+                "path": "tests/test_regression_touching_unsorted.py",
+                "content": "def test_touching():\n    assert True\n",
+            },
+        ],
+    )
+    assert u1_procedure.tree_hash(candidate) != before
+    outer = tmp_path / "private"
+    outer.mkdir(mode=0o700)
+    mount = outer / "mount"
+    u1_procedure.copy_tree(candidate, mount)
+    u1_procedure.make_container_readonly(mount)
+    assert oct(outer.stat().st_mode & 0o777) == "0o700"
+    assert oct(mount.stat().st_mode & 0o777) == "0o555"
+    assert oct((mount / "rangekit" / "ranges.py").stat().st_mode & 0o777) == "0o444"
+    assert (
+        u1_procedure.classify_test(subprocess.CompletedProcess([], 0, "1 passed", ""))
+        == "PASS"
+    )
+    assert (
+        u1_procedure.classify_test(
+            subprocess.CompletedProcess([], 1, "1 failed\nAssertionError", "")
+        )
+        == "ASSERTION_FAILURE"
+    )
+    assert (
+        u1_procedure.classify_test(
+            subprocess.CompletedProcess([], 1, "ERROR collecting test_x.py", "")
+        )
+        == "COLLECTION_OR_IMPORT_FAILURE"
+    )
+    assert (
+        u1_procedure.classify_test(
+            subprocess.CompletedProcess([], 125, "", "docker failure")
+        )
+        == "INFRASTRUCTURE_FAILURE"
+    )
+    command = u1_procedure.docker_command(
+        u1_procedure.APPROVED_PYTEST_IMAGE,
+        [(mount, "/workspace")],
+        ["-m", "pytest", "tests/test_regression_touching_unsorted.py", "-q"],
+        workdir="/workspace",
+    )
+    assert "--network=none" in command
+    assert "--read-only" in command
+    assert "--user=65534:65534" in command
+    assert f"{mount}:/workspace:ro" in command
+    assert u1_procedure.tree_hash(candidate) != before
 
 
 _WINDOW_STUB = r"""#!/bin/bash
