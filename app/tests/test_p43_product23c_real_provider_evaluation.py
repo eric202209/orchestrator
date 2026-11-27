@@ -929,6 +929,8 @@ def _model_observed(change_set_dir: Path, manifest: dict) -> dict:
     baseline = set(manifest["baseline_files"])
     copied = artifact["copied_files"]
     return {
+        "case_id": "U1",
+        "case_manifest_sha256": submitter.U1_MANIFEST_SHA256,
         "control": "model",
         "expected_outcome_met": True,
         "workspace_files": dict(manifest["baseline_files"]),
@@ -1144,7 +1146,11 @@ def test_runner_relay_and_worker_launch_contracts():
 
 
 def _seed_change_set_export_fixture(
-    tmp_path: Path, *, after_stop: bool = False, no_change_set: bool = False
+    tmp_path: Path,
+    *,
+    after_stop: bool = False,
+    no_change_set: bool = False,
+    case_id: str = "U1",
 ) -> tuple[Path, Path, Path]:
     root = tmp_path / "srv"
     evidence = tmp_path / "evidence"
@@ -1214,6 +1220,8 @@ def _seed_change_set_export_fixture(
     db.commit()
     db.close()
     observation = {
+        "case_id": case_id,
+        "case_manifest_sha256": submitter.frozen_case(case_id).manifest_sha256,
         "terminal": True,
         "task_execution_id": 1,
         "task_execution_status": "done",
@@ -1233,6 +1241,15 @@ def _seed_change_set_export_fixture(
             "deleted_files": [],
         }
     (root / "env").mkdir()
+    (root / "env" / "case-binding.json").write_text(
+        json.dumps(
+            {
+                "id": case_id,
+                "manifest_sha256": submitter.frozen_case(case_id).manifest_sha256,
+            }
+        ),
+        encoding="utf-8",
+    )
     (root / "env" / "observe.model.json").write_text(
         json.dumps(observation), encoding="utf-8"
     )
@@ -1244,9 +1261,14 @@ def _seed_change_set_export_fixture(
     return root, evidence, runtime_source
 
 
-def _run_change_set_export(tmp_path: Path, *, after_stop=False, no_change_set=False):
+def _run_change_set_export(
+    tmp_path: Path, *, after_stop=False, no_change_set=False, case_id="U1"
+):
     root, evidence, source = _seed_change_set_export_fixture(
-        tmp_path, after_stop=after_stop, no_change_set=no_change_set
+        tmp_path,
+        after_stop=after_stop,
+        no_change_set=no_change_set,
+        case_id=case_id,
     )
     function = c23b._shell_function(LIVE_RUN, "export_model_change_set")
     command = (

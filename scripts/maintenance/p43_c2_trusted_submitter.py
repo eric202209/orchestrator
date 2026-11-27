@@ -47,12 +47,14 @@ Host-side, with only the standard library (``python3 -I <this file> ...``):
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import sys
 import time
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
 FIXED_COMMAND = "python3 -c 'import sys; sys.exit(0)'"
@@ -104,20 +106,95 @@ CONTROL_PROJECTS = {
 }
 # Frozen PRODUCT-18 identities (freeze.json). Only hashes live here.
 U1_MANIFEST_SHA256 = "26965b02fe87e35de753267d0b0ee5741c0e555e1e019180a913224543b91f86"
+U2_MANIFEST_SHA256 = "314142190e698daf19b1b2f3e8d7e64629c9c7644953cb22442458569ee1bd3d"
 ORACLE_SHA256 = "b28ea4b22e26942b3e8462db62c2f4d790a4dd293d00e5a228a1b3e09687ecdc"
 HIDDEN_SUITE_SHA256 = "59fd0656331c9515e757949fd130961ccb1d1aed2b9d0a497f36d035da1d87df"
 # Staged layout (the PRODUCT-18 evidence tree, relative to its parent).
 U1_DIR = "p43-product-18/u1"
+U2_DIR = "p43-product-18/u2"
 ORACLE_PATH = "p43-product-02/oracle.py"
 HIDDEN_SUITE_PATH = "p43-product-18/tools/hidden_suite.py"
 # Read-only bind into the submitter container only (never the Worker).
 U1_MATERIAL_ROOT = "/run/p43-u1-material"
+U2_MATERIAL_ROOT = "/run/p43-u2-material"
 SUBMIT_PARTS = ("baseline", "reference")
 # The model control's mount: manifest, task and baseline only.
 MODEL_PARTS = ("baseline",)
 # P43-PRODUCT-23C: the evaluation window (the relay enforces the deadline).
 MODEL_TIMEOUT_SECONDS = 1200
 EVALUATION_PARTS = ("baseline", "reference", "naive", "hidden", "case", "tools")
+
+
+@dataclass(frozen=True)
+class FrozenCase:
+    """The immutable identity and labels for one frozen evaluation case."""
+
+    id: str
+    manifest_sha256: str
+    directory: str
+    material_root: str
+    reference_project: str
+    model_project: str
+    reference_title: str
+    model_title: str
+    reference_session: str
+    model_session: str
+    evaluation_controls: tuple[str, ...]
+
+
+CASE_DESCRIPTORS = MappingProxyType(
+    {
+        "U1": FrozenCase(
+            id="U1",
+            manifest_sha256=U1_MANIFEST_SHA256,
+            directory=U1_DIR,
+            material_root=U1_MATERIAL_ROOT,
+            reference_project="p43-c2-u1-reference",
+            model_project="p43-c2-u1-model",
+            reference_title="U1 trusted reference control",
+            model_title="U1 rangekit task",
+            reference_session="P43-PRODUCT-23B U1 reference control",
+            model_session="P43-PRODUCT-23C U1 model evaluation",
+            evaluation_controls=("reference", "naive"),
+        ),
+        "U2": FrozenCase(
+            id="U2",
+            manifest_sha256=U2_MANIFEST_SHA256,
+            directory=U2_DIR,
+            material_root=U2_MATERIAL_ROOT,
+            reference_project="p43-c2-u2-reference",
+            model_project="p43-c2-u2-model",
+            reference_title="U2 trusted reference control",
+            model_title="U2 ledgerlite task",
+            reference_session="P43-PRODUCT-24A U2 reference control",
+            model_session="P43-PRODUCT-24B U2 model evaluation",
+            evaluation_controls=("reference", "naive-symptom", "naive-partial"),
+        ),
+    }
+)
+DEFAULT_CASE_ID = "U1"
+
+
+def frozen_case(case_id: str = DEFAULT_CASE_ID) -> FrozenCase:
+    """Return one explicitly supported case, refusing unknown selectors."""
+
+    try:
+        return CASE_DESCRIPTORS[case_id]
+    except (KeyError, TypeError):
+        raise SubmitterRefused(f"unknown_case:{case_id}") from None
+
+
+def case_material_root(case_id: str = DEFAULT_CASE_ID) -> Path:
+    case = frozen_case(case_id)
+    # The U1 constant is retained as a test seam and as the compatibility path
+    # used by the PRODUCT-23B/23C procedures. U2 has the same explicit seam.
+    return Path(U1_MATERIAL_ROOT if case.id == "U1" else U2_MATERIAL_ROOT)
+
+
+def case_info(case_id: str = DEFAULT_CASE_ID) -> dict[str, Any]:
+    case = frozen_case(case_id)
+    return {**asdict(case), "material_root": str(case_material_root(case.id))}
+
 
 PROBE_TASK_DESCRIPTION = (
     "Run the fixed C2 containment probe: "
@@ -342,48 +419,68 @@ def _safe_relative(rel: str) -> str:
     return rel
 
 
-def _material_files(manifest: Mapping[str, Any], parts: tuple[str, ...]) -> dict:
+def _material_files(
+    manifest: Mapping[str, Any],
+    parts: tuple[str, ...],
+    case_id: str = DEFAULT_CASE_ID,
+) -> dict:
     """Every staged file for ``parts`` with its frozen sha256."""
 
-    u1 = U1_DIR
+    case = frozen_case(case_id)
+    case_dir = case.directory
     files = {
-        f"{u1}/manifest.json": U1_MANIFEST_SHA256,
-        f"{u1}/task.txt": manifest["task_sha256"],
+        f"{case_dir}/manifest.json": case.manifest_sha256,
+        f"{case_dir}/task.txt": manifest["task_sha256"],
     }
     if "baseline" in parts:
         for rel, digest in manifest["baseline_files"].items():
-            files[f"{u1}/baseline/{_safe_relative(rel)}"] = digest
-    for name in ("reference", "naive"):
-        if name in parts:
-            for rel, digest in manifest["controls"][name].items():
-                files[f"{u1}/controls/{name}/{_safe_relative(rel)}"] = digest
+            files[f"{case_dir}/baseline/{_safe_relative(rel)}"] = digest
+    control_names = []
+    if "reference" in parts:
+        control_names.append("reference")
+    if "naive" in parts:
+        control_names.extend(
+            name for name in case.evaluation_controls if name != "reference"
+        )
+    for name in control_names:
+        for rel, digest in manifest["controls"][name].items():
+            files[f"{case_dir}/controls/{name}/{_safe_relative(rel)}"] = digest
     if "hidden" in parts:
         for rel, digest in manifest["hidden_files"].items():
-            files[f"{u1}/hidden/{_safe_relative(rel)}"] = digest
+            files[f"{case_dir}/hidden/{_safe_relative(rel)}"] = digest
     if "case" in parts:
-        files[f"{u1}/case.json"] = manifest["expectations_sha256"]
+        files[f"{case_dir}/case.json"] = manifest["expectations_sha256"]
     if "tools" in parts:
         files[ORACLE_PATH] = ORACLE_SHA256
         files[HIDDEN_SUITE_PATH] = HIDDEN_SUITE_SHA256
     return files
 
 
-def _read_pinned_manifest(root: Path) -> dict[str, Any]:
-    path = root / U1_DIR / "manifest.json"
+def _read_pinned_manifest(root: Path, case_id: str = DEFAULT_CASE_ID) -> dict[str, Any]:
+    case = frozen_case(case_id)
+    path = root / case.directory / "manifest.json"
+    label = case.id.lower()
     if path.is_symlink() or not path.is_file():
-        raise SubmitterRefused("u1_manifest_missing")
+        raise SubmitterRefused(f"{label}_manifest_missing")
     data = path.read_bytes()
-    if _sha256_bytes(data) != U1_MANIFEST_SHA256:
-        raise SubmitterRefused("u1_manifest_sha256_mismatch")
-    return json.loads(data)
+    if _sha256_bytes(data) != case.manifest_sha256:
+        raise SubmitterRefused(f"{label}_manifest_sha256_mismatch")
+    manifest = json.loads(data)
+    if manifest.get("id") != case.id:
+        raise SubmitterRefused(f"{label}_manifest_case_mismatch")
+    return manifest
 
 
-def verify_u1_material(root: str | Path, parts: tuple[str, ...]) -> dict[str, Any]:
-    """Exactly the frozen files for ``parts``: no link, no extra, no mismatch."""
+def verify_case_material(
+    root: str | Path,
+    parts: tuple[str, ...],
+    case_id: str = DEFAULT_CASE_ID,
+) -> dict[str, Any]:
+    """Verify exactly one selected case's frozen files: no link or extra file."""
 
     root = Path(root)
-    manifest = _read_pinned_manifest(root)
-    expected = _material_files(manifest, parts)
+    manifest = _read_pinned_manifest(root, case_id)
+    expected = _material_files(manifest, parts, case_id)
     actual: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root).as_posix()
@@ -397,21 +494,30 @@ def verify_u1_material(root: str | Path, parts: tuple[str, ...]) -> dict[str, An
         unexpected = sorted(set(actual) - set(expected))
         differing = sorted(r for r in expected if actual.get(r) != expected[r])
         raise SubmitterRefused(
-            f"u1_material_mismatch:unexpected={unexpected[:5]},differing={differing[:5]}"
+            f"{case_id.lower()}_material_mismatch:unexpected={unexpected[:5]},differing={differing[:5]}"
         )
     return manifest
 
 
+def verify_u1_material(root: str | Path, parts: tuple[str, ...]) -> dict[str, Any]:
+    """Compatibility wrapper for the original PRODUCT-23B/23C U1 path."""
+
+    return verify_case_material(root, parts, "U1")
+
+
 def stage_material(
-    source: str | Path, destination: str | Path, parts: tuple[str, ...]
+    source: str | Path,
+    destination: str | Path,
+    parts: tuple[str, ...],
+    case_id: str = DEFAULT_CASE_ID,
 ) -> dict[str, Any]:
     """Copy exactly the frozen files for ``parts`` and verify the copy."""
 
     source, destination = Path(source), Path(destination)
     if os.path.lexists(destination):
         raise SubmitterRefused("material_destination_exists")
-    manifest = _read_pinned_manifest(source)
-    files = _material_files(manifest, parts)
+    manifest = _read_pinned_manifest(source, case_id)
+    files = _material_files(manifest, parts, case_id)
     for rel, digest in sorted(files.items()):
         origin = source / rel
         if origin.is_symlink() or not origin.is_file():
@@ -429,8 +535,14 @@ def stage_material(
     for directory in sorted({destination, *destination.rglob("*")}):
         if directory.is_dir():
             os.chmod(directory, 0o755)
-    verify_u1_material(destination, parts)
-    return {"staged": str(destination), "parts": list(parts), "files": len(files)}
+    verify_case_material(destination, parts, case_id)
+    return {
+        "case_id": case_id,
+        "manifest_sha256": frozen_case(case_id).manifest_sha256,
+        "staged": str(destination),
+        "parts": list(parts),
+        "files": len(files),
+    }
 
 
 def _is_test_file(rel: str) -> bool:
@@ -440,12 +552,15 @@ def _is_test_file(rel: str) -> bool:
     )
 
 
-def u1_reference_plan(material_root: str | Path) -> list[dict[str, Any]]:
-    """The frozen reference control as existing structured ops (verified bytes)."""
+def reference_plan(
+    material_root: str | Path, case_id: str = DEFAULT_CASE_ID
+) -> list[dict[str, Any]]:
+    """The selected frozen reference control as existing structured ops."""
 
+    case = frozen_case(case_id)
     root = Path(material_root)
-    manifest = verify_u1_material(root, SUBMIT_PARTS)
-    control = root / U1_DIR / "controls" / "reference"
+    manifest = verify_case_material(root, SUBMIT_PARTS, case.id)
+    control = root / case.directory / "controls" / "reference"
     change = json.loads((control / "manifest.json").read_text(encoding="utf-8"))
     if change.get("deleted_files"):
         raise SubmitterRefused("reference_control_deletes_files")
@@ -498,7 +613,23 @@ def u1_reference_plan(material_root: str | Path) -> list[dict[str, Any]]:
     ]
 
 
-def _control_definition(control: str) -> dict[str, Any]:
+def u1_reference_plan(material_root: str | Path) -> list[dict[str, Any]]:
+    """Compatibility wrapper for the original PRODUCT-23B U1 control."""
+
+    return reference_plan(material_root, "U1")
+
+
+def _case_control_projects(case_id: str = DEFAULT_CASE_ID) -> dict[str, str]:
+    case = frozen_case(case_id)
+    return {
+        "reference": case.reference_project,
+        "probe": CONTROL_PROJECTS["probe"],
+        MODEL: case.model_project,
+    }
+
+
+def _control_definition(control: str, case_id: str = DEFAULT_CASE_ID) -> dict[str, Any]:
+    case = frozen_case(case_id)
     if control == EXIT_CHECK:
         return {
             "project": PROJECT_NAME,
@@ -511,35 +642,39 @@ def _control_definition(control: str) -> dict[str, Any]:
             "seed": {},
         }
     if control == "reference":
-        root = Path(U1_MATERIAL_ROOT)
-        manifest = verify_u1_material(root, SUBMIT_PARTS)
-        baseline = root / U1_DIR / "baseline"
+        root = case_material_root(case.id)
+        manifest = verify_case_material(root, SUBMIT_PARTS, case.id)
+        baseline = root / case.directory / "baseline"
         return {
-            "project": CONTROL_PROJECTS[control],
-            "project_description": "P43-PRODUCT-23B trusted U1 reference control.",
-            "title": "U1 trusted reference control",
-            "description": (root / U1_DIR / "task.txt").read_text(encoding="utf-8"),
+            "project": case.reference_project,
+            "project_description": f"P43-PRODUCT-23B trusted {case.id} reference control.",
+            "title": case.reference_title,
+            "description": (root / case.directory / "task.txt").read_text(
+                encoding="utf-8"
+            ),
             "profile": "full_lifecycle",
-            "plan": u1_reference_plan(root),
-            "session": "P43-PRODUCT-23B U1 reference control",
+            "plan": reference_plan(root, case.id),
+            "session": case.reference_session,
             "seed": {
                 rel: (baseline / rel).read_bytes() for rel in manifest["baseline_files"]
             },
         }
     if control == MODEL:
-        root = Path(U1_MATERIAL_ROOT)
+        root = case_material_root(case.id)
         # Exact verification: a mount holding any reference, naive, hidden or
         # case file is refused, not filtered.
-        manifest = verify_u1_material(root, MODEL_PARTS)
-        baseline = root / U1_DIR / "baseline"
+        manifest = verify_case_material(root, MODEL_PARTS, case.id)
+        baseline = root / case.directory / "baseline"
         return {
-            "project": CONTROL_PROJECTS[control],
-            "project_description": "P43-PRODUCT-23C U1 real-provider evaluation.",
-            "title": "U1 rangekit task",
-            "description": (root / U1_DIR / "task.txt").read_text(encoding="utf-8"),
+            "project": case.model_project,
+            "project_description": f"P43-PRODUCT-24B {case.id} real-provider evaluation.",
+            "title": case.model_title,
+            "description": (root / case.directory / "task.txt").read_text(
+                encoding="utf-8"
+            ),
             "profile": "full_lifecycle",
             "plan": None,
-            "session": "P43-PRODUCT-23C U1 model evaluation",
+            "session": case.model_session,
             "seed": {
                 rel: (baseline / rel).read_bytes() for rel in manifest["baseline_files"]
             },
@@ -558,15 +693,18 @@ def _control_definition(control: str) -> dict[str, Any]:
     raise SubmitterRefused(f"unknown_control:{control}")
 
 
-def _control_project_names() -> dict[str, str]:
+def _control_project_names(case_id: str = DEFAULT_CASE_ID) -> dict[str, str]:
     """Stored Project names (``create_project`` humanizes the slug)."""
 
     from app.services.project.name_formatter import humanize_display_name
 
-    return {c: humanize_display_name(name) for c, name in CONTROL_PROJECTS.items()}
+    return {
+        c: humanize_display_name(name)
+        for c, name in _case_control_projects(case_id).items()
+    }
 
 
-def _control_guard(db: Any, control: str) -> Any:
+def _control_guard(db: Any, control: str, case_id: str = DEFAULT_CASE_ID) -> Any:
     """One submission per control, never while another attempt is in flight."""
 
     from app.models import Project, TaskExecution, User
@@ -581,7 +719,7 @@ def _control_guard(db: Any, control: str) -> Any:
         return None
     users = db.query(User).all()
     names = {project.name for project in db.query(Project).all()}
-    known = _control_project_names()
+    known = _control_project_names(case_id)
     if any(user.email != SUBMITTER_EMAIL for user in users) or not names <= set(
         known.values()
     ):
@@ -613,11 +751,13 @@ def submit(
     db_factory: Callable[[], Any] | None = None,
     environ: Mapping[str, str] | None = None,
     control: str = EXIT_CHECK,
+    case_id: str = DEFAULT_CASE_ID,
 ) -> dict[str, Any]:
     """Create one Project/Task/Session and queue it via ``queue_task_for_session``."""
 
     environ = os.environ if environ is None else environ
     require_disposable_environment(environ)
+    case = frozen_case(case_id)
     if control not in CONTROLS:
         raise SubmitterRefused(f"unknown_control:{control}")
     from app.api.v1.endpoints.projects import create_project
@@ -634,8 +774,8 @@ def submit(
         from app.database import SessionLocal as db_factory
     db = db_factory()
     try:
-        user = _control_guard(db, control)
-        definition = _control_definition(control)
+        user = _control_guard(db, control, case.id)
+        definition = _control_definition(control, case.id)
         if user is None:
             # Unusable password: this row only owns the disposable Projects.
             user = User(email=SUBMITTER_EMAIL, hashed_password="!", is_active=True)
@@ -708,15 +848,23 @@ def submit(
             "queue_status": queued.get("status"),
         }
         if control != EXIT_CHECK:
-            result.update(control=control, seeded_files=seeded)
+            result.update(
+                case_id=case.id,
+                case_manifest_sha256=case.manifest_sha256,
+                control=control,
+                seeded_files=seeded,
+            )
         return result
     finally:
         db.close()
 
 
-def _control_observation(db: Any, control: str, execution: Any) -> dict[str, Any]:
+def _control_observation(
+    db: Any, control: str, execution: Any, case_id: str = DEFAULT_CASE_ID
+) -> dict[str, Any]:
     """Change Set, workspace and expected outcome for one trusted control."""
 
+    case = frozen_case(case_id)
     from app.models import Project, Task, TaskExecutionChangeSet
     from app.services.workspace.changeset_service import ChangesetService
     from app.services.workspace.project_isolation_service import (
@@ -725,6 +873,11 @@ def _control_observation(db: Any, control: str, execution: Any) -> dict[str, Any
 
     task = db.get(Task, execution.task_id)
     project = db.get(Project, task.project_id)
+    if (
+        control != EXIT_CHECK
+        and project.name != _control_project_names(case.id)[control]
+    ):
+        raise SubmitterRefused("case_project_identity_mismatch")
     workspace = resolve_project_workspace_path(
         project.workspace_path, project.name, db=db
     )
@@ -775,6 +928,8 @@ def _control_observation(db: Any, control: str, execution: Any) -> dict[str, Any
             and workspace_files == probe_seed
         )
     return {
+        "case_id": case.id,
+        "case_manifest_sha256": case.manifest_sha256,
         "control": control,
         "project_id": project.id,
         "project_workspace": str(workspace),
@@ -814,6 +969,7 @@ def observe(
     deadline_seconds: float = 600.0,
     poll_seconds: float = 2.0,
     control: str = EXIT_CHECK,
+    case_id: str = DEFAULT_CASE_ID,
 ) -> dict[str, Any]:
     """Wait for the control's TaskExecution to reach a persisted terminal state."""
 
@@ -821,6 +977,7 @@ def observe(
 
     if control not in CONTROLS:
         raise SubmitterRefused(f"unknown_control:{control}")
+    case = frozen_case(case_id)
     if db_factory is None:
         from app.database import SessionLocal as db_factory
     stop_at = time.monotonic() + deadline_seconds
@@ -831,7 +988,7 @@ def observe(
             if control != EXIT_CHECK:
                 project = (
                     db.query(Project)
-                    .filter_by(name=_control_project_names()[control])
+                    .filter_by(name=_control_project_names(case.id)[control])
                     .one_or_none()
                 )
                 if project is None:
@@ -849,6 +1006,8 @@ def observe(
                 task = db.get(Task, execution.task_id)
                 session = db.get(SessionModel, execution.session_id)
                 result = {
+                    "case_id": case.id,
+                    "case_manifest_sha256": case.manifest_sha256,
                     "terminal": str(status).lower() in TERMINAL_STATUSES,
                     "task_execution_id": execution.id,
                     "task_execution_status": str(status),
@@ -877,7 +1036,7 @@ def observe(
                 if control == MODEL:
                     result.update(_model_attempt_observation(task, session, executions))
                 if control != EXIT_CHECK:
-                    result.update(_control_observation(db, control, execution))
+                    result.update(_control_observation(db, control, execution, case.id))
                     result["expected_outcome_met"] = bool(
                         result["expected_outcome_met"]
                         and execution.attempt_number == 1
@@ -977,6 +1136,7 @@ def evaluation_verdict(
     oracle: Mapping[str, Any],
     hidden: Mapping[str, Any],
     observed: Mapping[str, Any] | None = None,
+    case_id: str = DEFAULT_CASE_ID,
 ) -> dict[str, Any]:
     """Combine integrity, the P02 oracle and the hidden suite for ``control``.
 
@@ -987,17 +1147,25 @@ def evaluation_verdict(
     its own: it has no frozen expectation and is never replaced.
     """
 
-    if control not in ("reference", "naive", MODEL):
-        raise SubmitterRefused(f"unknown_evaluation_control:{control}")
+    case_descriptor = frozen_case(case_id)
     root = Path(material_root)
-    manifest = verify_u1_material(root, EVALUATION_PARTS)
-    case = json.loads((root / U1_DIR / "case.json").read_text(encoding="utf-8"))
+    manifest = verify_case_material(root, EVALUATION_PARTS, case_descriptor.id)
+    case = json.loads(
+        (root / case_descriptor.directory / "case.json").read_text(encoding="utf-8")
+    )
+    if control != MODEL and control not in case.get("expectations", {}):
+        raise SubmitterRefused(f"unknown_evaluation_control:{control}")
     expected = {} if control == MODEL else case["expectations"][control]
     row = None
     held = None
     if control in ("reference", MODEL):
         if not observed or observed.get("control") != control:
             raise SubmitterRefused(f"{control}_observation_required")
+        if (
+            observed.get("case_id") != case_descriptor.id
+            or observed.get("case_manifest_sha256") != case_descriptor.manifest_sha256
+        ):
+            raise SubmitterRefused("case_observation_identity_mismatch")
         row = observed.get("change_set") or {}
         baseline_unchanged = observed.get("workspace_files") == dict(
             manifest["baseline_files"]
@@ -1011,6 +1179,8 @@ def evaluation_verdict(
         and held is not False
     )
     observed_fields = {
+        "case_id": case_descriptor.id,
+        "case_manifest_sha256": case_descriptor.manifest_sha256,
         "functional_pass": oracle.get("functional_pass"),
         "preservation_pass": oracle.get("preservation_pass"),
         "acceptance_protected": oracle.get("acceptance_protected"),
@@ -1034,6 +1204,8 @@ def evaluation_verdict(
         else:
             outcome = "INCOMPLETE_DELIVERY"
         return {
+            "case_id": case_descriptor.id,
+            "case_manifest_sha256": case_descriptor.manifest_sha256,
             "control": control,
             "integrity": integrity,
             "product_held_and_baseline_unchanged": held,
@@ -1041,6 +1213,8 @@ def evaluation_verdict(
             "verdict": outcome,
         }
     return {
+        "case_id": case_descriptor.id,
+        "case_manifest_sha256": case_descriptor.manifest_sha256,
         "control": control,
         "integrity": integrity,
         "product_held_and_baseline_unchanged": held,
@@ -1082,7 +1256,9 @@ def _chat_text(payload: Any, key: str) -> str:
 
 
 def provider_request_contamination(
-    material_root: str | Path, relay_state_dir: str | Path
+    material_root: str | Path,
+    relay_state_dir: str | Path,
+    case_id: str = DEFAULT_CASE_ID,
 ) -> dict[str, Any]:
     """Supplementary evidence: evaluation-only lines in recorded requests.
 
@@ -1096,9 +1272,10 @@ def provider_request_contamination(
     """
 
     root = Path(material_root)
-    manifest = verify_u1_material(root, EVALUATION_PARTS)
-    files = _material_files(manifest, EVALUATION_PARTS)
-    visible = set(_material_files(manifest, MODEL_PARTS))
+    case = frozen_case(case_id)
+    manifest = verify_case_material(root, EVALUATION_PARTS, case.id)
+    files = _material_files(manifest, EVALUATION_PARTS, case.id)
+    visible = set(_material_files(manifest, MODEL_PARTS, case.id))
     allowed = "\n".join(
         (root / rel).read_text(encoding="utf-8", errors="replace")
         for rel in sorted(visible)
@@ -1140,6 +1317,8 @@ def provider_request_contamination(
                 pass
     unexplained = [hit for hit in hits if not hit["explained_by_prior_response"]]
     return {
+        "case_id": case.id,
+        "case_manifest_sha256": case.manifest_sha256,
         "requests_scanned": len(requests),
         "marker_lines": len(markers),
         "hits": hits,
@@ -1164,6 +1343,7 @@ def main(argv: list[str] | None = None) -> int:
             "observe",
             "stage-material",
             "verify-material",
+            "case-info",
             "verdict",
             "contamination",
         ),
@@ -1175,11 +1355,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--oracle")
     parser.add_argument("--hidden")
     parser.add_argument("--observed")
+    parser.add_argument("--case", default=DEFAULT_CASE_ID)
     args = parser.parse_args(argv)
     # Paths are Host-side evaluation inputs only; nothing else takes input.
     arity = {
         "stage-material": 2,
         "verify-material": 1,
+        "case-info": 0,
         "verdict": 2,
         "contamination": 2,
     }
@@ -1193,21 +1375,30 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "init":
             result = init_database()
+        elif args.command == "case-info":
+            result = case_info(args.case)
         elif args.command == "submit":
-            result = submit(control=args.control)
+            result = submit(control=args.control, case_id=args.case)
         elif args.command == "observe":
             require_disposable_environment()
             result = observe(
-                deadline_seconds=args.deadline_seconds, control=args.control
+                deadline_seconds=args.deadline_seconds,
+                control=args.control,
+                case_id=args.case,
             )
         elif args.command == "stage-material":
             source, destination = args.paths
-            result = stage_material(source, destination, parts[args.parts])
+            result = stage_material(source, destination, parts[args.parts], args.case)
         elif args.command == "verify-material":
-            verify_u1_material(args.paths[0], parts[args.parts])
-            result = {"verified": args.paths[0], "parts": args.parts}
+            verify_case_material(args.paths[0], parts[args.parts], args.case)
+            result = {
+                "case_id": args.case,
+                "manifest_sha256": frozen_case(args.case).manifest_sha256,
+                "verified": args.paths[0],
+                "parts": args.parts,
+            }
         elif args.command == "contamination":
-            result = provider_request_contamination(*args.paths)
+            result = provider_request_contamination(*args.paths, args.case)
         else:
             material, change_set = args.paths
             result = evaluation_verdict(
@@ -1217,6 +1408,7 @@ def main(argv: list[str] | None = None) -> int:
                 _load_json(args.oracle),
                 _load_json(args.hidden),
                 _load_json(args.observed) if args.observed else None,
+                args.case,
             )
     except (SubmitterRefused, ValueError) as exc:
         print(json.dumps({"refused": str(exc)}), file=sys.stderr)

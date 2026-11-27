@@ -17,7 +17,9 @@
 #   bash scripts/maintenance/p43_c2_live_run.sh cleanup --operator-approved
 #
 # P43-PRODUCT-23B trusted controls (one setup serves all; each runs once):
-#   export P43_C2_U1_EVIDENCE=<dir holding p43-product-02/ and p43-product-18/>
+#   export P43_C2_CASE=U1                         # default; U1 or U2 only
+#   export P43_C2_EVIDENCE=<dir holding p43-product-02/ and p43-product-18/>
+#   # P43_C2_U1_EVIDENCE remains accepted as the U1 compatibility alias.
 #   ... submit --operator-approved reference ; ... evaluate reference
 #   ... evaluate naive                       # frozen control, never submitted
 #   ... submit --operator-approved probe
@@ -85,6 +87,35 @@ info() { printf 'INFO %s\n' "$*"; }
 refuse() { echo "p43-c2-live-run: $*" >&2; exit 78; }
 need_approval() { [[ "${1:-}" == --operator-approved ]] || refuse "requires --operator-approved"; }
 
+selected_case() {
+    if [[ -f $ROOT/env/run.vars ]]; then
+        sed -n 's/^CASE_ID=//p' "$ROOT/env/run.vars"
+    else
+        printf '%s\n' "${P43_C2_CASE:-U1}"
+    fi
+}
+
+case_slug() {
+    case "${1:-$(selected_case)}" in
+        U1) printf 'u1\n' ;;
+        U2) printf 'u2\n' ;;
+        *) refuse "unknown P43_C2_CASE: ${1:-$(selected_case)}" ;;
+    esac
+}
+
+case_evidence_root() {
+    printf '%s\n' "${P43_C2_EVIDENCE:-${P43_C2_U1_EVIDENCE:-}}"
+}
+
+case_info_json() {
+    /usr/bin/python3 -I "$SUBMITTER" case-info --case "${1:-$(selected_case)}"
+}
+
+case_material_root() {
+    case_info_json "${1:-$(selected_case)}" |
+        /usr/bin/python3 -I -c 'import json, sys; print(json.load(sys.stdin)["material_root"])'
+}
+
 wait_for_worker_identity() {
     local worker_name="$1" logs_path="$2" startup_seconds="${3:-60}"
     local worker_status="" identity_ready=0
@@ -147,6 +178,8 @@ PY
 }
 
 require_inputs() {
+    local case_id=${P43_C2_CASE:-U1}
+    case_info_json "$case_id" >/dev/null || refuse "unsupported or mismatched evaluation case: $case_id"
     [[ "${P43_C2_CANDIDATE:-}" =~ ^[0-9a-f]{40}$ ]] || refuse "P43_C2_CANDIDATE must be a 40-hex commit"
     [[ "${P43_C2_CANDIDATE_TREE:-}" =~ ^[0-9a-f]{40}$ ]] || refuse "P43_C2_CANDIDATE_TREE must be a 40-hex tree"
     [[ "${P43_C2_REDIS_IMAGE:-}" =~ ^[a-z0-9./_:-]+@sha256:[0-9a-f]{64}$ ]] ||
@@ -359,7 +392,7 @@ cmd_check() {
     info "C1B/ai-agent fingerprint: $(c1b_fingerprint)"
     if provider_mode_requested; then
         require_provider_inputs
-        [[ -n ${P43_C2_U1_EVIDENCE:-} ]] || bad "provider mode requires P43_C2_U1_EVIDENCE"
+        [[ -n $(case_evidence_root) ]] || bad "provider mode requires P43_C2_EVIDENCE (or legacy P43_C2_U1_EVIDENCE)"
         docker network inspect "$P43_C2_PROVIDER_NETWORK" >/dev/null 2>&1 &&
             ok "provider network present: $P43_C2_PROVIDER_NETWORK" || bad "provider network absent"
         if PROVIDER_FACTS=$(provider_facts); then
@@ -470,16 +503,25 @@ cmd_setup() {
         "$P43_C2_REDIS_IMAGE" redis-server /etc/redis.conf >/dev/null
     ok "Redis started on internal $NET"
 
-    # Frozen U1 material (PRODUCT-23B), copied and verified by committed code.
-    if [[ -n ${P43_C2_U1_EVIDENCE:-} ]] && provider_mode_requested; then
-        # Model mount: manifest, task and baseline only (no reference control).
-        /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-model" --parts model
-        /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-eval" --parts evaluation
-        ok "U1 model and evaluation material staged and verified against the pinned frozen manifest"
-    elif [[ -n ${P43_C2_U1_EVIDENCE:-} ]]; then
-        /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-submit" --parts submit
-        /usr/bin/python3 -I "$SUBMITTER" stage-material "$P43_C2_U1_EVIDENCE" "$ROOT/u1-eval" --parts evaluation
-        ok "U1 material staged and verified against the pinned frozen manifest"
+    # Selected frozen material, copied and verified by committed code before
+    # any submitter mount is created. The model mount never receives controls,
+    # hidden, case or oracle material.
+    local case_id=${P43_C2_CASE:-U1} case_slug_value evidence case_info manifest_sha
+    case_slug_value=$(case_slug "$case_id")
+    evidence=$(case_evidence_root)
+    case_info=$(case_info_json "$case_id")
+    manifest_sha=$(/usr/bin/python3 -I -c 'import json, sys; print(json.load(sys.stdin)["manifest_sha256"])' <<<"$case_info")
+    printf '%s\n' "$case_info" >"$ROOT/env/case-binding.json"
+    if [[ -n $evidence ]]; then
+        if provider_mode_requested; then
+            # Model mount: manifest, task and baseline only (no reference control).
+            /usr/bin/python3 -I "$SUBMITTER" stage-material "$evidence" "$ROOT/${case_slug_value}-model" --parts model --case "$case_id"
+            /usr/bin/python3 -I "$SUBMITTER" stage-material "$evidence" "$ROOT/${case_slug_value}-eval" --parts evaluation --case "$case_id"
+        else
+            /usr/bin/python3 -I "$SUBMITTER" stage-material "$evidence" "$ROOT/${case_slug_value}-submit" --parts submit --case "$case_id"
+            /usr/bin/python3 -I "$SUBMITTER" stage-material "$evidence" "$ROOT/${case_slug_value}-eval" --parts evaluation --case "$case_id"
+        fi
+        ok "$case_id material staged and verified against the pinned frozen manifest $manifest_sha"
     fi
 
     # Strict C2 Launcher (separate user/key/state/socket; C1B untouched).
@@ -503,8 +545,8 @@ cmd_setup() {
         refuse "Launcher startup did not remove the orphan $orphan"
     fi
     ok "Launcher startup removed the pytest-image orphan $orphan"
-    printf 'C2_GID=%s\nNODE=%s\nCANDIDATE_TREE=%s\nPYTEST_IMAGE=%s\nORPHAN=%s\n' \
-        "$c2gid" "$node" "$tree" "$PYTEST_IMAGE" "$orphan" >"$ROOT/env/run.vars"
+    printf 'C2_GID=%s\nNODE=%s\nCANDIDATE_TREE=%s\nPYTEST_IMAGE=%s\nORPHAN=%s\nCASE_ID=%s\nCASE_MANIFEST_SHA256=%s\n' \
+        "$c2gid" "$node" "$tree" "$PYTEST_IMAGE" "$orphan" "$case_id" "$manifest_sha" >"$ROOT/env/run.vars"
     if provider_mode_requested; then
         printf 'PROVIDER_MODE=1\nPROVIDER_MODEL=%s\nPROVIDER_NETWORK=%s\nUPSTREAM_IP=%s\nUPSTREAM_PORT=%s\n' \
             "$P43_C2_PROVIDER_MODEL" "$P43_C2_PROVIDER_NETWORK" \
@@ -774,7 +816,10 @@ control_suffix() { # exit-check keeps the PRODUCT-22 file names
 
 cmd_submit() {
     need_approval "${1:-}"
-    local control=${2:-exit-check} sfx material=()
+    local control=${2:-exit-check} sfx material=() case_id case_slug_value material_root
+    case_id=$(selected_case)
+    case_slug_value=$(case_slug "$case_id")
+    material_root=$(case_material_root "$case_id")
     [[ $control =~ ^(exit-check|reference|probe|model)$ ]] || refuse "unknown control: $control"
     require_host
     [[ -f $ROOT/env/boundary.pass ]] || refuse "boundary has not passed; run: $0 boundary"
@@ -786,11 +831,11 @@ cmd_submit() {
     sfx=$(control_suffix "$control")
     [[ ! -e $ROOT/env/submitted$sfx ]] || refuse "$control already submitted once; no retry"
     if [[ $control == reference ]]; then
-        [[ -d $ROOT/u1-submit ]] || refuse "U1 material not staged (set P43_C2_U1_EVIDENCE before setup)"
-        material=(-v "$ROOT/u1-submit:/run/p43-u1-material:ro")
+        [[ -d $ROOT/${case_slug_value}-submit ]] || refuse "$case_id material not staged (set P43_C2_EVIDENCE before setup)"
+        material=(-v "$ROOT/${case_slug_value}-submit:$material_root:ro")
     elif [[ $control == model ]]; then
-        [[ -d $ROOT/u1-model ]] || refuse "U1 model material not staged"
-        material=(-v "$ROOT/u1-model:/run/p43-u1-material:ro")
+        [[ -d $ROOT/${case_slug_value}-model ]] || refuse "$case_id model material not staged"
+        material=(-v "$ROOT/${case_slug_value}-model:$material_root:ro")
     fi
     # Before the first submission no new row may exist; later ones may only
     # follow this window's first submission.
@@ -815,7 +860,7 @@ cmd_submit() {
         -w /opt/orchestrator --env-file "$ROOT/env/submitter.env" \
         --env-file "$ROOT/env/instance.env" --env-file "$ROOT/env/secrets.env" \
         $(authority_mounts) "${material[@]}" --entrypoint python3 "$IMAGE_TAG" \
-        -m scripts.maintenance.p43_c2_trusted_submitter submit --control "$control" |
+        -m scripts.maintenance.p43_c2_trusted_submitter submit --control "$control" --case "$case_id" |
         tee "$ROOT/env/submit$sfx.json"
     if [[ $control == model ]]; then
         observe_model "$deadline"
@@ -831,12 +876,13 @@ cmd_submit() {
 }
 
 observe_once() { # OUT DEADLINE_SECONDS; exit 0 terminal, 2 nonterminal at its deadline
+    local case_id; case_id=$(selected_case)
     # shellcheck disable=SC2046
     docker_run_image --network none -w /opt/orchestrator \
         --env-file "$ROOT/env/submitter.env" --env-file "$ROOT/env/instance.env" \
         $(authority_mounts) --entrypoint python3 "$IMAGE_TAG" \
         -m scripts.maintenance.p43_c2_trusted_submitter observe --control model \
-        --deadline-seconds "$2" >"$1"
+        --deadline-seconds "$2" --case "$case_id" >"$1"
 }
 
 # Observe until terminal or the evaluation deadline. A Task still nonterminal
@@ -874,19 +920,26 @@ observe_model() {
 
 # ---------------------------------------------------------------- evaluate
 eval_container() { # independent evaluation: pinned pytest image, no network, read-only
+    local evaluation_root=$1 change_set=$2
+    shift 2
     docker run --rm --pull=never --network=none --read-only --cap-drop=ALL \
         --security-opt=no-new-privileges:true --user=65534:65534 --memory=1g \
         --pids-limit=128 --tmpfs /tmp:rw,nosuid,nodev,size=256m -e HOME=/tmp -e TMPDIR=/tmp \
-        -v "$ROOT/u1-eval:/eval:ro" -v "$1:/cs:ro" --entrypoint python3 "$PYTEST_IMAGE" -I "${@:2}"
+        -v "$evaluation_root:/eval:ro" -v "$change_set:/cs:ro" --entrypoint python3 "$PYTEST_IMAGE" -I "$@"
 }
 
 cmd_evaluate() {
-    local control=${1:-} out source cs observed=() u1=/eval/p43-product-18/u1
-    [[ $control =~ ^(reference|naive|model)$ ]] || refuse "unknown evaluation control: ${control:-none}"
+    local control=${1:-} out source cs observed=() case_id case_slug_value evaluation_root case_dir
+    local -a evaluation_paths
+    [[ $control =~ ^(reference|naive|naive-symptom|naive-partial|model)$ ]] || refuse "unknown evaluation control: ${control:-none}"
     require_host
     # shellcheck disable=SC1091
     source "$ROOT/env/run.vars"
-    [[ -d $ROOT/u1-eval ]] || refuse "U1 material not staged"
+    case_id=$(selected_case)
+    case_slug_value=$(case_slug "$case_id")
+    evaluation_root=$ROOT/${case_slug_value}-eval
+    case_dir=/eval/p43-product-18/$case_slug_value
+    [[ -d $evaluation_root ]] || refuse "$case_id material not staged"
     out=$ROOT/eval/$control
     [[ ! -e $out ]] || refuse "$control already evaluated"
     install -d -m 0700 "$ROOT/eval" && install -d -m 0755 "$out"
@@ -904,7 +957,7 @@ cmd_evaluate() {
         [[ -f $ROOT/env/observe.model.after-stop.json ]] && record=$ROOT/env/observe.model.after-stop.json
         [[ -f $record ]] || refuse "model not observed"
         # Supplementary contamination evidence from the recorded requests.
-        /usr/bin/python3 -I "$SUBMITTER" contamination "$ROOT/u1-eval" "$ROOT/relay" >"$out/contamination.json" ||
+        /usr/bin/python3 -I "$SUBMITTER" contamination "$evaluation_root" "$ROOT/relay" --case "$case_id" >"$out/contamination.json" ||
             bad "contamination scan failed"
         # The actual held Change Set, whatever the outcome; never a substitute.
         source=$(/usr/bin/python3 -I -c 'import json, sys; cs = json.load(open(sys.argv[1])).get("change_set"); print(cs["directory"] if cs else "")' \
@@ -917,7 +970,7 @@ cmd_evaluate() {
         source=$ROOT/runtime/${source#/var/lib/orchestrator-worker/runtime/}
         observed=(--observed "$record")
     else
-        source=$ROOT/u1-eval/p43-product-18/u1/controls/naive
+        source=$evaluation_root/p43-product-18/$case_slug_value/controls/naive
     fi
     [[ -f $source/manifest.json && ! -L $source ]] || refuse "Change Set missing: $source"
     # A private, read-only copy: the Worker cannot change what is judged.
@@ -925,12 +978,20 @@ cmd_evaluate() {
     cp -R --no-preserve=ownership,mode "$source" "$cs"
     find "$cs" -type l | grep -q . && refuse "Change Set contains links"
     chmod -R a+rX,go-w "$cs"
-    eval_container "$cs" /eval/p43-product-02/oracle.py "$u1/baseline" /cs \
-        tests/test_rangekit_acceptance.py tests/test_ranges.py >"$out/oracle.json" || true
-    eval_container "$cs" /eval/p43-product-18/tools/hidden_suite.py "$u1/baseline" /cs \
-        "$u1/hidden" >"$out/hidden.json" || true
-    /usr/bin/python3 -I "$SUBMITTER" verdict "$ROOT/u1-eval" "$cs" --control "$control" \
-        --oracle "$out/oracle.json" --hidden "$out/hidden.json" "${observed[@]}" | tee "$out/verdict.json"
+    mapfile -t evaluation_paths < <(/usr/bin/python3 -I - "$evaluation_root/p43-product-18/$case_slug_value/manifest.json" <<'PY'
+import json, sys
+manifest = json.load(open(sys.argv[1], encoding="utf-8"))
+print(manifest["acceptance"])
+print(*manifest["existing_tests"], sep="\n")
+PY
+    )
+    [[ ${#evaluation_paths[@]} -ge 1 && -n ${evaluation_paths[0]} ]] || refuse "case evaluation paths unavailable"
+    eval_container "$evaluation_root" "$cs" /eval/p43-product-02/oracle.py \
+        "$case_dir/baseline" /cs "${evaluation_paths[@]}" >"$out/oracle.json" || true
+    eval_container "$evaluation_root" "$cs" /eval/p43-product-18/tools/hidden_suite.py \
+        "$case_dir/baseline" /cs "$case_dir/hidden" >"$out/hidden.json" || true
+    /usr/bin/python3 -I "$SUBMITTER" verdict "$evaluation_root" "$cs" --control "$control" \
+        --case "$case_id" --oracle "$out/oracle.json" --hidden "$out/hidden.json" "${observed[@]}" | tee "$out/verdict.json"
 }
 
 # ---------------------------------------------------------------- evidence
@@ -1009,6 +1070,20 @@ runtime = runtime_raw.resolve()
 if evidence.is_symlink() or not evidence.is_dir():
     raise SystemExit("protected evidence root is missing or is a symlink")
 evidence = evidence.resolve()
+case_binding_path = root / "env" / "case-binding.json"
+if case_binding_path.is_symlink() or not case_binding_path.is_file():
+    raise SystemExit("selected case binding is missing")
+case_binding = json.loads(case_binding_path.read_text(encoding="utf-8"))
+case_id = case_binding.get("id")
+case_manifest_sha256 = case_binding.get("manifest_sha256")
+if case_id not in {"U1", "U2"} or not isinstance(case_manifest_sha256, str):
+    raise SystemExit("selected case binding is invalid")
+expected_case_manifests = dict(
+    U1="26965b02fe87e35de753267d0b0ee5741c0e555e1e019180a913224543b91f86",
+    U2="314142190e698daf19b1b2f3e8d7e64629c9c7644953cb22442458569ee1bd3d",
+)
+if case_manifest_sha256 != expected_case_manifests[case_id]:
+    raise SystemExit("selected case manifest identity mismatch")
 export_parent = evidence / "change-sets"
 exported = export_parent / "model"
 
@@ -1113,6 +1188,11 @@ try:
         fail("terminal observation has no integer task_execution_id")
     if observed.get("terminal") is not True:
         fail("Change Set export requires a terminal observation")
+    if (
+        observed.get("case_id") != case_id
+        or observed.get("case_manifest_sha256") != case_manifest_sha256
+    ):
+        fail("terminal observation case identity mismatch")
 
     database_connection = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
     database_connection.row_factory = sqlite3.Row
@@ -1160,6 +1240,8 @@ try:
                     "schema": "openclaw.p43.model-change-set-export.v1",
                     "status": "not_applicable",
                     "reason": "unsuccessful_task_no_captured_change_set",
+                    "case_id": case_id,
+                    "case_manifest_sha256": case_manifest_sha256,
                     **identity,
                 },
             )
@@ -1277,6 +1359,8 @@ try:
             {
                 "schema": "openclaw.p43.model-change-set-export.v1",
                 "status": "complete",
+                "case_id": case_id,
+                "case_manifest_sha256": case_manifest_sha256,
                 "source_directory": str(source),
                 "source_manifest_sha256": hashlib.sha256(source_manifest_bytes).hexdigest(),
                 "exported_manifest_sha256": sha256(temporary / "manifest.json"),
@@ -1320,7 +1404,7 @@ cmd_evidence() {
     install -d -m 0700 "$EVIDENCE"
     local export_rc=0
     export_model_change_set || export_rc=$?
-    cp "$ROOT"/env/submit*.json "$ROOT"/env/observe*.json "$ROOT/env/image.id" "$ROOT/env/run.vars" \
+    cp "$ROOT"/env/submit*.json "$ROOT"/env/observe*.json "$ROOT/env/image.id" "$ROOT/env/run.vars" "$ROOT/env/case-binding.json" \
         "$ROOT/pin/worker-pin.json" "$ROOT/pin/launcher-context.json" "$EVIDENCE/"
     local verdict
     for verdict in "$ROOT"/eval/*/; do
