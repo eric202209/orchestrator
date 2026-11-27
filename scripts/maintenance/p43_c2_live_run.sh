@@ -964,7 +964,10 @@ cmd_evaluate() {
         source=$(/usr/bin/python3 -I -c 'import json, sys; cs = json.load(open(sys.argv[1])).get("change_set"); print(cs["directory"] if cs else "")' \
             "$record")
         if [[ -z $source ]]; then
-            printf '{"control": "model", "verdict": "NO_CHANGE_SET"}\n' | tee "$out/verdict.json"
+            # 24B-R1: carry the observed case provenance; the classifier still
+            # rejects a missing or mismatched identity.
+            /usr/bin/python3 -I -c 'import json, sys; r = json.load(open(sys.argv[1])); print(json.dumps({"control": "model", "verdict": "NO_CHANGE_SET", "case_id": r.get("case_id"), "case_manifest_sha256": r.get("case_manifest_sha256")}))' \
+                "$record" | tee "$out/verdict.json"
             return 0
         fi
         [[ $source == /var/lib/orchestrator-worker/runtime/* ]] || refuse "unexpected Change Set path: $source"

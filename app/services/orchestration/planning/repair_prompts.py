@@ -765,9 +765,13 @@ def build_planning_repair_prompt_with_metadata(
     validation_error = ""
     validation_char_limit = PLANNING_REPAIR_MAX_VALIDATION_ERROR_CHARS
     if rejection_reasons:
+        # Reasons that carry a source excerpt get the wider limits; a 180-char
+        # cut removes the excerpt itself (P43-PRODUCT-24B-R1).
         stale_fallback_repair = any(
             "patch_strategy_fallback_required" in str(reason or "")
             or "Current file excerpt:" in str(reason or "")
+            or "Candidate source excerpt with real newlines preserved:"
+            in str(reason or "")
             for reason in rejection_reasons
         )
         reason_char_limit = 1200 if stale_fallback_repair else 180

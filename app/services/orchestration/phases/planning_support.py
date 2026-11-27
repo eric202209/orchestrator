@@ -3127,9 +3127,12 @@ def _post_repair_python_source_syntax_reason(
     offset = first_issue.get("offset")
     message = str(first_issue.get("message") or "invalid Python syntax").strip()
     raw_candidate = str(first_issue.get("candidate_content") or "")
+    # Bounded so the error-centred window fits the repair prompt's per-reason
+    # cap for excerpt-bearing reasons (1200 chars, after this header).
     line_numbered_excerpt = _line_numbered_source_excerpt(
         raw_candidate,
         error_line=line,
+        max_chars=800,
     )
     compact_excerpt = " ".join(
         str(first_issue.get("candidate_content_excerpt") or "").split()
