@@ -925,7 +925,8 @@ eval_container() { # independent evaluation: pinned pytest image, no network, re
     docker run --rm --pull=never --network=none --read-only --cap-drop=ALL \
         --security-opt=no-new-privileges:true --user=65534:65534 --memory=1g \
         --pids-limit=128 --tmpfs /tmp:rw,nosuid,nodev,size=256m -e HOME=/tmp -e TMPDIR=/tmp \
-        -v "$evaluation_root:/eval:ro" -v "$change_set:/cs:ro" --entrypoint python3 "$PYTEST_IMAGE" -I "$@"
+        -v "$evaluation_root:/eval:ro" -v "$change_set:/cs:ro" -v "$SUBMITTER:/tools/p43_c2_trusted_submitter.py:ro" \
+        --entrypoint python3 "$PYTEST_IMAGE" -I "$@"
 }
 
 cmd_evaluate() {
@@ -990,8 +991,12 @@ PY
         "$case_dir/baseline" /cs "${evaluation_paths[@]}" >"$out/oracle.json" || true
     eval_container "$evaluation_root" "$cs" /eval/p43-product-18/tools/hidden_suite.py \
         "$case_dir/baseline" /cs "$case_dir/hidden" >"$out/hidden.json" || true
+    # P43-PRODUCT-24B: classified regression effectiveness on complete workspaces.
+    eval_container "$evaluation_root" "$cs" /tools/p43_c2_trusted_submitter.py regression /eval /cs \
+        --case "$case_id" >"$out/regression.json" || true
     /usr/bin/python3 -I "$SUBMITTER" verdict "$evaluation_root" "$cs" --control "$control" \
-        --case "$case_id" --oracle "$out/oracle.json" --hidden "$out/hidden.json" "${observed[@]}" | tee "$out/verdict.json"
+        --case "$case_id" --oracle "$out/oracle.json" --hidden "$out/hidden.json" \
+        --regression "$out/regression.json" "${observed[@]}" | tee "$out/verdict.json"
 }
 
 # ---------------------------------------------------------------- evidence
@@ -1409,7 +1414,7 @@ cmd_evidence() {
     local verdict
     for verdict in "$ROOT"/eval/*/; do
         [[ -d $verdict ]] || continue
-        for f in oracle hidden verdict contamination; do
+        for f in oracle hidden regression verdict contamination; do
             [[ -f $verdict$f.json ]] && cp "$verdict$f.json" "$EVIDENCE/$(basename "$verdict").$f.json"
         done
     done

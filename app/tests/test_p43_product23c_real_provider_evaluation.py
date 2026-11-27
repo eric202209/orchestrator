@@ -955,12 +955,26 @@ def test_model_verdict_judges_the_actual_change_set(tmp_path):
     change_set = _reference_as_model_change_set(evaluation, tmp_path)
     observed = _model_observed(change_set, manifest)
     passing = {"complete_delivery": True, "functional_pass": True}
+    # P43-PRODUCT-24B: model delivery also needs classified regression evidence.
+    regression = submitter.regression_effectiveness(evaluation, change_set, "U1")
+    assert regression["classification"] == "EFFECTIVE"
     verdict = submitter.evaluation_verdict(
-        "model", evaluation, change_set, passing, {"hidden_pass": True}, observed
+        "model",
+        evaluation,
+        change_set,
+        passing,
+        {"hidden_pass": True},
+        observed,
+        "U1",
+        regression,
     )
     # Matching the reference is a complete delivery, never leakage by itself.
     assert verdict["verdict"] == "COMPLETE_DELIVERY"
     assert verdict["integrity"]["ok"]
+    unproven = submitter.evaluation_verdict(
+        "model", evaluation, change_set, passing, {"hidden_pass": True}, observed
+    )
+    assert unproven["verdict"] == "INCOMPLETE_DELIVERY"
     incomplete = submitter.evaluation_verdict(
         "model", evaluation, change_set, passing, {"hidden_pass": False}, observed
     )

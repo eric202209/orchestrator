@@ -42,20 +42,31 @@ Host-side, with only the standard library (``python3 -I <this file> ...``):
     verify-material ROOT      verify the staged evaluation material
     verdict --control C ...   integrity + oracle + hidden verdict for C
     contamination EVAL RELAY  scan recorded provider requests (supplementary)
+
+Inside the pinned, network-less evaluation container (P43-PRODUCT-24B):
+
+    regression EVAL CHANGE_SET  classified regression effectiveness of the
+                                delivered tests on complete baseline and
+                                candidate workspaces
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 from types import MappingProxyType
 from typing import Any, Callable, Mapping
+import xml.etree.ElementTree as ET
 
 FIXED_COMMAND = "python3 -c 'import sys; sys.exit(0)'"
 FIXED_PLAN: tuple[dict[str, Any], ...] = (
@@ -1129,6 +1140,229 @@ def change_set_integrity(
     }
 
 
+# --- P43-PRODUCT-24B regression effectiveness --------------------------------
+# The frozen P02 oracle counts any non-"passed" baseline outcome (collection
+# or import failure, setup error, skip, absent test) as effective. This check
+# runs beside it, never replacing it, and accepts only an attributable
+# assertion failure on the complete baseline plus PASS on the candidate.
+
+REGRESSION_TIMEOUT_SECONDS = 120
+REGRESSION_EFFECTIVE = "EFFECTIVE"
+_ASSERTION_PREFIXES = ("assert ", "AssertionError", "Failed: ")
+_IMPORT_PREFIXES = ("ImportError", "ModuleNotFoundError", "NameError")
+
+
+def _test_names(source: str) -> set[str]:
+    return {
+        node.name
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name.startswith("test")
+    }
+
+
+def _failure_kind(element: ET.Element) -> str:
+    message = element.get("message") or ""
+    if element.tag == "skipped":
+        return "skipped"
+    if element.tag == "error":
+        return "setup_or_teardown_error"
+    if message.startswith(_ASSERTION_PREFIXES):
+        return "assertion_failure"
+    if message.startswith(_IMPORT_PREFIXES) or message.startswith(
+        "AttributeError: module "
+    ):
+        return "import_failure"
+    return "exception_failure"
+
+
+def _run_delivered(workspace: Path, targets: list[str], names: set[str]) -> dict:
+    """Run ``targets`` in ``workspace``; per new test function, its outcome."""
+
+    report = workspace.parent / f".{workspace.name}-junit.xml"
+    command = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "no:cacheprovider",
+        f"--junitxml={report}",
+        *targets,
+    ]
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=workspace,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=REGRESSION_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return {"status": "TIMEOUT", "exit": None, "cases": {}}
+    except OSError as exc:
+        return {"status": "INFRASTRUCTURE_FAILURE", "exit": None, "error": str(exc)}
+    result: dict[str, Any] = {
+        "exit": proc.returncode,
+        "tail": proc.stdout.strip().splitlines()[-3:],
+    }
+    if not report.is_file() or proc.returncode in (3, 4):
+        result.update(status="INFRASTRUCTURE_FAILURE", cases={})
+        return result
+    try:
+        cases = list(ET.parse(report).iter("testcase"))
+    except ET.ParseError:
+        result.update(status="INFRASTRUCTURE_FAILURE", cases={})
+        return result
+    finally:
+        report.unlink(missing_ok=True)
+    per_name: dict[str, list[str]] = {}
+    collection_errors = 0
+    for case in cases:
+        name = (case.get("name") or "").split("[", 1)[0]
+        kinds = [
+            _failure_kind(child)
+            for child in case
+            if child.tag in ("failure", "error", "skipped")
+        ]
+        if name not in names:
+            collection_errors += bool(kinds)
+            continue
+        per_name.setdefault(name, []).append(kinds[0] if kinds else "passed")
+    outcomes = {}
+    for name in sorted(names):
+        kinds = per_name.get(name) or ["absent"]
+        failing = [kind for kind in kinds if kind != "passed"]
+        outcomes[name] = failing[0] if failing else "passed"
+    result["cases"] = outcomes
+    if proc.returncode == 2 or collection_errors:
+        result["status"] = "COLLECTION_OR_IMPORT_FAILURE"
+    elif proc.returncode == 5 or all(v == "absent" for v in outcomes.values()):
+        result["status"] = "NO_TESTS_COLLECTED"
+    else:
+        result["status"] = "RAN"
+    return result
+
+
+def _baseline_result(run: Mapping[str, Any]) -> str:
+    if run["status"] != "RAN":
+        return run["status"]
+    kinds = set(run["cases"].values())
+    if "assertion_failure" in kinds:
+        return "ASSERTION_FAILURE"
+    if kinds == {"passed"}:
+        return "ALL_PASSED"
+    if "import_failure" in kinds:
+        return "IMPORT_FAILURE"
+    if "exception_failure" in kinds:
+        return "UNEXPECTED_EXCEPTION"
+    return "NO_ASSERTION_FAILURE"
+
+
+def _candidate_result(run: Mapping[str, Any]) -> str:
+    if run["status"] != "RAN":
+        return run["status"]
+    if run["exit"] == 0 and set(run["cases"].values()) == {"passed"}:
+        return "PASS"
+    return "FAILED"
+
+
+def _safe_rel(rel: Any) -> str:
+    path = PurePosixPath(rel) if isinstance(rel, str) else None
+    if path is None or path.is_absolute() or ".." in path.parts or not path.parts:
+        raise SubmitterRefused(f"unsafe_change_set_path:{rel!r}")
+    return path.as_posix()
+
+
+def regression_effectiveness(
+    material_root: str | Path,
+    change_set_dir: str | Path,
+    case_id: str = DEFAULT_CASE_ID,
+) -> dict[str, Any]:
+    """Classify the delivered regression tests on complete workspaces.
+
+    Both workspaces are the complete frozen baseline: the candidate adds every
+    Change Set file and removes its deletions; the baseline probe adds only
+    the delivered test files. EFFECTIVE requires an assertion failure of at
+    least one new test on the baseline, no collection failure, and every new
+    test passing on the candidate.
+    """
+
+    case_descriptor = frozen_case(case_id)
+    root = Path(material_root)
+    manifest = verify_case_material(root, EVALUATION_PARTS, case_descriptor.id)
+    baseline = root / case_descriptor.directory / "baseline"
+    change_set = Path(change_set_dir)
+    artifact = json.loads((change_set / "manifest.json").read_text("utf-8"))
+    copied = [_safe_rel(rel) for rel in artifact.get("copied_files") or []]
+    deleted = [_safe_rel(rel) for rel in artifact.get("deleted_files") or []]
+    acceptance = manifest["acceptance"]
+    result: dict[str, Any] = {
+        "case_id": case_descriptor.id,
+        "case_manifest_sha256": case_descriptor.manifest_sha256,
+        "workspaces": "complete_baseline_and_complete_candidate",
+    }
+    ignore = shutil.ignore_patterns(".agent", "__pycache__", ".pytest_cache")
+    with tempfile.TemporaryDirectory(prefix="p43-regression-") as tmp:
+        candidate = Path(tmp) / "candidate"
+        shutil.copytree(baseline, candidate, ignore=ignore)
+        for rel in copied:
+            (candidate / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(change_set / "files" / rel, candidate / rel)
+        for rel in deleted:
+            (candidate / rel).unlink(missing_ok=True)
+        delivered: dict[str, list[str]] = {}
+        unparsable: list[str] = []
+        for rel in copied:
+            if rel == acceptance or not _is_test_file(rel):
+                continue
+            try:
+                after = _test_names((candidate / rel).read_text("utf-8"))
+                before = (
+                    _test_names((baseline / rel).read_text("utf-8"))
+                    if (baseline / rel).is_file()
+                    else set()
+                )
+            except (SyntaxError, UnicodeDecodeError, ValueError):
+                unparsable.append(rel)
+                continue
+            if after - before:
+                delivered[rel] = sorted(after - before)
+        result["delivered_tests"] = delivered
+        result["unparsable_test_files"] = unparsable
+        if not delivered:
+            result["classification"] = (
+                "COLLECTION_OR_IMPORT_FAILURE" if unparsable else "NO_REGRESSION_TESTS"
+            )
+            return result
+        names = {name for group in delivered.values() for name in group}
+        targets = sorted(delivered)
+        probe = Path(tmp) / "baseline"
+        shutil.copytree(baseline, probe, ignore=ignore)
+        for rel in targets:
+            (probe / rel).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(candidate / rel, probe / rel)
+        on_baseline = _run_delivered(probe, targets, names)
+        on_candidate = _run_delivered(candidate, targets, names)
+    result["baseline"] = dict(on_baseline, result=_baseline_result(on_baseline))
+    result["candidate"] = dict(on_candidate, result=_candidate_result(on_candidate))
+    baseline_result = result["baseline"]["result"]
+    candidate_result = result["candidate"]["result"]
+    if unparsable:
+        result["classification"] = "COLLECTION_OR_IMPORT_FAILURE"
+    elif baseline_result == "ASSERTION_FAILURE" and candidate_result == "PASS":
+        result["classification"] = REGRESSION_EFFECTIVE
+    elif baseline_result == "ALL_PASSED":
+        result["classification"] = "INEFFECTIVE"
+    elif baseline_result != "ASSERTION_FAILURE":
+        result["classification"] = f"BASELINE_{baseline_result}"
+    else:
+        result["classification"] = f"CANDIDATE_{candidate_result}"
+    return result
+
+
 def evaluation_verdict(
     control: str,
     material_root: str | Path,
@@ -1137,6 +1371,7 @@ def evaluation_verdict(
     hidden: Mapping[str, Any],
     observed: Mapping[str, Any] | None = None,
     case_id: str = DEFAULT_CASE_ID,
+    regression: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Combine integrity, the P02 oracle and the hidden suite for ``control``.
 
@@ -1197,6 +1432,12 @@ def evaluation_verdict(
     if control == "reference" and not (integrity["ok"] and held):
         mismatches.append("reference_not_held_or_integrity_failed")
     if control == MODEL:
+        # P43-PRODUCT-24B: complete delivery also needs classified regression
+        # effectiveness on complete workspaces; absent evidence is not a pass.
+        regression_class = (regression or {}).get("classification") or "absent"
+        observed_fields["regression_effectiveness"] = regression_class
+        delivery = delivery and regression_class == REGRESSION_EFFECTIVE
+        observed_fields["complete_delivery_with_hidden"] = delivery
         if not integrity["ok"]:
             outcome = "INTEGRITY_FAILED"
         elif delivery:
@@ -1210,6 +1451,7 @@ def evaluation_verdict(
             "integrity": integrity,
             "product_held_and_baseline_unchanged": held,
             "observed": observed_fields,
+            "regression": regression,
             "verdict": outcome,
         }
     return {
@@ -1333,6 +1575,20 @@ def _load_json(path: str) -> dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _load_regression(path: str | None) -> dict[str, Any] | None:
+    """A missing or unreadable regression result is recorded, never a pass."""
+
+    if not path:
+        return None
+    try:
+        loaded = _load_json(path)
+    except (OSError, ValueError):
+        return {"classification": "EVALUATOR_FAILURE"}
+    return (
+        loaded if isinstance(loaded, dict) else {"classification": "EVALUATOR_FAILURE"}
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -1346,6 +1602,7 @@ def main(argv: list[str] | None = None) -> int:
             "case-info",
             "verdict",
             "contamination",
+            "regression",
         ),
     )
     parser.add_argument("paths", nargs="*")
@@ -1355,6 +1612,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--oracle")
     parser.add_argument("--hidden")
     parser.add_argument("--observed")
+    parser.add_argument("--regression")
     parser.add_argument("--case", default=DEFAULT_CASE_ID)
     args = parser.parse_args(argv)
     # Paths are Host-side evaluation inputs only; nothing else takes input.
@@ -1364,6 +1622,7 @@ def main(argv: list[str] | None = None) -> int:
         "case-info": 0,
         "verdict": 2,
         "contamination": 2,
+        "regression": 2,
     }
     if len(args.paths) != arity.get(args.command, 0):
         parser.error(f"{args.command} takes {arity.get(args.command, 0)} path(s)")
@@ -1399,6 +1658,8 @@ def main(argv: list[str] | None = None) -> int:
             }
         elif args.command == "contamination":
             result = provider_request_contamination(*args.paths, args.case)
+        elif args.command == "regression":
+            result = regression_effectiveness(*args.paths, args.case)
         else:
             material, change_set = args.paths
             result = evaluation_verdict(
@@ -1409,6 +1670,7 @@ def main(argv: list[str] | None = None) -> int:
                 _load_json(args.hidden),
                 _load_json(args.observed) if args.observed else None,
                 args.case,
+                _load_regression(args.regression),
             )
     except (SubmitterRefused, ValueError) as exc:
         print(json.dumps({"refused": str(exc)}), file=sys.stderr)
