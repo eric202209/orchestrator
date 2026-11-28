@@ -76,6 +76,47 @@ def step_unexecutable_mutating_commands(
     return findings
 
 
+def c2_sandbox_route_admits_verification(command: Any, project_dir: Path) -> bool:
+    """Whether the active verification route can run ``command``.
+
+    P43-PRODUCT-25A-R1: in C2 mode every verification goes only through the
+    Sandbox Gateway (``_execute_verification_in_sandbox``), which runs the
+    literal ``sys.exit`` script and admitted pytest commands, nothing else.
+    Plan admission and the Planning contract use the same predicates, so they
+    cannot accept a verification the route will refuse. Outside C2 mode this
+    adds nothing to the local predicates.
+    """
+
+    from app.services.orchestration.execution.sandbox_gateway import (
+        sandbox_c2_mode_enabled,
+        sandbox_pytest_arguments,
+        sandboxable_python_script,
+    )
+
+    if not sandbox_c2_mode_enabled():
+        return True
+    text = str(command or "").strip()
+    return (
+        sandboxable_python_script(text) is not None
+        or sandbox_pytest_arguments(text, Path(project_dir)) is not None
+    )
+
+
+def _c2_refused_verification_commands(
+    commands: List[str], project_dir: Path
+) -> List[str]:
+    from app.services.orchestration.phases.execution_local_steps import (
+        _is_simple_verification_command,
+    )
+
+    return [
+        command
+        for command in commands
+        if _is_simple_verification_command(command, project_dir=project_dir)
+        and not c2_sandbox_route_admits_verification(command, project_dir)
+    ]
+
+
 def plan_steps_without_execution_channel(
     plan: List[Dict[str, Any]],
     *,
@@ -150,7 +191,7 @@ def plan_steps_with_unsupported_commands(
             project_dir=resolved_dir,
             commands=commands,
             verification_command=step.get("verification"),
-        ):
+        ) and not _c2_refused_verification_commands(commands, resolved_dir):
             continue
         try:
             step_number = int(step.get("step_number", index))
@@ -205,7 +246,7 @@ def describe_unsupported_step_commands(
             )
         ),
         None,
-    )
+    ) or next(iter(_c2_refused_verification_commands(commands, project_dir)), None)
     if rejected is None:
         return (
             f"{prefix}step {step_number} commands fit no single admitted channel "
@@ -255,9 +296,13 @@ def plan_steps_with_unsupported_verification(
             continue
         verification = step.get("verification")
         command = str(verification or "").strip()
-        if not command or local_verification_command_is_executable(
-            project_dir=resolved_dir,
-            verification_command=command,
+        if (
+            not command
+            or local_verification_command_is_executable(
+                project_dir=resolved_dir,
+                verification_command=command,
+            )
+            and c2_sandbox_route_admits_verification(command, resolved_dir)
         ):
             continue
         try:
@@ -306,6 +351,7 @@ def local_executor_command_examples(project_dir: Path) -> tuple[list[str], list[
         command
         for command in verification_candidates
         if _is_simple_verification_command(command, project_dir=Path(project_dir))
+        and c2_sandbox_route_admits_verification(command, Path(project_dir))
         and local_step_commands_are_executable(
             project_dir=Path(project_dir),
             commands=[command],
