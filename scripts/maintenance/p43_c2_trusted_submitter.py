@@ -118,16 +118,19 @@ CONTROL_PROJECTS = {
 # Frozen PRODUCT-18 identities (freeze.json). Only hashes live here.
 U1_MANIFEST_SHA256 = "26965b02fe87e35de753267d0b0ee5741c0e555e1e019180a913224543b91f86"
 U2_MANIFEST_SHA256 = "314142190e698daf19b1b2f3e8d7e64629c9c7644953cb22442458569ee1bd3d"
+U3_MANIFEST_SHA256 = "1b67408c8253a2d4c2d91e47ec9e5c552f0052e820869144813dab8828a89911"
 ORACLE_SHA256 = "b28ea4b22e26942b3e8462db62c2f4d790a4dd293d00e5a228a1b3e09687ecdc"
 HIDDEN_SUITE_SHA256 = "59fd0656331c9515e757949fd130961ccb1d1aed2b9d0a497f36d035da1d87df"
 # Staged layout (the PRODUCT-18 evidence tree, relative to its parent).
 U1_DIR = "p43-product-18/u1"
 U2_DIR = "p43-product-18/u2"
+U3_DIR = "p43-product-18/u3"
 ORACLE_PATH = "p43-product-02/oracle.py"
 HIDDEN_SUITE_PATH = "p43-product-18/tools/hidden_suite.py"
 # Read-only bind into the submitter container only (never the Worker).
 U1_MATERIAL_ROOT = "/run/p43-u1-material"
 U2_MATERIAL_ROOT = "/run/p43-u2-material"
+U3_MATERIAL_ROOT = "/run/p43-u3-material"
 SUBMIT_PARTS = ("baseline", "reference")
 # The model control's mount: manifest, task and baseline only.
 MODEL_PARTS = ("baseline",)
@@ -151,6 +154,11 @@ class FrozenCase:
     reference_session: str
     model_session: str
     evaluation_controls: tuple[str, ...]
+    # P43-PRODUCT-25A: for a feature case, (baseline path, appended text) pairs
+    # that declare the absent public symbol with no behaviour, so the baseline
+    # regression probe fails by assertion rather than by import. Derived from
+    # the task text only; never applied to the candidate workspace.
+    absent_symbol_stub: tuple[tuple[str, str], ...] = ()
 
 
 CASE_DESCRIPTORS = MappingProxyType(
@@ -181,6 +189,31 @@ CASE_DESCRIPTORS = MappingProxyType(
             model_session="P43-PRODUCT-24B U2 model evaluation",
             evaluation_controls=("reference", "naive-symptom", "naive-partial"),
         ),
+        "U3": FrozenCase(
+            id="U3",
+            manifest_sha256=U3_MANIFEST_SHA256,
+            directory=U3_DIR,
+            material_root=U3_MATERIAL_ROOT,
+            reference_project="p43-c2-u3-reference",
+            model_project="p43-c2-u3-model",
+            reference_title="U3 trusted reference control",
+            model_title="U3 pagekit task",
+            reference_session="P43-PRODUCT-25A U3 reference control",
+            model_session="P43-PRODUCT-25A U3 model evaluation",
+            evaluation_controls=("reference", "naive-clamp", "naive-unexported"),
+            absent_symbol_stub=(
+                (
+                    "pagekit/links.py",
+                    "\n\ndef page_window(page, radius):  # P43 probe: no behaviour\n"
+                    "    return []\n",
+                ),
+                (
+                    "pagekit/__init__.py",
+                    "\nfrom .links import page_window  # noqa: E402  (P43 probe)\n"
+                    '\n__all__ = [*__all__, "page_window"]\n',
+                ),
+            ),
+        ),
     }
 )
 DEFAULT_CASE_ID = "U1"
@@ -198,8 +231,9 @@ def frozen_case(case_id: str = DEFAULT_CASE_ID) -> FrozenCase:
 def case_material_root(case_id: str = DEFAULT_CASE_ID) -> Path:
     case = frozen_case(case_id)
     # The U1 constant is retained as a test seam and as the compatibility path
-    # used by the PRODUCT-23B/23C procedures. U2 has the same explicit seam.
-    return Path(U1_MATERIAL_ROOT if case.id == "U1" else U2_MATERIAL_ROOT)
+    # used by the PRODUCT-23B/23C procedures. U2 and U3 have the same seam.
+    roots = {"U1": U1_MATERIAL_ROOT, "U2": U2_MATERIAL_ROOT, "U3": U3_MATERIAL_ROOT}
+    return Path(roots[case.id])
 
 
 def case_info(case_id: str = DEFAULT_CASE_ID) -> dict[str, Any]:
@@ -1344,6 +1378,11 @@ def regression_effectiveness(
         for rel in targets:
             (probe / rel).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(candidate / rel, probe / rel)
+        for rel, text in case_descriptor.absent_symbol_stub:
+            with open(probe / _safe_rel(rel), "a", encoding="utf-8") as handle:
+                handle.write(text)
+        if case_descriptor.absent_symbol_stub:
+            result["baseline_probe"] = "complete_baseline_with_absent_symbol_stub"
         on_baseline = _run_delivered(probe, targets, names)
         on_candidate = _run_delivered(candidate, targets, names)
     result["baseline"] = dict(on_baseline, result=_baseline_result(on_baseline))

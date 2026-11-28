@@ -17,7 +17,7 @@
 #   bash scripts/maintenance/p43_c2_live_run.sh cleanup --operator-approved
 #
 # P43-PRODUCT-23B trusted controls (one setup serves all; each runs once):
-#   export P43_C2_CASE=U1                         # default; U1 or U2 only
+#   export P43_C2_CASE=U1                         # default; U1, U2 or U3 only
 #   export P43_C2_EVIDENCE=<dir holding p43-product-02/ and p43-product-18/>
 #   # P43_C2_U1_EVIDENCE remains accepted as the U1 compatibility alias.
 #   ... submit --operator-approved reference ; ... evaluate reference
@@ -99,6 +99,7 @@ case_slug() {
     case "${1:-$(selected_case)}" in
         U1) printf 'u1\n' ;;
         U2) printf 'u2\n' ;;
+        U3) printf 'u3\n' ;;
         *) refuse "unknown P43_C2_CASE: ${1:-$(selected_case)}" ;;
     esac
 }
@@ -1084,11 +1085,12 @@ if case_binding_path.is_symlink() or not case_binding_path.is_file():
 case_binding = json.loads(case_binding_path.read_text(encoding="utf-8"))
 case_id = case_binding.get("id")
 case_manifest_sha256 = case_binding.get("manifest_sha256")
-if case_id not in {"U1", "U2"} or not isinstance(case_manifest_sha256, str):
+if case_id not in {"U1", "U2", "U3"} or not isinstance(case_manifest_sha256, str):
     raise SystemExit("selected case binding is invalid")
 expected_case_manifests = dict(
     U1="26965b02fe87e35de753267d0b0ee5741c0e555e1e019180a913224543b91f86",
     U2="314142190e698daf19b1b2f3e8d7e64629c9c7644953cb22442458569ee1bd3d",
+    U3="1b67408c8253a2d4c2d91e47ec9e5c552f0052e820869144813dab8828a89911",
 )
 if case_manifest_sha256 != expected_case_manifests[case_id]:
     raise SystemExit("selected case manifest identity mismatch")
